@@ -103,7 +103,11 @@ case "$hook" in
     printf '%s\\n' '{"hookSpecificOutput":{"updatedInput":{"command":"rtk git status"}}}'
     ;;
   compress_response_hook.py)
-    printf '%s\\n' '{"hookSpecificOutput":{"updatedToolOutput":"compressed-response","additionalContext":"[tokenless:env] warning"}}'
+    if [[ "$payload" == *'"is_error":true'* ]]; then
+      printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"[tokenless:env] command failed"}}'
+    else
+      printf '%s\\n' '{"hookSpecificOutput":{"updatedToolOutput":"compressed-response","additionalContext":"[tokenless:env] warning"}}'
+    fi
     ;;
   compress_schema_hook.py)
     printf '%s\\n' '{"hookSpecificOutput":{"llm_request":{"config":{"tools":[{"name":"bash","description":"compressed description","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]}}}}'
@@ -131,6 +135,41 @@ try {
     afterOutput.output,
     "[tokenless:ready] partial\n[tokenless:env] warning\ncompressed-response",
   );
+
+  const failureCases = [
+    { tool: "bash", exit: 1, isError: true },
+    { tool: "bash", exit: 127, isError: true },
+    { tool: "bash", exit: -1, isError: true },
+    { tool: "bash", exit: 0, isError: false },
+    { tool: "bash", exit: undefined, isError: false },
+    { tool: "bash", exit: null, isError: false },
+    { tool: "bash", exit: "127", isError: false },
+    { tool: "bash", exit: 1.5, isError: false },
+    { tool: "api_call", exit: 127, isError: false },
+  ];
+  for (const [index, testCase] of failureCases.entries()) {
+    const metadata = { exit: testCase.exit, description: "preserve metadata" };
+    const original = "command not found: important failure details";
+    const result = { title: "command", output: original, metadata };
+    await hooks["tool.execute.after"](
+      {
+        tool: testCase.tool,
+        sessionID: "failure-session",
+        callID: `failure-${index}`,
+        args: { command: "missing-command" },
+      },
+      result,
+    );
+    assert.equal(
+      result.output,
+      testCase.isError
+        ? `[tokenless:env] command failed\n${original}`
+        : "[tokenless:env] warning\ncompressed-response",
+      `unexpected output for ${JSON.stringify(testCase)}`,
+    );
+    assert.equal(result.metadata, metadata);
+    assert.equal(result.title, "command");
+  }
 
   process.env.TOKENLESS_TEST_READY = "block";
   await assert.rejects(
@@ -181,6 +220,11 @@ try {
   assert.equal(rewrite.payload.session_id, "session-1");
   assert.equal(rewrite.payload.tool_call_id, "call-1");
   assert.equal(rewrite.payload.tool_name, "bash");
+  for (const [index, testCase] of failureCases.entries()) {
+    const record = records.find((entry) => entry.payload.tool_call_id === `failure-${index}`);
+    assert.equal(record.payload.is_error === true, testCase.isError);
+    assert.equal(record.payload.tool_response, "command not found: important failure details");
+  }
   assert.equal(records.filter((record) => record.hook === "compress_schema_hook.py").length, 1);
 
   if (process.platform !== "win32") {
