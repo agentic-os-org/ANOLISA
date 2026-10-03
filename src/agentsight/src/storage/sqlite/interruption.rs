@@ -247,7 +247,11 @@ impl InterruptionStore {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail_str) {
                             let stored_error =
                                 v.get("error").and_then(|e| e.as_str()).unwrap_or("");
-                            if errors_match(stored_error, target) {
+                            // A row without error information must not match
+                            // every target: "" is a substring of anything, so
+                            // treating the empty key as a match suppressed
+                            // genuinely different interruptions.
+                            if !stored_error.is_empty() && errors_match(stored_error, target) {
                                 return true;
                             }
                         }
@@ -1609,6 +1613,43 @@ mod tests {
             "conv-efj",
             &InterruptionType::LlmError,
             Some("completely different error")
+        ));
+    }
+
+    #[test]
+    fn exists_for_conversation_row_without_error_does_not_match_any_error() {
+        // A detail with no string "error" field (e.g. the finish_reason-only
+        // ContextOverflow detail) must not behave as an empty-key match:
+        // "" is a substring of every target, so a genuinely different later
+        // interruption was suppressed as a duplicate.
+        let store = temp_store();
+        let mut e = make_event("conv-efe", InterruptionType::ContextOverflow);
+        e.interruption_id = "int-efe-1".to_string();
+        e.detail = Some(
+            r#"{"model":"qwen","input_tokens":9000,"max_tokens":8192,"finish_reason":"length"}"#
+                .to_string(),
+        );
+        store.insert(&e).unwrap();
+
+        assert!(!store.exists_for_conversation(
+            "conv-efe",
+            &InterruptionType::ContextOverflow,
+            Some("http 413 prompt is too long")
+        ));
+        // The None filter still matches any row for the conversation.
+        assert!(
+            store.exists_for_conversation("conv-efe", &InterruptionType::ContextOverflow, None)
+        );
+
+        // Positive control: a stored row that does carry the error still matches.
+        let mut e2 = make_event("conv-efg", InterruptionType::ContextOverflow);
+        e2.interruption_id = "int-efg-1".to_string();
+        e2.detail = Some(r#"{"error":"prompt is too long"}"#.to_string());
+        store.insert(&e2).unwrap();
+        assert!(store.exists_for_conversation(
+            "conv-efg",
+            &InterruptionType::ContextOverflow,
+            Some("http 413 prompt is too long")
         ));
     }
 
