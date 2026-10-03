@@ -139,12 +139,14 @@ impl GenAISqliteStore {
     ///
     /// When the window is over the cap the NEWEST rows are kept — preference
     /// analysis is about recent behavior ("wider windows only add stale
-    /// evidence"), and the trajectory provider below agrees
-    /// (`list_recent_atif_jsons` also fetches DESC then reverses). The
+    /// evidence"), and the trajectory provider below agrees on the cap
+    /// (`list_recent_atif_jsons` also LIMITs a DESC fetch; unlike this
+    /// store it returns rows newest-first, with no reversal). The
     /// previous ASC-first LIMIT kept the OLDEST rows, freezing every
     /// preference/turns/export view on the start of the window on any box
     /// past ~43 calls/day. Rows are returned oldest-first for consumer
-    /// compatibility.
+    /// compatibility — the turns endpoint reverses again to answer its
+    /// documented newest-first contract.
     ///
     /// Rows are returned as raw columns: interpreting them (stripping agent
     /// template noise, mining tool names) belongs to the preference layer
@@ -156,8 +158,8 @@ impl GenAISqliteStore {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             // Fetch newest-first (DESC LIMIT) and reverse in Rust so the cap
-            // drops the oldest rows, not the newest — same shape as
-            // list_recent_atif_jsons.
+            // drops the oldest rows, not the newest — the same DESC cap as
+            // list_recent_atif_jsons, which returns newest-first directly.
             "SELECT id, session_id, conversation_id, start_timestamp_ns,
                     user_query, output_messages
              FROM genai_events
