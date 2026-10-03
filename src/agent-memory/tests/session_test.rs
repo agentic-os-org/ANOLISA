@@ -396,3 +396,69 @@ fn audit_log_is_mirrored_to_session() {
     assert!(store_audit.contains("\"tool\":\"mem_write\""));
     assert!(session_log.contains("\"tool\":\"mem_write\""));
 }
+
+// ---------- torn trailing line ----------
+
+#[test]
+fn read_log_survives_torn_trailing_line_over_cap() {
+    let tmp = tempdir().unwrap();
+    let svc = SessionLogService::start(
+        tmp.path(),
+        SessionId::from_string("ses_torn_big").unwrap(),
+        "alice",
+        None,
+        "user-alice",
+        None,
+    )
+    .unwrap();
+
+    // >1 MiB of valid CJK jsonl, then a torn tail: an unterminated JSON
+    // fragment ending in a lone 0xE5 — the first byte of a 3-byte UTF-8
+    // character, as left behind by a crash mid-append.
+    let line = "{\"tool\":\"mem_read\",\"path\":\"笔记/组件-aaaaaaaaaa.md\"}\n";
+    let mut buf: Vec<u8> = Vec::with_capacity(2 << 20);
+    while buf.len() <= 1_048_576 {
+        buf.extend_from_slice(line.as_bytes());
+    }
+    buf.extend_from_slice(b"{\"tool\":\"mem_wr");
+    buf.push(0xE5);
+    std::fs::write(svc.log_path(), &buf).unwrap();
+
+    let log = svc.read_log().unwrap();
+    let lines: Vec<&str> = log.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!lines.is_empty());
+    for l in &lines {
+        let v: serde_json::Value = serde_json::from_str(l)
+            .unwrap_or_else(|e| panic!("torn line leaked into read_log: {e}: {l}"));
+        assert_eq!(v["tool"], "mem_read");
+    }
+}
+
+#[test]
+fn read_log_survives_torn_trailing_line_under_cap() {
+    let tmp = tempdir().unwrap();
+    let svc = SessionLogService::start(
+        tmp.path(),
+        SessionId::from_string("ses_torn_small").unwrap(),
+        "alice",
+        None,
+        "user-alice",
+        None,
+    )
+    .unwrap();
+
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(b"{\"tool\":\"mem_read\",\"path\":\"a.md\"}\n");
+    buf.extend_from_slice(b"{\"tool\":\"mem_write\",\"path\":\"b.md\"}\n");
+    buf.extend_from_slice(b"{\"tool\":\"mem_wr");
+    buf.push(0xE5);
+    std::fs::write(svc.log_path(), &buf).unwrap();
+
+    let log = svc.read_log().unwrap();
+    let lines: Vec<&str> = log.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "torn final line must be dropped, got: {log}"
+    );
+}

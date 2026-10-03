@@ -255,7 +255,7 @@ impl SessionLogService {
         let _g = self.log_file.lock().unwrap_or_else(|e| e.into_inner());
         let raw = std::fs::read(&self.log_path)?;
         if raw.len() <= Self::MAX_SESSION_LOG_BYTES as usize {
-            return String::from_utf8(raw).map_err(|e| MemoryError::Other(e.to_string()));
+            return decode_complete_lines(&raw);
         }
         // Return the tail: find a line boundary near the end of the cap.
         let cap = Self::MAX_SESSION_LOG_BYTES as usize;
@@ -264,7 +264,7 @@ impl SessionLogService {
             .position(|&b| b == b'\n')
             .map(|p| raw.len() - cap + p + 1)
             .unwrap_or(raw.len() - cap);
-        String::from_utf8(raw[start..].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+        decode_complete_lines(&raw[start..])
     }
 
     /// Copy a file from `<scratch>/<src_in_scratch>` to `<mount.root>/<dst_in_store>`.
@@ -334,4 +334,21 @@ impl SessionLogService {
             }
         }
     }
+}
+
+/// Decode a log slice as UTF-8 after dropping any torn trailing line.
+/// A crash mid-append can leave the final line partially written —
+/// possibly ending inside a multi-byte character — so decoding the raw
+/// slice would fail even though every complete line is intact. A line
+/// that was never newline-terminated was never a completed record, so
+/// cutting at the last `\n` recovers all completed lines; the dropped
+/// fragment is rewritten by the next append (the writer re-opens at EOF)
+/// or discarded with the session.
+fn decode_complete_lines(bytes: &[u8]) -> Result<String> {
+    let end = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    String::from_utf8(bytes[..end].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
 }
