@@ -1033,6 +1033,7 @@ mod tests {
             }],
             driver_payload: DriverPayload::Cosh(CoshClaim {
                 extension_dir_resource: "copy".into(),
+                bundle_manifest: "cosh-extension.json".into(),
             }),
         }
     }

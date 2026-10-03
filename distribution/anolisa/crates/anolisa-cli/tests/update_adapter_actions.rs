@@ -220,6 +220,7 @@ impl UpdateFixture {
             resources: Vec::new(),
             driver_payload: DriverPayload::Cosh(CoshClaim {
                 extension_dir_resource: "cosh_extension_dir".to_string(),
+                bundle_manifest: "cosh-extension.json".to_string(),
             }),
         };
         std::fs::create_dir_all(&user_layout.state_dir).expect("state dir");
