@@ -105,8 +105,14 @@ else
     exit 1
 fi
 
-GCC_VERSION=$(gcc --version | head -1)
-echo -e "  ${GREEN}✓${NC} Compiler: $GCC_VERSION"
+if command -v gcc &>/dev/null; then
+    GCC_VERSION=$(gcc --version | head -1)
+    echo -e "  ${GREEN}✓${NC} Compiler: $GCC_VERSION"
+else
+    echo -e "  ${RED}✗${NC} gcc not found"
+    echo "  Please install gcc (yum install gcc gcc-c++) and re-run setup."
+    exit 1
+fi
 echo ""
 
 # Summary
