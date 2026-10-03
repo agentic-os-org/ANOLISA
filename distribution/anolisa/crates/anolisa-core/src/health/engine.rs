@@ -8,6 +8,7 @@
 //! hostile manifest must not be able to read `/etc/shadow`, run a pipeline,
 //! or hang the caller.
 
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -202,15 +203,14 @@ fn check_binary(
     if let Some(reason) = reject_unowned_executable(env.layout, exe) {
         return CheckOutcome::leaf(label, CheckStatus::Unsupported, Some(reason));
     }
-    let capture = expect_pattern.is_some();
     let timeout = timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_PROBE_TIMEOUT);
-    match spawn_and_wait(exe, args, capture, timeout) {
+    match spawn_and_wait(exe, args, expect_pattern, timeout) {
         SpawnResult::Exited {
             success,
             code,
-            stdout,
+            pattern_seen,
         } => {
             if !success {
                 return CheckOutcome::leaf(
@@ -223,7 +223,7 @@ fn check_binary(
                 );
             }
             if let Some(pattern) = expect_pattern
-                && !stdout.contains(pattern)
+                && !pattern_seen
             {
                 return CheckOutcome::leaf(
                     label,
@@ -397,7 +397,7 @@ fn check_command(
         return CheckOutcome::leaf(label, CheckStatus::Unsupported, Some(reason));
     }
     let args: Vec<&str> = expanded[1..].iter().map(String::as_str).collect();
-    match spawn_and_wait(exe, &args, false, DEFAULT_PROBE_TIMEOUT) {
+    match spawn_and_wait(exe, &args, None, DEFAULT_PROBE_TIMEOUT) {
         SpawnResult::Exited { code, .. } => {
             let want = expect_exit_code.unwrap_or(0);
             if code == want {
@@ -432,7 +432,9 @@ enum SpawnResult {
     Exited {
         success: bool,
         code: i32,
-        stdout: String,
+        /// Whether the probe's stdout contained `expect_pattern` before the
+        /// deadline (`false` when no pattern was requested).
+        pattern_seen: bool,
     },
     /// Child exceeded the timeout and was killed.
     Timeout,
@@ -440,10 +442,17 @@ enum SpawnResult {
     SpawnError(std::io::Error),
 }
 
-/// Spawn `exe args`, poll until exit or timeout, and (when `capture`) return
-/// stdout. stdin/stderr are always null; stdout is null unless captured.
-fn spawn_and_wait(exe: &Path, args: &[&str], capture: bool, timeout: Duration) -> SpawnResult {
-    let stdout_cfg = if capture {
+/// Spawn `exe args`, poll until exit or timeout, and (when `expect_pattern`
+/// is set) match the probe's stdout against it as the output arrives.
+/// stdin/stderr are always null; stdout is null unless a pattern is
+/// requested.
+fn spawn_and_wait(
+    exe: &Path,
+    args: &[&str],
+    expect_pattern: Option<&str>,
+    timeout: Duration,
+) -> SpawnResult {
+    let stdout_cfg = if expect_pattern.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
@@ -461,36 +470,145 @@ fn spawn_and_wait(exe: &Path, args: &[&str], capture: bool, timeout: Duration) -
         Ok(c) => c,
         Err(err) => return SpawnResult::SpawnError(err),
     };
+    // Drain the piped stdout while polling for exit: a probe that writes
+    // more than the OS pipe buffer (64 KiB on Linux) would otherwise block
+    // on write, never exit, and be killed at the timeout even though it was
+    // healthy — the deadlock that `adapter::manager::run_capture`
+    // documents for the same pattern. The read end is non-blocking and the
+    // poll loop drains it itself, matching the pattern incrementally: memory
+    // stays O(pattern) no matter how much the probe writes, and the drain
+    // never outlives the deadline when a grandchild holds the pipe.
+    let mut stdout_pipe = child.stdout.take();
+    let mut scanner = expect_pattern.map(PatternScanner::new);
+    if let Some(pipe) = stdout_pipe.as_ref()
+        && let Err(err) = set_nonblocking(pipe)
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return SpawnResult::SpawnError(err);
+    }
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = if capture {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    if let Some(mut out) = child.stdout.take() {
-                        let _ = out.read_to_string(&mut buf);
-                    }
-                    buf
-                } else {
-                    String::new()
-                };
+                // Collect what the probe wrote before exiting. A writer
+                // that outlives the probe gets the rest of the deadline to
+                // produce the pattern, never more: the pipe is closed when
+                // the deadline passes or every write end is gone.
+                let mut eof = drain_pipe(&mut stdout_pipe, &mut scanner);
+                while !eof
+                    && scanner.as_ref().is_some_and(|scanner| !scanner.found())
+                    && started.elapsed() <= timeout
+                {
+                    std::thread::sleep(PROBE_POLL);
+                    eof = drain_pipe(&mut stdout_pipe, &mut scanner);
+                }
+                drop(stdout_pipe.take());
                 return SpawnResult::Exited {
                     success: status.success(),
                     code: status.code().unwrap_or(-1),
-                    stdout,
+                    pattern_seen: scanner.as_ref().is_some_and(PatternScanner::found),
                 };
             }
             Ok(None) => {
+                drain_pipe(&mut stdout_pipe, &mut scanner);
                 if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Close the read end instead of waiting for EOF: a
+                    // grandchild holding the pipe can neither delay the
+                    // timeout result nor keep a drain reading after it.
+                    drop(stdout_pipe.take());
                     return SpawnResult::Timeout;
                 }
                 std::thread::sleep(PROBE_POLL);
             }
             Err(err) => return SpawnResult::SpawnError(err),
         }
+    }
+}
+
+/// Upper bound on bytes the stdout pipe may deliver per poll iteration, so
+/// a probe that writes without end cannot starve the exit/timeout checks.
+const DRAIN_BUDGET_PER_POLL: usize = 1 << 20;
+
+/// Switch a pipe read end to non-blocking mode so the poll loop can drain
+/// it in place instead of parking a helper thread on it.
+fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
+    nix::fcntl::fcntl(
+        pipe.as_raw_fd(),
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .map(|_| ())
+    .map_err(std::io::Error::from)
+}
+
+/// Feed one currently-readable burst of `pipe` to `scanner`, returning
+/// whether the pipe has reached EOF. The pipe must already be
+/// non-blocking; callers own that setup so this helper can never park the
+/// caller's poll loop on a stalled writer.
+fn drain_pipe(pipe: &mut Option<impl Read>, scanner: &mut Option<PatternScanner<'_>>) -> bool {
+    let Some(pipe) = pipe.as_mut() else {
+        return true;
+    };
+    let mut budget = DRAIN_BUDGET_PER_POLL;
+    let mut chunk = [0u8; 8192];
+    while budget > 0 {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return true,
+            Ok(read) => {
+                if let Some(scanner) = scanner.as_mut() {
+                    scanner.push(&chunk[..read]);
+                }
+                budget = budget.saturating_sub(read);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// Incremental substring matcher for a probe's stdout. Between chunks it
+/// retains only the last `pattern.len() - 1` bytes, so a match that
+/// straddles a read boundary is still found while memory stays O(pattern)
+/// no matter how much output the probe produces.
+struct PatternScanner<'a> {
+    pattern: &'a [u8],
+    tail: Vec<u8>,
+    seen: bool,
+}
+
+impl<'a> PatternScanner<'a> {
+    fn new(pattern: &'a str) -> Self {
+        Self {
+            pattern: pattern.as_bytes(),
+            tail: Vec::new(),
+            seen: pattern.is_empty(),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if self.seen {
+            return;
+        }
+        let mut window = std::mem::take(&mut self.tail);
+        window.extend_from_slice(chunk);
+        self.seen = window
+            .windows(self.pattern.len())
+            .any(|candidate| candidate == self.pattern);
+        if !self.seen {
+            let keep = self.pattern.len() - 1;
+            if window.len() > keep {
+                window.drain(..window.len() - keep);
+            }
+            self.tail = window;
+        }
+    }
+
+    fn found(&self) -> bool {
+        self.seen
     }
 }
 
@@ -664,6 +782,134 @@ mod tests {
             },
         );
         assert_eq!(out.status, CheckStatus::Failed);
+    }
+
+    /// A probe whose stdout exceeds the OS pipe buffer (64 KiB on Linux)
+    /// must still be able to exit: the spawner drains the piped stdout
+    /// while polling, so the child never blocks on write. Without the
+    /// drain the child stalls, the poll loop never sees an exit, and a
+    /// healthy fast probe is killed at the timeout.
+    #[test]
+    fn binary_version_stdout_larger_than_the_pipe_buffer_still_matches() {
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let exe = write_exec(
+            &layout.bin_dir,
+            "tool",
+            "#!/bin/sh\ndd if=/dev/zero bs=65536 count=8\necho 'tool 1.2.3'\nexit 0\n",
+        );
+        let spec = CheckSpec::BinaryVersion {
+            binary: exe.display().to_string(),
+            expect_pattern: Some("tool 1.2.3".to_string()),
+            timeout_secs: Some(2),
+        };
+        let out = run_check(
+            &spec,
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: None,
+            },
+        );
+        assert_eq!(
+            out.status,
+            CheckStatus::Ok,
+            "chatty probe must not be killed: {:?}",
+            out.detail
+        );
+    }
+
+    /// A writer that outlives the probe must not hold the check open: the
+    /// engine drains what the probe wrote, gives a lingering writer the
+    /// rest of the deadline, then closes the pipe. Before the drain was
+    /// bounded, the join waited for EOF — for as long as the writer lived.
+    #[test]
+    fn probe_outliving_writer_does_not_hold_the_check_open() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let home = tempdir().expect("tempdir");
+            let layout = layout_for(home.path());
+            // The background sleep inherits stdout and holds the pipe open
+            // for 30 s; the probe itself prints nothing and exits at once.
+            let exe = write_exec(&layout.bin_dir, "tool", "#!/bin/sh\n(sleep 30) &\nexit 0\n");
+            let spec = CheckSpec::BinaryVersion {
+                binary: exe.display().to_string(),
+                expect_pattern: Some("tool 1.2.3".to_string()),
+                timeout_secs: Some(1),
+            };
+            let out = run_check(
+                &spec,
+                &CheckEnv {
+                    layout: &layout,
+                    dry_run: false,
+                    service_probes: None,
+                },
+            );
+            tx.send((out.status, out.detail)).ok();
+        });
+        let (status, detail) = rx
+            .recv_timeout(Duration::from_millis(1500))
+            .expect("the check must not wait for a writer outliving the probe");
+        assert_eq!(status, CheckStatus::Failed, "detail: {detail:?}");
+        assert!(
+            detail.unwrap_or_default().contains("did not contain"),
+            "the missing pattern must be reported, not a timeout"
+        );
+    }
+
+    /// After a timeout with a writer that keeps going, the engine must not
+    /// keep a detached drain accumulating the probe's stdout: it used to
+    /// retain every byte for as long as the writer lived.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_with_a_never_ending_writer_keeps_memory_bounded() {
+        fn rss_kib() -> u64 {
+            let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+                .expect("parse VmRSS")
+        }
+
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        // The writer outlives the probe the timeout kills; it stops early
+        // on EPIPE once the engine closes the pipe, and is capped at
+        // 256 MiB so a retained-drain regression cannot exhaust the test
+        // host.
+        let exe = write_exec(
+            &layout.bin_dir,
+            "tool",
+            "#!/bin/sh\n(\n  i=0\n  while [ \"$i\" -lt 32 ]; do\n    dd if=/dev/zero bs=65536 count=128 || exit 0\n    i=$((i + 1))\n  done\n) &\nsleep 30\n",
+        );
+        let spec = CheckSpec::BinaryVersion {
+            binary: exe.display().to_string(),
+            expect_pattern: Some("tool 1.2.3".to_string()),
+            timeout_secs: Some(1),
+        };
+        let before = rss_kib();
+        let out = run_check(
+            &spec,
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: None,
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Failed);
+        assert!(
+            out.detail.unwrap_or_default().contains("exceeded"),
+            "the timeout must be reported"
+        );
+        // Give a retained drain (the old behaviour) time to accumulate.
+        std::thread::sleep(Duration::from_millis(500));
+        let after = rss_kib();
+        assert!(
+            after <= before + 96 * 1024,
+            "stdout drain must stay bounded after a timeout: {before} KiB -> {after} KiB RSS"
+        );
     }
 
     #[test]
