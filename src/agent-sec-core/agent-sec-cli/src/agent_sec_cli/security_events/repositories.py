@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
-_CORRELATION_CANDIDATE_LIMIT = 1000
+CORRELATION_CANDIDATE_LIMIT = 1000
 _SUMMARY_GROUP_FIELDS = ("category", "event_type", "result", "session_id", "run_id")
 
 
@@ -223,7 +223,7 @@ class SecurityEventRepository:
                 SecurityEventRecord.timestamp_epoch.asc(),
                 SecurityEventRecord.event_id.asc(),
             )
-            .limit(_CORRELATION_CANDIDATE_LIMIT)
+            .limit(CORRELATION_CANDIDATE_LIMIT)
         )
 
         session_factory = self._store.session_factory()

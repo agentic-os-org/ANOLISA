@@ -86,6 +86,11 @@ selection logic:
   ``MAX_FALLBACK_BATCH_WINDOW_SECONDS`` so long runs are not prefetched as one
   large time range.
 
+A shared read returns at most ``CORRELATION_CANDIDATE_LIMIT`` rows. When a
+group's shared read fills that page it may have cut off matches for the
+records at the tail, so the affected group is re-queried per record to keep
+the "same as ``find_correlated``" contract.
+
 Per-category selection
 ----------------------
 When multiple candidates of one category pass matching, the smallest
@@ -101,6 +106,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
 
+from agent_sec_cli.security_events.repositories import CORRELATION_CANDIDATE_LIMIT
 from agent_sec_cli.security_events.schema import SecurityEvent
 
 ZERO_RUN_ID = "00000000-0000-0000-0000-000000000000"
@@ -297,6 +303,13 @@ class SecurityCorrelationService:
                 since_epoch=None,
                 until_epoch=None,
             )
+            if len(items) > 1 and len(candidates) >= CORRELATION_CANDIDATE_LIMIT:
+                # A full candidate page may have cut off the tail of the
+                # group's tool_call_ids, which would silently drop matches
+                # that find_correlated() returns for those records.
+                for index, record in items:
+                    results[index] = self.find_correlated(record)
+                continue
             for index, record in items:
                 results[index] = self._select_by_category(
                     record,
@@ -314,6 +327,10 @@ class SecurityCorrelationService:
                 since_epoch=None,
                 until_epoch=None,
             )
+            if len(items) > 1 and len(candidates) >= CORRELATION_CANDIDATE_LIMIT:
+                for index, record in items:
+                    results[index] = self.find_correlated(record)
+                continue
             for index, record in items:
                 results[index] = self._select_by_category(
                     record,
@@ -326,6 +343,7 @@ class SecurityCorrelationService:
             candidates_by_index: dict[int, list[_SecurityEventCandidate]] = {
                 item.index: [] for item in items
             }
+            page_truncated = False
             for window_items in _merge_fallback_batch_items(items):
                 since_epoch = min(item.since_epoch for item in window_items)
                 until_epoch = max(item.until_epoch for item in window_items)
@@ -337,8 +355,18 @@ class SecurityCorrelationService:
                     since_epoch=since_epoch,
                     until_epoch=until_epoch,
                 )
+                page_truncated = (
+                    page_truncated or len(candidates) >= CORRELATION_CANDIDATE_LIMIT
+                )
                 for item in window_items:
                     candidates_by_index[item.index].extend(candidates)
+
+            if page_truncated and len(items) > 1:
+                # A merged window that filled the candidate page may have
+                # dropped matches for the records at its tail.
+                for item in items:
+                    results[item.index] = self.find_correlated(item.record)
+                continue
 
             for item in items:
                 results[item.index] = self._select_by_category(

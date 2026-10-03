@@ -998,3 +998,87 @@ def test_fallback_mode_skips_skill_ledger_even_when_basename_would_match() -> No
     )
 
     assert result == []
+
+
+# Mirrors SecurityEventRepository's candidate page cap. Hardcoded so this
+# regression test runs (and fails) against an unmodified main, where the
+# constant is not importable.
+_REPOSITORY_PAGE_CAP = 1000
+
+
+class _CappedReader:
+    """Models SecurityEventRepository.query_correlation_candidates.
+
+    Applies the same filters, timestamp ordering and page cap as the SQLite
+    repository so a test can exercise the truncation boundary deterministically.
+    """
+
+    def __init__(self, candidates: list[_Candidate]) -> None:
+        self._candidates = candidates
+
+    def query_correlation_candidates(
+        self,
+        *,
+        session_id: str,
+        categories: tuple[str, ...],
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        tool_call_ids: "list[str] | tuple[str, ...] | None" = None,
+        since_epoch: float | None = None,
+        until_epoch: float | None = None,
+    ) -> list[_Candidate]:
+        selected = [
+            candidate
+            for candidate in self._candidates
+            if candidate.event.session_id == session_id
+            and candidate.event.category in categories
+            and (run_id is None or candidate.event.run_id == run_id)
+            and (tool_call_id is None or candidate.event.tool_call_id == tool_call_id)
+            and (
+                tool_call_ids is None
+                or candidate.event.tool_call_id in tuple(tool_call_ids)
+            )
+            and (since_epoch is None or candidate.timestamp_epoch >= since_epoch)
+            and (until_epoch is None or candidate.timestamp_epoch <= until_epoch)
+        ]
+        selected.sort(
+            key=lambda candidate: (candidate.timestamp_epoch, candidate.event.event_id)
+        )
+        return selected[:_REPOSITORY_PAGE_CAP]
+
+
+def _truncation_fixture() -> tuple[list[_Candidate], list[ObservabilityRecordFields]]:
+    early = [
+        _Candidate(
+            _event(
+                event_id=f"early-{index}",
+                category="code_scan",
+                tool_call_id="tool-early",
+            ),
+            timestamp_epoch=float(index),
+        )
+        for index in range(_REPOSITORY_PAGE_CAP)
+    ]
+    late = _Candidate(
+        _event(event_id="late", category="skill_ledger", tool_call_id="tool-late"),
+        timestamp_epoch=5000.0,
+    )
+    records = [
+        _record(tool_call_id="tool-early", observed_at_epoch=100.0),
+        _record(tool_call_id="tool-late", observed_at_epoch=5000.0),
+    ]
+    return early + [late], records
+
+
+def test_batch_exact_mode_matches_single_record_results_when_page_truncates() -> None:
+    candidates, records = _truncation_fixture()
+    single = [
+        SecurityCorrelationService(_CappedReader(candidates)).find_correlated(record)
+        for record in records
+    ]
+    batch = SecurityCorrelationService(_CappedReader(candidates)).find_correlated_many(
+        records
+    )
+
+    assert _result_signatures(batch) == _result_signatures(single)
+    assert [item.event.event_id for item in batch[1]] == ["late"]
