@@ -132,10 +132,19 @@ impl GenAISqliteStore {
     }
 
     /// Fetch the narrow column set preference analysis needs for completed
-    /// main-flow LLM calls at or after `since_ns`, oldest first, capped at
+    /// main-flow LLM calls at or after `since_ns`, capped at
     /// [`PREFERENCE_WINDOW_MAX_ROWS`]. Read-only: no schema or writes.
     /// `input_messages` is deliberately not selected — no rule reads it and
     /// it would multiply the memory peak of a window fetch.
+    ///
+    /// When the window is over the cap the NEWEST rows are kept — preference
+    /// analysis is about recent behavior ("wider windows only add stale
+    /// evidence"), and the trajectory provider below agrees
+    /// (`list_recent_atif_jsons` also fetches DESC then reverses). The
+    /// previous ASC-first LIMIT kept the OLDEST rows, freezing every
+    /// preference/turns/export view on the start of the window on any box
+    /// past ~43 calls/day. Rows are returned oldest-first for consumer
+    /// compatibility.
     ///
     /// Rows are returned as raw columns: interpreting them (stripping agent
     /// template noise, mining tool names) belongs to the preference layer
@@ -146,6 +155,9 @@ impl GenAISqliteStore {
     ) -> Result<Vec<PreferenceWindowRow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
+            // Fetch newest-first (DESC LIMIT) and reverse in Rust so the cap
+            // drops the oldest rows, not the newest — same shape as
+            // list_recent_atif_jsons.
             "SELECT id, session_id, conversation_id, start_timestamp_ns,
                     user_query, output_messages
              FROM genai_events
@@ -153,7 +165,7 @@ impl GenAISqliteStore {
                AND event_type = 'llm_call'
                AND status = 'complete'
                AND call_kind = 'main'
-             ORDER BY start_timestamp_ns ASC
+             ORDER BY start_timestamp_ns DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(
@@ -173,6 +185,9 @@ impl GenAISqliteStore {
         for row in rows {
             result.push(row?);
         }
+        // DESC fetch, chronological return — consumers index by recency and
+        // compare adjacent rows in time order.
+        result.reverse();
         Ok(result)
     }
 

@@ -1,3 +1,4 @@
+use super::events::PREFERENCE_WINDOW_MAX_ROWS;
 use super::*;
 use crate::genai::semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
@@ -836,6 +837,148 @@ fn test_get_events_in_time_range_with_agent_filter() {
         .get_events_in_time_range(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-b"))
         .unwrap();
     assert_eq!(r.len(), 2); // call-4, call-5
+    cleanup_db(&path);
+}
+
+// ─── preference window tests ──────────────────────────────────────────────────
+
+/// Insert `n` completed main-flow llm_call rows with strictly increasing
+/// timestamps starting at `base`, plus optional out-of-filter rows.
+fn insert_window_rows(store: &GenAISqliteStore, n: i64, base: i64, step: i64) {
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query, call_kind\
+               ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+               ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18,?19)";
+    let conn = store.conn.lock().unwrap();
+    for i in 0..n {
+        let ts = base + i * step;
+        conn.execute(
+            sql,
+            params![
+                format!("pw-{i}"),
+                ts,
+                ts + step,
+                step,
+                "openai",
+                "gpt-4",
+                10_i64,
+                10_i64,
+                20_i64,
+                "sess-pw",
+                "trace-pw",
+                "conv-pw",
+                "agent-a",
+                1_i32,
+                "complete",
+                "[]",
+                "proc-a",
+                format!("query {i}"),
+                "main"
+            ],
+        )
+        .unwrap();
+    }
+}
+
+fn window_store(suffix: &str) -> (GenAISqliteStore, std::path::PathBuf) {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_prefwin_{suffix}_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    (store, path)
+}
+
+#[test]
+fn preference_window_keeps_newest_rows_when_capped() {
+    // Over the cap the window must keep the NEWEST rows — the previous
+    // ASC-first LIMIT kept the oldest, freezing every preference view on
+    // the start of the window.
+    let (store, path) = window_store("capped");
+    let n = (PREFERENCE_WINDOW_MAX_ROWS + 40) as i64;
+    let base = 1_000_000_000i64;
+    let step = 1_000_000i64;
+    insert_window_rows(&store, n, base, step);
+
+    let rows = store.get_preference_window_events(0).unwrap();
+    assert_eq!(rows.len(), PREFERENCE_WINDOW_MAX_ROWS);
+    // The newest 300 rows: first row is event #40 (ts = base + 40*step).
+    assert_eq!(rows[0].start_timestamp_ns, base + 40 * step);
+    assert_eq!(rows[0].user_query.as_deref(), Some("query 40"));
+    // Last row is the newest event.
+    assert_eq!(
+        rows[rows.len() - 1].start_timestamp_ns,
+        base + (n - 1) * step
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn preference_window_returns_rows_in_chronological_order() {
+    let (store, path) = window_store("order");
+    insert_window_rows(&store, 10, 1_000_000_000, 1_000_000);
+    let rows = store.get_preference_window_events(0).unwrap();
+    for pair in rows.windows(2) {
+        assert!(
+            pair[0].start_timestamp_ns < pair[1].start_timestamp_ns,
+            "rows must be chronological for consumer compatibility"
+        );
+    }
+    cleanup_db(&path);
+}
+
+#[test]
+fn preference_window_filters_status_and_call_kind() {
+    let (store, path) = window_store("filter");
+    insert_window_rows(&store, 3, 1_000_000_000, 1_000_000);
+    {
+        let conn = store.conn.lock().unwrap();
+        // A pending row: excluded by status.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-pending','llm_call',999_000_000,'pending','main','s','{}')",
+            [],
+        )
+        .unwrap();
+        // An interrupted row: excluded by status.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-int','llm_call',999_000_000,'interrupted','main','s','{}')",
+            [],
+        )
+        .unwrap();
+        // A sub-call row: excluded by call_kind.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-sub','llm_call',999_000_000,'complete','sub','s','{}')",
+            [],
+        )
+        .unwrap();
+        // A non-llm_call row: excluded by event_type.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-other','tool_call',999_000_000,'complete','main','s','{}')",
+            [],
+        )
+        .unwrap();
+    }
+    let rows = store.get_preference_window_events(0).unwrap();
+    assert_eq!(rows.len(), 3, "only the complete main llm_call rows");
+    for r in &rows {
+        assert!(r.user_query.as_deref().unwrap().starts_with("query"));
+    }
+    cleanup_db(&path);
+}
+
+#[test]
+fn preference_window_empty_when_no_rows_in_range() {
+    let (store, path) = window_store("empty");
+    insert_window_rows(&store, 3, 1_000_000_000, 1_000_000);
+    // All rows are older than since_ns: empty vec, not an error.
+    let rows = store.get_preference_window_events(2_000_000_000).unwrap();
+    assert!(rows.is_empty());
     cleanup_db(&path);
 }
 
