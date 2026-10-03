@@ -281,6 +281,10 @@ fn build_agent_metadata(events: &[TraceEventDetail], parsed: &[Option<LLMCall>])
 }
 
 /// Find the most frequently used model across events.
+///
+/// Counts come from a `HashMap`, whose iteration order is randomized per map:
+/// a single-key max reported a different model for equally used ones, so ties
+/// are broken by name.
 fn most_frequent_model(events: &[TraceEventDetail]) -> Option<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for e in events {
@@ -290,7 +294,7 @@ fn most_frequent_model(events: &[TraceEventDetail]) -> Option<String> {
     }
     counts
         .into_iter()
-        .max_by_key(|&(_, c)| c)
+        .min_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)))
         .map(|(m, _)| m.to_string())
 }
 
@@ -1274,5 +1278,51 @@ pub(crate) mod tests {
         let flattened = result.content.as_ref().and_then(|v| v.as_str()).unwrap();
         let restored: serde_json::Value = serde_json::from_str(flattened).unwrap();
         assert_eq!(restored, payload);
+    }
+
+    #[test]
+    fn most_frequent_model_breaks_ties_by_name() {
+        // Five models used once each: the counts map is a HashMap, whose
+        // iteration order is randomized per map instance, so a single-key max
+        // reported a different model from call to call.
+        fn calls(models: &[&str]) -> Vec<TraceEventDetail> {
+            models
+                .iter()
+                .enumerate()
+                .map(|(i, model)| {
+                    let mut e = call_event(
+                        i as i64 + 1,
+                        1_000_000_000 + i as i64 * 1_000_000,
+                        None,
+                        None,
+                        Some("hi"),
+                    );
+                    e.model = Some((*model).to_string());
+                    e
+                })
+                .collect()
+        }
+
+        let events = calls(&["zeta", "alpha", "delta", "echo", "bravo"]);
+        let first = most_frequent_model(&events);
+        assert_eq!(first.as_deref(), Some("alpha"));
+        for _ in 0..8 {
+            assert_eq!(
+                most_frequent_model(&events),
+                first,
+                "a tie must not follow the map's iteration order"
+            );
+        }
+
+        // The majority still wins over the name order.
+        let with_majority = calls(&["zeta", "alpha", "delta", "echo", "bravo", "zeta", "zeta"]);
+        assert_eq!(most_frequent_model(&with_majority).as_deref(), Some("zeta"));
+
+        // No model recorded stays None.
+        let mut none = calls(&["zeta", "alpha"]);
+        for e in none.iter_mut() {
+            e.model = None;
+        }
+        assert_eq!(most_frequent_model(&none), None);
     }
 }
