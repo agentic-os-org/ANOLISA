@@ -178,6 +178,13 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             if r_str is None:
                 continue
             r = int(r_str)
+            if delta < 0 and r == at:
+                # Deleted row: drop its content. Relabeling it like the other
+                # shifted rows would collide with row `at - 1` — two <row>
+                # elements with the same address in one sheetData.
+                sheet_data.remove(row_el)
+                changes += 1
+                continue
             if r >= at:
                 new_r = max(1, r + delta)
                 row_el.set("r", str(new_r))
