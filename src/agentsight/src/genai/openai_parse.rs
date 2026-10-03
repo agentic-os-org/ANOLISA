@@ -418,7 +418,18 @@ impl GenAIBuilder {
                 // Tool call deltas — merge by index
                 if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                     for tc in calls {
-                        let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        // `index` comes off the wire. A value outside the slot
+                        // range must not be truncated into another slot, which
+                        // would overwrite a valid tool call's id, name and
+                        // arguments; drop it like the native envelope path does.
+                        let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if idx >= MAX_TOOL_CALL_SLOTS {
+                            log::debug!(
+                                "[GenAI] dropping SSE tool_call with out-of-range index {idx}"
+                            );
+                            continue;
+                        }
+                        let idx = idx as u32;
                         let entry = tc_map
                             .entry(idx)
                             .or_insert_with(|| (String::new(), String::new(), String::new()));
@@ -901,6 +912,38 @@ mod tests {
                 assert_eq!(id.as_deref(), Some("call_2"));
                 assert_eq!(name, "list_dir");
                 assert_eq!(arguments.as_ref().unwrap()["path"], "/tmp");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    /// `index` is wire input on the delta path too: a value outside the slot
+    /// range must not be truncated into another slot, which would overwrite a
+    /// valid tool call's id, name and arguments in the reconstructed message.
+    #[test]
+    fn test_extract_parts_from_sse_body_rejects_absurd_tool_call_index() {
+        let body = r#"[
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"alpha","arguments":"{\"x\":1}"}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":4294967296,"id":"call_b","type":"function","function":{"name":"beta","arguments":"{\"y\":2}"}}]}}]},
+            {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+
+        assert_eq!(
+            parts.len(),
+            1,
+            "the out-of-range index must not be merged into slot 0: {parts:?}"
+        );
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_a"));
+                assert_eq!(name, "alpha");
+                assert_eq!(arguments.as_ref().unwrap()["x"], 1);
             }
             _ => panic!("expected ToolCall"),
         }

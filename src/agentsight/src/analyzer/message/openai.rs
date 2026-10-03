@@ -31,6 +31,13 @@ use super::types::{
     OpenAiSseChunk,
 };
 
+/// Upper bound on tool-call slots reconstructed from one streamed response.
+///
+/// `index` comes off the wire and slots are allocated up to that value, so the
+/// same bound the semantic builder applies to the DashScope native envelope
+/// keeps a malformed or hostile value from selecting an unrelated slot.
+const MAX_TOOL_CALL_SLOTS: u64 = 256;
+
 /// Emit an in-flight Responses-API function call, if there is one.
 ///
 /// Called both when the stream says the call is finished and before a new call
@@ -444,7 +451,18 @@ impl OpenAIParser {
                     // Extract and merge tool_call deltas by index
                     if let Some(calls) = &choice.delta.tool_calls {
                         for tc in calls {
-                            let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            // `index` comes off the wire. A value outside the
+                            // slot range must not be truncated into another
+                            // slot, which would overwrite a valid tool call's
+                            // id, name and arguments.
+                            let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if idx >= MAX_TOOL_CALL_SLOTS {
+                                log::debug!(
+                                    "[OpenAI] dropping SSE tool_call with out-of-range index {idx}"
+                                );
+                                continue;
+                            }
+                            let idx = idx as u32;
                             let entry = tool_call_map
                                 .entry(idx)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
@@ -1201,6 +1219,51 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"file_path\": \"/tmp/a.md\"}"
+        );
+    }
+
+    /// `index` is wire input: a value outside the slot range must not be
+    /// truncated into another slot, which would overwrite a valid tool call's
+    /// id, name and arguments in the recorded message.
+    #[test]
+    fn test_aggregate_sse_chunks_rejects_absurd_tool_call_index() {
+        let chunk = |tc: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "gpt-4o",
+                "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": null}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"index": 0, "id": "call_a", "type": "function", "function": {"name": "alpha", "arguments": "{\"x\":1}"}}),
+            ),
+            chunk(
+                serde_json::json!({"index": 4294967296u64, "id": "call_b", "type": "function", "function": {"name": "beta", "arguments": "{\"y\":2}"}}),
+            ),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            1,
+            "the out-of-range index must not be merged into slot 0: {tc:?}"
+        );
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_a");
+        let func = tc[0].get("function").unwrap();
+        assert_eq!(func.get("name").unwrap().as_str().unwrap(), "alpha");
+        assert_eq!(
+            func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"x\":1}"
         );
     }
 }
