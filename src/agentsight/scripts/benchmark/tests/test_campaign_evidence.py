@@ -176,7 +176,7 @@ def test_runtime_log_capture_detects_fatal_patterns_and_rotation(
 
     source.write_text("new file after rotation\n", encoding="utf-8")
     clean, errors = campaign.capture_runtime_log(source, start, destination)
-    assert clean is True
+    assert clean is None
     assert errors == []
     assert campaign.log_position(tmp_path / "missing") is None
     assert campaign.capture_runtime_log(None, None, destination) == (None, [])
@@ -212,9 +212,11 @@ def test_runtime_log_storage_failures_reject_campaign(
 ) -> None:
     source = tmp_path / "agentsight.log"
     destination = tmp_path / "captured.log"
+    source.touch()
+    start = campaign.log_position(source)
     source.write_text(message + "\n", encoding="utf-8")
 
-    clean, errors = campaign.capture_runtime_log(source, 0, destination)
+    clean, errors = campaign.capture_runtime_log(source, start, destination)
     assert clean is False
     assert errors == ["database_write"]
     assert destination.read_text(encoding="utf-8") == message + "\n"
@@ -242,8 +244,10 @@ def test_runtime_log_ignores_unrelated_storage_messages(
     tmp_path: Path, message: str
 ) -> None:
     source = tmp_path / "agentsight.log"
+    source.touch()
+    start = campaign.log_position(source)
     source.write_text(message + "\n", encoding="utf-8")
-    assert campaign.capture_runtime_log(source, 0, tmp_path / "captured.log") == (
+    assert campaign.capture_runtime_log(source, start, tmp_path / "captured.log") == (
         True,
         [],
     )

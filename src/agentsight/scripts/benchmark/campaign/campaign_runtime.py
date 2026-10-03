@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,27 +24,76 @@ RUNTIME_ERROR_PATTERNS = {
 }
 
 
-def log_position(path: Path | None) -> int | None:
-    """Return the current log size when a readable runtime log is configured."""
+@dataclass(frozen=True)
+class LogPosition:
+    """Identity and bounded pre-run tail used to verify log continuity."""
+
+    offset: int
+    device: int
+    inode: int
+    anchor: bytes
+
+
+def log_position(path: Path | None) -> LogPosition | None:
+    """Snapshot the opened runtime log, including a bounded continuity anchor."""
     if path is None:
         return None
     try:
-        return path.stat().st_size
+        with path.open("rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            handle.seek(max(0, metadata.st_size - 4096))
+            anchor = handle.read(min(metadata.st_size, 4096))
+            if len(anchor) != min(metadata.st_size, 4096):
+                return None
+            return LogPosition(
+                metadata.st_size, metadata.st_dev, metadata.st_ino, anchor
+            )
     except OSError:
         return None
 
 
 def capture_runtime_log(
-    source: Path | None, start: int | None, destination: Path
+    source: Path | None, start: LogPosition | None, destination: Path
 ) -> tuple[bool | None, list[str]]:
-    """Copy the measured log segment and classify fatal runtime messages."""
+    """Capture available diagnostics; only continuous evidence can certify clean."""
     if source is None or start is None:
         return None, []
     try:
         with source.open("rb") as handle:
-            if source.stat().st_size >= start:
-                handle.seek(start)
+            metadata = os.fstat(handle.fileno())
+            continuous = (
+                metadata.st_dev == start.device
+                and metadata.st_ino == start.inode
+                and metadata.st_size >= start.offset
+            )
+            if continuous:
+                # Size and inode alone miss copytruncate followed by regrowth.
+                handle.seek(start.offset - len(start.anchor))
+                continuous = handle.read(len(start.anchor)) == start.anchor
+            handle.seek(start.offset if continuous else 0)
             payload = handle.read()
+            if continuous:
+                handle.seek(start.offset - len(start.anchor))
+                continuous = (
+                    os.fstat(handle.fileno()).st_size >= start.offset
+                    and handle.read(len(start.anchor)) == start.anchor
+                )
+                if not continuous:
+                    handle.seek(0)
+                    payload += b"\n" + handle.read()
+            try:
+                current = source.stat()
+            except OSError:
+                continuous = False
+            else:
+                if not os.path.samestat(metadata, current):
+                    continuous = False
+                    # Rotation can race with open/read. Preserve diagnostics
+                    # from one replacement without chasing an unbounded stream.
+                    try:
+                        payload += b"\n" + source.read_bytes()
+                    except OSError:
+                        pass
     except OSError:
         return None, []
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +102,10 @@ def capture_runtime_log(
     errors = [
         name for name, pattern in RUNTIME_ERROR_PATTERNS.items() if pattern.search(text)
     ]
-    return not errors, errors
+    if errors:
+        return False, errors
+    # A replaced or truncated log may have lost failures from this interval.
+    return (True if continuous else None), []
 
 
 def process_metadata(pid: int) -> dict[str, Any]:
