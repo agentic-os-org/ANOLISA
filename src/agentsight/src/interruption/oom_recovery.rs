@@ -74,9 +74,6 @@ pub fn recover_oom_events(
             continue;
         }
 
-        // Match against known agent process name prefixes
-        let agent_name = match_agent_name(&ev.process_name);
-
         // Try to correlate with genai_events to find active session/conversation
         // via pending (in-flight) LLM calls at OOM time.
         let (session_id, conversation_id, active_conversations): (
@@ -110,28 +107,18 @@ pub fn recover_oom_events(
             (None, None, Vec::new())
         };
 
-        let mut detail = serde_json::json!({
-            "pid": ev.pid,
-            "process_name": ev.process_name,
-            "agent_name": agent_name,
-            "oom": true,
-            "source": "dmesg",
-        });
-        if !active_conversations.is_empty() {
-            detail["active_conversations"] = serde_json::json!(active_conversations);
-        }
-
-        let interruption = InterruptionEvent::new(
-            InterruptionType::AgentCrash,
-            session_id,
-            None,
-            conversation_id,
-            None,
-            Some(ev.pid),
-            agent_name.map(|s| s.to_string()),
-            ev.timestamp_ns,
-            Some(detail),
-        );
+        let Some(interruption) =
+            oom_interruption_for(ev, session_id, conversation_id, &active_conversations)
+        else {
+            // Not a known agent runtime — the module contract is to record
+            // only agent kills, and a non-agent kill is not an agent crash.
+            log::debug!(
+                "OOM recovery: skip non-agent pid={} name={}",
+                ev.pid,
+                ev.process_name
+            );
+            continue;
+        };
 
         match interruption_store.insert(&interruption) {
             Ok(_) => {
@@ -158,6 +145,42 @@ pub fn recover_oom_events(
         events.len(),
         written,
     );
+}
+
+/// Build the `agent_crash` interruption for one OOM kill, or `None` when the
+/// killed process is not a known agent runtime.
+///
+/// A non-agent kill (a build job, a browser tab, an unrelated worker) is not
+/// an agent crash; writing it with `agent_name: None` surfaced a false
+/// critical in the interruption stream, so those events are skipped entirely.
+fn oom_interruption_for(
+    ev: &OomKillEvent,
+    session_id: Option<String>,
+    conversation_id: Option<String>,
+    active_conversations: &[String],
+) -> Option<InterruptionEvent> {
+    let agent_name = match_agent_name(&ev.process_name)?;
+    let mut detail = serde_json::json!({
+        "pid": ev.pid,
+        "process_name": ev.process_name,
+        "agent_name": agent_name,
+        "oom": true,
+        "source": "dmesg",
+    });
+    if !active_conversations.is_empty() {
+        detail["active_conversations"] = serde_json::json!(active_conversations);
+    }
+    Some(InterruptionEvent::new(
+        InterruptionType::AgentCrash,
+        session_id,
+        None,
+        conversation_id,
+        None,
+        Some(ev.pid),
+        Some(agent_name.to_string()),
+        ev.timestamp_ns,
+        Some(detail),
+    ))
 }
 
 /// Parse OOM kill events from `dmesg -T` output.
@@ -451,5 +474,50 @@ mod tests {
                 .is_none()
         );
         assert!(parse_oom_kill_structured("").is_none());
+    }
+
+    // ─── oom_interruption_for: only agent kills become agent_crash ──────────
+
+    fn oom_event(process_name: &str) -> OomKillEvent {
+        OomKillEvent {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            pid: 4242,
+            process_name: process_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn non_agent_oom_kill_is_not_an_agent_crash() {
+        // The module doc ("for each killed process that matches a known agent
+        // name") and match_agent_name's else branch ("Non-agent processes —
+        // skip") require dropping kills of unrelated processes; writing them
+        // with agent_name: None produced false critical agent_crash records.
+        assert!(oom_interruption_for(&oom_event("python3"), None, None, &[]).is_none());
+        assert!(oom_interruption_for(&oom_event("chrome"), None, None, &[]).is_none());
+        assert!(oom_interruption_for(&oom_event("mysqld"), None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn agent_oom_kill_keeps_its_detail_shape() {
+        let interruption = oom_interruption_for(
+            &oom_event("openclaw-gatewa"),
+            Some("sess-1".to_string()),
+            Some("conv-1".to_string()),
+            &["conv-1".to_string()],
+        )
+        .expect("a kill of a known agent runtime must be recorded");
+        assert!(matches!(
+            interruption.interruption_type,
+            InterruptionType::AgentCrash
+        ));
+        assert_eq!(interruption.agent_name.as_deref(), Some("OpenClaw"));
+        assert_eq!(interruption.pid, Some(4242));
+        assert_eq!(interruption.session_id.as_deref(), Some("sess-1"));
+        let detail: serde_json::Value =
+            serde_json::from_str(&interruption.detail.expect("detail")).expect("valid json");
+        assert_eq!(detail["agent_name"], "OpenClaw");
+        assert_eq!(detail["oom"], true);
+        assert_eq!(detail["source"], "dmesg");
+        assert_eq!(detail["active_conversations"][0], "conv-1");
     }
 }
