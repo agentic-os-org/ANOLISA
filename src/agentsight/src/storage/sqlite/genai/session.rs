@@ -87,7 +87,8 @@ impl GenAISqliteStore {
                 "), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
                     MAX(model)               AS model,
-                    MAX(agent_name)          AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name)) AS agent_name,
                     (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
                       WHERE g2.session_id = g1.session_id
                         AND g2.event_type = 'llm_call'
@@ -147,7 +148,8 @@ impl GenAISqliteStore {
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT session_id,
-                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name))       AS agent_name,
                     COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)   AS total_input,
@@ -164,7 +166,8 @@ impl GenAISqliteStore {
         } else {
             concat!(
                 "SELECT session_id,
-                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name))       AS agent_name,
                     COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)   AS total_input,
@@ -216,7 +219,8 @@ impl GenAISqliteStore {
 
         let sql = concat!(
             "SELECT session_id,
-                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name))       AS agent_name,
                     COALESCE(SUM(",
             billed_input_col!(),
             "), 0)   AS total_input,

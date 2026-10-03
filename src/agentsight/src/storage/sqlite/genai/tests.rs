@@ -564,6 +564,42 @@ fn savings_sessions_agent_filter_falls_back_to_process_name() {
 }
 
 #[test]
+fn savings_sessions_report_the_resolved_agent_name() {
+    // #4394 made the savings filter attribute process-only rows; the label the
+    // queries return for the same rows must resolve the same way, otherwise
+    // the savings page shows an empty agent for a session that latency and the
+    // agent activity list attribute to proc-x.
+    let (store, path) = create_populated_store("sav_label");
+    insert_process_only_row(&store, "call-x", "proc-x");
+
+    let listed = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"))
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].agent_name.as_deref(),
+        Some("proc-x"),
+        "the returned label must resolve like the filter does"
+    );
+
+    let single = store
+        .get_session_for_savings("sess-x")
+        .unwrap()
+        .expect("the session must exist");
+    assert_eq!(single.agent_name.as_deref(), Some("proc-x"));
+
+    let sessions = store
+        .list_sessions(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    let session = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-x")
+        .expect("the session must be listed");
+    assert_eq!(session.agent_name.as_deref(), Some("proc-x"));
+    cleanup_db(&path);
+}
+
+#[test]
 fn savings_sessions_agent_filter_matches_case_insensitively() {
     let (store, path) = create_populated_store("sav_case");
     let lower = store
