@@ -51,6 +51,10 @@ impl MemoryService {
     /// directory is writable. Failure to start the session is logged and
     /// degrades gracefully (mem_promote / mem_session_log will return errors).
     pub fn new(config: AppConfig) -> Result<Self> {
+        // Defense in depth: programmatically constructed configs skip
+        // AppConfig::load, and IndexHandle::open consumes these raw values
+        // below — reject the misconfigurations before they reach the store.
+        config.validate()?;
         // `pick_strategy` below may unshare into a user namespace, after
         // which `geteuid()` reports the mapped uid (0 for the default
         // `0 <host uid> 1` mapping) instead of the one we were launched
