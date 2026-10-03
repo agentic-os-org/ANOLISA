@@ -131,13 +131,13 @@ anolisa env
 
 ```bash
 # 验证 hook 安装
-ls ~/.config/cosh/hooks/
+ls ~/.copilot-shell/cosh/hooks/
 
 # 重新安装 hook
 /usr/share/tokenless/scripts/install.sh --cosh
 
 # 检查 cosh hook 配置
-cat ~/.config/cosh/config.toml | grep -A5 hooks
+cat ~/.copilot-shell/config.toml | grep -A5 hooks
 ```
 
 ---
