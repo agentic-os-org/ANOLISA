@@ -36,6 +36,7 @@ pub fn extract_private_metadata(
     let mut cwd: Option<String> = None;
     let mut user_count: u64 = 0;
     let mut assistant_count: u64 = 0;
+    let mut in_assistant_turn = false;
 
     for e in events {
         if cwd.is_none() {
@@ -45,12 +46,26 @@ pub fn extract_private_metadata(
             // Claude-style tool results also ride in type=="user" events;
             // they are observations, not user messages.
             Some("user") => {
+                in_assistant_turn = false;
                 if !carries_only_tool_results(e.get("message")) {
                     user_count += 1;
                 }
             }
-            Some("assistant") => assistant_count += 1,
-            _ => {}
+            // The ATIF converter merges consecutive assistant events into a
+            // single Agent step ("Collect all consecutive assistant events
+            // (same LLM turn)"), so count turns rather than events: the count
+            // has to describe the trajectory it rides on, as the user side
+            // does since 9df75a971.
+            Some("assistant") => {
+                if !in_assistant_turn {
+                    assistant_count += 1;
+                    in_assistant_turn = true;
+                }
+            }
+            // A skipped event neither extends nor ends the turn, mirroring the
+            // converter's merge loop.
+            Some(t) if crate::atif::SKIP_TYPES.contains(&t) => {}
+            _ => in_assistant_turn = false,
         }
     }
 
@@ -119,6 +134,33 @@ mod tests {
         assert_eq!(extra["user_message_count"], 1);
         assert_eq!(extra["assistant_message_count"], 1);
         assert_eq!(extra["project"], "myapp");
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_assistant_turns_like_the_trajectory() {
+        use agentsight_atif::StepSource;
+        // The converter merges consecutive assistant events into one Agent
+        // step ("same LLM turn"), so the count that rides in `extra` must
+        // describe the trajectory rather than the raw event stream — the same
+        // contract the user side follows since 9df75a971.
+        let content = concat!(
+            "{\"type\":\"user\",\"cwd\":\"/data/myapp\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"part one\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"part two\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let trajectory = crate::atif::convert_qoder_events(&events, "qoder").unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::Agent)
+            .count();
+        let extra = extract_private_metadata(&events, "myapp");
+        assert_eq!(agent_steps, 1, "both assistant events are one LLM turn");
+        assert_eq!(
+            extra["assistant_message_count"], agent_steps as i64,
+            "the count must describe the trajectory it rides on"
+        );
     }
 
     #[test]

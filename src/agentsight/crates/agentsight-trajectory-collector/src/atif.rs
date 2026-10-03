@@ -17,7 +17,8 @@ use agentsight_atif::{
 };
 
 /// Event types to skip entirely.
-const SKIP_TYPES: &[&str] = &["runtime-config", "session_meta", "progress", "last-prompt"];
+pub(crate) const SKIP_TYPES: &[&str] =
+    &["runtime-config", "session_meta", "progress", "last-prompt"];
 
 /// Convert raw Qoder JSONL events into an ATIF v1.7 trajectory.
 pub fn convert_qoder_events(
