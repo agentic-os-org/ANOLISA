@@ -13,7 +13,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anolisa_platform::ipc::{PeerCredential, get_peer_credential, recv_message, send_message};
 
@@ -104,21 +104,30 @@ impl DaemonServer {
         fs::set_permissions(&self.socket_path, fs::Permissions::from_mode(0o660))?;
         Self::chgrp_anolisa(std::path::Path::new(&self.socket_path))?;
 
-        // Set a non-blocking accept timeout so we can check the shutdown flag.
-        listener.set_nonblocking(false)?;
+        // Poll accept() in non-blocking mode so the shutdown flag is
+        // observed even while no client connects: a blocking accept(2)
+        // parks the loop until one more connection arrives, so a
+        // Shutdown request (or request_shutdown) could never stop the
+        // daemon on its own — it only replied "shutdown initiated".
+        listener.set_nonblocking(true)?;
 
         eprintln!(
             "[anolisa-helper] listening on {} (v{})",
             self.socket_path, self.version
         );
 
-        for stream in listener.incoming() {
+        loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
 
-            match stream {
-                Ok(stream) => {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
+                    // The accepted stream does not inherit the listener's
+                    // non-blocking mode on Linux, but reset it explicitly
+                    // so the per-connection handler can use blocking IO on
+                    // every platform.
+                    let _ = stream.set_nonblocking(false);
                     let rate_limiter = Arc::clone(&self.rate_limiter);
                     let last_operation = Arc::clone(&self.last_operation);
                     let shutdown = Arc::clone(&self.shutdown);
@@ -137,6 +146,9 @@ impl DaemonServer {
                             eprintln!("[anolisa-helper] connection error: {e}");
                         }
                     });
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
                     eprintln!("[anolisa-helper] accept error: {e}");
@@ -659,6 +671,37 @@ mod tests {
         );
         assert!(matches!(resp, HelperResponse::Success { .. }));
         assert!(shutdown.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn request_shutdown_exits_the_accept_loop_without_a_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("system-helper.sock");
+        let server = Arc::new(DaemonServer::new(
+            socket_path.to_str().expect("socket path is UTF-8"),
+        ));
+        let runner = Arc::clone(&server);
+        let handle = thread::spawn(move || runner.run());
+
+        // Wait for the listener to bind.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !socket_path.exists() && Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(socket_path.exists(), "daemon never bound its socket");
+
+        server.request_shutdown();
+
+        // The accept loop must notice the flag on its own: no client should
+        // have to connect just to unblock a parked accept(2).
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !handle.is_finished() && Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            handle.is_finished(),
+            "daemon still running 5s after request_shutdown"
+        );
     }
 
     #[test]
