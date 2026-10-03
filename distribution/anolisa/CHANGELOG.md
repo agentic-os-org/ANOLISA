@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Enable the website installer for Intel Macs running macOS 11 or later,
+  lifting the ARM-only limitation recorded under [0.3.16]
+  ([#3449](https://github.com/agentic-os-org/ANOLISA/pull/3449)).
+
 ## [0.3.16] - 2026-09-23
 
 ### Added

@@ -9,6 +9,12 @@
 
 ## [未发布]
 
+### 新增
+
+- 官网安装脚本支持 macOS 11 及更高版本的 Intel Mac，
+  解除 [0.3.16] 中记录的仅 ARM 限制
+  ([#3449](https://github.com/agentic-os-org/ANOLISA/pull/3449))。
+
 ## [0.3.16] - 2026-09-23
 
 ### 新增
