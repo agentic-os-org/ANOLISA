@@ -141,13 +141,7 @@ fn parse_svc_list_line(line: &str) -> Option<SvcStatus> {
     }
     let name = parts[0].trim_end_matches(".service");
     let active = parts[2] == "active";
-    let state = match parts[3] {
-        "running" => SvcState::Running,
-        "exited" => SvcState::Stopped,
-        "dead" => SvcState::Stopped,
-        "failed" => SvcState::Failed,
-        other => SvcState::Unknown(other.to_string()),
-    };
+    let state = sub_state_to_svc_state(parts[3]);
     let description = if parts.len() > 4 {
         Some(parts[4..].join(" "))
     } else {
@@ -253,8 +247,28 @@ fn state_from_properties(props: &std::collections::HashMap<String, String>) -> S
         .map(String::as_str)
         .unwrap_or("unknown")
     {
-        "active" => SvcState::Running,
+        // Active includes finished oneshots (SubState=exited, no process):
+        // the shared SubState table decides, defaulting to Running when
+        // systemd omits SubState.
+        "active" => props
+            .get("SubState")
+            .map(|sub| sub_state_to_svc_state(sub))
+            .unwrap_or(SvcState::Running),
         "inactive" => SvcState::Stopped,
+        "failed" => SvcState::Failed,
+        "activating" => SvcState::Activating,
+        "deactivating" => SvcState::Deactivating,
+        other => SvcState::Unknown(other.to_string()),
+    }
+}
+
+/// Shared SubState to SvcState truth table for both `systemctl show`
+/// properties and `list-units` SUB parsing: one mapping, no drift.
+/// A reloading daemon is still running; a finished oneshot is stopped.
+fn sub_state_to_svc_state(sub: &str) -> SvcState {
+    match sub {
+        "running" | "reloading" => SvcState::Running,
+        "exited" | "dead" => SvcState::Stopped,
         "failed" => SvcState::Failed,
         "activating" => SvcState::Activating,
         "deactivating" => SvcState::Deactivating,
@@ -410,6 +424,33 @@ mod tests {
         let props = parse_systemctl_show("MainPID=0");
         let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Unknown("unknown".to_string()));
+    }
+
+    // A finished oneshot (ActiveState=active, SubState=exited) must not be
+    // reported Running: live example systemd-journal-flush.service
+    // (active/exited, MainPID=0) on a real host.
+    #[test]
+    fn test_svc_status_exited_oneshot_is_not_running() {
+        let mut props = std::collections::HashMap::new();
+        props.insert("ActiveState".to_string(), "active".to_string());
+        props.insert("SubState".to_string(), "exited".to_string());
+        assert_ne!(
+            state_from_properties(&props),
+            SvcState::Running,
+            "an exited oneshot must not be reported Running"
+        );
+    }
+
+    // One truth table: list SUB activating must map like status
+    // ActiveState activating, not to Unknown.
+    #[test]
+    fn test_svc_list_activating_matches_status_mapping() {
+        let svc = parse_svc_list_line("a.service loaded activating activating boot desc").unwrap();
+        assert_eq!(
+            svc.state,
+            SvcState::Activating,
+            "list SUB activating must map like ActiveState activating"
+        );
     }
 
     // --- UTF-8 service names and descriptions ---
