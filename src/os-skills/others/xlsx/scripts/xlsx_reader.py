@@ -154,8 +154,10 @@ def audit_quality(sheets: dict) -> dict:
                 "note": f"{dup_count} fully duplicate rows found."
             })
 
-        # Mixed-type object columns (numeric data stored as text)
-        for col in df.select_dtypes(include="object").columns:
+        # Mixed-type text columns (numeric data stored as text). "str" is
+        # passed alongside "object" so str-dtype columns keep matching on
+        # pandas >= 4 and no Pandas4Warning fires on pandas 3.
+        for col in df.select_dtypes(include=["object", "str"]).columns:
             numeric_converted = pd.to_numeric(df[col], errors="coerce")
             convertible = int(numeric_converted.notna().sum())
             non_null_total = int(df[col].notna().sum())
