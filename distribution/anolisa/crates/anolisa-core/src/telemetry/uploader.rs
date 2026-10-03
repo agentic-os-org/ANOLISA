@@ -654,6 +654,14 @@ fn unix_now() -> u64 {
 ///
 /// Reads line-by-line via a `BufReader` so a large file does not have to be
 /// fully loaded into memory before `max_lines` takes effect.
+///
+/// Lines are read as bytes and decoded lossily: the ops `.jsonl` files are
+/// pre-created `0666` for multi-writer access, so any writer can leave a
+/// line that is not valid UTF-8. A hard `InvalidData` here would fail the
+/// whole component round without advancing its offset, and every later
+/// round would re-fail at the same byte — permanently blocking upload of
+/// the valid lines behind it. A malformed line instead flows through
+/// `build_body`'s raw fallback and the tail advances past it.
 fn read_from(path: &Path, offset: u64, max_lines: usize) -> io::Result<(Vec<String>, u64)> {
     use std::io::{BufRead, BufReader};
     let mut f = File::open(path)?;
@@ -662,20 +670,21 @@ fn read_from(path: &Path, offset: u64, max_lines: usize) -> io::Result<(Vec<Stri
 
     let mut lines = Vec::new();
     let mut consumed: u64 = 0;
-    let mut raw = String::new();
+    let mut raw: Vec<u8> = Vec::new();
     loop {
         raw.clear();
-        let n = reader.read_line(&mut raw)?;
+        let n = reader.read_until(b'\n', &mut raw)?;
         if n == 0 {
             break; // EOF
         }
         // Only complete lines (terminated by '\n') are consumed; a trailing
         // partial line is left for the next round.
-        if !raw.ends_with('\n') {
+        if !raw.ends_with(b"\n") {
             break;
         }
         consumed += n as u64;
-        let trimmed = raw.trim_end_matches(['\n', '\r']);
+        let line = String::from_utf8_lossy(&raw);
+        let trimmed = line.trim_end_matches(['\n', '\r']);
         if !trimmed.is_empty() {
             lines.push(trimmed.to_string());
         }
@@ -955,6 +964,75 @@ mod tests {
         let (lines, consumed) = read_from(&path, 0, 0).unwrap();
         assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(consumed, 4); // "a\nb\n"
+    }
+
+    #[test]
+    fn test_read_from_decodes_invalid_utf8_lossily() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.jsonl");
+        // The ops jsonl files are world-writable (multi-writer), so a single
+        // non-UTF-8 byte in one line must not fail the whole read.
+        let mut bytes = b"{\"a\":1}\n".to_vec();
+        bytes.extend_from_slice(b"\xff\xfe poison\n");
+        bytes.extend_from_slice(b"{\"b\":2}\n");
+        fs::write(&path, bytes).unwrap();
+        let (lines, consumed) = read_from(&path, 0, 0).unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "{\"a\":1}");
+        // Invalid bytes decode to the replacement character, not an error.
+        assert!(lines[1].contains("poison"), "got {:?}", lines[1]);
+        assert_eq!(lines[2], "{\"b\":2}");
+        assert_eq!(consumed as usize, 8 + 10 + 8); // every byte consumed
+    }
+
+    #[test]
+    fn test_run_once_ships_lines_behind_a_poison_utf8_line() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let mut bytes = b"{\"a\":1}\n".to_vec();
+        bytes.extend_from_slice(b"\xff\xfe poison\n");
+        bytes.extend_from_slice(b"{\"b\":2}\n");
+        fs::write(&path, bytes).unwrap();
+
+        // Round 1 must not wedge: the poison line is consumed (via the raw
+        // fallback in build_body) and the valid line behind it ships.
+        let mut bodies = Vec::new();
+        up.run_once_with_post(|_, body| {
+            bodies.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bodies.len(), 1, "one POST carrying every line");
+        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0]["a"], "1");
+        assert_eq!(logs[2]["b"], "2");
+        // The malformed line itself travels as raw content, not an error.
+        assert!(logs[1]["raw"].as_str().unwrap().contains("poison"));
+
+        // The offset advanced past the poison byte: a later round only ships
+        // lines appended after it.
+        let mut appended = OpenOptions::new().append(true).open(&path).unwrap();
+        appended.write_all(b"{\"c\":3}\n").unwrap();
+        let mut later = Vec::new();
+        up.run_once_with_post(|_, body| {
+            later.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(later.len(), 1);
+        let parsed: Value = serde_json::from_str(&later[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["c"], "3");
+        let stored = up.load_offsets();
+        assert_eq!(
+            stored["cosh"].offset as usize,
+            8 + 10 + 8 + 8,
+            "offset covers every consumed byte including the poison line"
+        );
     }
 
     #[test]
