@@ -3603,3 +3603,187 @@ describe('truncateAndSaveToFile', () => {
     );
   });
 });
+
+describe('CoreToolScheduler sandbox bypass retry redaction', () => {
+  const RAW_SECRET = 'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
+  const REDACTED_SECRET = `sk-${'*'.repeat(20)}`;
+
+  function buildBypassScheduler(options: {
+    execute: ReturnType<typeof vi.fn>;
+    onSandboxBypassRequested?: boolean;
+  }) {
+    const shellTool = new MockTool({
+      name: 'run_shell_command',
+      execute: options.execute,
+      shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+    });
+
+    const failureHookOutput = {
+      decision: 'allow' as const,
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => false,
+      systemMessage: undefined,
+      reason: undefined,
+      getSandboxBypassRequest: () => ({
+        original_command: 'dangerous-cmd',
+        reason: 'sandbox blocked the command',
+      }),
+      notifications: [],
+    };
+    const mockHookSystem = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(undefined),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+      firePostToolUseFailureEvent: vi.fn().mockResolvedValue(failureHookOutput),
+      setHookEnabled: vi.fn(),
+    };
+
+    const toolRegistry = {
+      getTool: () => shellTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => shellTool,
+      getToolByDisplayName: () => shellTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-bypass-redaction',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistry,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getEnableToolOutputTruncation: () => true,
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookSystem,
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+      onSandboxBypassRequested: vi
+        .fn()
+        .mockResolvedValue(options.onSandboxBypassRequested ?? true),
+    });
+
+    return { scheduler, onAllToolCallsComplete, mockHookSystem };
+  }
+
+  it('should redact secrets in the sandbox bypass retry response', async () => {
+    const execute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        llmContent: 'sandbox violation output',
+        returnDisplay: 'sandbox violation output',
+        error: { message: 'Sandbox denied command', type: 'SANDBOX_ERROR' },
+      })
+      .mockResolvedValueOnce({
+        llmContent: `unsandboxed output with key ${RAW_SECRET}`,
+        returnDisplay: `unsandboxed output with key ${RAW_SECRET}`,
+      });
+
+    const { scheduler, onAllToolCallsComplete } = buildBypassScheduler({
+      execute,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'bypass-redact-1',
+          name: 'run_shell_command',
+          args: { command: 'dangerous-cmd' },
+          isClientInitiated: false,
+          prompt_id: 'p-bypass-redact',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCall = onAllToolCallsComplete.mock.calls[0][0][0] as {
+      status: string;
+      response: { responseParts: unknown[]; resultDisplay: unknown };
+    };
+    expect(completedCall.status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    const responseJson = JSON.stringify(completedCall.response.responseParts);
+    expect(responseJson).not.toContain(RAW_SECRET);
+    expect(responseJson).toContain(REDACTED_SECRET);
+
+    expect(JSON.stringify(completedCall.response.resultDisplay)).not.toContain(
+      RAW_SECRET,
+    );
+  });
+
+  it('control: redacts secrets on the normal (non-bypass) success path', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: `normal output with key ${RAW_SECRET}`,
+      returnDisplay: `normal output with key ${RAW_SECRET}`,
+    });
+
+    const { scheduler, onAllToolCallsComplete } = buildBypassScheduler({
+      execute,
+      onSandboxBypassRequested: false,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'normal-redact-1',
+          name: 'run_shell_command',
+          args: { command: 'safe-cmd' },
+          isClientInitiated: false,
+          prompt_id: 'p-normal-redact',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCall = onAllToolCallsComplete.mock.calls[0][0][0] as {
+      status: string;
+      response: { responseParts: unknown[]; resultDisplay: unknown };
+    };
+    expect(completedCall.status).toBe('success');
+
+    const responseJson = JSON.stringify(completedCall.response.responseParts);
+    expect(responseJson).not.toContain(RAW_SECRET);
+    expect(responseJson).toContain(REDACTED_SECRET);
+  });
+});
