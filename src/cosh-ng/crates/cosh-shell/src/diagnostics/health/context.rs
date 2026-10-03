@@ -129,6 +129,9 @@ fn health_message_token(id: HealthMessageId) -> &'static str {
         HealthMessageId::HealthFindingDiskHigh => "HealthFindingDiskHigh",
         HealthMessageId::HealthFindingRecentOom => "HealthFindingRecentOom",
         HealthMessageId::HealthFindingKernelPanic => "HealthFindingKernelPanic",
+        HealthMessageId::HealthFindingWorkspaceConfinementUnsupported => {
+            "HealthFindingWorkspaceConfinementUnsupported"
+        }
         HealthMessageId::HealthFindingServiceFailed => "HealthFindingServiceFailed",
         HealthMessageId::HealthFindingServiceInactive => "HealthFindingServiceInactive",
         _ => "HealthMessage",

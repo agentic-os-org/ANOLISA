@@ -114,4 +114,5 @@ collect_message_ids!([
     managed_task_ids,
     composer_control_submit_ids,
     auth_ecs_ids,
+    health_confinement_ids,
 ],);

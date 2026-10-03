@@ -294,14 +294,20 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsChecking as usize,
-            MessageId::ALL.len() - 12
+            MessageId::ALL.len() - 15
         );
         assert_eq!(
             MessageId::AuthEcsCancelHint as usize,
             MessageId::AuthEcsChecking as usize + 10
         );
+        // The #3413 kernel-confinement health segment is the current tail; tail
+        // ownership assertions move with each appended segment.
         assert_eq!(
-            MessageId::AuthEcsRefreshing as usize + 1,
+            MessageId::HealthFindingWorkspaceConfinementUnsupported as usize,
+            MessageId::AuthEcsRefreshing as usize + 1
+        );
+        assert_eq!(
+            MessageId::HealthRemediationWorkspaceConfinement as usize + 1,
             MessageId::ALL.len()
         );
     }
