@@ -479,6 +479,12 @@ jobs:
   docker-build-push:
     name: Build & Push Docker Image
     runs-on: anolisa-k8s-amd-nightly
+    # rpm-sec-core is optional (skipped when no release/sec-core/v* branch
+    # exists). Without this guard, GitHub Actions' skip propagation would
+    # silently skip this job — and the E2E job depending on it — on any night
+    # where sec-core has no release branch. !failure() && !cancelled() runs
+    # on success *or* skip of every needs entry, and still skips on failure.
+    if: ${{ !failure() && !cancelled() }}
     needs:
       - versions
       - rpm-cosh
@@ -607,7 +613,10 @@ jobs:
   # ==========================================================================
   anolisa-raw-lifecycle-e2e:
     name: E2E anolisa raw lifecycle
-    if: github.event_name == 'schedule' || inputs.dry-run != true
+    # docker-build-push may run while rpm-sec-core was skipped (optional
+    # component); !failure() && !cancelled() keeps this job alive in that
+    # case instead of inheriting the skip, while still honoring dry-run.
+    if: ${{ !failure() && !cancelled() && (github.event_name == 'schedule' || inputs.dry-run != true) }}
     runs-on: anolisa-k8s-amd-nightly
     timeout-minutes: 30
     needs:
