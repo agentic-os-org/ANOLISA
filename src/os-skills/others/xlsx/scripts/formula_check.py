@@ -198,6 +198,8 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
 
             # Track shared formula IDs seen on this sheet (si -> primary cell ref)
             shared_primary: dict[str, str] = {}
+            # Consumer cells per group (si -> first consumer cell ref)
+            shared_consumers: dict[str, str] = {}
 
             for cell in ws.findall(f".//{NSP}c"):
                 cell_ref = cell.get("r", "?")
@@ -248,6 +250,8 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
                 if f_type == "shared" and f_elem.text is None:
                     # Consumer cell: skip formula counting and cross-ref checks
                     # (the primary cell already covers this formula)
+                    if f_si is not None:
+                        shared_consumers.setdefault(f_si, cell_ref)
                     continue
 
                 formula = f_elem.text or ""
@@ -291,6 +295,27 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
                                 }
                             )
                             results["error_count"] += 1
+
+            # ── Check 4: shared formula integrity ──────────────────────
+            # Every consumer si seen on this sheet must have a primary cell
+            # that carries the group's formula text; run after the scan so
+            # document order does not matter.
+            for si, consumer_ref in sorted(shared_consumers.items()):
+                if si not in shared_primary:
+                    results["errors"].append(
+                        {
+                            "type": "orphan_shared_formula",
+                            "sheet": sheet_name,
+                            "cell": consumer_ref,
+                            "si": si,
+                            "detail": (
+                                f"Shared formula consumer references group si "
+                                f"'{si}' but no primary cell with formula text "
+                                f"exists on this sheet"
+                            ),
+                        }
+                    )
+                    results["error_count"] += 1
 
     return results
 
@@ -396,6 +421,8 @@ def main() -> None:
                 print(f"         Defined names: {e.get('defined_names', [])}")
             elif e["type"] == "malformed_error_cell":
                 print(f"  [FAIL] [{e['sheet']}!{e['cell']}] malformed error cell: {e['detail']}")
+            elif e["type"] == "orphan_shared_formula":
+                print(f"  [FAIL] [{e['sheet']}!{e['cell']}] {e['detail']}")
             elif e["type"] == "file_error":
                 print(f"  [FAIL] File error: {e['message']}")
         print()
