@@ -67,6 +67,27 @@ OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 AN
 保留在 OpenClaw 2026.9.2 的 `coding` 会话 profile 中。自定义白名单、sandbox 策略及
 不采用该元数据的宿主需要显式添加新名称；指南说明了如何追加而不覆盖已有策略。
 
+## 核心操作
+
+```bash
+# 初始化命名空间
+agent-memory init
+
+# 打印解析后的配置
+agent-memory info
+```
+
+以 MCP 服务器运行后，Agent 通过以下工具交互：
+
+| 操作 | MCP 工具 |
+|------|----------|
+| 写入记忆 | `mem_write(path, content)` |
+| 读取记忆 | `mem_read(path)` |
+| 搜索 | `memory_search(query, mode="hybrid")` |
+| 观察 | `memory_observe(content, type)` |
+| 获取上下文 | `memory_get_context(max_tokens)` |
+| 快照 | `mem_snapshot(name)` |
+
 ## 架构
 
 单进程 Tokio 异步运行时，通过 stdio JSON-RPC 2.0 暴露 37 个 MCP 工具：
