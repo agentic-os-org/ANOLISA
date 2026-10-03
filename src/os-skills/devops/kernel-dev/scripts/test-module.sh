@@ -20,6 +20,25 @@ MODULE_PARAMS="$*"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Set once insmod succeeds; the EXIT trap uses it so a failure anywhere
+# between load and unload still leaves the system as we found it.
+MODULE_LOADED=0
+
+cleanup() {
+    local rc=$?
+    if [ "$MODULE_LOADED" -eq 1 ]; then
+        echo -e "${YELLOW}⚠${NC} Test aborted with the module loaded — attempting rmmod..."
+        if rmmod "$MODULE_NAME" 2>/dev/null; then
+            echo -e "${YELLOW}⚠${NC} Module was unloaded by the cleanup handler"
+        else
+            echo -e "${RED}✗${NC} Module '$MODULE_NAME' is STILL LOADED. Inspect:"
+            echo "      lsmod | grep '^$MODULE_NAME' ; dmesg | tail -20"
+        fi
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT
+
 # Search for module file in examples directories
 MODULE_FILE=""
 for dir in "$BASE_DIR/examples/$MODULE_NAME" "$BASE_DIR/examples/hello_module" "$BASE_DIR/examples/param_module" "$BASE_DIR/examples/proc_module" "$BASE_DIR/examples/char_device" "$SCRIPT_DIR"; do
@@ -52,8 +71,9 @@ if [ ! -f "$MODULE_FILE" ]; then
 fi
 echo -e "${GREEN}✓${NC} Module file found"
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then 
+# Check if running as root (KERNEL_TEST_SKIP_ROOT=1 is a CI-only hook that
+# lets the scripted logic be exercised with stubbed kernel commands).
+if [ "${KERNEL_TEST_SKIP_ROOT:-0}" != "1" ] && [ "$EUID" -ne 0 ]; then
     echo -e "${YELLOW}⚠${NC} This script requires root privileges"
     echo "Please run with sudo: sudo $0 $MODULE_NAME"
     exit 1
@@ -69,7 +89,11 @@ echo ""
 echo -e "${BLUE}Step 2: Check Existing Module${NC}"
 if lsmod | grep -q "^${MODULE_NAME}"; then
     echo -e "${YELLOW}⚠${NC} Module is already loaded, unloading..."
-    rmmod "$MODULE_NAME" 2>/dev/null || true
+    if ! rmmod "$MODULE_NAME" 2>/dev/null; then
+        echo -e "${RED}✗${NC} Cannot unload the already-loaded module (in use?)."
+        echo "  Investigate: lsmod | grep '^$MODULE_NAME'; lsof /dev/${MODULE_NAME} 2>/dev/null"
+        exit 1
+    fi
     sleep 1
 fi
 echo -e "${GREEN}✓${NC} Module is not loaded"
@@ -83,6 +107,7 @@ if [ -n "$MODULE_PARAMS" ]; then
 else
     insmod "$MODULE_FILE"
 fi
+MODULE_LOADED=1
 echo -e "${GREEN}✓${NC} Module loaded"
 echo ""
 
@@ -115,7 +140,7 @@ echo ""
 
 # View kernel logs
 echo -e "${BLUE}Step 6: Kernel Logs (dmesg)${NC}"
-dmesg | tail -10 | grep -i "$MODULE_NAME" || echo "No logs found"
+dmesg 2>/dev/null | tail -10 | grep -i "$MODULE_NAME" || echo "No logs found"
 echo ""
 
 # Test duration
@@ -126,7 +151,14 @@ echo ""
 
 # Unload module
 echo -e "${BLUE}Step 8: Unloading Module${NC}"
-rmmod "$MODULE_NAME"
+if ! rmmod "$MODULE_NAME"; then
+    # Still loaded: keep MODULE_LOADED set so the trap reports it, and make
+    # the failure the reported one instead of a bare set -e abort.
+    echo -e "${RED}✗${NC} rmmod failed — module remains loaded."
+    echo "  A buggy module exit path usually causes this; check dmesg for output from ${MODULE_NAME}_exit."
+    exit 1
+fi
+MODULE_LOADED=0
 echo -e "${GREEN}✓${NC} Module unloaded"
 echo ""
 
@@ -142,7 +174,7 @@ echo ""
 
 # Final kernel logs
 echo -e "${BLUE}Step 10: Final Kernel Logs${NC}"
-dmesg | tail -5 | grep -i "$MODULE_NAME" || echo "No logs found"
+dmesg 2>/dev/null | tail -5 | grep -i "$MODULE_NAME" || echo "No logs found"
 echo ""
 
 # Summary
