@@ -19,8 +19,23 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     // Called only after schema validation; these conversions still propagate a
     // visible error if the bundled shape and semantic validator ever diverge.
     let spec = &document["spec"];
+    for (name, agent) in spec["agents"].as_object().ok_or(Error::InvalidSchema)? {
+        require(
+            agent.get("qoder").is_none() || agent["adapter"] == "qoder",
+            &format!("/spec/agents/{name}/qoder"),
+            "Qoder settings require the Qoder Adapter",
+        )?;
+    }
     let providers = spec["providers"].as_object().ok_or(Error::InvalidSchema)?;
     let events = spec["events"].as_object().ok_or(Error::InvalidSchema)?;
+    for (name, provider) in providers {
+        require(
+            provider["protocol"] != "native-hook/v1alpha1"
+                || provider["config"].as_object().is_some_and(|config| config.is_empty()),
+            &format!("/spec/providers/{name}/config"),
+            "native hooks have no Provider private configuration; use explicit argv and environment",
+        )?;
+    }
     for (name, event) in events {
         let path = format!("/spec/events/{name}");
         let enabled = event["enabled"] == true;
@@ -72,11 +87,28 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                 &format!("{path}/provider"),
                 "unknown Provider reference",
             )?;
+            let native = step.get("native").is_some();
+            require(
+                native == (providers[provider]["protocol"] == "native-hook/v1alpha1"),
+                &format!("{path}/provider"),
+                "step shape must match the referenced Provider protocol",
+            )?;
+            require(
+                !native || matches!(name.as_str(), "tool.before" | "tool.after"),
+                &path,
+                "native hooks are defined only for tool.before and tool.after",
+            )?;
+            require(
+                !native || matches!(step["on_error"].as_str(), Some("report" | "block")),
+                &format!("{path}/on_error"),
+                "native hooks support report or block failure actions",
+            )?;
             let active = enabled && step["enabled"] != false;
-            for (index, effect) in step["effects"]
-                .as_array()
-                .ok_or(Error::InvalidSchema)?
-                .iter()
+            for (index, effect) in step
+                .get("effects")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
                 .enumerate()
             {
                 let effect = effect.as_str().ok_or(Error::InvalidSchema)?;

@@ -148,6 +148,9 @@ runs:
             -name 'dist' -o -name '__pycache__' -o -name '.pytest_cache' -o \
             -name '.ruff_cache' \
           \) -prune -exec rm -rf {} +
+          # The AW protocol is an in-repository source dependency of the V2 CLI.
+          python3 "${SRC_DIR}/scripts/package-aw-source.py" \
+            "$PWD" "/tmp/build/${ARCHIVE_NAME}"
           # Replace example keys in trusted-keys with the real GPG public key
           # so the packaged archive ships the production key.
           if [ -n "$GPG_PUBLIC_KEY" ]; then
