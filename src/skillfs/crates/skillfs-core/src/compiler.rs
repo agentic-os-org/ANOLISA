@@ -75,8 +75,9 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
     // Depth 0 = root level, always emit.
     let mut emit_at_depth: Vec<bool> = vec![true];
 
-    for line in content.lines() {
-        let trimmed = line.trim();
+    for line in content.split_inclusive('\n') {
+        let (body, terminator) = split_line_terminator(line);
+        let trimmed = body.trim();
 
         if let Some(expr) = parse_if_directive(trimmed) {
             // Push: active iff parent scope is active AND condition true.
@@ -106,19 +107,30 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
             continue;
         }
 
-        // Emit the line when all depth conditions are satisfied.
+        // Emit the line when all depth conditions are satisfied, with its own
+        // terminator: directive lines are dropped, but the surviving lines
+        // keep the file's line endings.
         if emit_at_depth.iter().all(|&e| e) {
-            output.push_str(line);
-            output.push('\n');
+            output.push_str(body);
+            output.push_str(terminator);
         }
     }
 
-    // Match trailing newline behaviour of the original content.
-    if !content.ends_with('\n') && output.ends_with('\n') {
-        output.pop();
-    }
-
     output
+}
+
+/// Split one line from `str::split_inclusive('\n')` into its body and the
+/// terminator it arrived with. Keeping the terminator per line is what lets
+/// both compiler stages leave the file's line endings alone: a CRLF line (or
+/// a final line without any terminator) is emitted exactly as written.
+fn split_line_terminator(line: &str) -> (&str, &str) {
+    match line.strip_suffix('\n') {
+        Some(head) => match head.strip_suffix('\r') {
+            Some(body) => (body, "\r\n"),
+            None => (head, "\n"),
+        },
+        None => (line, ""),
+    }
 }
 
 fn parse_if_directive(line: &str) -> Option<&str> {
@@ -260,6 +272,8 @@ fn unquote(s: &str) -> &str {
 /// the overall structure of the file.
 ///
 /// Returns a clone of the original content when no rules apply (idempotent).
+/// Each line keeps its own terminator (`\n`, `\r\n`, or none on the final
+/// line), so only the text a rule actually rewrites changes.
 fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> String {
     let has_uv = env.has_command("uv");
     let node_pm = detect_best_node_pm(env);
@@ -271,14 +285,12 @@ fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> Str
 
     let mut output = String::with_capacity(content.len());
 
-    for line in content.lines() {
-        output.push_str(&normalize_line(line, has_uv, &node_pm));
-        output.push('\n');
-    }
-
-    // Match trailing newline of original.
-    if !content.ends_with('\n') && output.ends_with('\n') {
-        output.pop();
+    for line in content.split_inclusive('\n') {
+        // Each line keeps its own terminator, so a file whose lines are not
+        // rewritten comes back byte-identical (CRLF sources included).
+        let (body, terminator) = split_line_terminator(line);
+        output.push_str(&normalize_line(body, has_uv, &node_pm));
+        output.push_str(terminator);
     }
 
     output
@@ -1119,5 +1131,31 @@ mod tests {
         let r2 = compile(without_newline, &env);
         assert!(r1.ends_with('\n'));
         assert!(!r2.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_heuristic_keeps_line_endings_when_no_rule_matches() {
+        let env = env_darwin_uv();
+        // The heuristic stage substitutes commands; it must not re-flow the
+        // file. A CRLF SKILL.md (Windows-authored sources exist) with no
+        // applicable rule has to come back byte-identical.
+        let content = "---\r\nname: crlf-skill\r\n---\r\n\r\nBody text.\r\n";
+        assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_heuristic_keeps_line_endings_of_rewritten_lines() {
+        let env = env_darwin_uv();
+        let content = "Install with:\r\n\r\nRun: pip install requests\r\n\r\nDone.\r\n";
+        let expected = "Install with:\r\n\r\nRun: uv pip install requests\r\n\r\nDone.\r\n";
+        assert_eq!(compile(content, &env), expected);
+    }
+
+    #[test]
+    fn test_conditional_keeps_line_endings() {
+        let env = env_darwin_uv();
+        let content = "---\r\nname: x\r\n---\r\n<!-- @if os == darwin -->\r\nDarwin body.\r\n<!-- @endif -->\r\n";
+        let expected = "---\r\nname: x\r\n---\r\nDarwin body.\r\n";
+        assert_eq!(compile(content, &env), expected);
     }
 }
