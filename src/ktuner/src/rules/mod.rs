@@ -3581,7 +3581,12 @@ fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
         let recommended_mb = 256;
         recs.push(Recommendation {
             param: "vm.dirty_background_bytes".to_string(),
-            current_value: format!("0 (ratio={ratio}%)"),
+            // current_value feeds the rollback ledger's `previous` field,
+            // which is written back verbatim on `ktuner rollback`. A
+            // human-readable annotation here would be rejected by the
+            // kernel as EINVAL, making the param permanently unrestorable.
+            // The ratio detail already appears in the reason.
+            current_value: "0".to_string(),
             recommended_value: format!("{}", recommended_mb * 1024 * 1024),
             reason: format!("{}GB 内存 dirty_background_ratio {}% = {}GB 脏页才开始后台刷盘，用 bytes 可精确控制",
                 info.memory_total_gb, ratio, info.memory_total_gb * ratio / 100),
@@ -5376,7 +5381,9 @@ fn eval_conntrack_tcp_timeout_established(
     if current > 86400 {
         recs.push(Recommendation {
             param: "net.netfilter.nf_conntrack_tcp_timeout_established".to_string(),
-            current_value: format!("{} ({}天)", current, current / 86400),
+            // Plain numeric: rollback writes this back verbatim; the
+            // days annotation belongs in the reason, not the value.
+            current_value: current.to_string(),
             recommended_value: "86400".to_string(),
             reason: "conntrack 已建立连接的超时默认 5 天太长，高并发下大量条目占满表导致丢包，缩短到 1 天".to_string(),
             confidence: Confidence::Medium,
@@ -6219,6 +6226,16 @@ mod tests {
             !has_ratio,
             "large-RAM host should use dirty_bytes, not dirty_ratio"
         );
+        // The rollback ledger writes current_value back to the kernel
+        // verbatim, so it must stay a bare, parseable number — the old
+        // "0 (ratio=..%)" annotation made the param unrestorable (EINVAL).
+        if let Some(rec) = recs.iter().find(|r| r.param == "vm.dirty_background_bytes") {
+            assert_eq!(
+                rec.current_value.parse::<u64>().ok(),
+                Some(0),
+                "current_value must be the bare kernel-writable number"
+            );
+        }
     }
 
     #[test]
@@ -8126,6 +8143,17 @@ mod tests {
             .exists()
         {
             assert!(checked >= 1);
+            // current_value feeds the rollback ledger verbatim; it must be a
+            // bare number, not "432000 (5天)"-style annotation.
+            if let Some(rec) = recs
+                .iter()
+                .find(|r| r.param == "net.netfilter.nf_conntrack_tcp_timeout_established")
+            {
+                assert!(
+                    rec.current_value.parse::<u64>().is_ok(),
+                    "current_value must be a bare kernel-writable number"
+                );
+            }
         }
     }
 
