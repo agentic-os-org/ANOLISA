@@ -189,6 +189,12 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
         if e.tool == "memory_search" || e.tool == "mem_grep" {
             // Extract the query from the path field (format: "mode:query" or "bm25:query")
             let query = extract_search_query(&e.path);
+            if is_sanitized_query_marker(&query) {
+                // `memory_search` sanitizes queries to a `len=N` marker in
+                // the audit log, so the actual query is unrecoverable here;
+                // persisting the marker would record junk interest topics.
+                continue;
+            }
             if query.len() > 3 {
                 let title = format!("搜索: {query}");
                 let content = format!("Agent 通过 `{}` 搜索了 `{}`。", e.tool, query);
@@ -208,6 +214,14 @@ fn rule_interest(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolida
     }
 
     facts
+}
+
+/// True when the extracted query is the `len=N` marker `memory_search`
+/// writes into the audit log instead of the raw query text.
+fn is_sanitized_query_marker(query: &str) -> bool {
+    query
+        .strip_prefix("len=")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Extract the actual search query from the path field.
@@ -556,6 +570,40 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].category, FactCategory::Summary);
         assert!(facts[0].content.contains("3 次工具调用"));
+    }
+
+    #[test]
+    fn interest_rule_skips_sanitized_search_markers() {
+        // a89dbc3b sanitizes search queries in the audit log to a `len=N`
+        // marker, so the actual query is unrecoverable here. Persisting the
+        // marker would record junk "搜索: len=14" interest facts.
+        let entries = vec![
+            make_entry("memory_search", "bm25:len=14", true, None),
+            make_entry(
+                "memory_search",
+                "bm25(fallback from hybrid):len=9",
+                true,
+                None,
+            ),
+            make_entry("mem_grep", "notes/", true, None),
+        ];
+        let facts = rule_interest(&entries, "sid");
+        assert!(
+            facts.iter().all(|f| !f.title.contains("len=")),
+            "sanitized search markers must not become interest facts: {:?}",
+            facts.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn interest_rule_keeps_recorded_queries() {
+        let entries = vec![make_entry("memory_search", "bm25:kernel config", true, None)];
+        let facts = rule_interest(&entries, "sid");
+        assert!(
+            facts.iter().any(|f| f.title.contains("kernel config")),
+            "a recorded query must still produce an interest fact: {:?}",
+            facts.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
     }
 
     #[test]
