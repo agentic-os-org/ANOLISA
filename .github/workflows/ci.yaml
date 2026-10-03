@@ -1161,6 +1161,10 @@ jobs:
         run: |
           bash distribution/anolisa/tests/test-install-chmod-scope.sh
 
+      - name: Validate install help index wording
+        run: |
+          bash distribution/anolisa/tests/test-install-help-index-wording.sh
+
       - name: Check formatting
         run: |
           cd distribution/anolisa
