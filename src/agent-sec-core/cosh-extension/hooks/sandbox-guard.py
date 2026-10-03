@@ -257,6 +257,9 @@ def build_sandbox_command(
     """
     # 转义单引号：' → '\''
     escaped_cmd = original_command.replace("'", "'\\''")
+    # cwd 同样只做单引号包裹转义：双引号内 $ 与反引号仍会被外层 shell 展开，
+    # 单引号内除 ' 外全部按字面处理（' → '\''）。
+    escaped_cwd = cwd.replace("'", "'\\''")
 
     # 若 restore_command 与实际执行命令不同（如含 sudo），将其 base64 编码
     # 嵌入为沙箱内 bash 的临时环境变量 COSH_RC，不影响命令执行语义，
@@ -269,7 +272,7 @@ def build_sandbox_command(
 
     return (
         f"{LINUX_SANDBOX}"
-        f' --sandbox-policy-cwd "{cwd}"'
+        f" --sandbox-policy-cwd '{escaped_cwd}'"
         f" --file-system-sandbox-policy '{SANDBOX_FS_POLICY}'"
         f" --network-sandbox-policy '\"{network_policy}\"'"
         f" -- bash -c '{full_bash_cmd}'"
