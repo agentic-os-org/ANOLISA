@@ -56,6 +56,11 @@ pub struct Episode {
     pub duration_secs: u64,
     pub error_count: usize,
     pub created_at: String,
+    /// Inclusive `[start, end]` indices of the audit entries this episode
+    /// was extracted from, used to deduplicate overlapping extractions.
+    /// Not part of the persisted representation.
+    #[serde(skip)]
+    pub entry_span: (usize, usize),
 }
 
 impl Episode {
@@ -79,6 +84,7 @@ impl Episode {
             duration_secs,
             error_count,
             created_at: now,
+            entry_span: (0, 0),
         }
     }
 
@@ -200,11 +206,26 @@ pub fn extract_episodes(
     // Pattern 4: general task chains (≥min_steps consecutive diverse calls)
     episodes.extend(extract_general_chains(entries, session_id, min_steps));
 
-    // Deduplicate overlapping episodes (prefer longer ones)
+    // Deduplicate overlapping episodes (prefer longer ones): after the
+    // length sort, drop every episode whose entry range is contained in
+    // an already-kept episode's range. The pattern extractors overlap by
+    // design — e.g. a search → read → edit → read span is both an
+    // edit-verify cycle and a general task chain over the same entries —
+    // and without this check each span would emit one episode per
+    // matching pattern, double-writing the episodic facts.
     episodes.sort_by_key(|e| std::cmp::Reverse(e.chain.len()));
-    episodes.truncate(max_episodes);
+    let mut kept: Vec<Episode> = Vec::with_capacity(episodes.len());
+    for episode in episodes {
+        let contained = kept.iter().any(|k| {
+            k.entry_span.0 <= episode.entry_span.0 && episode.entry_span.1 <= k.entry_span.1
+        });
+        if !contained {
+            kept.push(episode);
+        }
+    }
+    kept.truncate(max_episodes);
 
-    episodes
+    kept
 }
 
 // ── Pattern 1: Edit-Verify Cycle ──────────────────────────────────
@@ -259,14 +280,9 @@ fn extract_edit_cycle(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Epis
         let trigger = format!("{} {}", entries[i].tool, entries[i].path);
         let duration = duration_between(&entries[i].ts, &entries[l].ts);
 
-        episodes.push(Episode::new(
-            session_id,
-            trigger,
-            chain,
-            outcome,
-            error_count,
-            duration,
-        ));
+        let mut episode = Episode::new(session_id, trigger, chain, outcome, error_count, duration);
+        episode.entry_span = (i, l);
+        episodes.push(episode);
 
         i = l + 1; // Skip past this episode
     }
@@ -312,14 +328,16 @@ fn extract_promote_chain(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<E
 
             let trigger = format!("promote: {}", entries[i].path);
             let duration = duration_between(&entries[ri].ts, &entries[i].ts);
-            episodes.push(Episode::new(
+            let mut episode = Episode::new(
                 session_id,
                 trigger,
                 chain,
                 EpisodeOutcome::Promoted,
                 0,
                 duration,
-            ));
+            );
+            episode.entry_span = (ri, i);
+            episodes.push(episode);
         }
 
         i += 1;
@@ -345,14 +363,16 @@ fn extract_error_recovery(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<
                 let chain = vec![make_step(1, &entries[i]), make_step(2, &entries[j])];
                 let trigger = format!("error recovery: {}", entries[i].tool);
                 let duration = duration_between(&entries[i].ts, &entries[j].ts);
-                episodes.push(Episode::new(
+                let mut episode = Episode::new(
                     session_id,
                     trigger,
                     chain,
                     EpisodeOutcome::Recovered,
                     1,
                     duration,
-                ));
+                );
+                episode.entry_span = (i, j);
+                episodes.push(episode);
                 break;
             }
         }
@@ -402,14 +422,10 @@ fn extract_general_chains(
                 let start_idx: usize = *current_chain.first().unwrap();
                 let end_idx: usize = *current_chain.last().unwrap();
                 let duration = duration_between(&entries[start_idx].ts, &entries[end_idx].ts);
-                episodes.push(Episode::new(
-                    session_id,
-                    trigger,
-                    chain,
-                    outcome,
-                    error_count,
-                    duration,
-                ));
+                let mut episode =
+                    Episode::new(session_id, trigger, chain, outcome, error_count, duration);
+                episode.entry_span = (start_idx, end_idx);
+                episodes.push(episode);
             }
             current_chain.clear();
             chain_start = None;
@@ -444,14 +460,9 @@ fn extract_general_chains(
         let start_idx: usize = *current_chain.first().unwrap();
         let end_idx: usize = *current_chain.last().unwrap();
         let duration = duration_between(&entries[start_idx].ts, &entries[end_idx].ts);
-        episodes.push(Episode::new(
-            session_id,
-            trigger,
-            chain,
-            outcome,
-            error_count,
-            duration,
-        ));
+        let mut episode = Episode::new(session_id, trigger, chain, outcome, error_count, duration);
+        episode.entry_span = (start_idx, end_idx);
+        episodes.push(episode);
     }
 
     episodes
@@ -606,5 +617,56 @@ mod tests {
         assert!(md.starts_with("---\n"));
         assert!(md.contains("outcome: success"));
         assert!(md.contains("## Step 1: memory_search"));
+    }
+    #[test]
+    fn extract_episodes_dedups_one_span_to_one_episode() {
+        // One search → read → edit → read span matches both the
+        // edit-verify cycle pattern and the general task-chain pattern.
+        // It must yield a single episode, not one per pattern.
+        let entries = vec![
+            make_entry("memory_search", "bm25:rust config", true, None, Some(3)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+            make_entry("mem_edit", "src/config.rs", true, None, Some(1)),
+            make_entry("mem_read", "src/config.rs", true, None, Some(200)),
+        ];
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        assert_eq!(
+            episodes.len(),
+            1,
+            "got {} episodes: {:?}",
+            episodes.len(),
+            episodes
+                .iter()
+                .map(|e| e.trigger.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extract_episodes_keeps_non_overlapping_spans() {
+        // Two disjoint search → read → edit → read spans separated by a
+        // mem_list noise entry: both must survive dedup.
+        let entries = vec![
+            make_entry("memory_search", "bm25:alpha", true, None, Some(3)),
+            make_entry("mem_read", "a/one.rs", true, None, Some(100)),
+            make_entry("mem_edit", "a/one.rs", true, None, Some(1)),
+            make_entry("mem_read", "a/one.rs", true, None, Some(100)),
+            make_entry("mem_list", "", true, None, Some(10)),
+            make_entry("memory_search", "bm25:beta", true, None, Some(3)),
+            make_entry("mem_read", "b/two.rs", true, None, Some(100)),
+            make_entry("mem_edit", "b/two.rs", true, None, Some(1)),
+            make_entry("mem_read", "b/two.rs", true, None, Some(100)),
+        ];
+        let episodes = extract_episodes(&entries, "test-sid", 3, 10);
+        assert_eq!(
+            episodes.len(),
+            2,
+            "got {} episodes: {:?}",
+            episodes.len(),
+            episodes
+                .iter()
+                .map(|e| e.trigger.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }
