@@ -158,8 +158,11 @@ bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 | Claude Code | `anolisa adapter enable tokenless claude-code` | `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh` |
 | Codex | `anolisa adapter enable tokenless codex` | `bash ~/.local/share/anolisa/adapters/tokenless/codex/scripts/install.sh` |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` | `bash ~/.local/share/anolisa/adapters/tokenless/qwencode/scripts/install.sh` |
+| OpenCode | `anolisa adapter enable tokenless opencode` | `bash ~/.local/share/anolisa/adapters/tokenless/opencode/scripts/install.sh` |
+| QwenPaw | `anolisa adapter enable tokenless qwenpaw` | `bash ~/.local/share/anolisa/adapters/tokenless/qwenpaw/scripts/install.sh` |
+| DSH (DeepSeek Harness) | `anolisa adapter enable tokenless dsh --profile <profile>` (repeat `--profile` per profile; each enable treats the supplied profiles as the complete desired set) | no bundled script — the DSH bundle is registered per DSH profile, so use the anolisa CLI path |
 
-Each bundled adapter also ships a matching `scripts/uninstall.sh` next to its `install.sh`; use it to disable that framework again. Run it **before** removing the adapter resources — a registration points into that directory, so deleting the directory first leaves the framework hooked, plugged or symlinked to a path that no longer exists. The [Uninstall](#uninstall) section gives the full order per install method.
+Each bundled adapter that ships a standalone `scripts/install.sh` also ships a matching `scripts/uninstall.sh` next to it; use it to disable that framework again. Run it **before** removing the adapter resources — a registration points into that directory, so deleting the directory first leaves the framework hooked, plugged or symlinked to a path that no longer exists. The [Uninstall](#uninstall) section gives the full order per install method.
 
 Restart the agent CLI, IDE, or gateway after enabling.
 
