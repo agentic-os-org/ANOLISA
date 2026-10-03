@@ -640,6 +640,42 @@ export class CoreToolScheduler {
     );
   }
 
+  /**
+   * Redacts secrets from a tool result in place, before the result is turned
+   * into a success response. Shared by the normal success path and the
+   * sandbox-bypass retry path so retries that ran unsandboxed cannot bypass
+   * redaction.
+   */
+  private redactToolResultSecrets(toolResult: ToolResult): void {
+    toolResult.llmContent = redactPartListUnion(toolResult.llmContent);
+    if (typeof toolResult.returnDisplay === 'string') {
+      toolResult.returnDisplay = redactSecrets(toolResult.returnDisplay);
+    } else if (
+      toolResult.returnDisplay &&
+      typeof toolResult.returnDisplay === 'object' &&
+      'ansiOutput' in toolResult.returnDisplay
+    ) {
+      const ansiDisplay = toolResult.returnDisplay as {
+        ansiOutput: import('../utils/terminalSerializer.js').AnsiOutput;
+      };
+      ansiDisplay.ansiOutput = redactAnsiOutput(ansiDisplay.ansiOutput);
+    } else if (
+      toolResult.returnDisplay &&
+      typeof toolResult.returnDisplay === 'object' &&
+      'fileDiff' in toolResult.returnDisplay
+    ) {
+      // Redact secrets from FileDiff display (WriteFile / EditFile results)
+      const diffDisplay = toolResult.returnDisplay as FileDiff;
+      diffDisplay.fileDiff = redactSecrets(diffDisplay.fileDiff);
+      diffDisplay.newContent = redactSecrets(diffDisplay.newContent);
+      if (diffDisplay.originalContent !== null) {
+        diffDisplay.originalContent = redactSecrets(
+          diffDisplay.originalContent,
+        );
+      }
+    }
+  }
+
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
@@ -1394,33 +1430,7 @@ export class CoreToolScheduler {
           const toolResult: ToolResult = await promise;
 
           // Redact secrets from tool result before further processing
-          toolResult.llmContent = redactPartListUnion(toolResult.llmContent);
-          if (typeof toolResult.returnDisplay === 'string') {
-            toolResult.returnDisplay = redactSecrets(toolResult.returnDisplay);
-          } else if (
-            toolResult.returnDisplay &&
-            typeof toolResult.returnDisplay === 'object' &&
-            'ansiOutput' in toolResult.returnDisplay
-          ) {
-            const ansiDisplay = toolResult.returnDisplay as {
-              ansiOutput: import('../utils/terminalSerializer.js').AnsiOutput;
-            };
-            ansiDisplay.ansiOutput = redactAnsiOutput(ansiDisplay.ansiOutput);
-          } else if (
-            toolResult.returnDisplay &&
-            typeof toolResult.returnDisplay === 'object' &&
-            'fileDiff' in toolResult.returnDisplay
-          ) {
-            // Redact secrets from FileDiff display (WriteFile / EditFile results)
-            const diffDisplay = toolResult.returnDisplay as FileDiff;
-            diffDisplay.fileDiff = redactSecrets(diffDisplay.fileDiff);
-            diffDisplay.newContent = redactSecrets(diffDisplay.newContent);
-            if (diffDisplay.originalContent !== null) {
-              diffDisplay.originalContent = redactSecrets(
-                diffDisplay.originalContent,
-              );
-            }
-          }
+          this.redactToolResultSecrets(toolResult);
 
           if (signal.aborted) {
             this.setStatusInternal(
@@ -1727,7 +1737,58 @@ export class CoreToolScheduler {
                             }
                             const retryResult = await retryPromise;
                             if (retryResult.error === undefined) {
-                              const retryContent = retryResult.llmContent;
+                              // The retry ran unsandboxed, so its output must
+                              // go through the same redaction and truncation
+                              // as the normal success path before it reaches
+                              // the model and the transcript.
+                              this.redactToolResultSecrets(retryResult);
+                              let retryContent: PartListUnion =
+                                retryResult.llmContent;
+                              let retryOutputFile: string | undefined;
+                              const retryContentLength =
+                                typeof retryContent === 'string'
+                                  ? retryContent.length
+                                  : undefined;
+                              if (
+                                typeof retryContent === 'string' &&
+                                this.config.getEnableToolOutputTruncation() &&
+                                this.config.getTruncateToolOutputThreshold() >
+                                  0 &&
+                                this.config.getTruncateToolOutputLines() > 0
+                              ) {
+                                const retryThreshold =
+                                  this.config.getTruncateToolOutputThreshold();
+                                const retryTruncateLines =
+                                  this.config.getTruncateToolOutputLines();
+                                const truncatedResult =
+                                  await truncateAndSaveToFile(
+                                    retryContent,
+                                    callId,
+                                    this.config.storage.getProjectTempDir(),
+                                    retryThreshold,
+                                    retryTruncateLines,
+                                  );
+                                retryContent = truncatedResult.content;
+                                retryOutputFile = truncatedResult.outputFile;
+
+                                if (retryOutputFile) {
+                                  logToolOutputTruncated(
+                                    this.config,
+                                    new ToolOutputTruncatedEvent(
+                                      scheduledCall.request.prompt_id,
+                                      {
+                                        toolName,
+                                        originalContentLength:
+                                          retryContentLength ?? 0,
+                                        truncatedContentLength:
+                                          retryContent.length,
+                                        threshold: retryThreshold,
+                                        lines: retryTruncateLines,
+                                      },
+                                    ),
+                                  );
+                                }
+                              }
                               const retryResponse = convertToFunctionResponse(
                                 toolName,
                                 callId,
@@ -1739,6 +1800,8 @@ export class CoreToolScheduler {
                                 resultDisplay: retryResult.returnDisplay,
                                 error: undefined,
                                 errorType: undefined,
+                                outputFile: retryOutputFile,
+                                contentLength: retryContentLength,
                               });
                               handledBySandboxBypass = true;
                             }
