@@ -194,7 +194,18 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             # Also update formulas in every row (formulas can reference any row)
             for cell_el in row_el:
                 f_el = cell_el.find(_tag("f"))
-                if f_el is not None and f_el.text:
+                if f_el is None:
+                    continue
+                # Shared/array formulas carry the group range in the ref
+                # attribute; consumers (si=N) are only valid inside it, so
+                # shift it in lockstep with the group (C2:C4 → C2:C5).
+                ref_attr = f_el.get("ref")
+                if ref_attr:
+                    new_ref = shift_sqref(ref_attr, at, delta)
+                    if new_ref != ref_attr:
+                        f_el.set("ref", new_ref)
+                        changes += 1
+                if f_el.text:
                     new_f = shift_formula(f_el.text, at, delta)
                     if new_f != f_el.text:
                         f_el.text = new_f
