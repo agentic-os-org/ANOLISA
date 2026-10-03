@@ -108,6 +108,12 @@ impl ConsolidatedFact {
         out.push_str(&format!("category: {}\n", self.category));
         out.push_str(&format!("title: {}\n", sanitize_hint(&self.title)));
         out.push_str(&format!("source_tool: {}\n", self.source_tool));
+        // `memory_summary` and `memory_sovereignty` classify memories by the
+        // `source` frontmatter value (`auto-consolidation` / `auto-capture` /
+        // `manual-observe` / `manual-write`). Without this stamp every
+        // consolidated fact was counted as `unknown_source` and invisible to
+        // `memory_auto_created`.
+        out.push_str("source: auto-consolidation\n");
         if !self.related_paths.is_empty() {
             out.push_str("related_paths:\n");
             for p in &self.related_paths {
