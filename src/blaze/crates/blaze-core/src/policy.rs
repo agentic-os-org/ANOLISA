@@ -147,6 +147,15 @@ pub struct PolicySelect {
 impl PolicyFile {
     /// Validate internal consistency constraints of a policy file.
     pub fn validate(&self) -> Result<()> {
+        // Every checkpoint manifest records the policy that selected the
+        // captured runtime, and its validator rejects an empty value. Refuse an
+        // empty name while the policy is loaded instead of failing later, after
+        // a sandbox created from this policy has already captured its runtime.
+        if self.policy_name.trim().is_empty() {
+            return Err(BlazeError::PolicyEvalError {
+                reason: "policy_name must not be empty".to_string(),
+            });
+        }
         if let Some(pool) = &self.pool {
             if !is_legacy_packaged_policy_pool(self, pool) {
                 return Err(BlazeError::PolicyEvalError {
@@ -1043,6 +1052,32 @@ memory = "4G"
         assert!(
             msg.contains(r#"policy "named-policy":"#),
             "error should include policy name: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_policy_name() {
+        let raw = r#"
+manifest_version = 1
+policy_name = ""
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parse");
+        let err = pf
+            .validate()
+            .expect_err("an empty policy name cannot identify a checkpoint");
+        assert!(err.to_string().contains("policy_name"), "{err}");
+
+        let mut whitespace = pf.clone();
+        whitespace.policy_name = "   ".to_string();
+        assert!(
+            whitespace.validate().is_err(),
+            "a whitespace-only policy name is empty after trimming"
         );
     }
 
