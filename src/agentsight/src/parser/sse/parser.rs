@@ -87,25 +87,38 @@ impl SseParser {
     pub fn parse(&self, event: Rc<SslEvent>) -> Vec<ParsedSseEvent> {
         let buf_len = event.buf_size() as usize;
         let buf = &event.buf[..buf_len];
-        let text = String::from_utf8_lossy(buf);
 
         let mut events = Vec::new();
         let mut current_id: Option<String> = None;
         let mut current_event: Option<String> = None;
         let mut current_retry: Option<u64> = None;
-        let mut data_parts: Vec<String> = Vec::new();
+        let mut data_parts: Vec<&[u8]> = Vec::new();
         let mut data_start: Option<usize> = None;
 
         let mut byte_offset = 0;
 
-        // Use split_inclusive to properly track byte offsets with \r\n line endings
-        let lines_iter = text.split_inclusive('\n');
+        // Iterate the ORIGINAL bytes, not a lossy UTF-8 conversion: the
+        // zero-copy offsets below index into event.buf, so they must stay
+        // in raw-buffer coordinates. from_utf8_lossy expands every invalid
+        // byte (e.g. a multi-byte character split across TLS record
+        // boundaries) into a 3-byte U+FFFD, which would shift every offset
+        // after it and make data() slice the wrong bytes.
+        let lines_iter = buf.split_inclusive(|b| *b == b'\n');
 
         for line_with_end in lines_iter {
-            // Remove trailing \r\n or \n for parsing, but keep track of original length
-            let line = line_with_end.trim_end_matches('\n').trim_end_matches('\r');
             let line_with_end_len = line_with_end.len();
             let line_start = byte_offset;
+
+            // Remove trailing \r\n or \n for parsing, but keep track of original length
+            let mut end = line_with_end_len;
+            if end > 0 && line_with_end[end - 1] == b'\n' {
+                end -= 1;
+                while end > 0 && line_with_end[end - 1] == b'\r' {
+                    end -= 1;
+                }
+            }
+            let line_bytes = &line_with_end[..end];
+            let line = String::from_utf8_lossy(line_bytes);
 
             if line.is_empty() {
                 // Empty line terminates the event
@@ -118,18 +131,10 @@ impl SseParser {
                     // Multi-line data concatenation is not supported in zero-copy mode
                     // Users needing full multi-line data should use the legacy SSEParser
                     let (data_offset, data_len) = if !data_parts.is_empty() {
-                        // Only use first data line for zero-copy access
-                        // Use the actual byte length from original buffer, not UTF-8 string length
-                        let first_line_bytes = data_parts[0].as_bytes();
-                        let first_line_byte_len = first_line_bytes.len();
-                        // Account for \r if present in original data
-                        let has_crlf = data_parts[0].ends_with('\r');
-                        let adjusted_len = if has_crlf {
-                            first_line_byte_len - 1
-                        } else {
-                            first_line_byte_len
-                        };
-                        (data_start.unwrap_or(0), adjusted_len)
+                        // Only use first data line for zero-copy access;
+                        // its raw byte length is exact because trailing \r
+                        // was already trimmed above.
+                        (data_start.unwrap_or(0), data_parts[0].len())
                     } else {
                         (0, 0)
                     };
@@ -167,6 +172,8 @@ impl SseParser {
                 // line_start: start of line in buffer
                 // field.len() + 1: skip field and colon
                 // +1 if there was a space after colon
+                // A field only matches when it is pure ASCII, so the lossy
+                // prefix has the same length as the raw prefix.
                 let value_start =
                     line_start + field.len() + 1 + if has_space_after_colon { 1 } else { 0 };
 
@@ -177,22 +184,24 @@ impl SseParser {
                         if data_start.is_none() {
                             data_start = Some(value_start);
                         }
-                        // Store the value without \r for consistency
-                        data_parts.push(value_stripped.to_string());
+                        // Keep the RAW value bytes: the recorded length must
+                        // count original buffer bytes, not the lossy
+                        // expansion of any invalid UTF-8 inside the value.
+                        data_parts.push(&line_bytes[value_start - line_start..]);
                     }
                     "retry" => current_retry = value_stripped.parse().ok(),
                     _ => {} // Unknown field, ignore per spec
                 }
             } else {
                 // Field without colon, entire line is field name with empty value
-                match line {
+                match line.as_ref() {
                     "id" => current_id = Some(String::new()),
                     "event" => current_event = Some(String::new()),
                     "data" => {
                         if data_start.is_none() {
                             data_start = Some(line_start + 5); // "data" + 0 chars
                         }
-                        data_parts.push(String::new());
+                        data_parts.push(&[]);
                     }
                     "retry" => current_retry = Some(0),
                     _ => {} // Unknown field, ignore per spec
@@ -295,6 +304,37 @@ mod tests {
 
         assert_eq!(events[0].data(), b"first");
         assert_eq!(events[1].data(), b"second");
+    }
+
+    #[test]
+    fn test_parse_offsets_survive_invalid_utf8_bytes() {
+        // A TLS record boundary can split a multi-byte character, so a
+        // captured buffer may contain invalid UTF-8. Offsets must stay in
+        // ORIGINAL buffer coordinates: with the lossy whole-buffer string,
+        // each invalid byte expanded into a 3-byte U+FFFD and every later
+        // event's data() returned the wrong bytes.
+        let parser = SseParser::new();
+        let data = b"data: \xff\n\ndata: hi\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data(), b"\xff");
+        assert_eq!(events[1].data(), b"hi");
+    }
+
+    #[test]
+    fn test_parse_offsets_survive_invalid_utf8_inside_data() {
+        // Invalid bytes inside the first data line must not inflate the
+        // recorded data_len either.
+        let parser = SseParser::new();
+        let data = b"event: usage\ndata: {\"a\":1}\xff\ndata: second\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.as_deref(), Some("usage"));
+        assert_eq!(events[0].data(), b"{\"a\":1}\xff");
     }
 
     #[test]
