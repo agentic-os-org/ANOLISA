@@ -61,24 +61,47 @@ pub fn parse_index(content: &str) -> Vec<IndexEntry> {
         }
         // Format: - [title](path) — description
         let rest = &line[3..]; // skip "- ["
-        if let Some(bracket_end) = rest.find("](") {
-            let title = &rest[..bracket_end];
-            let after_bracket = &rest[bracket_end + 2..];
-            if let Some(paren_end) = after_bracket.find(')') {
-                let path = &after_bracket[..paren_end];
+        if let Some(entry) = parse_entry_line(rest) {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+/// Parse one `[title](path) — description` line (without the leading `- [`).
+///
+/// The title is free-form text and may itself contain `"]("` (e.g. a note
+/// about markdown link syntax), so the first `"]("` on the line is not
+/// necessarily the link opener. Candidate openers are tried left to right
+/// and the first one that yields a well-formed path wins: a path cut at a
+/// stray title bracket necessarily swallows the real opener's `"]("` and is
+/// rejected, while lines whose first opener is the real one (including
+/// descriptions that happen to contain `"]("` after the link) parse exactly
+/// as before. Paths written by `to_line` never contain `"]("` for plain
+/// file paths, so the emitted format is unchanged.
+fn parse_entry_line(rest: &str) -> Option<IndexEntry> {
+    let mut search_from = 0;
+    while let Some(offset) = rest[search_from..].find("](") {
+        let opener = search_from + offset;
+        let after_bracket = &rest[opener + 2..];
+        if let Some(paren_end) = after_bracket.find(')') {
+            let path = &after_bracket[..paren_end];
+            if !path.contains("](") {
+                let title = &rest[..opener];
                 let description = after_bracket[paren_end + 1..]
                     .trim_start_matches(" — ")
                     .trim_start_matches(" - ")
                     .to_string();
-                entries.push(IndexEntry {
+                return Some(IndexEntry {
                     title: title.to_string(),
                     path: path.to_string(),
                     description,
                 });
             }
         }
+        search_from = opener + 1;
     }
-    entries
+    None
 }
 
 /// Build a complete index by scanning all .md files in the mount.
@@ -285,6 +308,21 @@ mod tests {
         };
         let line = entry.to_line();
         assert!(line.len() <= MAX_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn index_entry_round_trips_through_parse_index() {
+        // A title may itself contain "](" (e.g. a note about markdown link
+        // syntax); the emitted line must parse back into the same entry.
+        let entry = IndexEntry {
+            title: "array literal ]( vs concat".into(),
+            path: "notes/x.md".into(),
+            description: "pick one".into(),
+        };
+        let parsed = parse_index(&entry.to_line());
+        assert_eq!(parsed.len(), 1, "one entry must parse back");
+        assert_eq!(parsed[0].path, "notes/x.md");
+        assert_eq!(parsed[0].title, "array literal ]( vs concat");
     }
 
     #[test]
