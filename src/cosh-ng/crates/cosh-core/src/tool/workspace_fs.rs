@@ -411,6 +411,11 @@ impl WorkspaceFs {
                 continue;
             }
 
+            // The stack always holds at least the workspace root: it starts
+            // as `vec![root]` and the `..` arm never pops past the root
+            // (the `len() == 1` guard returns Escape first), so `last()`
+            // always yields the current directory.
+            debug_assert!(!directories.is_empty());
             let current = directories.last().expect("workspace root descriptor");
             let metadata = match statat(current, &component, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(metadata) => metadata,
@@ -779,11 +784,17 @@ impl WorkspaceFs {
         loop {
             let Some(component) = remaining.pop_front() else {
                 return match mode {
-                    ResolveMode::Readable => Ok(ResolvedBeneath::Node(reopen_pinned(
-                        directories.last().expect("workspace root descriptor"),
-                        &display_path,
-                        true,
-                    )?)),
+                    ResolveMode::Readable => {
+                        // Never empty: the stack starts with the root and
+                        // `..` cannot pop past it (Escape is returned at
+                        // `len() == 1` first).
+                        debug_assert!(!directories.is_empty());
+                        Ok(ResolvedBeneath::Node(reopen_pinned(
+                            directories.last().expect("workspace root descriptor"),
+                            &display_path,
+                            true,
+                        )?))
+                    }
                     ResolveMode::Pinned => Ok(ResolvedBeneath::Node(directories.pop())),
                     ResolveMode::Write { .. } => Err(WorkspaceOpenError::Other(format!(
                         "Path must name a file: {}",
@@ -802,6 +813,9 @@ impl WorkspaceFs {
                 continue;
             }
 
+            // Same invariant as the open_beneath loop above: the stack
+            // never drops below the workspace root.
+            debug_assert!(!directories.is_empty());
             let current = directories.last().expect("workspace root descriptor");
             // Pin before inspecting so a concurrent rename cannot change which
             // symlink target or directory the remainder is resolved against.
