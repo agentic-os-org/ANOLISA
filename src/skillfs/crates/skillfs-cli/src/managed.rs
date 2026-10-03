@@ -671,7 +671,18 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             .spawn()
             .map_err(|e| format!("failed to spawn worker: {e}"))?;
         let worker_pid = child.id();
-        let _ = write_pid(&paths.worker_pid, worker_pid);
+        // teardown_instance uses this file to signal the worker directly when
+        // the supervisor is gone. A missing file loses only that fallback:
+        // clear_mount() in teardown still unmounts, and a successful unmount
+        // makes the FUSE loop return and the worker exit — so the worker is
+        // orphaned only when unmount also fails or the worker is stuck. The
+        // warn makes the lost fallback visible for diagnosing that case.
+        if let Err(error) = write_pid(&paths.worker_pid, worker_pid) {
+            warn!(
+                error = %error,
+                "failed to write worker pid file; stop cannot signal this worker directly if the supervisor dies"
+            );
+        }
         info!(worker_pid, "managed worker started");
 
         // Wait for the worker, watching for shutdown.
