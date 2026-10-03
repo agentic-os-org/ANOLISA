@@ -899,7 +899,13 @@ mod tests {
         // fails with "instance directory already exists", so validation must
         // reject the configuration instead of starting a daemon that can
         // never create a sandbox.
+        //
+        // template.dir is moved outside /var/lib/blaze in every case so the
+        // only overlap under test is the storage/state one — otherwise the
+        // pre-existing template boundary check rejects the config first and
+        // the storage rule would not be exercised.
         let mut equal = DaemonConfig::default();
+        equal.template.dir = PathBuf::from("/srv/blaze/templates");
         equal.storage.images_dir = PathBuf::from("/srv/blaze/images");
         equal.storage.instances_dir = equal.daemon.state_dir.clone();
         let error = equal
@@ -911,6 +917,7 @@ mod tests {
         );
 
         let mut nested = DaemonConfig::default();
+        nested.template.dir = PathBuf::from("/srv/blaze/templates");
         nested.storage.images_dir = nested.daemon.state_dir.clone();
         nested.storage.instances_dir = PathBuf::from("/srv/blaze/instances");
         let error = nested
@@ -919,6 +926,8 @@ mod tests {
         assert!(error.to_string().contains("storage.images_dir"), "{error}");
 
         let mut owning = DaemonConfig::default();
+        owning.template.dir = PathBuf::from("/srv/blaze/templates");
+        owning.storage.images_dir = PathBuf::from("/srv/blaze/images");
         owning.storage.instances_dir = owning
             .daemon
             .state_dir
@@ -933,6 +942,7 @@ mod tests {
 
         // A disjoint layout stays valid.
         let mut ok = DaemonConfig::default();
+        ok.template.dir = PathBuf::from("/srv/blaze/templates");
         ok.storage.images_dir = PathBuf::from("/srv/blaze/images");
         ok.storage.instances_dir = PathBuf::from("/srv/blaze/instances");
         ok.validate().expect("disjoint storage roots are valid");
