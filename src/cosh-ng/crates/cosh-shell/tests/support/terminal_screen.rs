@@ -14,6 +14,22 @@ use super::raw_cli::{raw_cli_shared_run_guard, RawCliRunGuard};
 const ROWS: u16 = 24;
 const DEADLINE: Duration = Duration::from_secs(5);
 const QUIET: Duration = Duration::from_millis(50);
+/// Screen sessions clear the child environment and pin this PATH, so the
+/// `cosh-shell` child can only see shells inside these directories.
+const SCREEN_PATH: &str = "/usr/bin:/bin";
+
+/// A zsh screen session can only start when zsh resolves inside the pinned
+/// screen PATH: the child environment is cleared, so a zsh on the caller's
+/// PATH but outside these directories is invisible to it. Tests driving zsh
+/// screens must skip (not panic) when it is missing, mirroring the
+/// `zsh --version` availability guards in the sibling suites.
+pub(crate) fn zsh_available_in_screen_path() -> bool {
+    Command::new("zsh")
+        .env("PATH", SCREEN_PATH)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
 
 pub(crate) struct TerminalSession {
     child: Child,
@@ -111,7 +127,7 @@ impl TerminalSession {
             .arg0("cosh")
             .args(["--shell", shell])
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", SCREEN_PATH)
             .env("HOME", root.path())
             .env("TMPDIR", root.path())
             .env("INPUTRC", root.path().join("inputrc"))

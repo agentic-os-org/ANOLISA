@@ -1,4 +1,4 @@
-use super::support::terminal_screen::TerminalSession;
+use super::support::terminal_screen::{zsh_available_in_screen_path, TerminalSession};
 
 fn wait_reference(session: &mut TerminalSession, label: &str, expected: &vt100::Parser) {
     session.wait_screen(label, |screen| {
@@ -68,11 +68,8 @@ fn bash_prompt_geometry_survives_control_transitions_without_status_rows() {
 
 #[test]
 fn zsh_prompt_geometry_survives_control_transitions_without_status_rows() {
-    if std::process::Command::new("zsh")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
         return;
     }
     ownership_transitions("zsh");
@@ -133,11 +130,8 @@ fn bash_status_rows_preserve_geometry_across_control_transitions() {
 
 #[test]
 fn zsh_status_rows_preserve_geometry_across_control_transitions() {
-    if std::process::Command::new("zsh")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
         return;
     }
     ownership_transitions_with_status("zsh");
