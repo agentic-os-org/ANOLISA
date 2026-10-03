@@ -30,9 +30,7 @@ function isFile(path) {
 
 function findHookRunner() {
   const adapterDir = process.env.ANOLISA_ADAPTER_DIR;
-  const userHome = process.env.HOME && isAbsolute(process.env.HOME)
-    ? process.env.HOME
-    : homedir();
+  const userHome = process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : homedir();
   const candidates = [
     process.env.TOKENLESS_HOOK_RUNNER,
     adapterDir ? join(adapterDir, "common", "hooks", "run-hook.sh") : "",
@@ -172,9 +170,7 @@ export const TokenlessPlugin = async () => {
       const payload = toolPayload(input, output.args);
       const readyResult = await runHook(runner, "tool_ready_hook.sh", payload);
       if (readyResult?.decision === "block") {
-        throw new Error(
-          readyResult.reason || "Tokenless reports that the tool is not ready",
-        );
+        throw new Error(readyResult.reason || "Tokenless reports that the tool is not ready");
       }
 
       const readyOutput = hookSpecificOutput(readyResult);
@@ -197,11 +193,17 @@ export const TokenlessPlugin = async () => {
       const readyContext = readinessContext.get(key);
       readinessContext.delete(key);
 
-      const result = await runHook(
-        runner,
-        "compress_response_hook.py",
-        toolPayload(input, input.args, output.output),
-      );
+      const payload = toolPayload(input, input.args, output.output);
+      // OpenCode keeps Bash's exit code outside the model-visible text.
+      // Forward failure evidence so Core preserves it and can add diagnostics.
+      if (
+        input.tool === "bash" &&
+        Number.isInteger(output.metadata?.exit) &&
+        output.metadata.exit !== 0
+      ) {
+        payload.is_error = true;
+      }
+      const result = await runHook(runner, "compress_response_hook.py", payload);
       const hookOutput = hookSpecificOutput(result);
       const compressedOutput = hookOutput?.updatedToolOutput;
       if (typeof compressedOutput === "string") {
