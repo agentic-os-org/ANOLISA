@@ -56,11 +56,18 @@ def _compat(prompt, model, size, key, base):
     except urllib.error.HTTPError:
         return _wanx(prompt, model, size, key)
     d = res.get("data",[])
-    if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
+    if d:
+        url = d[0].get("url")
+        if url: return url
+        b64 = d[0].get("b64_json","")
+        if b64: return "b64:"+b64
+        print(f"ERROR: data[0] has neither url nor b64_json: {json.dumps(res)[:400]}",file=sys.stderr); sys.exit(1)
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
 
 def _save(src, path):
     if src.startswith("b64:"):
+        if not src[4:].strip():
+            print(f"ERROR: Empty b64 payload, refusing to write {path}",file=sys.stderr); sys.exit(1)
         data = base64.b64decode(src[4:])
     else:
         with urllib.request.urlopen(urllib.request.Request(src,headers={"User-Agent":"Mozilla/5.0"}),timeout=60) as r: data = r.read()
