@@ -759,6 +759,31 @@ fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<Strin
     result.as_ref().err().map(|e| e.to_string())
 }
 
+/// Render free text from the skill tree safe for terminal text output.
+///
+/// Skill names are adopted verbatim from directory names, and descriptions,
+/// tags and parse messages come from `SKILL.md` content — all of it
+/// attacker-influenceable (the drift watcher's modeled threat). Printed raw,
+/// an embedded newline fabricates report lines and ESC/OSC sequences are
+/// live terminal commands (OSC 777 is a notification/title command). Text
+/// output escapes those control bytes; JSON output keeps serde's own
+/// escaping and is unaffected. Visible characters pass through unchanged.
+fn escape_ctl(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                escaped.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 /// Guarantees each CLI command emits exactly one SLS ops record on every exit
 /// path. It is armed in `main` before logging is initialized, so the `Drop`
 /// fallback is live if tracing's internal error report panics after an early
@@ -2992,12 +3017,20 @@ async fn cmd_validate(
                 if failed > 0 {
                     println!("✗ {} skill(s) failed:", failed);
                     for err in &load_errors {
-                        println!("  - {}: {}", err.path.display(), err.error);
+                        println!(
+                            "  - {}: {}",
+                            escape_ctl(&err.path.display().to_string()),
+                            escape_ctl(&err.error)
+                        );
                     }
                     for name in &names {
                         if let Some(entry) = store.get(name) {
                             if entry.parse_status.is_error() {
-                                println!("  - {}: {}", name, entry.parse_status.message());
+                                println!(
+                                    "  - {}: {}",
+                                    escape_ctl(name),
+                                    escape_ctl(&entry.parse_status.message())
+                                );
                             }
                         }
                     }
@@ -3007,7 +3040,11 @@ async fn cmd_validate(
                     for name in &names {
                         if let Some(entry) = store.get(name) {
                             if entry.parse_status.is_degraded() {
-                                println!("  - {}: {}", name, entry.parse_status.message());
+                                println!(
+                                    "  - {}: {}",
+                                    escape_ctl(name),
+                                    escape_ctl(&entry.parse_status.message())
+                                );
                             }
                         }
                     }
@@ -3026,13 +3063,15 @@ async fn cmd_validate(
                         println!(
                             "  {} {} - {} ({})",
                             status,
-                            name,
-                            entry
-                                .metadata
-                                .description
-                                .chars()
-                                .take(50)
-                                .collect::<String>(),
+                            escape_ctl(name),
+                            escape_ctl(
+                                &entry
+                                    .metadata
+                                    .description
+                                    .chars()
+                                    .take(50)
+                                    .collect::<String>()
+                            ),
                             if entry.metadata.enabled {
                                 "enabled"
                             } else {
@@ -3153,15 +3192,21 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
                 skillfs_core::ParseStatus::Error(_) => "✗",
             };
 
-            println!("{} {}", status_icon, name);
-            println!("  Description: {}", entry.metadata.description);
-            println!("  Version: {}", entry.metadata.version);
+            println!("{} {}", status_icon, escape_ctl(name));
+            println!("  Description: {}", escape_ctl(&entry.metadata.description));
+            println!("  Version: {}", escape_ctl(&entry.metadata.version));
             println!(
                 "  Tags: {}",
                 if entry.metadata.tags.is_empty() {
                     "(none)".to_string()
                 } else {
-                    entry.metadata.tags.join(", ")
+                    entry
+                        .metadata
+                        .tags
+                        .iter()
+                        .map(|tag| escape_ctl(tag))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 }
             );
             let status = entry.parse_status.status_str();
@@ -3169,7 +3214,7 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
             let status_detail = if message.is_empty() {
                 status.to_string()
             } else {
-                format!("{status} ({message})")
+                format!("{status} ({})", escape_ctl(&message))
             };
             println!(
                 "  Status: {status_detail} | {}",
@@ -3423,5 +3468,34 @@ mod tests {
         }
 
         ctrl.shutdown();
+    }
+
+    #[test]
+    fn escape_ctl_neutralizes_terminal_control_bytes() {
+        // Newline/CR/tab become visible mnemonics instead of line breaks.
+        assert_eq!(escape_ctl("evil\ninjected"), "evil\\ninjected");
+        assert_eq!(escape_ctl("a\rb"), "a\\rb");
+        assert_eq!(escape_ctl("a\tb"), "a\\tb");
+        // ESC (OSC/CSI introducer) becomes \x1b, DEL likewise.
+        assert_eq!(
+            escape_ctl("ansi\u{1b}]777;id\u{7}"),
+            "ansi\\x1b]777;id\\x07"
+        );
+        assert_eq!(escape_ctl("\u{7f}"), "\\x7f");
+        // Other C0 controls get \xNN; nothing raw below 0x20 survives.
+        assert_eq!(escape_ctl("a\u{0}b"), "a\\x00b");
+        assert!(
+            !escape_ctl("\u{1}\u{2}\n\u{1b}")
+                .chars()
+                .any(|c| (c as u32) < 0x20)
+        );
+    }
+
+    #[test]
+    fn escape_ctl_keeps_visible_text_readable() {
+        assert_eq!(escape_ctl("web-search v1.2"), "web-search v1.2");
+        // Multi-byte characters pass through untouched.
+        assert_eq!(escape_ctl("技能 skills"), "技能 skills");
+        assert_eq!(escape_ctl(""), "");
     }
 }
