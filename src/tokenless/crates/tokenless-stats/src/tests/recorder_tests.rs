@@ -231,6 +231,150 @@ fn session_diff_database_linking_matches_record_semantics() {
 }
 
 #[test]
+fn session_diff_links_records_written_across_a_utc_offset_change() {
+    // A session that spans a UTC-offset change (DST fall-back, travel, or a
+    // machine move) persists rfc3339 timestamps whose wall-clock text no
+    // longer sorts in instant order: the -05:00 half of the repeated hour
+    // text-sorts before the earlier -04:00 half. The database-side link
+    // must order by the instant the timestamps denote, not their text, or
+    // the prelinked flags describe a different adjacency than the report
+    // builder iterates and real compression chains split apart.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let first = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("before".to_string(), "middle".to_string());
+    let second = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("middle".to_string(), "after".to_string());
+    let unrelated = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("unrelated".to_string(), "other".to_string());
+    let first_id = rec.record(&first).unwrap();
+    let second_id = rec.record(&second).unwrap();
+    let third_id = rec.record(&unrelated).unwrap();
+
+    // 01:30-04:00 (05:30Z) precedes 01:15-05:00 (06:15Z) in instant order,
+    // but sorts after it lexicographically.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-01T01:30:00.000000-04:00' WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-01T01:15:00.000000-05:00' WHERE id = ?1",
+            [second_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-01T01:45:00.000000-05:00' WHERE id = ?1",
+            [third_id],
+        )
+        .unwrap();
+    }
+
+    let records = rec.records_for_diff("dst-session", None).unwrap();
+    let report = crate::diff::session_report(
+        &records,
+        "dst-session",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    let chains = json["chains"].as_array().unwrap();
+
+    assert_eq!(chains.len(), 2, "chains: {chains:?}");
+    let linked = chains
+        .iter()
+        .find(|chain| chain["status"] == "linked")
+        .unwrap_or_else(|| panic!("no linked chain in {chains:?}"));
+    assert_eq!(linked["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        chains
+            .iter()
+            .filter(|chain| chain["status"] == "standalone")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn newest_record_windows_span_a_utc_offset_change() {
+    // A limited newest-first window must keep the records with the latest
+    // instants. Text ordering of rfc3339 timestamps spans offsets by
+    // wall clock only, so during a fall-back the repeated hour's -05:00
+    // text sorts before the earlier -04:00 text and would let an older
+    // record displace a newer one from the window.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let oldest = sample(OperationType::CompressSchema, CompressionMode::Active, "dst-list");
+    let middle = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-list",
+    );
+    let newest = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "dst-list",
+    );
+    let oldest_id = rec.record(&oldest).unwrap();
+    let middle_id = rec.record(&middle).unwrap();
+    let newest_id = rec.record(&newest).unwrap();
+
+    // Instants: oldest 05:30Z, middle 06:15Z, newest 06:45Z; the middle
+    // record's -05:00 text sorts before the oldest record's -04:00 text.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-01T01:30:00.000000-04:00' WHERE id = ?1",
+            [oldest_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-01T01:15:00.000000-05:00' WHERE id = ?1",
+            [middle_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-01T01:45:00.000000-05:00' WHERE id = ?1",
+            [newest_id],
+        )
+        .unwrap();
+    }
+
+    let window: Vec<i64> = rec
+        .all_records(Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![newest_id, middle_id]);
+
+    let session_window: Vec<i64> = rec
+        .records_by_session("dst-list", Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(session_window, vec![newest_id, middle_id]);
+}
+
+#[test]
 fn records_for_diff_caps_to_newest_records() {
     let (rec, _dir) = new_recorder();
     for _ in 0..(StatsRecorder::DEFAULT_LIMIT + 1) {
