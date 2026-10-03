@@ -974,6 +974,9 @@ def wait_gateway_ready(args):
         print("openclaw gateway status --deep timed out")
     print("Recent gateway service logs:")
     print_gateway_logs(args)
+    raise SystemExit(
+        "OpenClaw Gateway port did not listen before the ready timeout."
+    )
 
 
 def completed_output(result):
