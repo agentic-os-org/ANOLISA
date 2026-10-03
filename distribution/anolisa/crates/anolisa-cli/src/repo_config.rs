@@ -16,10 +16,12 @@
 //!   `$channel` substitute into `base_url` only. Values come from host
 //!   detection and can be overridden in `[vars]`; an unknown or unset
 //!   variable is a hard error — a URL with a silently-preserved `$typo`
-//!   is the hardest failure to diagnose downstream.
+//!   is the hardest failure to diagnose downstream. Substituted values
+//!   are re-validated: a `[vars]` or host value cannot inject what the
+//!   template rules reject.
 //! * **Schemes**: `file://` and `https://` always allowed; `http://`
-//!   requires `insecure = true` on the entry; query strings and
-//!   fragments are rejected.
+//!   requires `insecure = true` on the entry; query strings, fragments,
+//!   dot segments, and whitespace are rejected.
 //! * **Raw layout**: the repository path layout is code-owned. Index rows
 //!   with empty `url` resolve to
 //!   `<base_url>/{component}/{version}/{os}/{arch}/{component}-{version}-{os}-{arch}{ext}`.
@@ -553,6 +555,11 @@ impl RepoConfig {
             ),
         ]);
         let substituted = substitute_vars(backend_name, &backend.base_url, &values)?;
+        // A variable value ([vars] override or host detection) can inject
+        // exactly the shapes the raw template was validated against, so the
+        // substituted URL is re-checked before any caller derives index,
+        // artifact, or dnf baseurls from it.
+        validate_base_url(backend_name, &substituted, backend.insecure)?;
         Ok(substituted.trim_end_matches('/').to_string())
     }
 
@@ -589,8 +596,12 @@ pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
     Ok(url.trim_end_matches('/').to_string())
 }
 
-/// Enforce the base_url shape rules (see module docs). Runs on the raw
-/// string before substitution — the scheme is always literal.
+/// Enforce the base_url shape rules (see module docs): scheme, non-empty
+/// authority/path, and no query string, fragment, `.`/`..` segment, or
+/// whitespace. Runs on the raw template at parse time — the scheme is
+/// always literal — and again on the substituted result in
+/// [`RepoConfig::resolved_base_url`], so a variable value cannot inject
+/// what the template rules reject.
 fn validate_base_url(backend: &str, url: &str, insecure: bool) -> Result<(), RepoConfigError> {
     let invalid = |reason: &str| RepoConfigError::InvalidBaseUrl {
         backend: backend.to_string(),
@@ -620,6 +631,15 @@ fn validate_base_url(backend: &str, url: &str, insecure: bool) -> Result<(), Rep
     }
     if url.contains('?') || url.contains('#') {
         return Err(invalid("query strings and fragments are not allowed"));
+    }
+    if rest
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(invalid("dot segments ('.' and '..') are not allowed"));
+    }
+    if url.chars().any(char::is_whitespace) {
+        return Err(invalid("whitespace is not allowed"));
     }
     Ok(())
 }
@@ -1251,6 +1271,58 @@ agentsight = "anolis-agentsight"
             err,
             RepoConfigError::UnsetVariable { name, .. } if name == "releasever"
         ));
+    }
+
+    /// A `[vars]` value must not smuggle characters the base_url shape
+    /// rules reject: substitution happens after the raw template passed
+    /// `validate_base_url`, so the resolved URL is re-checked before any
+    /// caller derives index or artifact URLs from it.
+    #[test]
+    fn vars_value_cannot_bypass_base_url_shape_rules() {
+        for poison in ["stable?token=1", "stable#frag", "../other"] {
+            let cfg = RepoConfig::from_toml_str(&format!(
+                r#"schema_version = 1
+default_backend = "raw"
+[vars]
+channel = "{poison}"
+[backends.raw]
+base_url = "https://example.com/anolisa/$channel/v1/"
+"#,
+            ))
+            .expect("raw template passes shape rules");
+            let (name, backend) = cfg.select_backend(None).expect("raw backend");
+            let err = match cfg.resolved_base_url(name, backend, &host()) {
+                Ok(url) => panic!("poison {poison:?} must be rejected, got {url}"),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err, RepoConfigError::InvalidBaseUrl { .. }),
+                "poison {poison:?}: got {err:?}"
+            );
+        }
+    }
+
+    /// Host-detected values feed the same substitution, so they get the
+    /// same post-substitution re-check.
+    #[test]
+    fn host_detected_value_cannot_bypass_base_url_shape_rules() {
+        let cfg = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "raw"
+[backends.raw]
+base_url = "https://example.com/anolisa/$os/v1/"
+"#,
+        )
+        .expect("raw template passes shape rules");
+        let (name, backend) = cfg.select_backend(None).expect("raw backend");
+        let host = HostVars {
+            os: "li nux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let err = cfg
+            .resolved_base_url(name, backend, &host)
+            .expect_err("whitespace in a host value must be rejected");
+        assert!(matches!(err, RepoConfigError::InvalidBaseUrl { .. }));
     }
 
     #[test]
