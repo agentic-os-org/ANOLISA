@@ -36,24 +36,65 @@ Once installed, OS Skills are available to any ANOLISA-compatible Agent runtime.
 
 ## Skill Categories
 
+The bundled skills, grouped by the category directories under `src/os-skills/`:
+
+### AI Tools
+
+| Skill | Description |
+|-------|-------------|
+| `install-claude-code` | Install and configure Claude Code IDE |
+| `install-hermes` | Install and configure Hermes Agent |
+| `install-openclaw` | Install and configure OpenClaw |
+| `install-qwenpaw` | Deploy the QwenPaw AI assistant with DingTalk integration |
+| `install-tokenless` | Install and configure Tokenless (LLM token optimization) |
+| `qwenpaw-usage` | QwenPaw usage guide (heartbeat, scheduled tasks, packaging) |
+| `setup-mcp` | Configure MCP servers in Copilot Shell |
+
 ### System Administration
 
 | Skill | Description |
 |-------|-------------|
-| `disk-usage` | Check filesystem disk usage |
-| `service-ctl` | Start/stop/restart system services |
-| `process-mgmt` | List and manage processes |
-| `user-mgmt` | User and group management |
-| `package-ops` | Package install/remove/query |
+| `alinux-admin` | ALinux 4 system management (systemd, SSH, firewalld, NetworkManager) |
+| `backup-restore` | System backup and restore |
+| `ktuner` | Kernel parameter auto-tuning with recommendations and rollback |
+| `regex-mastery` | Regular expression guide |
+| `shell-scripting` | Bash/Zsh scripting and automation |
+| `storage-resize` | Alibaba Cloud disk expansion (XFS/EXT4/Btrfs) |
+| `upgrade-alinux-kernel` | ALinux kernel upgrade |
 
-### DevOps Automation
+### DevOps
 
 | Skill | Description |
 |-------|-------------|
-| `container-ops` | Docker/Podman container management |
-| `log-analysis` | Search and analyze system logs |
-| `network-diag` | Network diagnostics (ping, traceroute, port check) |
-| `cron-mgmt` | Cron job management |
+| `github` | GitHub workflows and integration via the `gh` CLI |
+| `kernel-dev` | ALinux 4 kernel development automation (SRPM and upstream) |
+| `sysom-agentsight` | AgentSight token, audit, and session diagnostics queries |
+| `sysom-diagnosis` | SysOM diagnostics and tuning |
+
+### Alibaba Cloud
+
+| Skill | Description |
+|-------|-------------|
+| `aliyun-ecs` | ECS instance lifecycle management via Alibaba Cloud CLI |
+
+### Security
+
+| Skill | Description |
+|-------|-------------|
+| `alinux-cve-query` | Query Alibaba Cloud Linux CVE vulnerability info |
+
+### Others
+
+| Skill | Description |
+|-------|-------------|
+| `anolisa-guide` | Answers about ANOLISA, Agentic OS, cosh, and Copilot Shell |
+| `anolisa-register` | Manage ANOLISA registration (join or leave the co-build program) |
+| `clawhub-skill-mng` | Search, install, and manage agent skills from ClawHub |
+| `cosh-guide` | Copilot Shell user guide and help |
+| `humanizer` | Remove signs of AI-generated writing from text |
+| `image-gen` | Generate images from text prompts via DashScope/Qwen |
+| `pdf-reader` | Extract text from PDF files |
+| `xlsx` | Open, create, edit, and validate Excel/spreadsheet files |
 
 ---
 
@@ -64,22 +105,6 @@ OS Skills integrates with cosh and other ANOLISA-compatible runtimes automatical
 ```bash
 # Verify skills are loaded
 anolisa status os-skills
-```
-
----
-
-## Configuration
-
-Configuration file: `~/.config/os-skills/config.toml`
-
-```toml
-[skills]
-# Enabled skill categories
-enabled = ["system", "devops"]
-
-[safety]
-# Require confirmation for destructive operations
-confirm_destructive = true
 ```
 
 ---
