@@ -2,10 +2,9 @@
 
 [English](README.md)
 
-AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以启动 Qoder CLI，
-接通配置的工具 Hook，运行外部 Provider，并独立于 Agent 会话保存执行元数据。
-用户继续使用 Qoder 的终端界面和原生 Hook 调度。QwenPaw、OpenClaw 和 Hermes
-Adapter 仍待交付，当前接口处于实验阶段。
+AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以通过已验证的原生
+入口启动 Qoder CLI 和 OpenClaw，运行外部 Provider，并独立于 Agent 会话保存
+执行元数据。原生调度与权限仍由框架负责，当前接口处于实验阶段。
 
 ## 当前可用范围
 
@@ -16,7 +15,8 @@ Adapter 仍待交付，当前接口处于实验阶段。
 | 工具前执行结构化 Provider 的 `observe`/`block`，工具成功后执行 `observe` | ✅ |
 | 执行回调输入保持不变的原生 Hook 命令 | ✅ 字节输出和退出状态交回 Qoder；不含重写链与审批流程 |
 | 启动或复用独立服务，查询执行元数据 | ✅ |
-| 通过 AW 启动 QwenPaw、OpenClaw 或 Hermes | ❌ |
+| 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
+| 启动其余首批框架 | ❌ 相应 Adapter 独立交付 |
 | 安装已发布的 AW 包、跨框架请求审批或在原生 Hook 之外强制执行策略 | ❌ |
 
 ## 启动 Qoder
@@ -57,6 +57,17 @@ Linux 二进制 `aw-provider-sec-core` 将配置中选定的工具输入传给�
 候选效果和工具后观察。它依赖已有 sec-core CLI 与 daemon，无需向 sec-core
 安装 AW 代码。源码构建、配置和本地 Host 示例见
 [sec-core Provider 指南](../../docs/user-guide/zh/user-entrypoint/aw-sec-core.md)。
+
+## 启动 OpenClaw
+
+使用 OpenClaw 2026.9.6，保留其原生模型配置。
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明必需的 profile 参数和
+工具生命周期范围。从 `src/aw` 执行：
+
+```bash
+target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent openclaw \
+  --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
 
 ## 接入与开发
 

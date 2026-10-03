@@ -1,0 +1,48 @@
+# Run with OpenClaw 2026.9.6 and explicit native config/profile paths.
+# This neutral command demonstrates hook execution, not a security policy.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: openclaw-native-hooks
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: auto
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    openclaw:
+      adapter: openclaw
+      argv: [openclaw, gateway, run]
+  providers:
+    native-command:
+      protocol: native-hook/v1alpha1
+      transport:
+        type: stdio
+        argv: [/bin/sh, -c, 'cat >/dev/null; printf "{}"']
+        location: agent
+      timeout_ms: 2000
+      max_output_bytes: 65536
+      config: {}
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: before-command
+          provider: native-command
+          native: {}
+          on_error: block
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: after-command
+          provider: native-command
+          native: {}
+          on_error: report
