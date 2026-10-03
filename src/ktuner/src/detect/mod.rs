@@ -537,6 +537,20 @@ fn read_thp_enabled() -> String {
     )
 }
 
+/// Read a process's `/proc/<pid>/comm` as a name, lossily.
+///
+/// The kernel allows almost any non-NUL bytes in comm (a process can set
+/// them via `prctl(PR_SET_NAME)`, and an executable named with non-UTF-8
+/// bytes gives its main thread those bytes too). `read_to_string` rejects
+/// such a file outright, which used to make the process invisible to
+/// service detection — its rules then did not fire even though the
+/// workload was running. A lossy read keeps the ASCII prefix, which is
+/// what the boundary matching in `process_name_matches` compares anyway.
+fn read_comm_from(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
 fn read_processes() -> Result<Vec<ProcessInfo>> {
     let mut procs = Vec::new();
     let proc_dir = "/proc";
@@ -546,8 +560,7 @@ fn read_processes() -> Result<Vec<ProcessInfo>> {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.parse::<u32>().is_ok() {
                 let comm_path = format!("/proc/{fname}/comm");
-                if let Ok(comm) = fs::read_to_string(&comm_path) {
-                    let comm = comm.trim().to_string();
+                if let Some(comm) = read_comm_from(&comm_path) {
                     // A metrics exporter shares its target's name prefix
                     // ("postgres_exporter"), so keeping it in the process list
                     // makes the database rules fire on a host that only scrapes
@@ -1042,6 +1055,41 @@ mod tests {
         assert!(info.has_process("nginx"));
         assert!(info.has_process("elasticsearch"));
         assert!(info.has_process("redis-server"));
+    }
+
+    /// The kernel allows non-UTF-8 bytes in comm (set via prctl, or inherited
+    /// from an executable named with raw bytes); `read_to_string` rejects
+    /// such a file, which made the process invisible to service detection —
+    /// its rules then did not fire even though the workload was running.
+    /// The lossy read keeps the ASCII prefix the boundary matching compares.
+    #[test]
+    fn read_comm_survives_non_utf8_bytes() {
+        let dir = std::env::temp_dir().join(format!("ktuner_comm_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let comm_path = dir.join("comm");
+        // "postgres" followed by an invalid UTF-8 continuation byte and the
+        // newline the kernel appends.
+        fs::write(&comm_path, b"postgres\xa0\n").expect("write non-UTF-8 comm");
+
+        let comm = read_comm_from(comm_path.to_str().unwrap()).expect("comm must be readable");
+        assert!(
+            comm.starts_with("postgres"),
+            "the ASCII prefix must survive a lossy read: {comm:?}"
+        );
+        // The recovered name still identifies the service.
+        assert!(
+            process_name_matches(&comm, "postgres"),
+            "a lossily-read comm must still match its service name: {comm:?}"
+        );
+
+        // Guard: the ordinary path is unchanged.
+        fs::write(&comm_path, b"nginx: worker process\n").expect("write ordinary comm");
+        assert_eq!(
+            read_comm_from(comm_path.to_str().unwrap()).as_deref(),
+            Some("nginx: worker process")
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
