@@ -30,6 +30,7 @@ Exit code:
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
+import posixpath
 import re
 import json
 
@@ -82,6 +83,29 @@ def get_defined_names(z: zipfile.ZipFile) -> set[str]:
     return names
 
 
+def resolve_rel_target(target: str) -> str:
+    """
+    Resolve a workbook.xml.rels Target to the zip member path of the part.
+
+    Handles all OPC target forms:
+      - Package-absolute: "/xl/worksheets/sheet1.xml"
+      - Workbook-relative: "worksheets/sheet1.xml" (resolved against xl/)
+      - Dot segments: "./worksheets/sheet1.xml", "../xl/worksheets/sheet1.xml"
+      - Producer quirk: "xl/worksheets/sheet1.xml" (already carries the prefix)
+    """
+    if target.startswith("/"):
+        # Package-absolute: names the member from the package root, so the
+        # leading "/" is simply dropped — it must NOT be joined onto "xl/"
+        # (that would yield "xl//xl/worksheets/sheet1.xml").
+        return posixpath.normpath(target.lstrip("/"))
+    if not target.startswith("xl/"):
+        # Workbook-relative to xl/workbook.xml: resolve against the "xl/" base.
+        target = posixpath.join("xl", target)
+    # normpath collapses "./" and "<seg>/../" segments so the result matches
+    # the literal member name in the archive.
+    return posixpath.normpath(target)
+
+
 def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
     """Return dict of {r:id -> xl/worksheets/sheetN.xml} from workbook.xml.rels."""
     rels_xml = z.read("xl/_rels/workbook.xml.rels")
@@ -91,10 +115,7 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
         rid = rel.get("Id", "")
         target = rel.get("Target", "")
         if "worksheets" in target:
-            # Target may be relative: "worksheets/sheet1.xml" -> "xl/worksheets/sheet1.xml"
-            if not target.startswith("xl/"):
-                target = "xl/" + target
-            mapping[rid] = target
+            mapping[rid] = resolve_rel_target(target)
     return mapping
 
 
