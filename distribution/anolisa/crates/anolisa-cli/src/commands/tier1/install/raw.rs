@@ -161,7 +161,7 @@ pub(crate) fn resolve_raw(
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
-                "distribution index {index_url} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa self-update' and retry",
+                "distribution index {index_url} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa update self' and retry",
                 blocking.reason
             ),
         });
@@ -735,7 +735,7 @@ fn validate_min_anolisa_version_against(
         return Err(CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: format!(
-                "component '{component}' requires anolisa >= {required}, but this CLI is {current}; run 'anolisa self-update' and retry",
+                "component '{component}' requires anolisa >= {required}, but this CLI is {current}; run 'anolisa update self' and retry",
             ),
         });
     }
@@ -921,7 +921,7 @@ fn resolve_render_spec(
     let mode = RenderMode::parse(render).ok_or_else(|| CliError::InvalidArgument {
         command: COMMAND.to_string(),
         reason: format!(
-            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}'); run 'anolisa self-update' and retry",
+            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}'); run 'anolisa update self' and retry",
             spec.display(),
             anolisa_core::manifest::RENDER_ANOLISA_PATHS_V1,
         ),
@@ -1558,7 +1558,7 @@ mod tests {
         match err {
             CliError::InvalidArgument { reason, .. } => {
                 assert!(reason.contains("anolisa-paths-v2"), "got: {reason}");
-                assert!(reason.contains("self-update"), "got: {reason}");
+                assert!(reason.contains("update self"), "got: {reason}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
@@ -1692,7 +1692,7 @@ mod tests {
                     reason.contains(env!("CARGO_PKG_VERSION")),
                     "must name the current version: {reason}"
                 );
-                assert!(reason.contains("self-update"), "got: {reason}");
+                assert!(reason.contains("update self"), "got: {reason}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
