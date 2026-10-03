@@ -54,8 +54,10 @@
 #   ${ANOLISA_PREFIX}/bin/anolisa                       (binary)
 #   ${ANOLISA_PREFIX}/share/anolisa/manifests/          (osbase)
 #
-# The distribution index is NOT staged: the CLI downloads and caches it from
-# the configured mirror at runtime, so a datadir copy would never be read.
+# The distribution index is NOT staged: the CLI downloads it from the
+# configured mirror at runtime, and the raw backend re-fetches it on every
+# resolve (no CLI path uses an index cache), so a datadir copy would never
+# be read.
 #
 # After install, `anolisa env / list / install <component> --dry-run`
 # work without the source tree, without overlays, and without any DEMO_ROOT env.
@@ -161,8 +163,9 @@ Environment overrides:
 URL-fetch mode notes:
   * The default manifest bundle path uses manifests-latest.tar.gz. Pin to a
     specific release by setting ANOLISA_MANIFEST_BUNDLE_URL explicitly.
-  * The distribution index is not staged: the CLI downloads and caches it
-    from the configured mirror at runtime.
+  * The distribution index is not staged: the CLI downloads it from the
+    configured mirror at runtime; the raw backend re-fetches the index
+    on every resolve (no CLI path uses an index cache).
 
 Examples:
   # Auto-detected install from a checkout (running this file from scripts/).
@@ -589,9 +592,9 @@ realpath_inside() {
 #
 # Only osbase manifests are staged. The dev-tree runtime/ manifests and the
 # distribution-index/ directory were retired: component manifests are
-# downloaded from the distribution backend at install time, and the CLI
-# fetches + caches the distribution index from the mirror at runtime, so a
-# datadir copy of either would never be read.
+# downloaded from the distribution backend at install time, and the raw
+# backend re-fetches the distribution index from the mirror on every
+# resolve, so a datadir copy of either would never be read.
 
 stage_from_local() {
   for subdir in osbase; do
