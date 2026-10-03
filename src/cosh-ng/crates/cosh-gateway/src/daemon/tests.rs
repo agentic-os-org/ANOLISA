@@ -1539,3 +1539,90 @@ fn bind_replaces_only_an_owned_stale_socket() {
 
 #[path = "tests/snapshot.rs"]
 mod snapshot;
+
+#[test]
+fn out_of_range_task_pagination_is_invalid_request_not_store_unavailable() {
+    let root = private_tempdir();
+    let socket_path = private_directory(&root, "runtime").join("gateway.sock");
+    let database_path = root.path().join("gateway.db");
+    let config = daemon_config(socket_path.clone(), database_path);
+    let workspace = config.launch_catalog.default_workspace().clone();
+    let mut daemon = GatewayDaemon::bind(config).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server = std::thread::spawn(move || daemon.serve_until(&server_shutdown));
+    let client = LocalGatewayClient::new(socket_path);
+
+    let GatewayResult::Task(task) = client
+        .submit_launch(SubmitLaunch {
+            request_id: RequestId::new(),
+            idempotency_key: IdempotencyKey::new("pagination-bounds").unwrap(),
+            launch: TaskLaunchSpecV1::new(
+                BoundedText::new("inspect the failed service").unwrap(),
+                TaskRuntime::Core,
+                workspace,
+                CheckpointPolicy::Off,
+                ApprovalPolicy::AllowAll,
+            ),
+        })
+        .unwrap()
+    else {
+        panic!("launch submission must return its Task")
+    };
+
+    for limit in [0_u16, 65, 65535] {
+        match client.list(RequestId::new(), limit) {
+            Err(GatewayDaemonError::Remote {
+                code, recoverable, ..
+            }) => {
+                assert_eq!(code, "invalid_request", "limit {limit}");
+                assert!(!recoverable, "limit {limit}");
+            }
+            other => panic!("out-of-range list limit {limit} must be rejected: {other:?}"),
+        }
+    }
+    match client.events(RequestId::new(), task.task_id.clone(), Some(u64::MAX), 64) {
+        Err(GatewayDaemonError::Remote {
+            code, recoverable, ..
+        }) => {
+            assert_eq!(code, "invalid_request");
+            assert!(!recoverable);
+        }
+        other => panic!("event cursor u64::MAX must be rejected: {other:?}"),
+    }
+
+    let GatewayResult::Tasks(page) = client.list(RequestId::new(), 20).unwrap() else {
+        panic!("an in-range list must keep succeeding")
+    };
+    assert!(page.tasks.iter().any(|view| view.task_id == task.task_id));
+    let GatewayResult::Events(events) = client
+        .events(RequestId::new(), task.task_id.clone(), Some(0), 64)
+        .unwrap()
+    else {
+        panic!("an in-range event page must keep succeeding")
+    };
+    assert!(!events.events.is_empty());
+
+    shutdown.store(true, Ordering::Relaxed);
+    server.join().unwrap().unwrap();
+}
+
+#[test]
+fn real_store_failures_keep_the_store_unavailable_classification() {
+    for error in [
+        GatewayDaemonError::Store(StoreError::Corrupt {
+            message: "projection diverges from its events".to_owned(),
+        }),
+        GatewayDaemonError::Store(StoreError::InvalidCommit {
+            message: "Outbox lease deadline must be in the future".to_owned(),
+        }),
+    ] {
+        let response = error_response(None, &error);
+        let GatewayResponseOutcome::Error { error: body } = response.outcome else {
+            panic!("a store failure must produce an error response")
+        };
+        assert_eq!(body.code, "store_unavailable");
+        assert_eq!(body.message, "durable Task storage is unavailable");
+        assert!(!body.recoverable);
+    }
+}

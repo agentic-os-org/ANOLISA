@@ -130,6 +130,7 @@ where
             .get(&actor.actor_id, &task_id)
             .map(GatewayResult::Task),
         GatewayRequest::List { limit, .. } => {
+            validate_page_limit(limit, "Task list")?;
             ports.list(&actor.actor_id, limit).map(GatewayResult::Tasks)
         }
         GatewayRequest::Events {
@@ -137,9 +138,13 @@ where
             after_revision,
             limit,
             ..
-        } => ports
-            .events(&actor.actor_id, &task_id, after_revision, limit)
-            .map(GatewayResult::Events),
+        } => {
+            validate_page_limit(limit, "Task event page")?;
+            validate_event_cursor(after_revision)?;
+            ports
+                .events(&actor.actor_id, &task_id, after_revision, limit)
+                .map(GatewayResult::Events)
+        }
         GatewayRequest::Cancel { request, .. } => ports
             .cancel(&actor.actor_id, request)
             .map(GatewayResult::Cancelled),
@@ -179,4 +184,32 @@ pub(super) fn validate_submission_admission(
                 "Task target or Runtime is not admitted by this daemon".to_owned(),
             )
         })
+}
+
+/// Largest bounded page one List or Events request may admit.
+const MAX_TASK_PAGE_LIMIT: u16 = 64;
+
+/// Rejects a page bound that durable storage would refuse, at admission.
+///
+/// Out-of-range bounds are a malformed request, not a storage outage: the
+/// transport rejects them as [`GatewayDaemonError::Protocol`] so the response
+/// classifies as `invalid_request` instead of `store_unavailable`. The
+/// store-side checks remain as defense in depth.
+fn validate_page_limit(limit: u16, page: &str) -> Result<(), GatewayDaemonError> {
+    if limit == 0 || limit > MAX_TASK_PAGE_LIMIT {
+        return Err(GatewayDaemonError::Protocol(format!(
+            "{page} limit must be between 1 and {MAX_TASK_PAGE_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects an event cursor that cannot be stored as a SQLite INTEGER.
+fn validate_event_cursor(after_revision: Option<u64>) -> Result<(), GatewayDaemonError> {
+    if after_revision.is_some_and(|revision| i64::try_from(revision).is_err()) {
+        return Err(GatewayDaemonError::Protocol(
+            "Task event cursor exceeds SQLite INTEGER range".to_owned(),
+        ));
+    }
+    Ok(())
 }
