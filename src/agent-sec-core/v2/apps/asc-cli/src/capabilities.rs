@@ -216,6 +216,10 @@ impl fmt::Display for FilterError {
 
 /// Normalizes one filter value, or reports the allowed set.
 ///
+/// The value is trimmed with V1's Python `strip()` semantics, so a filter that
+/// differs from an allowed name only by U+001C..U+001F is accepted exactly as
+/// V1 accepts it.
+///
 /// # Errors
 /// Returns [`FilterError`] when the trimmed, lowercased value is not allowed.
 fn normalize(
@@ -227,7 +231,7 @@ fn normalize(
     let Some(value) = value else {
         return Ok(None);
     };
-    let normalized = value.trim().to_lowercase();
+    let normalized = resolve::python_strip(value).to_lowercase();
     allowed
         .iter()
         .find(|candidate| **candidate == normalized)
@@ -321,6 +325,17 @@ mod tests {
     #[test]
     fn filters_trim_and_normalize_case() {
         let records = query(&empty(), Some(" QODER "), Some(" PROMPT-SCAN ")).expect("filters");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].agent, "qoder");
+        assert_eq!(records[0].capability, "prompt-scan");
+    }
+
+    /// V1 accepts a filter decorated with U+001C..U+001F: it strips with Python
+    /// `str.strip()`, which removes the four information separators as well.
+    #[test]
+    fn filters_strip_information_separators_like_v1() {
+        let records = query(&empty(), Some("qoder\u{1c}"), Some("\u{1f}PROMPT-SCAN"))
+            .expect("V1 accepts the decorated filters");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].agent, "qoder");
         assert_eq!(records[0].capability, "prompt-scan");

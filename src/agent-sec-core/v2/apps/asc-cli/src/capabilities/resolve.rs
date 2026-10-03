@@ -114,7 +114,7 @@ fn resolve_one(
         // takes before its native extension is built: the configured value is
         // still reported, but an unsupported backend cannot be flagged.
         EnvKind::Identifier => (
-            raw.map(str::trim)
+            raw.map(python_strip)
                 .filter(|text| !text.is_empty())
                 .map_or_else(
                     || EnvValue::text(""),
@@ -139,7 +139,7 @@ fn resolve_bool(
     let Some(raw) = raw else {
         return EnvValue::Bool(default);
     };
-    let normalized = raw.trim().to_lowercase();
+    let normalized = python_strip(raw).to_lowercase();
     let resolved = if strict {
         match normalized.as_str() {
             "true" => Some(true),
@@ -171,7 +171,7 @@ fn resolve_keyword(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    let normalized = raw.trim().to_lowercase();
+    let normalized = python_strip(raw).to_lowercase();
     let normalized = if aliased {
         match normalized.as_str() {
             "debug" => "observe".to_owned(),
@@ -199,7 +199,7 @@ fn resolve_int_timeout(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    let Ok(mut value) = raw.trim().parse::<i64>() else {
+    let Ok(mut value) = python_strip(raw).parse::<i64>() else {
         diagnostics.push(fallback(name, &EnvValue::text(default)));
         return EnvValue::text(default);
     };
@@ -230,7 +230,7 @@ fn resolve_float_timeout(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    let parsed = raw.trim().parse::<f64>();
+    let parsed = python_strip(raw).parse::<f64>();
     let Ok(mut value) = parsed else {
         diagnostics.push(fallback(name, &EnvValue::text(default)));
         return EnvValue::text(default);
@@ -285,6 +285,24 @@ fn format_number(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+/// Trims a value the way V1's Python `str.strip()` does.
+///
+/// Rust's `str::trim` follows the Unicode `White_Space` property; `CPython`'s
+/// argument-less `str.strip()` strips that same set plus U+001C..U+001F, the
+/// four information separators. V1 resolves every value in this view with
+/// `strip()`, so those four characters must not decide whether a value is
+/// valid: `"\u{1c}false"` is a disabled hook and `"\u{1c}ask"` is a valid mode
+/// for V1.
+///
+/// The same rule is already implemented for the trace-context labels in
+/// `asc-observability` and for the PII detector's Python `\s`, so this keeps
+/// the V1-alignment convention in one shape.
+pub(crate) fn python_strip(value: &str) -> &str {
+    value.trim_matches(|character: char| {
+        character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character)
+    })
 }
 
 /// Escapes non-printable characters and caps the length of a reported value.
@@ -382,7 +400,7 @@ pub(crate) fn scan_mode(capability: &str, values: &[ResolvedEnv]) -> String {
 /// Returns the effective timeout, falling back to the hook's built-in value.
 pub(crate) fn timeout(agent: &str, capability: &str, values: &[ResolvedEnv]) -> String {
     if let Some(value) = values.iter().find(|value| value.name.ends_with("_TIMEOUT")) {
-        let text = value.effective.as_str().trim();
+        let text = python_strip(value.effective.as_str());
         return if text.is_empty() {
             "-".to_owned()
         } else {
@@ -742,5 +760,67 @@ mod tests {
 
         let (values, _) = resolve_pair("cosh", "code-scan", &[]);
         assert_eq!(scan_mode("code-scan", &values), "-");
+    }
+
+    /// V1 strips U+001C..U+001F with Python `str.strip()`; Rust's `trim` does not.
+    ///
+    /// Every value in this view is resolved from a value V1 trims with Python
+    /// semantics, so a switch, a mode, a timeout and the reported backend name
+    /// must all ignore the four information separators instead of treating a
+    /// decorated value as invalid.
+    #[test]
+    fn information_separators_are_stripped_like_v1() {
+        let (values, diagnostics) = resolve_pair(
+            "qoder",
+            "pii-check",
+            &[("PII_CHECKER_HOOK_ENABLED", "\u{1c}false")],
+        );
+        assert_eq!(values[0].effective, EnvValue::Bool(false));
+        assert!(!enabled(&values));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let (values, diagnostics) = resolve_pair(
+            "qoder",
+            "code-scan",
+            &[("CODE_SCANNER_MODE", "\u{1f}ask\u{1c}")],
+        );
+        assert_eq!(mode(&values, "observe"), "ask");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let (values, diagnostics) = resolve_pair(
+            "qoder",
+            "code-scan",
+            &[("CODE_SCANNER_TIMEOUT", "\u{1d}30\u{1e}")],
+        );
+        assert_eq!(timeout("qoder", "code-scan", &values), "30");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let (values, diagnostics) = resolve_pair(
+            "qwen",
+            "pii-check",
+            &[("PII_CHECKER_TIMEOUT", "\u{1c}0.5\u{1f}")],
+        );
+        assert_eq!(timeout("qwen", "pii-check", &values), "0.5");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let (values, diagnostics) = resolve_pair(
+            "qoder",
+            "prompt-scan",
+            &[("PROMPT_SCANNER_L2_MODEL", "\u{1c}gpt-5\u{1f}")],
+        );
+        let value =
+            find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+        assert_eq!(value.effective, EnvValue::text("gpt-5"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // A value that is nothing but separators is still "not set" for V1.
+        let (values, _) = resolve_pair(
+            "qoder",
+            "prompt-scan",
+            &[("PROMPT_SCANNER_L2_MODEL", "\u{1c}\u{1f}")],
+        );
+        let value =
+            find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+        assert_eq!(value.effective, EnvValue::text(""));
     }
 }
