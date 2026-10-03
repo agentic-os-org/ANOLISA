@@ -776,7 +776,22 @@ clone_repo() {
 
             git fetch origin
             git checkout "$BRANCH"
-            git pull --ff-only origin "$BRANCH"
+            if git pull --ff-only origin "$BRANCH"; then
+                :
+            else
+                log_error "Update failed: cannot fast-forward $BRANCH to origin/$BRANCH (branches diverged)."
+                if [ -n "$autostash_ref" ]; then
+                    log_info "Restoring your stashed local changes (re-apply manually if needed: git stash apply $autostash_ref)..."
+                    if git stash apply "$autostash_ref"; then
+                        log_warn "Local changes were restored; they are also still preserved in the stash."
+                    else
+                        log_error "Could not restore local changes automatically. They are still preserved in git stash."
+                        log_info "Resolve manually with: git stash apply $autostash_ref"
+                    fi
+                fi
+                log_info "Reconcile the branch manually (e.g. git rebase origin/$BRANCH) and re-run the installer."
+                exit 1
+            fi
 
             if [ -n "$autostash_ref" ]; then
                 local restore_now="yes"
