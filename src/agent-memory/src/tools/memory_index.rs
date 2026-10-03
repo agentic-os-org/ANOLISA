@@ -242,11 +242,14 @@ fn extract_title_and_description(content: &str, fallback_path: &str) -> (String,
         }
     }
 
-    // Fallback description: first line of body
+    // Fallback description: first line of body. The fence skip only applies
+    // when the file actually opens with frontmatter — a plain body may
+    // legitimately use a `---` horizontal rule as a section separator, and
+    // its description must still come from the start of the body.
     if description.is_empty() {
         let body = content
-            .find("\n---\n")
-            .map(|pos| &content[pos + 5..])
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.find("\n---\n").map(|pos| &rest[pos + 5..]))
             .unwrap_or(content);
         let first_line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
         description = first_line.chars().take(80).collect::<String>();
@@ -301,5 +304,19 @@ mod tests {
         let (title, desc) = extract_title_and_description(content, "notes/observed/abc.md");
         assert_eq!(title, "notes/observed/abc.md");
         assert_eq!(desc, "Just plain markdown content here.");
+    }
+
+    #[test]
+    fn description_fallback_is_first_body_line_without_frontmatter() {
+        // A plain body (no frontmatter) may legitimately contain a `---`
+        // horizontal rule; the fallback description must still come from the
+        // start of the body, not from after the rule.
+        let content = "# Deploy checklist\n\nsteps here\n\n---\n\nrollback notes\n";
+        let (title, desc) = extract_title_and_description(content, "notes/deploy.md");
+        assert_eq!(title, "notes/deploy.md");
+        assert_eq!(
+            desc, "# Deploy checklist",
+            "description must come from the start of the body"
+        );
     }
 }
