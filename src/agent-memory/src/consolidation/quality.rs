@@ -137,20 +137,27 @@ pub fn normalize_relative_dates(content: &str) -> String {
     // "N days ago" / "N 天前"
     result = DAYS_AGO_EN
         .replace_all(&result, |caps: &regex::Captures| {
-            let n: i64 = caps[1].parse().unwrap_or(0);
-            let date = today - Duration::days(n);
-            date.format("%Y-%m-%d").to_string()
+            format_days_ago(&caps[1], &caps[0], today)
         })
         .to_string();
     result = DAYS_AGO_CN
         .replace_all(&result, |caps: &regex::Captures| {
-            let n: i64 = caps[1].parse().unwrap_or(0);
-            let date = today - Duration::days(n);
-            date.format("%Y-%m-%d").to_string()
+            format_days_ago(&caps[1], &caps[0], today)
         })
         .to_string();
 
     result
+}
+
+/// Resolve an "N days ago" capture to an absolute date. Absurd day counts
+/// (e.g. a file named "999999999999 days ago.md") are left untouched instead
+/// of panicking on out-of-range date arithmetic.
+fn format_days_ago(digits: &str, whole: &str, today: NaiveDate) -> String {
+    let n: i64 = digits.parse().unwrap_or(0);
+    match Duration::try_days(n).and_then(|d| today.checked_sub_signed(d)) {
+        Some(date) => date.format("%Y-%m-%d").to_string(),
+        None => whole.to_string(),
+    }
 }
 
 /// Replace a relative date expression with an absolute date.
@@ -301,5 +308,15 @@ mod tests {
             .format("%Y-%m-%d")
             .to_string();
         assert!(result.contains(&expected));
+    }
+
+    #[test]
+    fn normalize_absurd_days_ago_leaves_text_unchanged() {
+        // A file named like "999999999999 days ago.md" reaches consolidation
+        // through the fact content; the out-of-range date arithmetic must
+        // leave the text alone instead of panicking.
+        for text in ["set 999999999999 days ago", "999999999999天前的记录"] {
+            assert_eq!(normalize_relative_dates(text), text);
+        }
     }
 }
