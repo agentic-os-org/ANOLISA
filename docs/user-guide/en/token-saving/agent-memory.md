@@ -377,7 +377,7 @@ BM25 + dense vector hybrid retrieval, fused via RRF (Reciprocal Rank Fusion, k=6
 
 ### Auto consolidation
 
-On shutdown, automatically extracts atomic facts from the session audit log (`mem_consolidate`) using 6 heuristic rules (zero LLM calls) — identifies high-frequency paths, search patterns, etc., and persists them as structured memory. Also manually triggerable via the `mem_consolidate` tool. Includes episodic memory extraction and conflict detection (BM25 threshold).
+On shutdown, automatically extracts atomic facts from the session audit log (`mem_consolidate`) using 6 heuristic rules (zero LLM calls) — identifies high-frequency paths, repeated edits, failures and promotions, and persists them as structured memory. Search queries never reach the audit log (only the mode and the query length are recorded), and no fact quotes that length back: an episode records that a `bm25` search ran, not what it looked for. Also manually triggerable via the `mem_consolidate` tool. Includes episodic memory extraction and conflict detection (BM25 threshold).
 
 ### Audit & observability
 
