@@ -114,7 +114,7 @@ impl TimePeriod {
     ///
     /// For the three "last" periods the pair is the *current, unfinished*
     /// period, which is later in time — not an earlier window. Comparisons must
-    /// therefore not treat it as a baseline (see `by_period_with_compare`).
+    /// therefore not treat it as a baseline (see `baseline_time_range`).
     pub fn previous_period(&self) -> TimePeriod {
         match self {
             TimePeriod::Today => TimePeriod::Yesterday,
@@ -125,6 +125,65 @@ impl TimePeriod {
             TimePeriod::LastMonth => TimePeriod::Month,
         }
     }
+
+    /// The baseline window `by_period_with_compare` compares against: the
+    /// genuinely earlier window of the same length.
+    ///
+    /// `previous_period()` is NOT this: it is the view-switching pair-mate,
+    /// so for the three "last" periods it hands back the current, unfinished
+    /// window, and comparing a complete period against a partial one
+    /// fabricated a trend (the CLI printed it as `比上一时段（N）`). The
+    /// follow-up arithmetic the interim guard left open: yesterday compares
+    /// with the day before yesterday, last week with the week before last,
+    /// last month with the month before last. The three current periods
+    /// reuse the fixed ranges of their "last" variants.
+    fn baseline_time_range(&self) -> (u64, u64) {
+        let now_naive = Utc::now().naive_utc();
+        match self {
+            TimePeriod::Today => TimePeriod::Yesterday.time_range(),
+            TimePeriod::Week => TimePeriod::LastWeek.time_range(),
+            TimePeriod::Month => TimePeriod::LastMonth.time_range(),
+            TimePeriod::Yesterday => {
+                // The day before yesterday.
+                let day = now_naive.date() - chrono::Duration::days(2);
+                calendar_day_range(day, day)
+            }
+            TimePeriod::LastWeek => {
+                // The week before last week: Monday two weeks back through
+                // its Sunday.
+                let weekday = now_naive.weekday().num_days_from_monday();
+                let this_monday = now_naive.date() - chrono::Duration::days(weekday as i64);
+                let start = this_monday - chrono::Duration::weeks(2);
+                let end = start + chrono::Duration::days(6);
+                calendar_day_range(start, end)
+            }
+            TimePeriod::LastMonth => {
+                // The month before last month: back two firsts from this
+                // month's first, ending on the last day of that month.
+                let first_day_this_month = now_naive.date().with_day(1).unwrap();
+                let start = first_day_this_month
+                    .checked_sub_months(chrono::Months::new(2))
+                    .expect("two months back from a first-of-month always exists");
+                let end = first_day_this_month
+                    .checked_sub_months(chrono::Months::new(1))
+                    .expect("one month back from a first-of-month always exists")
+                    - chrono::Duration::days(1);
+                calendar_day_range(start, end)
+            }
+        }
+    }
+}
+
+/// Inclusive `(start_ns, end_ns)` for the calendar days `start..=end`,
+/// extending the end to the final nanosecond of its last second exactly like
+/// `TimePeriod::time_range` does for its fixed windows, so a record at
+/// 23:59:59.5 belongs to its own day and not the next one.
+fn calendar_day_range(start: chrono::NaiveDate, end: chrono::NaiveDate) -> (u64, u64) {
+    let start = start.and_hms_opt(0, 0, 0).unwrap();
+    let end = end.and_hms_opt(23, 59, 59).unwrap();
+    let start_ns = start.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let end_ns = end.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
+    (start_ns, end_ns.saturating_add(999_999_999))
 }
 
 /// Token usage breakdown by agent/task
@@ -604,21 +663,21 @@ impl<'a> TokenQuery<'a> {
     pub fn by_period_with_compare(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period(period);
 
-        // Only compare against a window that starts before this one.
-        // `previous_period()` is the view-switching pair-mate, so for
-        // yesterday / last_week / last_month it hands back the current,
-        // unfinished period; reporting that as "the previous period" compares a
-        // complete period against a partial one.
-        let prev_period = period.previous_period();
-        if prev_period.time_range().0 >= period.time_range().0 {
-            return result;
-        }
+        // Compare against the genuinely earlier window of the same length
+        // (`baseline_time_range`): yesterday for today, the day before
+        // yesterday for yesterday, last week for this week, the week before
+        // last for last week, and likewise for months. `previous_period()`
+        // is the view-switching pair-mate, so for the "last" periods it is
+        // the current, unfinished window — reporting that as "the previous
+        // period" compared a complete period against a partial one, which is
+        // why the interim guard suppressed the comparison entirely instead.
+        let (prev_start, prev_end) = period.baseline_time_range();
+        let prev_records = self.store.by_time_range(prev_start, prev_end);
+        let prev_total: u64 = prev_records.iter().map(|r| r.total_tokens()).sum();
 
-        let prev_result = self.by_period(prev_period);
-
-        let change = result.total_tokens as i64 - prev_result.total_tokens as i64;
-        let change_percent = if prev_result.total_tokens > 0 {
-            (change as f64 / prev_result.total_tokens as f64) * 100.0
+        let change = result.total_tokens as i64 - prev_total as i64;
+        let change_percent = if prev_total > 0 {
+            (change as f64 / prev_total as f64) * 100.0
         } else if result.total_tokens > 0 {
             100.0 // From 0 to non-zero is 100% increase
         } else {
@@ -626,7 +685,7 @@ impl<'a> TokenQuery<'a> {
         };
 
         result.comparison = Some(TokenComparison {
-            previous_total: prev_result.total_tokens,
+            previous_total: prev_total,
             change,
             change_percent,
             trend: if change > 0 {
@@ -1237,28 +1296,152 @@ mod tests {
     /// `previous_period()` is the pair-mate used for view switching, so for
     /// last_week it hands back the *current*, unfinished week. Comparing a
     /// complete week against a partial one is not "the previous period", and
-    /// the CLI prints that fabricated baseline as `比上一时段（N）`. Without an
-    /// earlier window to compare against, the query must not report one.
+    /// the CLI prints that fabricated baseline as `比上一时段（N）`. The
+    /// baseline is the week before last week instead, and nothing from the
+    /// unfinished current week may leak into it.
     #[test]
-    fn last_week_does_not_compare_against_the_unfinished_week() {
+    fn last_week_compares_against_the_week_before_last() {
         let path = unique_db_path("compare_last_week");
         let store = TokenStore::new(&path).unwrap();
 
-        let (last_week_start, _) = TimePeriod::LastWeek.time_range();
+        // A record in the week before last week: the real baseline.
+        let now_naive = Utc::now().naive_utc();
+        let weekday = now_naive.weekday().num_days_from_monday();
+        let this_monday = now_naive.date() - chrono::Duration::days(weekday as i64);
+        let week_before_last_monday = this_monday - chrono::Duration::weeks(2);
+        let baseline_ns = week_before_last_monday
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap() as u64;
         store
-            .insert(&make_record(last_week_start, Some("A"), 60, 40))
+            .insert(&make_record(baseline_ns, Some("A"), 30, 30))
             .unwrap();
+
+        // A record in the unfinished current week: must not become (or
+        // contaminate) the baseline.
         let (week_start, _) = TimePeriod::Week.time_range();
         store
             .insert(&make_record(week_start, Some("A"), 6, 4))
             .unwrap();
 
+        // Last week's own record.
+        let (last_week_start, _) = TimePeriod::LastWeek.time_range();
+        store
+            .insert(&make_record(last_week_start, Some("A"), 60, 40))
+            .unwrap();
+
         let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::LastWeek);
         assert_eq!(result.total_tokens, 100, "last week's own total");
-        assert!(
-            result.comparison.is_none(),
-            "last week has no earlier period to compare against, got {:?}",
-            result.comparison
+        let comparison = result
+            .comparison
+            .expect("last week compares against the week before last week");
+        assert_eq!(
+            comparison.previous_total, 60,
+            "the baseline is the week before last week, not the unfinished current week"
+        );
+        assert_eq!(comparison.trend, Trend::Up);
+        cleanup_db(&path);
+    }
+
+    /// Yesterday compares against the day before yesterday — the arithmetic
+    /// the interim guard explicitly left to a follow-up.
+    #[test]
+    fn yesterday_compares_against_the_day_before() {
+        let path = unique_db_path("compare_yesterday");
+        let store = TokenStore::new(&path).unwrap();
+
+        let now_naive = Utc::now().naive_utc();
+        let day_before = now_naive.date() - chrono::Duration::days(2);
+        let baseline_ns = day_before
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap() as u64;
+        store
+            .insert(&make_record(baseline_ns, Some("A"), 25, 25))
+            .unwrap();
+        let (yesterday_start, _) = TimePeriod::Yesterday.time_range();
+        store
+            .insert(&make_record(yesterday_start, Some("A"), 10, 10))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::Yesterday);
+        assert_eq!(result.total_tokens, 20, "yesterday's own total");
+        let comparison = result
+            .comparison
+            .expect("yesterday compares against the day before yesterday");
+        assert_eq!(comparison.previous_total, 50);
+        assert_eq!(comparison.trend, Trend::Down);
+        cleanup_db(&path);
+    }
+
+    /// Last month compares against the month before last month.
+    #[test]
+    fn last_month_compares_against_the_month_before_last() {
+        let path = unique_db_path("compare_last_month");
+        let store = TokenStore::new(&path).unwrap();
+
+        let now_naive = Utc::now().naive_utc();
+        let first_this_month = now_naive.date().with_day(1).unwrap();
+        // The 15th of month-before-last: safely inside its calendar window
+        // even for short months.
+        let baseline_day = first_this_month
+            .checked_sub_months(chrono::Months::new(2))
+            .expect("two months back from a first-of-month always exists")
+            + chrono::Duration::days(14);
+        let baseline_ns = baseline_day
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap() as u64;
+        store
+            .insert(&make_record(baseline_ns, Some("A"), 40, 40))
+            .unwrap();
+        let (last_month_start, _) = TimePeriod::LastMonth.time_range();
+        store
+            .insert(&make_record(last_month_start, Some("A"), 20, 20))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::LastMonth);
+        assert_eq!(result.total_tokens, 40, "last month's own total");
+        let comparison = result
+            .comparison
+            .expect("last month compares against the month before last month");
+        assert_eq!(comparison.previous_total, 80);
+        assert_eq!(comparison.trend, Trend::Down);
+        cleanup_db(&path);
+    }
+
+    /// Guard: the baseline windows carry the same final-nanosecond extension
+    /// as the fixed periods, so a record at 23:59:59.5 of the baseline day
+    /// stays in the baseline.
+    #[test]
+    fn yesterday_baseline_includes_its_final_second() {
+        let now_naive = Utc::now().naive_utc();
+        let day_before = now_naive.date() - chrono::Duration::days(2);
+        let start_ns = day_before
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap() as u64;
+
+        let path = unique_db_path("baseline_final_second");
+        let store = TokenStore::new(&path).unwrap();
+        let late = start_ns + 86_399 * 1_000_000_000 + 500_000_000;
+        store
+            .insert(&make_record(late, Some("Agent-Late"), 40, 20))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::Yesterday);
+        let comparison = result.comparison.expect("yesterday has a baseline window");
+        assert_eq!(
+            comparison.previous_total, 60,
+            "the day before yesterday includes its final second"
         );
         cleanup_db(&path);
     }
