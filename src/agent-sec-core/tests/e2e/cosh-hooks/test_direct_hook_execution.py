@@ -15,6 +15,10 @@ _USER_EXTENSION_DIR = Path.home() / ".copilot-shell" / "extensions" / "agent-sec
 _SOURCE_EXTENSION_DIR = Path(__file__).resolve().parents[3] / "cosh-extension"
 _CODE_SCANNER_HOOK = _SOURCE_EXTENSION_DIR / "hooks" / "code_scanner_hook.py"
 _PII_CHECKER_HOOK = _SOURCE_EXTENSION_DIR / "hooks" / "pii_checker_hook.py"
+_SANDBOX_GUARD_HOOK = _SOURCE_EXTENSION_DIR / "hooks" / "sandbox-guard.py"
+_SANDBOX_FAILURE_HANDLER_HOOK = (
+    _SOURCE_EXTENSION_DIR / "hooks" / "sandbox-failure-handler.py"
+)
 
 
 _MOCK_CLI_SCRIPT = f"#!{sys.executable}\n" + textwrap.dedent("""\
@@ -290,3 +294,51 @@ def test_cosh_manifest_hooks_are_directly_executable() -> None:
             failed.append(f"{command}: invalid stdout JSON: {exc}: {proc.stdout!r}")
 
     assert failed == []
+
+
+# Parseable-but-wrong-shaped hook payloads: the payload decodes as JSON, but
+# the object graph is not what the hook expects (non-object payload,
+# tool_input as a string/null, command as a list). Infrastructure failures
+# like these must fail open: exit 0 with a valid HookOutput JSON on stdout.
+_MALFORMED_HOOK_PAYLOADS = (
+    "{}",
+    "[1, 2]",
+    '{"tool_input": "rm -rf /"}',
+    '{"tool_input": {"command": ["rm"]}}',
+    '{"tool_input": null}',
+)
+
+
+@pytest.mark.parametrize(
+    "hook_path",
+    [_SANDBOX_GUARD_HOOK, _CODE_SCANNER_HOOK, _SANDBOX_FAILURE_HANDLER_HOOK],
+    ids=["sandbox-guard", "code-scanner", "sandbox-failure-handler"],
+)
+@pytest.mark.parametrize("payload", _MALFORMED_HOOK_PAYLOADS)
+def test_cosh_sandbox_hooks_fail_open_on_malformed_payloads(
+    hook_path: Path, payload: str
+) -> None:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    proc = subprocess.run(
+        [sys.executable, str(hook_path)],
+        input=payload,
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+        timeout=5,
+    )
+
+    assert proc.returncode == 0, (
+        f"{hook_path.name} must exit 0 on malformed payload {payload!r} "
+        f"(fail open): stderr={proc.stderr.strip()}"
+    )
+    try:
+        json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        pytest.fail(
+            f"{hook_path.name} must print valid HookOutput JSON on stdout for "
+            f"payload {payload!r}: {exc}: stdout={proc.stdout!r}"
+        )

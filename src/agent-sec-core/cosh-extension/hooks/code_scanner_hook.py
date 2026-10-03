@@ -89,11 +89,19 @@ def main() -> None:
         return
 
     # 2. Extract command from tool_input
+    if not isinstance(input_data, dict):
+        print(_allow())
+        return
+
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
 
     field = _TOOL_FIELD.get(tool_name)
     if field is None:
+        print(_allow())
+        return
+
+    if not isinstance(tool_input, dict):
         print(_allow())
         return
 

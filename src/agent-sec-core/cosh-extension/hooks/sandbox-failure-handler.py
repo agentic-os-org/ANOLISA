@@ -100,11 +100,22 @@ def main():
         print(json.dumps({}))
         return
 
+    if not isinstance(input_data, dict):
+        # 载荷不是对象（如数组），无需动作，安全放行
+        print(json.dumps({}))
+        return
+
     tool_input = input_data.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        # tool_input 不是对象（字符串/null 等），无需动作，安全放行
+        print(json.dumps({}))
+        return
     error_msg = input_data.get("error", "")
+    if not isinstance(error_msg, str):
+        error_msg = ""
 
     sandboxed_cmd = tool_input.get("command", "")
-    if not sandboxed_cmd:
+    if not isinstance(sandboxed_cmd, str) or not sandboxed_cmd:
         print(json.dumps({}))
         return
 

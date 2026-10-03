@@ -293,12 +293,21 @@ def main():
         print(json.dumps({"decision": "allow"}))
         return
 
+    if not isinstance(input_data, dict):
+        # 载荷不是对象（如数组），安全放行
+        print(json.dumps({"decision": "allow"}))
+        return
+
     tool_input = input_data.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        # tool_input 不是对象（字符串/null 等），安全放行
+        print(json.dumps({"decision": "allow"}))
+        return
     command = tool_input.get("command", "")
     cwd = input_data.get("cwd", "/tmp")
 
-    # matcher 已保证只在 shell 类工具上触发，这里只剩空命令短路。
-    if not command.strip():
+    # matcher 已保证只在 shell 类工具上触发，这里只剩空命令/非字符串命令短路。
+    if not isinstance(command, str) or not command.strip():
         print(json.dumps({"decision": "allow"}))
         return
 
