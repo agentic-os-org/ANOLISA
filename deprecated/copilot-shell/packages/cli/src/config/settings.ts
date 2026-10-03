@@ -804,11 +804,9 @@ export function loadSettings(
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           if (MIGRATE_V2_OVERWRITE) {
             try {
-              fs.writeFileSync(
-                filePath,
-                JSON.stringify(settingsObject, null, 2),
-                'utf-8',
-              );
+              updateSettingsFilePreservingFormat(filePath, {
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              });
             } catch (e) {
               console.error(
                 `Error adding version to settings file: ${getErrorMessage(e)}`,

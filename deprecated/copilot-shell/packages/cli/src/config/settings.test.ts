@@ -609,6 +609,39 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.model?.name).toBe('qwen-coder');
     });
 
+    it('should preserve comments when stamping the version field onto a settings file', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const comment = '// keep my comment';
+      const commentBearingContent = `{\n  ${comment}\n  "ui": { "theme": "dark" }\n}\n`;
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return commentBearingContent;
+          return '{}';
+        },
+      );
+      // The suite-wide mock is the identity function; make it actually strip
+      // line comments so comment-bearing settings parse as JSON.
+      const stripLineComments = (jsonString: string) =>
+        jsonString.replace(/^\s*\/\/.*$/gm, '');
+      mockStripJsonComments.mockImplementation(stripLineComments);
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writtenContent = writeCall[1] as string;
+      expect(writtenContent).toContain(comment);
+      const writtenJson = JSON.parse(
+        stripLineComments(writtenContent),
+      ) as Record<string, unknown>;
+      expect(writtenJson[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect((writtenJson['ui'] as { theme?: string } | undefined)?.theme).toBe(
+        'dark',
+      );
+    });
+
     it('should correctly handle partially migrated settings without version field', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
