@@ -67,7 +67,7 @@ echo ""
 
 # Check if module is already loaded
 echo -e "${BLUE}Step 2: Check Existing Module${NC}"
-if lsmod | grep -q "^${MODULE_NAME}"; then
+if lsmod | grep -q "^${MODULE_NAME} "; then
     echo -e "${YELLOW}⚠${NC} Module is already loaded, unloading..."
     rmmod "$MODULE_NAME" 2>/dev/null || true
     sleep 1
@@ -88,7 +88,7 @@ echo ""
 
 # Verify module is loaded
 echo -e "${BLUE}Step 4: Verify Module Loaded${NC}"
-if lsmod | grep -q "^${MODULE_NAME}"; then
+if lsmod | grep -q "^${MODULE_NAME} "; then
     echo -e "${GREEN}✓${NC} Module is loaded"
     lsmod | grep "^${MODULE_NAME}"
 else
@@ -132,7 +132,7 @@ echo ""
 
 # Verify module is unloaded
 echo -e "${BLUE}Step 9: Verify Module Unloaded${NC}"
-if lsmod | grep -q "^${MODULE_NAME}"; then
+if lsmod | grep -q "^${MODULE_NAME} "; then
     echo -e "${RED}✗${NC} Module failed to unload"
     exit 1
 else
