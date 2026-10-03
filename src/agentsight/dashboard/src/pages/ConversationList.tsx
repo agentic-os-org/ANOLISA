@@ -826,7 +826,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       ),
       fetchTimeseries(startNs, endNs, agent),
       fetchInterruptionCount(startNs, endNs, agent).catch(() => null),
-      fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
+      fetchInterruptionStats(startNs, endNs, agent).catch(() => [] as InterruptionTypeStat[]),
       fetchInterruptionSessionCounts(startNs, endNs, agent).catch(() => [] as SessionInterruptionCount[]),
       fetchInterruptionConversationCounts(startNs, endNs, agent).catch(() => [] as ConversationInterruptionCount[]),
       fetchTokenSavings(startNs, endNs, agent).catch(() => null),

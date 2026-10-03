@@ -8,6 +8,7 @@ const {
   enforcementSupportsMode,
   enforcementViolationTotal,
   fetchContainmentPlan,
+  fetchInterruptionStats,
   fetchLatencyMetrics,
   fetchSecurityCase,
   fetchSecurityStatus,
@@ -254,6 +255,40 @@ test('fetchLatencyMetrics omits agent_name when no filter is provided', async ()
   await fetchLatencyMetrics(3_000_000_000, 4_000_000_000);
   const url = new URL(requestedUrl);
 
+  assert.equal(url.searchParams.get('start_ns'), '3000000000');
+  assert.equal(url.searchParams.get('end_ns'), '4000000000');
+  assert.equal(url.searchParams.has('agent_name'), false);
+});
+
+test('fetchInterruptionStats forwards the agent filter like the count and breakdown views', async () => {
+  let requestedUrl = null;
+  global.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response('[]', { status: 200 });
+  };
+
+  await fetchInterruptionStats(1_000_000_000, 2_000_000_000, 'claude');
+  const url = new URL(requestedUrl);
+
+  assert.equal(url.pathname, '/api/interruptions/stats');
+  assert.equal(url.searchParams.get('start_ns'), '1000000000');
+  assert.equal(url.searchParams.get('end_ns'), '2000000000');
+  // The card badge and the per-type tooltip must answer the same population:
+  // without the filter the tooltip counts every agent while the badge counts one.
+  assert.equal(url.searchParams.get('agent_name'), 'claude');
+});
+
+test('fetchInterruptionStats omits agent_name when no filter is provided', async () => {
+  let requestedUrl = null;
+  global.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response('[]', { status: 200 });
+  };
+
+  await fetchInterruptionStats(3_000_000_000, 4_000_000_000);
+  const url = new URL(requestedUrl);
+
+  assert.equal(url.pathname, '/api/interruptions/stats');
   assert.equal(url.searchParams.get('start_ns'), '3000000000');
   assert.equal(url.searchParams.get('end_ns'), '4000000000');
   assert.equal(url.searchParams.has('agent_name'), false);
