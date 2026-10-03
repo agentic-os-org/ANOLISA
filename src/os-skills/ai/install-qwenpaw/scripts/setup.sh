@@ -103,6 +103,7 @@ sed \
   -e "s|{DINGTALK_CLIENT_ID}|${DINGTALK_CLIENT_ID}|g" \
   -e "s|{DINGTALK_CLIENT_SECRET}|${DINGTALK_CLIENT_SECRET}|g" \
   "$CONFIG_TEMPLATE" > "$QWENPAW_DIR/config.json"
+chmod 600 "$QWENPAW_DIR/config.json"
 echo "  config.json 已写入"
 
 # 3b: dashscope.json — 百炼提供商
