@@ -89,7 +89,10 @@ def load_config(config_path: Path) -> VerificationConfig:
                 continue
 
             if in_list:
-                if line == "]":
+                # Entries tolerate trailing commas (rstrip below), so accept the
+                # matching comma-style terminator too; otherwise "], " is
+                # swallowed as a junk entry and the next header is corrupted.
+                if line in ("]", "],"):
                     in_list = False
                 else:
                     value = line.rstrip(",").strip()

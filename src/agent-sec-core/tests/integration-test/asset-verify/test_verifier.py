@@ -274,6 +274,30 @@ class TestLoadConfig(unittest.TestCase):
         config = load_config(Path(config_path))
         self.assertEqual(config["skills_dirs"], ["/opt/skills1", "/opt/skills2"])
 
+    def test_comma_style_list_with_bracket_comma_terminator(self):
+        config_path = os.path.join(self.tmpdir, "config.conf")
+        with open(config_path, "w") as f:
+            f.write("skills_dir = [\n")
+            f.write("    /opt/skills1,\n")
+            f.write("    /opt/skills2,\n")
+            f.write("],\n")
+
+        config = load_config(Path(config_path))
+        self.assertEqual(config["skills_dirs"], ["/opt/skills1", "/opt/skills2"])
+
+    def test_comma_style_lists_do_not_swallow_next_header(self):
+        config_path = os.path.join(self.tmpdir, "config.conf")
+        with open(config_path, "w") as f:
+            f.write("skills_dir = [\n")
+            f.write("    /a\n")
+            f.write("],\n")
+            f.write("skills_dir = [\n")
+            f.write("    /b\n")
+            f.write("]\n")
+
+        config = load_config(Path(config_path))
+        self.assertEqual(config["skills_dirs"], ["/a", "/b"])
+
     def test_empty_list_is_valid(self):
         config_path = Path(self.tmpdir) / "config.conf"
         with open(config_path, "w") as f:
