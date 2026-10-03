@@ -385,9 +385,19 @@ impl GenAIBuilder {
     /// enrichment (`GenAIBuilder::extract_sse_enrichment`) so both persist
     /// identical, deserializable `output_messages` — content, reasoning, and
     /// index-merged tool-call deltas alike.
+    ///
+    /// Anthropic streams carry no `choices` array at all, so when none of the
+    /// chunks is OpenAI-shaped the Anthropic aggregation below runs instead —
+    /// the live path reconstructs Anthropic content through the analyzer's
+    /// message parser, but the drain path has only this merger.
     pub(super) fn merge_sse_chunks(
         chunks: &[serde_json::Value],
     ) -> (Vec<MessagePart>, Option<String>) {
+        if !chunks.iter().any(|c| c.get("choices").is_some()) {
+            if let Some(merged) = Self::merge_anthropic_sse_chunks(chunks) {
+                return merged;
+            }
+        }
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
         let mut finish_reason: Option<String> = None;
@@ -485,6 +495,160 @@ impl GenAIBuilder {
         }
 
         (parts, finish_reason)
+    }
+
+    /// Aggregate Anthropic-protocol SSE chunks into parts.
+    ///
+    /// Anthropic streams usage and content in separate events (`message_start`
+    /// carries input tokens, `message_delta` the output tokens and
+    /// `stop_reason`), and the content itself arrives as `content_block_start`
+    /// plus `content_block_delta` events addressed by a wire-supplied `index`.
+    /// The live path reconstructs this through the analyzer's message parser
+    /// (`ParsedApiMessage::AnthropicMessage`), but the dead-pid/flush drain
+    /// path persists through `extract_sse_enrichment` → `merge_sse_chunks`,
+    /// which understood only OpenAI `choices[].delta` — a drained Anthropic
+    /// stream therefore lost its entire output (`output_messages = None`)
+    /// while the same stream captured live kept it.
+    ///
+    /// Mirrors the analyzer's aggregation: text deltas → one Text part per
+    /// block, thinking deltas → Reasoning, tool_use blocks → ToolCall with the
+    /// concatenated `input_json_delta` fragments, all in block-index order.
+    /// Block indices are capped like `MAX_TOOL_CALL_SLOTS` so a hostile index
+    /// cannot turn one JSON field into an unbounded map. Returns `None` when
+    /// no Anthropic event shape is present (caller falls back).
+    pub(super) fn merge_anthropic_sse_chunks(
+        chunks: &[serde_json::Value],
+    ) -> Option<(Vec<MessagePart>, Option<String>)> {
+        enum Block {
+            Text(String),
+            Thinking(String),
+            ToolUse {
+                id: String,
+                name: String,
+                args_json: String,
+            },
+        }
+
+        let mut blocks: std::collections::BTreeMap<u64, Block> = std::collections::BTreeMap::new();
+        let mut finish_reason: Option<String> = None;
+        let mut saw_anthropic_event = false;
+
+        for chunk in chunks {
+            let event_type = chunk.get("type").and_then(|v| v.as_str());
+            match event_type {
+                Some("content_block_start") => {
+                    saw_anthropic_event = true;
+                    let Some(index) = chunk.get("index").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    if index >= MAX_TOOL_CALL_SLOTS {
+                        continue;
+                    }
+                    let Some(content_block) = chunk.get("content_block") else {
+                        continue;
+                    };
+                    let block = match content_block.get("type").and_then(|v| v.as_str()) {
+                        Some("tool_use") => Block::ToolUse {
+                            id: content_block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: content_block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            args_json: String::new(),
+                        },
+                        Some("thinking") => Block::Thinking(String::new()),
+                        // Text and any future block kind default to a text
+                        // accumulator; unknown deltas are then ignored.
+                        _ => Block::Text(String::new()),
+                    };
+                    blocks.insert(index, block);
+                }
+                Some("content_block_delta") => {
+                    saw_anthropic_event = true;
+                    let Some(index) = chunk.get("index").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    let Some(delta) = chunk.get("delta") else {
+                        continue;
+                    };
+                    match delta.get("type").and_then(|v| v.as_str()) {
+                        Some("text_delta") => {
+                            if let (Some(text), Some(Block::Text(buf))) = (
+                                delta.get("text").and_then(|v| v.as_str()),
+                                blocks.get_mut(&index),
+                            ) {
+                                buf.push_str(text);
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let (Some(text), Some(Block::Thinking(buf))) = (
+                                delta.get("thinking").and_then(|v| v.as_str()),
+                                blocks.get_mut(&index),
+                            ) {
+                                buf.push_str(text);
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            if let (Some(fragment), Some(Block::ToolUse { args_json, .. })) = (
+                                delta.get("partial_json").and_then(|v| v.as_str()),
+                                blocks.get_mut(&index),
+                            ) {
+                                args_json.push_str(fragment);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some("message_delta") => {
+                    saw_anthropic_event = true;
+                    if let Some(stop) = chunk.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                    {
+                        finish_reason = Some(stop.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_anthropic_event {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        for block in blocks.into_values() {
+            match block {
+                Block::Text(text) if !text.is_empty() => {
+                    parts.push(MessagePart::Text { content: text });
+                }
+                Block::Thinking(thinking) if !thinking.is_empty() => {
+                    parts.push(MessagePart::Reasoning { content: thinking });
+                }
+                Block::ToolUse {
+                    id,
+                    name,
+                    args_json,
+                } => {
+                    let arguments = if args_json.trim().is_empty() {
+                        None
+                    } else {
+                        serde_json::from_str(&args_json).ok()
+                    };
+                    parts.push(MessagePart::ToolCall {
+                        id: if id.is_empty() { None } else { Some(id) },
+                        name,
+                        arguments,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Some((parts, finish_reason))
     }
 
     /// Reconstruct assistant output from the DashScope/Bailian **native**
@@ -840,6 +1004,60 @@ mod tests {
             matches!(&parts[0], MessagePart::Reasoning { content } if content == "thinking...")
         );
         assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
+    }
+
+    /// Anthropic SSE bodies carry no `choices` array, so the merger must
+    /// aggregate `content_block_start`/`content_block_delta` events instead of
+    /// yielding no parts at all. This is the same merger the dead-pid drain
+    /// path persists through, so a captured Anthropic body reconstructs its
+    /// blocks on both paths.
+    #[test]
+    fn test_extract_parts_from_sse_body_anthropic_blocks() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}},
+            {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Paris\"}"}},
+            {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":42}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "Hello"
+        ));
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments, &Some(serde_json::json!({"city": "Paris"})));
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert_eq!(finish.as_deref(), Some("tool_use"));
+    }
+
+    /// Mixed protocol bodies cannot happen (one stream is one protocol), but a
+    /// body whose chunks have `choices` must keep taking the OpenAI walk even
+    /// when an Anthropic-shaped event sneaks in, and an Anthropic stream with
+    /// no content blocks must degrade to today's behavior (no parts) rather
+    /// than inventing any.
+    #[test]
+    fn test_merge_sse_chunks_anthropic_without_blocks_stays_empty() {
+        let chunks: Vec<serde_json::Value> = vec![
+            serde_json::json!({"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}),
+            serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+        ];
+        let (parts, finish) = GenAIBuilder::merge_sse_chunks(&chunks);
+        assert!(parts.is_empty(), "no content blocks means no parts");
+        assert_eq!(finish.as_deref(), Some("end_turn"));
     }
 
     #[test]

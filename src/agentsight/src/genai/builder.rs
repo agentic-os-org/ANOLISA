@@ -515,6 +515,19 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                // Anthropic nests the model inside message_start's message
+                // object; none of its events carries a top-level "model" key,
+                // so without this lookup a drained Anthropic stream records
+                // no model from the response at all.
+                if model.is_none()
+                    && json.get("type").and_then(|v| v.as_str()) == Some("message_start")
+                {
+                    if let Some(m) = json.pointer("/message/model").and_then(|v| v.as_str()) {
+                        if !m.is_empty() {
+                            model = Some(m.to_string());
+                        }
+                    }
+                }
                 // Extract response id (trace_id) from first chunk that has it
                 if trace_id.is_none() {
                     if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
@@ -814,6 +827,124 @@ mod tests {
             "input_tokens from message_start must survive the message_delta"
         );
         assert_eq!(enrichment.output_tokens, Some(42));
+    }
+
+    /// A drained Anthropic stream must keep its output content and model, not
+    /// just the usage. The live path reconstructs Anthropic content through the
+    /// analyzer's message parser, but the drain path has only
+    /// `extract_sse_enrichment`, whose merger previously understood OpenAI
+    /// `choices[].delta` alone — so the persisted row lost `output_messages`
+    /// (and the model, which Anthropic nests inside `message_start.message`).
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_stream_keeps_content() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo world"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Paris\"}"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":42}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+
+        // The model is nested in message_start.message, not top-level.
+        assert_eq!(
+            enrichment.model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "model must be read from message_start.message.model"
+        );
+
+        let json = enrichment
+            .output_messages
+            .expect("drained anthropic output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(parsed[0].parts.len(), 2, "text part + tool_use part");
+        match &parsed[0].parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello world"),
+            other => panic!("expected Text part, got {other:?}"),
+        }
+        match &parsed[0].parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments,
+                    &Some(serde_json::json!({"city": "Paris"})),
+                    "input_json_delta fragments must concatenate into the arguments"
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    /// A thinking block must survive the drain path too, in block order before
+    /// the text that follows it.
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_stream_keeps_reasoning() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pondering"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+        let json = enrichment
+            .output_messages
+            .expect("drained anthropic output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed[0].parts.len(), 2);
+        assert!(matches!(
+            &parsed[0].parts[0],
+            MessagePart::Reasoning { content } if content == "pondering"
+        ));
+        assert!(matches!(
+            &parsed[0].parts[1],
+            MessagePart::Text { content } if content == "answer"
+        ));
     }
 
     #[test]
