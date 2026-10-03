@@ -165,11 +165,22 @@ def main() -> None:
     num_cells = parse_kv(args.values)
     formula_cells = parse_kv(args.formula)
 
-    # Step 1: Shift rows down using xlsx_shift_rows.py
+    # Step 1: Resolve the worksheet and capture reference styles from the
+    # PRE-SHIFT tree. Reading them after the shift would attribute the caller's
+    # row number to whatever the shift moved into that position: with
+    # --at 3 --copy-style-from 4, row 4 after the shift holds what used to be
+    # row 3, and the new row would silently get row 3's styles.
+    ws_path = find_ws_path(args.work_dir, args.sheet)
+    ref_styles = {}
+    if args.copy_style_from is not None:
+        ref_styles = get_row_styles(ET.parse(ws_path), args.copy_style_from)
+        print(f"Step 1: Copied styles from row {args.copy_style_from}: {ref_styles}")
+
+    # Step 2: Shift rows down using xlsx_shift_rows.py
     script_dir = os.path.dirname(os.path.abspath(__file__))
     shift_script = os.path.join(script_dir, "xlsx_shift_rows.py")
 
-    print(f"Step 1: Shifting rows >= {at} down by 1...")
+    print(f"Step 2: Shifting rows >= {at} down by 1...")
     result = subprocess.run(
         [sys.executable, shift_script, args.work_dir, "insert", str(at), "1"],
         capture_output=True, text=True,
@@ -178,15 +189,6 @@ def main() -> None:
         print(f"ERROR: shift_rows failed:\n{result.stderr}")
         sys.exit(1)
     print(result.stdout)
-
-    # Step 2: Resolve worksheet path and get reference styles
-    ws_path = find_ws_path(args.work_dir, args.sheet)
-    ws_tree = ET.parse(ws_path)
-
-    ref_styles = {}
-    if args.copy_style_from is not None:
-        ref_styles = get_row_styles(ws_tree, args.copy_style_from)
-        print(f"Step 2: Copied styles from row {args.copy_style_from}: {ref_styles}")
 
     # Step 3: Add text values to sharedStrings
     text_indices = {}
