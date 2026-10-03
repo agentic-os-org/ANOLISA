@@ -1,4 +1,4 @@
-use super::support::terminal_screen::TerminalSession;
+use super::support::terminal_screen::{zsh_available_in_screen_path, TerminalSession};
 
 fn startup(shell: &str) {
     let rc = if shell == "bash" { ".bashrc" } else { ".zshrc" };
@@ -109,6 +109,10 @@ fn bash_non_login_startup_sources_user_environment_once() {
 
 #[test]
 fn zsh_non_login_startup_sources_user_environment_once() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     startup("zsh");
 }
 
@@ -119,6 +123,10 @@ fn bash_ctrl_u_and_paste_wait_for_explicit_enter() {
 
 #[test]
 fn zsh_ctrl_u_and_paste_wait_for_explicit_enter() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     editing("zsh");
 }
 
@@ -129,6 +137,10 @@ fn bash_nonzero_exit_restores_parent_terminal() {
 
 #[test]
 fn zsh_nonzero_exit_restores_parent_terminal() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     exit("zsh", b"exit 23\n", 23);
 }
 
@@ -139,5 +151,9 @@ fn bash_eof_restores_parent_terminal() {
 
 #[test]
 fn zsh_eof_restores_parent_terminal() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     exit("zsh", b"\x04", 0);
 }

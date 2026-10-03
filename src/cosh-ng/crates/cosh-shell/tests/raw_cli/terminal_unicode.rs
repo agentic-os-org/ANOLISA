@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use super::support::terminal_screen::TerminalSession;
+use super::support::terminal_screen::{zsh_available_in_screen_path, TerminalSession};
 
 const COLS: u16 = 24;
 const ROWS: u16 = 24;
@@ -212,20 +212,36 @@ fn raw_cli_bash_enhanced_unicode_cells_cursor_and_execution() {
 
 #[test]
 fn raw_cli_zsh_native_unicode_cells_cursor_and_execution() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     assert_unicode_line_editing("zsh", "native", false);
 }
 
 #[test]
 fn raw_cli_zsh_enhanced_unicode_cells_cursor_and_execution() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     assert_unicode_line_editing("zsh", "enhanced", false);
 }
 
 #[test]
 fn raw_cli_zsh_native_combining_cells_cursor_and_execution() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     assert_unicode_line_editing("zsh", "native", true);
 }
 
 #[test]
 fn raw_cli_zsh_enhanced_combining_cells_cursor_and_execution() {
+    if !zsh_available_in_screen_path() {
+        eprintln!("SKIP: zsh is unavailable in the pinned screen PATH");
+        return;
+    }
     assert_unicode_line_editing("zsh", "enhanced", true);
 }
