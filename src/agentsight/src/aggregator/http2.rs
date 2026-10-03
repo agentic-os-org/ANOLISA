@@ -344,26 +344,54 @@ impl Http2Stream {
         result
     }
 
+    /// One response header value, preferring the stateful HPACK decode.
+    ///
+    /// The stateless fallback resolves static-table entries only, so a header
+    /// the peer added to the dynamic table and referenced by index on a later
+    /// response of the same connection comes back valueless there.
+    fn response_header(&self, name: &str) -> Option<String> {
+        if let Some(ref headers) = self.decoded_response_headers {
+            if let Some((_, value)) = headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            {
+                return Some(value.clone());
+            }
+        }
+        self.response_headers.as_ref().and_then(|h| {
+            h.decode_headers_stateless()
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .and_then(|(_, value)| value)
+        })
+    }
+
+    /// One request header value, preferring the stateful HPACK decode.
+    fn request_header(&self, name: &str) -> Option<String> {
+        if let Some(ref headers) = self.decoded_request_headers {
+            if let Some((_, value)) = headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            {
+                return Some(value.clone());
+            }
+        }
+        self.request_headers.as_ref().and_then(|h| {
+            h.decode_headers_stateless()
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .and_then(|(_, value)| value)
+        })
+    }
+
     /// Content-Encoding header from response headers (e.g. "gzip", "deflate")
     pub fn content_encoding(&self) -> Option<String> {
-        self.response_headers.as_ref().and_then(|h| {
-            let headers = h.decode_headers_stateless();
-            headers
-                .iter()
-                .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
-                .and_then(|(_, value)| value.clone())
-        })
+        self.response_header("content-encoding")
     }
 
     /// Content-Encoding header from request headers
     pub fn request_content_encoding(&self) -> Option<String> {
-        self.request_headers.as_ref().and_then(|h| {
-            let headers = h.decode_headers_stateless();
-            headers
-                .iter()
-                .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
-                .and_then(|(_, value)| value.clone())
-        })
+        self.request_header("content-encoding")
     }
 
     /// Get request body as decompressed string (concatenates all data frames)
@@ -573,8 +601,16 @@ impl Http2Stream {
             .unwrap_or(0)
     }
 
-    /// Get request headers as JSON string
+    /// Get request headers as JSON string.
+    ///
+    /// Prefers the stateful HPACK decode (the stateless one resolves static
+    /// table entries only, dropping headers referenced through the dynamic
+    /// table).
     pub fn request_headers_json(&self) -> String {
+        if let Some(ref headers) = self.decoded_request_headers {
+            let decoded = headers.iter().cloned().collect::<std::collections::HashMap<_, _>>();
+            return serde_json::to_string(&decoded).unwrap_or_default();
+        }
         if let Some(ref headers) = self.request_headers {
             let decoded = headers
                 .decode_headers_stateless()
@@ -587,8 +623,14 @@ impl Http2Stream {
         }
     }
 
-    /// Get response headers as JSON string
+    /// Get response headers as JSON string.
+    ///
+    /// Prefers the stateful HPACK decode, like [`Self::request_headers_json`].
     pub fn response_headers_json(&self) -> String {
+        if let Some(ref headers) = self.decoded_response_headers {
+            let decoded = headers.iter().cloned().collect::<std::collections::HashMap<_, _>>();
+            return serde_json::to_string(&decoded).unwrap_or_default();
+        }
         if let Some(ref headers) = self.response_headers {
             let decoded = headers
                 .decode_headers_stateless()
@@ -1961,6 +2003,65 @@ mod tests {
         assert_eq!(
             hdrs.iter().find(|(n, _)| n == "authorization").unwrap().1,
             "Bearer sk-test123"
+        );
+    }
+
+    #[test]
+    fn content_encoding_prefers_the_stateful_headers() {
+        // A keep-alive connection sends `content-encoding: gzip` literally on
+        // the first response and then references the HPACK dynamic entry: the
+        // stateful decoder resolves it, the stateless one (static table only)
+        // cannot. `content_encoding()` and the header-JSON accessors only
+        // looked at the stateless decode, unlike method/path/status_code.
+        //
+        // 0x5A = literal with incremental indexing, static name 26
+        // (content-encoding); 0xBE = indexed field, dynamic index 62, the entry
+        // that literal just inserted.
+        let first: &[u8] = &[0x5A, 0x04, b'g', b'z', b'i', b'p'];
+        let second: &[u8] = &[0xBE];
+
+        let connection_id = ConnectionId {
+            pid: 700,
+            ssl_ptr: 0x7000,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let decoded_first = aggregator
+            .decode_header_block(connection_id, StreamDirection::Response, first)
+            .expect("the literal adds the dynamic entry");
+        assert_eq!(
+            decoded_first,
+            vec![("content-encoding".to_string(), "gzip".to_string())]
+        );
+        let decoded = aggregator
+            .decode_header_block(connection_id, StreamDirection::Response, second)
+            .expect("the stateful decoder resolves the dynamic reference");
+        assert_eq!(
+            decoded
+                .iter()
+                .find(|(name, _)| name == "content-encoding")
+                .map(|(_, value)| value.as_str()),
+            Some("gzip")
+        );
+
+        let event = create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 1);
+        let frame = create_test_frame(1, 0x01, 0x04, second.to_vec(), event);
+        assert!(
+            frame
+                .decode_headers_stateless()
+                .iter()
+                .all(|(_, value)| value.is_none()),
+            "the stateless decoder cannot resolve the dynamic reference"
+        );
+
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.response_headers = Some(frame);
+        stream.decoded_response_headers = Some(decoded);
+
+        assert_eq!(stream.content_encoding().as_deref(), Some("gzip"));
+        assert!(
+            stream.response_headers_json().contains("content-encoding"),
+            "headers JSON must not drop the dynamic-table header: {}",
+            stream.response_headers_json()
         );
     }
 
