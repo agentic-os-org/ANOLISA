@@ -16,7 +16,6 @@
 """
 
 import json
-import re
 import shlex
 import sys
 from pathlib import PurePath
@@ -31,6 +30,61 @@ from agent_sec_cli.sandbox.rules import (
     SAFE_CONDITIONAL,
     SHELL_UNSAFE_OPERATORS,
 )
+
+# Shell 语句分隔符：换行、后台 &、顺序 ; 、管道 | 以及 && / ||。
+# 与 SHELL_UNSAFE_OPERATORS（直接放弃解析）不同，这些分隔符只是把
+# 脚本切成多条命令，逐条套用四层分类。
+_SEPARATORS = ("&&", "||", ";", "|", "&", "\n")
+
+
+def _split_shell_statements(script: str) -> List[str]:
+    """按 shell 语句分隔符切分脚本，引号内的分隔符视为普通字符。
+
+    仅在引号外切分：``echo 'a;b'`` 里的 ``;`` 是数据不是语法，切了会让
+    shlex 解析失败、把无害命令误降级。反斜杠转义遵循 shlex 规则（单引号
+    内不转义，双引号内转义下一字符）。
+    """
+    statements: List[str] = []
+    current: List[str] = []
+    quote: Optional[str] = None
+    escaped = False
+    i = 0
+    n = len(script)
+    while i < n:
+        ch = script[i]
+        if escaped:
+            current.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if quote:
+            current.append(ch)
+            if ch == "\\" and quote == '"':
+                escaped = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            current.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+        two = script[i : i + 2]
+        if two in ("&&", "||") or ch in _SEPARATORS:
+            statements.append("".join(current))
+            current = []
+            i += 2 if two in ("&&", "||") else 1
+            continue
+        current.append(ch)
+        i += 1
+    statements.append("".join(current))
+    return [s for s in (seg.strip() for seg in statements) if s]
 
 
 class RuleEngine:
@@ -150,13 +204,11 @@ class CommandClassifier:
             return None
 
         result = []
-        for s in re.split(r"\s*(?:&&|\|\||;|\|)\s*", script):
-            s = s.strip()
-            if s:
-                try:
-                    result.append(shlex.split(s))
-                except ValueError:
-                    return None
+        for s in _split_shell_statements(script):
+            try:
+                result.append(shlex.split(s))
+            except ValueError:
+                return None
         return result or None
 
     def _check_rules(
