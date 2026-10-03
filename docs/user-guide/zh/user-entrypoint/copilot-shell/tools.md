@@ -54,12 +54,12 @@ Copilot Shell 提供以下核心工具：
 
 ### 白名单
 
-设置特定工具免确认执行：
+设置特定工具免确认执行。条目使用工具注册名，例如 `read_file`、`list_directory`、`grep_search`、`run_shell_command`：
 
 ```json
 {
   "tools": {
-    "allowed": ["ReadFile", "ListDir", "GrepSearch"]
+    "allowed": ["read_file", "list_directory", "grep_search"]
   }
 }
 ```
@@ -73,7 +73,7 @@ Copilot Shell 提供以下核心工具：
 ```json
 {
   "tools": {
-    "exclude": ["WebSearch"]
+    "exclude": ["web_search"]
   }
 }
 ```
