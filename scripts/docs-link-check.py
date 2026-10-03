@@ -28,8 +28,10 @@ def repo_root() -> Path:
 
 def files_to_check(root: Path) -> list[Path]:
     # Scope: the published docs tree, root-level docs, and component README
-    # entry points. Deep in-tree docs (design notes, SKILL.md assets) are
-    # intentionally excluded to keep the gate focused on reader-facing paths.
+    # entry points — including the components relocated outside src/ (under
+    # deprecated/ and distribution/). Deep in-tree docs (design notes,
+    # SKILL.md assets) are intentionally excluded to keep the gate focused
+    # on reader-facing paths.
     out = subprocess.run(
         [
             "git",
@@ -39,6 +41,8 @@ def files_to_check(root: Path) -> list[Path]:
             ":(glob)*.md",
             ":(glob)src/*/README*.md",
             ":(glob)src/*/python/*/README*.md",
+            ":(glob)deprecated/*/README*.md",
+            ":(glob)distribution/*/README*.md",
         ],
         capture_output=True,
         text=True,

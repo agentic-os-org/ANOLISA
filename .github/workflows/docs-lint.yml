@@ -17,6 +17,7 @@ on:
       - 'scripts/docs-lint.sh'
       - '.github/docs-lint-exemptions.txt'
       - 'scripts/docs-link-check.py'
+      - 'scripts/test_docs_link_check.py'
       - '.github/workflows/docs-lint.yml'
 
 permissions:
@@ -34,3 +35,6 @@ jobs:
 
       - name: Relative link check
         run: python3 scripts/docs-link-check.py
+
+      - name: Regression test link-check scope and rules
+        run: python3 -m unittest discover -s scripts -p 'test_docs_link_check.py' -v
