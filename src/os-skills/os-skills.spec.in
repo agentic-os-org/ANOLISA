@@ -31,11 +31,28 @@ install -p -m 0644 component.toml \
     %{buildroot}%{_datadir}/anolisa/components/os-skills/component.toml
 
 # Find each skill directory (identified by containing SKILL.md) and copy it
-# flattened into the target skills directory.
+# flattened into the target skills directory. Fail the build on the first
+# copy failure: the loop's exit status is only the LAST cp's, so without the
+# per-copy guard a mid-loop failure (ENOSPC, permission, read-only buildroot)
+# would exit 0 and ship a partial RPM (same fix shape as the Makefile install
+# recipe, PR #3622).
+set -eu
 find . -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
     skill_dir=$(dirname "$skillmd")
-    cp -rp "$skill_dir" %{buildroot}%{_datadir}/anolisa/skills/
+    cp -rp "$skill_dir" %{buildroot}%{_datadir}/anolisa/skills/ \
+        || { echo "ERROR: os-skills: failed to copy skill: $skill_dir" >&2; exit 1; }
 done
+
+# Post-count verification: every discovered skill must have landed in the
+# buildroot before %files packages it (also catches basename collisions that
+# cp -rp would otherwise silently overwrite).
+expected=$(find . -name 'SKILL.md' | wc -l)
+installed=$(find %{buildroot}%{_datadir}/anolisa/skills -mindepth 2 -maxdepth 2 \
+    -name 'SKILL.md' | wc -l)
+if [ "$installed" -ne "$expected" ]; then
+    echo "ERROR: os-skills: $expected skills discovered but only $installed installed" >&2
+    exit 1
+fi
 
 # Set permissions
 find %{buildroot}%{_datadir}/anolisa/skills -type d -exec chmod 0755 {} +
