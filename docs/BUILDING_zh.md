@@ -31,7 +31,7 @@ cd anolisa
 | tokenless | [`src/tokenless`](../src/tokenless/README_zh.md) | Rust Token 与命令输出优化，源码构建面向 Linux，macOS 使用从 Linux 交叉编译的 npm 制品 |
 | agent-memory（`memory`） | [`src/agent-memory`](../src/agent-memory/README_zh.md) | Rust MCP memory server，Linux |
 | os-skills（`skills`） | [`src/os-skills`](../src/os-skills/README_zh.md) | 静态 Skill 定义和脚本，具体平台取决于各 Skill 的声明 |
-| anolisa | [`distribution/anolisa`](../distribution/anolisa/README_zh.md) | Rust 组件生命周期 CLI，支持 Linux 和 macOS arm64 |
+| anolisa | [`distribution/anolisa`](../distribution/anolisa/README_zh.md) | Rust 组件生命周期 CLI，支持 Linux（x86_64/aarch64）与 macOS 11+（arm64/x86_64，受限） |
 | SkillFS（`skillfs`） | [`src/skillfs`](../src/skillfs/README_zh.md) | Rust FUSE Skill 文件系统，Linux |
 | ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README_zh.md) | Rust workspace checkpoint daemon 和 TypeScript adapter，作为 Linux system service 运行 |
 | ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel tuning engine，Linux |

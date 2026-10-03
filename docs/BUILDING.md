@@ -35,7 +35,7 @@ The `src/` tree currently contains these twelve components:
 | tokenless | [`src/tokenless`](../src/tokenless/README.md) | Rust token and command-output optimization; Linux source build, with cross-compiled npm artifacts for macOS |
 | agent-memory (`memory`) | [`src/agent-memory`](../src/agent-memory/README.md) | Rust MCP memory server; Linux |
 | os-skills (`skills`) | [`src/os-skills`](../src/os-skills/README.md) | Static skill definitions and scripts; all platforms supported by each skill |
-| anolisa | [`distribution/anolisa`](../distribution/anolisa/README.md) | Rust component lifecycle CLI; Linux and macOS arm64 |
+| anolisa | [`distribution/anolisa`](../distribution/anolisa/README.md) | Rust component lifecycle CLI; Linux (x86_64/aarch64), macOS 11+ (arm64/x86_64, limited) |
 | SkillFS (`skillfs`) | [`src/skillfs`](../src/skillfs/README.md) | Rust FUSE skill filesystem; Linux |
 | ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README.md) | Rust workspace checkpoint daemon and TypeScript adapters; Linux system service |
 | ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel-tuning engine; Linux |
