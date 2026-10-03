@@ -511,8 +511,27 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
 
         let npm_run = "npm run ";
         let pm_run = format!("{} run ", node_pm);
+        // Position-aware rewrite, mirroring the virtualenv block above.
+        // "pnpm run " contains "npm run " at offset 1, so a blanket replace
+        // corrupts natively-pnpm content into "ppnpm run "; a line-wide
+        // guard would over-correct and suppress genuine conversions on
+        // mixed lines ("pnpm run lint && npm run build"). Only an
+        // occurrence at a command position is a real npm invocation.
         if result.contains(npm_run) {
-            result = result.replace(npm_run, &pm_run);
+            let mut out = String::with_capacity(result.len());
+            let mut copied = 0; // bytes of `result` already emitted
+            let mut search = 0; // search offset within `result`
+            while let Some(rel) = result[search..].find(npm_run) {
+                let abs = search + rel;
+                if is_command_position(&result, abs) {
+                    out.push_str(&result[copied..abs]);
+                    out.push_str(&pm_run);
+                    copied = abs + npm_run.len();
+                }
+                search = abs + npm_run.len();
+            }
+            out.push_str(&result[copied..]);
+            result = out;
         }
 
         let npm_test = "npm test";
@@ -874,6 +893,44 @@ mod tests {
         assert!(result.contains("pnpm install"));
         assert!(result.contains("pnpm run build"));
         assert!(result.contains("pnpm test"));
+    }
+
+    #[test]
+    fn test_heuristic_pnpm_run_not_double_prefixed() {
+        let env = env_node_pnpm();
+        // "pnpm run " contains "npm run " at offset 1: without the
+        // sibling-style guard, already-normalized or natively pnpm content
+        // is corrupted into "ppnpm run build" on every (re)compile — the
+        // FUSE mount would serve broken commands to agents.
+        let content = "pnpm install\npnpm run build\npnpm test\n";
+        assert_eq!(compile(content, &env), content);
+
+        // Normalization must be a fixed point: compiling the output of a
+        // first pass changes nothing.
+        let once = compile("npm install\nnpm run build\nnpm test\n", &env);
+        assert_eq!(compile(&once, &env), once);
+    }
+
+    #[test]
+    fn test_heuristic_run_rewrite_is_position_aware() {
+        let env = env_node_pnpm();
+        // A genuine `npm run` later in a line that already carries the
+        // target form must still convert — a line-wide guard suppressed it.
+        let mixed = compile("pnpm run lint && npm run build\n", &env);
+        assert_eq!(mixed, "pnpm run lint && pnpm run build\n");
+        // Target forms before AND after a genuine npm run.
+        let wrapped = compile("pnpm install && npm run build && pnpm test\n", &env);
+        assert!(
+            wrapped.contains("&& pnpm run build &&"),
+            "genuine npm run must convert between pnpm forms: {wrapped}"
+        );
+        // `npm run` in argument position is left alone — precision the
+        // blanket replace never had.
+        let arg = compile("echo npm run build\n", &env);
+        assert_eq!(arg, "echo npm run build\n");
+        // Fixed point over the converted outputs.
+        assert_eq!(compile(&mixed, &env), mixed);
+        assert_eq!(compile(&wrapped, &env), wrapped);
     }
 
     #[test]
