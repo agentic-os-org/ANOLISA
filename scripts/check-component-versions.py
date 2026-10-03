@@ -67,18 +67,33 @@ def read_text(path: str) -> str:
 
 def read_toml_version(path: str) -> str:
     text = read_text(path)
-    if tomllib is not None:
-        try:
-            data = tomllib.loads(text)
-            version = data.get("version")
+    if tomllib is None:
+        # Python < 3.11 has no tomllib: best-effort line-regex fallback.
+        match = VERSION_RE.search(text)
+        if not match:
+            raise ValueError(f"no version field in {path} (component: {path.rsplit('/', 1)[0]})")
+        return match.group(1)
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"malformed TOML in {path}: {error}") from None
+    # Conventional version locations only: Cargo sources keep it in
+    # [package] or [workspace.package], component manifests in [component];
+    # a bare top-level key is accepted for completeness. Dependency tables
+    # are deliberately not consulted.
+    workspace = data.get("workspace")
+    tables = (
+        data.get("package"),
+        workspace.get("package") if isinstance(workspace, dict) else None,
+        data.get("component"),
+        data,
+    )
+    for table in tables:
+        if isinstance(table, dict):
+            version = table.get("version")
             if isinstance(version, str):
                 return version
-        except tomllib.TOMLDecodeError:
-            pass
-    match = VERSION_RE.search(text)
-    if not match:
-        raise ValueError(f"no version field in {path} (component: {path.rsplit('/', 1)[0]})")
-    return match.group(1)
+    raise ValueError(f"no version field in {path} (component: {path.rsplit('/', 1)[0]})")
 
 
 def read_json_version(path: str) -> str:

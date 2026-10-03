@@ -230,6 +230,9 @@ jobs:
       - name: Check component version metadata
         run: python3 scripts/check-component-versions.py
 
+      - name: Regression test TOML version parsing
+        run: python3 -m unittest discover -s scripts -p 'test_check_component_versions.py' -v
+
       - name: Regression test tokenless catalog version mismatch detection
         run: bash tests/test-check-component-versions.sh
 
