@@ -136,6 +136,47 @@ fn cmd_check(cat: Option<String>, conservative: bool) -> Result<i32> {
     Ok(code)
 }
 
+/// Why `ktuner tune` exited without applying anything. Pure so the
+/// status/exit-code decision is unit-testable without touching the system.
+///
+/// `in_scope` is the recommendation list after the category/conservative
+/// filters but BEFORE the writable/runtime-dangerous filter; `applicable` is
+/// the number that survives it. Returns `None` when tune should proceed (at
+/// least one applicable recommendation).
+fn tune_short_circuit(
+    in_scope: &[Recommendation],
+    applicable: usize,
+) -> Option<(serde_json::Value, i32)> {
+    if applicable > 0 {
+        return None;
+    }
+    if in_scope.is_empty() {
+        // Genuinely nothing to recommend in scope — unchanged output and code.
+        return Some((json!({ "status": "optimal", "applied": 0 }), 0));
+    }
+    // Recommendations exist but every one was filtered out before any write.
+    // Reporting "optimal" here is false: `check` exits 1 on the same host.
+    // A rec that is both unwritable and runtime-dangerous counts only as
+    // unwritable, so the two counts always add up to in_scope.len().
+    let unwritable = in_scope.iter().filter(|r| !r.writable).count();
+    let runtime_dangerous = in_scope
+        .iter()
+        .filter(|r| r.writable && category::is_runtime_dangerous(&r.param))
+        .count();
+    Some((
+        json!({
+            "status": "blocked",
+            "applied": 0,
+            "recommendations": in_scope.len(),
+            "blocked_unwritable": unwritable,
+            "blocked_runtime_dangerous": runtime_dangerous,
+        }),
+        // Mirror check's exit-1 "has recommendations" convention: the system
+        // is not optimal, tune simply cannot act on it in this environment.
+        1,
+    ))
+}
+
 fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i32> {
     if !dry_run {
         let is_root = unsafe { libc::geteuid() } == 0;
@@ -156,13 +197,21 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
     if conservative {
         recs.retain(|r| r.confidence == rules::Confidence::High);
     }
-    recs.retain(|r| r.writable && !category::is_runtime_dangerous(&r.param));
-
-    if recs.is_empty() {
-        let output = json!({ "status": "optimal", "applied": 0 });
+    // Keep the pre-filter set so the early exit can distinguish "nothing to
+    // recommend" from "recommended, but nothing applicable here" (e.g. root
+    // in a container with read-only /proc/sys, where every rec is refreshed
+    // as unwritable) — reporting optimal in the latter case contradicts
+    // check's exit 1 on the same host.
+    let applicable: Vec<Recommendation> = recs
+        .iter()
+        .filter(|r| r.writable && !category::is_runtime_dangerous(&r.param))
+        .cloned()
+        .collect();
+    if let Some((output, code)) = tune_short_circuit(&recs, applicable.len()) {
         println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(0);
+        return Ok(code);
     }
+    let recs = applicable;
 
     if dry_run {
         let recs_json: Vec<serde_json::Value> = recs.iter().map(rec_json).collect();
@@ -303,6 +352,102 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn rec(param: &str, writable: bool) -> Recommendation {
+        Recommendation {
+            param: param.to_string(),
+            writable,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tune_short_circuit_optimal_when_nothing_recommended() {
+        // True optimal: no recommendations in scope at all — the output and
+        // exit code must stay byte-identical to today's.
+        let (output, code) = tune_short_circuit(&[], 0).expect("must short-circuit");
+        assert_eq!(code, 0);
+        assert_eq!(output, json!({ "status": "optimal", "applied": 0 }));
+    }
+
+    #[test]
+    fn tune_short_circuit_blocked_when_all_unwritable() {
+        // The read-only-/proc/sys container case: three recommendations exist,
+        // every one refreshed as unwritable, so tune cannot act — and must
+        // not claim the system is optimal while `check` exits 1.
+        let recs = vec![
+            rec("vm.swappiness", false),
+            rec("fs.file-max", false),
+            rec("net.core.somaxconn", false),
+        ];
+        let (output, code) = tune_short_circuit(&recs, 0).expect("must short-circuit when blocked");
+        assert_eq!(code, 1);
+        assert_eq!(
+            output,
+            json!({
+                "status": "blocked",
+                "applied": 0,
+                "recommendations": 3,
+                "blocked_unwritable": 3,
+                "blocked_runtime_dangerous": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn tune_short_circuit_blocked_when_only_rec_is_dangerous() {
+        // A host whose only recommendation is the runtime-dangerous
+        // vm.nr_hugepages: writable, but excluded from runtime writes.
+        let recs = vec![rec("vm.nr_hugepages", true)];
+        let (output, code) = tune_short_circuit(&recs, 0).expect("must short-circuit when blocked");
+        assert_eq!(code, 1);
+        assert_eq!(output["status"], json!("blocked"));
+        assert_eq!(output["blocked_runtime_dangerous"], json!(1));
+        assert_eq!(output["blocked_unwritable"], json!(0));
+    }
+
+    #[test]
+    fn tune_short_circuit_blocked_counts_partition_exactly() {
+        // 2 unwritable + 1 writable-but-dangerous: the counts must partition
+        // in_scope, and a rec that is BOTH unwritable and dangerous counts
+        // once, as unwritable.
+        let recs = vec![
+            rec("vm.swappiness", false),
+            rec("fs.file-max", false),
+            rec("vm.nr_hugepages", true),
+            rec("kernel.shmmax", false), // dangerous AND unwritable
+        ];
+        let (output, _) = tune_short_circuit(&recs, 0).expect("blocked");
+        assert_eq!(output["recommendations"], json!(4));
+        assert_eq!(output["blocked_unwritable"], json!(3));
+        assert_eq!(output["blocked_runtime_dangerous"], json!(1));
+        assert_eq!(
+            output["blocked_unwritable"].as_u64().unwrap()
+                + output["blocked_runtime_dangerous"].as_u64().unwrap(),
+            output["recommendations"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn tune_short_circuit_proceeds_when_anything_applicable() {
+        // The mixed case must NOT short-circuit: tune still applies what it
+        // can and reports per-parameter outcomes for the rest.
+        let recs = vec![
+            rec("vm.swappiness", false),
+            rec("fs.file-max", false),
+            rec("net.core.somaxconn", true),
+        ];
+        assert!(tune_short_circuit(&recs, 1).is_none());
+    }
+
+    #[test]
+    fn tune_short_circuit_empty_after_category_filter_is_optimal() {
+        // "blocked" only fires when recommendations exist IN SCOPE, so
+        // `--category net` on a net-clean host keeps today's optimal output.
+        let (output, code) = tune_short_circuit(&[], 0).expect("short-circuits");
+        assert_eq!(code, 0);
+        assert_eq!(output["status"], json!("optimal"));
+    }
 
     struct CurrentFile(PathBuf);
 

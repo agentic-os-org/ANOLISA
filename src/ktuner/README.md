@@ -36,7 +36,7 @@ All output goes to **stdout as JSON**. Errors go to **stderr as JSON**. No ANSI 
 | Code | Meaning |
 |------|---------|
 | 0    | Success (check: system already optimal; tune/fix/rollback: applied OK) |
-| 1    | check: has recommendations (not an error, system can be improved) |
+| 1    | check: has recommendations (not an error, system can be improved); tune: recommendations exist but none are applicable here (status "blocked", e.g. read-only /proc/sys in a container) |
 | 2    | Error (details in stderr JSON) |
 
 ### check output
