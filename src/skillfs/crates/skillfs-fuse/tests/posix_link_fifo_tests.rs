@@ -319,6 +319,85 @@ fn test_same_skill_hardlink_allowed() {
     );
 }
 
+#[test]
+fn test_hardlink_alias_rename_is_a_noop() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+    });
+    write_passthrough(&fx, "alpha", "src.txt", b"shared");
+
+    let src = fx.skill_path("alpha").join("src.txt");
+    let dst = fx.skill_path("alpha").join("link.txt");
+    std::fs::hard_link(&src, &dst).expect("hardlink same-skill regular file");
+
+    // Both names get distinct per-path FUSE inodes (SkillFS maps paths to
+    // inodes even for hard links); pin them before the rename.
+    let src_ino = std::fs::symlink_metadata(&src).expect("lstat src").ino();
+    let dst_ino = std::fs::symlink_metadata(&dst).expect("lstat dst").ino();
+
+    // POSIX: rename(a, b) where a and b are links to the same object is a
+    // successful no-op — both directory entries survive. The kernel's VFS
+    // short-circuits same-inode renames, so this pins the userspace-visible
+    // contract (both names readable, stable identities, content shared);
+    // the daemon-side recognition for the sequences that DO reach FUSE is
+    // `is_same_backing_object` in mutate.rs, unit-tested there with the
+    // same real-hardlink fixture shapes.
+    std::fs::rename(&src, &dst).expect("rename onto same-object hardlink");
+
+    for path in [&src, &dst] {
+        assert!(
+            std::fs::symlink_metadata(path).is_ok(),
+            "both names must survive the same-object rename: {}",
+            path.display()
+        );
+    }
+    // Identity survives: a fresh LOOKUP through each name must return the
+    // same FUSE inode it had before the no-op rename.
+    assert_eq!(
+        std::fs::symlink_metadata(&src)
+            .expect("lstat src after")
+            .ino(),
+        src_ino,
+        "src must keep its inode across a same-object rename"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&dst)
+            .expect("lstat dst after")
+            .ino(),
+        dst_ino,
+        "dst must keep its inode across a same-object rename"
+    );
+    // And both names keep serving the shared content, including after one
+    // link is removed.
+    assert_eq!(std::fs::read(&src).expect("read src"), b"shared");
+    assert_eq!(std::fs::read(&dst).expect("read dst"), b"shared");
+
+    // The same no-op in the other direction.
+    std::fs::rename(&dst, &src).expect("rename back onto same object");
+    assert_eq!(
+        std::fs::symlink_metadata(&src)
+            .expect("lstat src after back")
+            .ino(),
+        src_ino,
+        "src must keep its inode across the reverse same-object rename"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&dst)
+            .expect("lstat dst after back")
+            .ino(),
+        dst_ino,
+        "dst must keep its inode across the reverse same-object rename"
+    );
+
+    std::fs::remove_file(&src).expect("unlink src");
+    assert_eq!(
+        std::fs::read(&dst).expect("read dst after unlink"),
+        b"shared"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Hardlink — rejected
 // ─────────────────────────────────────────────────────────────────────────────
