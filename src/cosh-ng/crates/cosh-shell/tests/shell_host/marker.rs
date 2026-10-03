@@ -564,6 +564,60 @@ fn shell_host_zsh_valid_cue_matrix_wins_over_natural_language() {
     }
 }
 
+/// Native zsh sources `.zshrc` before `.zlogin` in a login shell; the marker's
+/// login replay must reproduce that order (plus the system login files), or a
+/// `.zlogin` keyed off `.zshrc` state would observe a world no native login
+/// zsh would ever give it.
+#[test]
+fn shell_host_zsh_login_replay_follows_native_startup_order() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("SKIP: zsh is unavailable");
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-login-order-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let trace = work_dir.join("startup-trace");
+    let trace_path = trace.display().to_string();
+    for (name, token) in [
+        (".zshenv", "zshenv"),
+        (".zprofile", "zprofile"),
+        (".zshrc", "zshrc"),
+        (".zlogin", "zlogin"),
+    ] {
+        std::fs::write(
+            home_dir.join(name),
+            format!("printf '{token}\\n' >> \"{trace_path}\"\n"),
+        )
+        .expect(name);
+    }
+    let mut config = ShellHostConfig::new("zsh-login-order", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config.login_shell = true;
+    let output = run_scripted_zsh(&config, &[ScriptedInput::command("true")])
+        .expect("scripted zsh login replay");
+
+    let trace_text = std::fs::read_to_string(&trace).unwrap_or_else(|error| {
+        panic!(
+            "startup trace after login replay: {error}: {}",
+            String::from_utf8_lossy(&output.terminal_output)
+        )
+    });
+    assert_eq!(
+        trace_text.lines().collect::<Vec<_>>(),
+        ["zshenv", "zprofile", "zshrc", "zlogin"],
+        "login replay must follow native zsh startup order"
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
 #[test]
 fn shell_host_bash_missing_natural_language_routes_without_command_block() {
     if Command::new("bash").arg("--version").output().is_err() {
