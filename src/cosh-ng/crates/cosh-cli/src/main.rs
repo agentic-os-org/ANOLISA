@@ -29,6 +29,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "__login-shell-access", hide = true)]
+    LoginShellAccess(cmd::login_shell::AccessProbeArgs),
+    /// Explicit login-shell registration and local account selection (Linux)
+    LoginShell(cmd::login_shell::LoginShellArgs),
     /// Package management (cross-distro: dnf/apt/zypper)
     Pkg {
         #[command(subcommand)]
@@ -52,6 +56,10 @@ enum Commands {
 }
 
 fn main() {
+    let cli = Cli::parse();
+    if let Commands::LoginShellAccess(args) = &cli.command {
+        std::process::exit(cmd::login_shell::run_access_probe(args));
+    }
     // Initialize tracing (stderr-only, controlled by COSH_LOG or RUST_LOG)
     let filter = std::env::var("COSH_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
@@ -65,11 +73,13 @@ fn main() {
         .with_target(true)
         .try_init();
 
-    let cli = Cli::parse();
     let distro = Distro::detect();
     let start = Instant::now();
 
     let exit_code = match cli.command {
+        // The probe returns above, before any tracing initialization.
+        Commands::LoginShellAccess(_) => unreachable!("access probe already exited"),
+        Commands::LoginShell(args) => cmd::login_shell::run(args, &distro, start),
         Commands::Pkg { action } => cmd::pkg::run(action, &distro, start),
         Commands::Svc { action } => cmd::svc::run(action, &distro, start),
         Commands::Checkpoint { action } => cmd::checkpoint::run(action, &distro, start),

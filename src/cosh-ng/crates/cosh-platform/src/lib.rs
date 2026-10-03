@@ -11,6 +11,7 @@
 pub mod audit;
 pub mod checkpoint;
 pub mod detect;
+pub mod login_shell;
 pub mod pkg;
 pub mod process;
 pub mod svc;
