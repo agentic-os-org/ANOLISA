@@ -486,13 +486,23 @@ fn segment_is_build_log_owned(words: &[String]) -> bool {
         .iter()
         .position(|word| !is_environment_assignment(word))
         .unwrap_or(words.len());
-    if words.get(index).is_some_and(|word| word == "env") {
+    if words
+        .get(index)
+        .is_some_and(|word| command_basename(word) == "env")
+    {
         index += 1;
-        while words
-            .get(index)
-            .is_some_and(|word| is_environment_assignment(word))
-        {
-            index += 1;
+        while let Some(word) = words.get(index) {
+            if is_environment_assignment(word) {
+                index += 1;
+                continue;
+            }
+            if word.starts_with('-') && word.as_str() != "-" {
+                // -u/--unset are the only env flags that consume a
+                // following word; --unset=VAR embeds it instead.
+                index += 1 + usize::from(matches!(word.as_str(), "-u" | "--unset"));
+                continue;
+            }
+            break;
         }
     }
     if matches!(
@@ -508,10 +518,19 @@ fn segment_is_build_log_owned(words: &[String]) -> bool {
         .unwrap_or_default();
     let arguments = &words[index.saturating_add(1).min(words.len())..];
     match executable {
-        "cargo" => matches!(
-            arguments.first().map(String::as_str),
-            Some("build" | "check" | "clippy" | "install" | "test")
-        ),
+        "cargo" => {
+            // A leading +toolchain argument selects the toolchain and
+            // precedes the subcommand.
+            let arguments = &arguments[usize::from(
+                arguments
+                    .first()
+                    .is_some_and(|argument| argument.starts_with('+')),
+            )..];
+            matches!(
+                arguments.first().map(String::as_str),
+                Some("build" | "check" | "clippy" | "install" | "test")
+            )
+        }
         "pytest" => true,
         executable if is_python_executable(executable) => {
             matches!(
@@ -1317,6 +1336,73 @@ mod tests {
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn pre_tool_owns_build_commands_behind_env_flags_and_toolchains() {
+        for command in [
+            "env -i cargo test",
+            "env -u RUSTC cargo build",
+            "env --ignore-environment cargo check",
+            "/usr/bin/env cargo test",
+            "env -i make",
+            "env -i go test ./...",
+            "env -i npm test",
+            "cargo +nightly test",
+            "cargo +stable build",
+            "cargo +1.84 check",
+            "cargo +toolchain-with-dashes clippy",
+            "cargo test --workspace",
+            "RUST_BACKTRACE=1 cargo check",
+            "env CARGO_X=1 cargo test",
+            "command cargo test",
+            "python3.12 -m pytest",
+            "make -j8",
+        ] {
+            assert!(
+                is_build_log_owned_command(command),
+                "expected BuildLog ownership for {command:?}"
+            );
+        }
+
+        for command in [
+            "cargo +nightly fmt",
+            "env -i cat build.log",
+            "env -u RUSTC grep error log",
+        ] {
+            assert!(
+                !is_build_log_owned_command(command),
+                "unexpected BuildLog ownership for {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_tool_build_log_owner_behind_env_flag_beats_rtk_rewriting() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("fake rtk");
+        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk env -i cargo test'\n");
+        let response = pre_tool_with_rtk(
+            &PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": "env -i cargo test"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            },
+            &Attribution::new("test"),
+            &rtk,
+            directory.path(),
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::Passthrough);
+        assert_eq!(response.output_optimization, OutputOptimization::None);
+        assert_eq!(
+            response.arguments["command"].as_str().unwrap(),
+            "env -i cargo test"
+        );
     }
 
     #[test]
