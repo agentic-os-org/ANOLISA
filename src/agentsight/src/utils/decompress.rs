@@ -51,7 +51,7 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
 ///
 /// - `None` or `"identity"` → return body unchanged
 /// - `"gzip"` or `"x-gzip"` → decompress with GzDecoder
-/// - `"deflate"` → decompress with DeflateDecoder
+/// - `"deflate"` → zlib format (RFC 1950), falling back to raw deflate
 /// - `"zstd"` → decompress with the zstd decoder
 /// - `"br"` → decompress with the brotli decoder
 /// - Unknown encoding → return body unchanged
@@ -94,7 +94,7 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
         Some("gzip") | Some("x-gzip") => {
             read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
         }
-        Some("deflate") => read_capped(flate2::read::DeflateDecoder::new(body), body, "deflate"),
+        Some("deflate") => decompress_deflate(body),
         Some("zstd") => {
             // A streaming decoder (capped via `read_capped`) replaces
             // `zstd::decode_all`, which would allocate the full output up front
@@ -114,6 +114,21 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
         Some("br") => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
         _ => body.to_vec(),
     }
+}
+
+/// Decompress a `Content-Encoding: deflate` body.
+///
+/// RFC 9110 §8.4.1.2 defines `deflate` as the zlib format (RFC 1950), so that
+/// is tried first. Some servers still send raw deflate (RFC 1951), so a failed
+/// zlib attempt falls back to the raw decoder. `read_capped` returns `raw`
+/// unchanged when a decoder rejects the body, which is the fallback signal
+/// here: an over-cap zlib body ends up as raw either way.
+fn decompress_deflate(body: &[u8]) -> Vec<u8> {
+    let decoded = read_capped(flate2::read::ZlibDecoder::new(body), body, "deflate");
+    if decoded != body {
+        return decoded;
+    }
+    read_capped(flate2::read::DeflateDecoder::new(body), body, "deflate")
 }
 
 /// Growable output sink for the incremental zstd decoder with the same hard
@@ -475,6 +490,20 @@ mod tests {
 
         let bad = b"not deflate";
         assert_eq!(decompress_body(bad, Some("deflate")), bad);
+    }
+
+    #[test]
+    fn deflate_accepts_the_zlib_wrapper() {
+        // RFC 9110 defines `Content-Encoding: deflate` as the zlib format
+        // (RFC 1950). A zlib-wrapped body used to reach the raw decoder, fail,
+        // and come back still compressed, so the response was unreadable.
+        let plain = b"hello zlib";
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_ne!(compressed.as_slice(), plain.as_slice());
+
+        assert_eq!(decompress_body(&compressed, Some("deflate")), plain);
     }
 
     #[test]
