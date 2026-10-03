@@ -113,6 +113,31 @@ fn core_event_to_drift_event_covers_every_core_variant() {
     }
 }
 
+/// Review regression for the watcher move-out guard (skillfs-core): if a
+/// moved-out regular *file* with a skill-shaped name were ever surfaced as
+/// `DirDeleted`, this conversion would turn it into a skill-scoped
+/// deletion — the exact false attribution the watcher's retained type
+/// memory prevents. Pin the conversion's stakes here: a `DirDeleted` core
+/// event for a skill-shaped path IS skill-scoped, so the only correct
+/// defense is to never emit that event for a file, which the
+/// skillfs-core watcher tests (`moved_out_skill_shaped_file_is_silent`)
+/// prove.
+#[test]
+fn dir_deleted_conversion_is_skill_scoped_for_shaped_names() {
+    let source = Path::new("/srv/skills");
+    // "scratch" is a valid skill name: the lexical classifier attributes
+    // it to a skill, not to InsideSourceOutsideSkill.
+    let drift = core_event_to_drift_event(
+        source,
+        &CoreWatcherEvent::DirDeleted(source.join("scratch")),
+    );
+    assert_eq!(drift.change_kind, DriftChangeKind::Deleted);
+    assert!(matches!(
+        &drift.scope,
+        DriftScope::SkillDir { skill_name } if skill_name == "scratch"
+    ));
+}
+
 /// Drive the adapter end-to-end through the W0 audit pipeline using an
 /// `InMemoryEventSink`. This is the deterministic equivalent of "real
 /// watcher fired an event": we synthesize a stream of core watcher events,

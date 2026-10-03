@@ -1,8 +1,16 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// Cap on the retained directory-type memory. The set only ever holds
+/// immediate children of the source root, so this bound exists purely to
+/// defend against a pathological source; the seed takes the first
+/// `MAX_TRACKED_DIRS` entries and drops the rest (their move-outs then
+/// stay silent — the pre-watcher behavior, never a false positive).
+const MAX_TRACKED_DIRS: usize = 10_000;
 
 // ---------------------------------------------------------------------------
 // SkillEvent
@@ -249,7 +257,15 @@ async fn run_watcher(
 
     // Debounce state: path -> (last_event_time, last_event_kind)
     let debounce = std::time::Duration::from_millis(debounce_ms);
-    let mut pending: HashMap<PathBuf, (Instant, notify::EventKind)> = HashMap::new();
+    let mut pending: HashMap<PathBuf, (std::time::Instant, notify::EventKind)> = HashMap::new();
+
+    // Type memory for the move-out arm: immediate children of the source
+    // that we know to be directories. Seeded once from the source root so a
+    // move-out of a directory that predates this watcher is still
+    // attributable, and kept current by restats below. A path absent from
+    // this set is either a regular file or unknown — in both cases its
+    // `RenameMode::From` must NOT be reported as a directory deletion.
+    let mut known_dirs = seed_known_dirs(&source);
 
     // Shutdown signal future. When `shutdown_rx` is `Some`, the loop
     // exits as soon as the corresponding `WatcherHandle::shutdown` (or
@@ -278,9 +294,7 @@ async fn run_watcher(
                 return;
             }
             Some(event) = notify_rx.recv() => {
-                for path in &event.paths {
-                    pending.insert(path.clone(), (Instant::now(), event.kind));
-                }
+                debounce_insert(&mut pending, &event, &mut known_dirs);
             }
             _ = tokio::time::sleep(debounce) => {
                 let now = Instant::now();
@@ -292,7 +306,20 @@ async fn run_watcher(
 
                 for (path, kind) in ready {
                     pending.remove(&path);
-                    if let Some(event) = classify_event(&source, &path, kind) {
+                    // Retain the observed type while the path still exists:
+                    // a stat failure (already moved away or removed) simply
+                    // records nothing, so stale entries are never created.
+                    if path.parent().map(|p| p == source).unwrap_or(false)
+                        && path.is_dir()
+                    {
+                        known_dirs.insert(path.clone());
+                    }
+                    if let Some(event) = classify_event(&source, &path, kind, &known_dirs) {
+                        if let SkillEvent::DirDeleted(ref gone) = event {
+                            // The entry no longer names a directory; stop
+                            // treating a future same-named path as one.
+                            known_dirs.remove(gone);
+                        }
                         if tx.send(event).is_err() {
                             return; // receiver dropped
                         }
@@ -300,6 +327,73 @@ async fn run_watcher(
                 }
             }
         }
+    }
+}
+
+/// One-time type seed: the immediate-child directories of the source root.
+///
+/// A moved-away path cannot be restated, so the move-out arm below depends
+/// on this retained type. Seeding at watcher start covers directories that
+/// predate the watcher; regular files are deliberately absent (their move
+/// must stay silent, however skill-shaped their name).
+fn seed_known_dirs(source: &Path) -> HashSet<PathBuf> {
+    std::fs::read_dir(source)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|entry| entry.path())
+                .take(MAX_TRACKED_DIRS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Record one notify event into the debounce map.
+///
+/// `Modify(Name(RenameMode::Both))` carries both sides of a rename (old
+/// first, new second) in a single event. Split it so each pending path
+/// keeps a side-specific kind: the old path is recorded as `From`, the new
+/// path as `To`. Without the split, per-path classification cannot tell
+/// which side of the rename a path is, and inotify moves — the ONLY way
+/// `mv` on a skill directory is ever reported — were classified as `None`.
+///
+/// For a paired rename the new side already exists when the event arrives,
+/// so its type is authoritative for BOTH sides: a directory rename records
+/// the old and the new path, a regular-file rename records neither (its
+/// `From` side must stay silent). This correlation also makes the outcome
+/// independent of the (arbitrary) order in which the debounce map flushes
+/// the two sides.
+fn debounce_insert(
+    pending: &mut std::collections::HashMap<PathBuf, (std::time::Instant, notify::EventKind)>,
+    event: &notify::Event,
+    known_dirs: &mut HashSet<PathBuf>,
+) {
+    let both = matches!(
+        event.kind,
+        notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::Both
+        ))
+    ) && event.paths.len() == 2;
+    if both && event.paths[1].is_dir() {
+        known_dirs.insert(event.paths[0].clone());
+        known_dirs.insert(event.paths[1].clone());
+    }
+    for (index, path) in event.paths.iter().enumerate() {
+        let kind = if both {
+            if index == 0 {
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::From,
+                ))
+            } else {
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::To,
+                ))
+            }
+        } else {
+            event.kind
+        };
+        pending.insert(path.clone(), (std::time::Instant::now(), kind));
     }
 }
 
@@ -317,7 +411,15 @@ async fn run_watcher(
 ///   `InsideSourceOutsideSkill`, so consuming them is safe. A `SKILL.md`
 ///   directly at the source root is not a manifest in any loaded layout
 ///   and stays unclassified.
-/// * `<source>/<skill>` — immediate skill-directory create/remove.
+/// * `<source>/<skill>` — immediate skill-directory create/remove, including
+///   inotify move events: `RenameMode::To` (move-in / rename target) restats
+///   the path like `Create`; `RenameMode::From` (move-out / rename source)
+///   is emitted only for paths whose directory-ness the watcher has
+///   retained — from the startup seed of the source root, from a restat of
+///   an earlier event, or from the correlated new side of a paired rename —
+///   because the moved-away path itself can no longer be restated, and a
+///   skill-shaped regular *file* moved out must never be reported as a
+///   skill-directory deletion.
 ///
 /// Arbitrary non-manifest files inside a skill (`scripts/run.sh`,
 /// `notes.txt`, `.skill-meta/manifest.json`) are **not** surfaced, and
@@ -328,7 +430,12 @@ async fn run_watcher(
 /// its internals. The W1 drift runtime in `skillfs-fuse` therefore
 /// observes manifest- and skill-directory-level drift, mirroring this
 /// helper's scope.
-fn classify_event(source: &Path, path: &Path, kind: notify::EventKind) -> Option<SkillEvent> {
+fn classify_event(
+    source: &Path,
+    path: &Path,
+    kind: notify::EventKind,
+    known_dirs: &HashSet<PathBuf>,
+) -> Option<SkillEvent> {
     use notify::EventKind;
 
     let is_skill_md = path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md");
@@ -365,6 +472,7 @@ fn classify_event(source: &Path, path: &Path, kind: notify::EventKind) -> Option
             _ => None,
         }
     } else if is_immediate_child {
+        use notify::event::{ModifyKind, RenameMode};
         match kind {
             EventKind::Create(_) if path.is_dir() => {
                 Some(SkillEvent::DirCreated(path.to_path_buf()))
@@ -372,6 +480,23 @@ fn classify_event(source: &Path, path: &Path, kind: notify::EventKind) -> Option
             // Removed paths no longer exist. Use the event's original object
             // kind instead of inspecting the filesystem after deletion.
             EventKind::Remove(notify::event::RemoveKind::Folder) => {
+                Some(SkillEvent::DirDeleted(path.to_path_buf()))
+            }
+            // MOVED_TO: the new name of a rename inside the source, or a
+            // move-in from outside. inotify does not tag the event with
+            // the object type, so restat (the Create arm already does).
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) if path.is_dir() => {
+                Some(SkillEvent::DirCreated(path.to_path_buf()))
+            }
+            // MOVED_FROM: the old name of a rename, or a move-out. The path
+            // no longer exists, so its type must come from the retained
+            // memory (`known_dirs`, seeded at startup and refreshed by
+            // restats and paired-rename correlation). A path that is a
+            // known directory reports its departure; anything else — a
+            // regular file with a skill-shaped name included — stays
+            // silent, so a file move can never masquerade as a
+            // skill-directory deletion downstream.
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) if known_dirs.contains(path) => {
                 Some(SkillEvent::DirDeleted(path.to_path_buf()))
             }
             _ => None,
@@ -386,6 +511,266 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renamed_in_directory_to_side_reports_dir_created() {
+        let source = tempfile::tempdir().expect("source directory");
+        let new_name = source.path().join("beta");
+        std::fs::create_dir(&new_name).expect("moved-in directory");
+
+        let event = classify_event(
+            source.path(),
+            &new_name,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To,
+            )),
+            &HashSet::new(),
+        );
+        assert!(matches!(event, Some(SkillEvent::DirCreated(path)) if path == new_name));
+    }
+
+    #[test]
+    fn moved_in_file_to_side_is_not_dir_created() {
+        let source = tempfile::tempdir().expect("source directory");
+        let file = source.path().join("notes.txt");
+        std::fs::write(&file, "x").expect("moved-in file");
+
+        let event = classify_event(
+            source.path(),
+            &file,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To,
+            )),
+            &HashSet::new(),
+        );
+        assert!(
+            event.is_none(),
+            "a moved-in regular file is not a DirCreated"
+        );
+    }
+
+    #[test]
+    fn moved_out_tracked_directory_reports_dir_deleted_without_restat() {
+        let source = tempfile::tempdir().expect("source directory");
+        let old_name = source.path().join("alpha");
+        // The directory was observed while the watcher ran (startup seed
+        // or an earlier restat); a move-out then leaves the path absent,
+        // so the From side cannot restat it and consults the type memory.
+        let known_dirs: HashSet<PathBuf> = HashSet::from([old_name.clone()]);
+
+        let event = classify_event(
+            source.path(),
+            &old_name,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            &known_dirs,
+        );
+        assert!(matches!(event, Some(SkillEvent::DirDeleted(path)) if path == old_name));
+    }
+
+    #[test]
+    fn moved_out_skill_shaped_file_is_silent() {
+        // Review regression: a regular file with a valid skill name moved
+        // out of the source must never surface as a skill-directory
+        // deletion — the drift conversion maps DirDeleted straight into a
+        // skill-scoped deletion event. The seed records directories only,
+        // so the file's From side classifies to None.
+        let source = tempfile::tempdir().expect("source directory");
+        let file = source.path().join("scratch");
+        std::fs::write(&file, "a skill-shaped regular file").expect("file");
+        let known_dirs = seed_known_dirs(source.path());
+        assert!(
+            !known_dirs.contains(&file),
+            "the seed records immediate-child directories only"
+        );
+
+        let event = classify_event(
+            source.path(),
+            &file,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            &known_dirs,
+        );
+        assert!(event.is_none(), "a moved-out file is not a DirDeleted");
+    }
+
+    #[test]
+    fn seed_records_immediate_child_directories_only() {
+        let source = tempfile::tempdir().expect("source directory");
+        std::fs::create_dir(source.path().join("alpha")).expect("directory");
+        std::fs::write(source.path().join("scratch"), "file").expect("file");
+        std::fs::write(source.path().join("SKILL.md"), "root manifest").expect("file");
+
+        let known = seed_known_dirs(source.path());
+        assert!(known.contains(&source.path().join("alpha")));
+        assert!(!known.contains(&source.path().join("scratch")));
+        assert!(!known.contains(&source.path().join("SKILL.md")));
+    }
+
+    #[test]
+    fn paired_directory_rename_correlates_the_type_to_both_sides() {
+        let source = tempfile::tempdir().expect("source directory");
+        let old = source.path().join("alpha");
+        let new = source.path().join("beta");
+        // The rename has completed: the new side exists and is the
+        // authoritative type witness for both sides of the pair.
+        std::fs::create_dir(&new).expect("new side");
+
+        let mut pending = std::collections::HashMap::new();
+        let mut known_dirs = HashSet::new();
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            paths: vec![old.clone(), new.clone()],
+            attrs: Default::default(),
+        };
+        debounce_insert(&mut pending, &event, &mut known_dirs);
+        assert!(known_dirs.contains(&old), "the From side inherits the type");
+        assert!(known_dirs.contains(&new));
+
+        let classified = classify_event(
+            source.path(),
+            &old,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            &known_dirs,
+        );
+        assert!(matches!(classified, Some(SkillEvent::DirDeleted(p)) if p == old));
+    }
+
+    #[test]
+    fn paired_regular_file_rename_records_no_type() {
+        // A regular file renamed within the source records neither side,
+        // so its From side stays silent even for a skill-shaped name.
+        let source = tempfile::tempdir().expect("source directory");
+        let old = source.path().join("scratch");
+        let new = source.path().join("scratch2");
+        std::fs::write(&new, "a file").expect("new side");
+
+        let mut pending = std::collections::HashMap::new();
+        let mut known_dirs = HashSet::new();
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            paths: vec![old.clone(), new.clone()],
+            attrs: Default::default(),
+        };
+        debounce_insert(&mut pending, &event, &mut known_dirs);
+        assert!(
+            known_dirs.is_empty(),
+            "a file rename records no directory type"
+        );
+
+        let classified = classify_event(
+            source.path(),
+            &old,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            &known_dirs,
+        );
+        assert!(
+            classified.is_none(),
+            "a renamed file's old name stays silent"
+        );
+    }
+
+    #[test]
+    fn both_events_are_split_per_side_by_the_debounce_map() {
+        let mut pending = std::collections::HashMap::new();
+        let old = PathBuf::from("/source/alpha");
+        let new = PathBuf::from("/source/beta");
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            paths: vec![old.clone(), new.clone()],
+            attrs: Default::default(),
+        };
+        debounce_insert(&mut pending, &event, &mut HashSet::new());
+        assert!(matches!(
+            pending[&old],
+            (
+                _,
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::From
+                ))
+            )
+        ));
+        assert!(matches!(
+            pending[&new],
+            (
+                _,
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::To
+                ))
+            )
+        ));
+
+        // Single-path events keep their kind verbatim.
+        pending.clear();
+        let file = PathBuf::from("/source/alpha/SKILL.md");
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![file.clone()],
+            attrs: Default::default(),
+        };
+        debounce_insert(&mut pending, &event, &mut HashSet::new());
+        assert!(matches!(
+            pending[&file],
+            (_, notify::EventKind::Modify(notify::event::ModifyKind::Any))
+        ));
+    }
+
+    #[test]
+    fn skill_md_move_from_side_still_reports_modified() {
+        let source = tempfile::tempdir().expect("source directory");
+        let manifest = source.path().join("alpha/SKILL.md");
+        std::fs::create_dir_all(manifest.parent().expect("skill dir")).expect("skill directory");
+        std::fs::write(&manifest, "x").expect("manifest");
+
+        // The SKILL.md arm maps any Modify to Modified — the rename sub-kind
+        // included — so a moved manifest still reports Modified for the old
+        // path (unchanged behavior, pinned).
+        let event = classify_event(
+            source.path(),
+            &manifest,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            &HashSet::new(),
+        );
+        assert!(matches!(event, Some(SkillEvent::Modified(path)) if path == manifest));
+    }
+
+    #[test]
+    fn file_rename_from_side_stays_silent() {
+        // A top-level regular file renamed within the source: its From
+        // side cannot be restated (the path is gone) and inotify does not
+        // tag the object type, so the untracked path must stay silent.
+        // This is the pre-move-coverage behavior for files, retained on
+        // purpose (see moved_out_skill_shaped_file_is_silent).
+        let source = tempfile::tempdir().expect("source directory");
+        let old_name = source.path().join("scratch");
+
+        let event = classify_event(
+            source.path(),
+            &old_name,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            &HashSet::new(),
+        );
+        assert!(
+            event.is_none(),
+            "an untracked From path is not a DirDeleted"
+        );
+    }
+
+    #[test]
     fn removed_immediate_directory_is_classified_without_restat() {
         let source = tempfile::tempdir().expect("source directory");
         let child = source.path().join("alpha");
@@ -396,6 +781,7 @@ mod tests {
             source.path(),
             &child,
             notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+            &HashSet::new(),
         );
         assert!(matches!(event, Some(SkillEvent::DirDeleted(path)) if path == child));
     }
@@ -416,6 +802,7 @@ mod tests {
             source.path(),
             &skill_md,
             notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            &HashSet::new(),
         );
         assert!(
             matches!(event, Some(SkillEvent::Modified(ref path)) if path == &skill_md),
@@ -430,6 +817,7 @@ mod tests {
                 source.path(),
                 &other,
                 notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                &HashSet::new()
             )
             .is_none(),
             "non-manifest files must stay outside the manifest scope"
@@ -461,7 +849,7 @@ mod tests {
             notify::EventKind::Remove(notify::event::RemoveKind::Any),
         ] {
             assert!(
-                classify_event(source.path(), &snapshot_md, kind).is_none(),
+                classify_event(source.path(), &snapshot_md, kind, &HashSet::new()).is_none(),
                 "store-internal .skill-meta snapshot SKILL.md must stay unobserved ({kind:?})"
             );
         }
@@ -483,6 +871,7 @@ mod tests {
                 source.path(),
                 &categorized_snapshot,
                 notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                &HashSet::new()
             )
             .is_none(),
             "categorized-layout .skill-meta snapshots must stay unobserved"
@@ -498,6 +887,7 @@ mod tests {
                     source.path(),
                     &user_md,
                     notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                    &HashSet::new()
                 ),
                 Some(SkillEvent::Modified(_))
             ),
@@ -518,7 +908,13 @@ mod tests {
             notify::event::RemoveKind::Other,
         ] {
             assert!(
-                classify_event(source.path(), &file, notify::EventKind::Remove(kind)).is_none(),
+                classify_event(
+                    source.path(),
+                    &file,
+                    notify::EventKind::Remove(kind),
+                    &HashSet::new()
+                )
+                .is_none(),
                 "{kind:?} must not be attributed as a removed directory"
             );
         }
@@ -537,6 +933,7 @@ mod tests {
                     source.path(),
                     path,
                     notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+                    &HashSet::new()
                 )
                 .is_none(),
                 "directory deletion must stay within the immediate-child scope"
