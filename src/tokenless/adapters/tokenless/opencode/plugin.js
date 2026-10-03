@@ -30,9 +30,7 @@ function isFile(path) {
 
 function findHookRunner() {
   const adapterDir = process.env.ANOLISA_ADAPTER_DIR;
-  const userHome = process.env.HOME && isAbsolute(process.env.HOME)
-    ? process.env.HOME
-    : homedir();
+  const userHome = process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : homedir();
   const candidates = [
     process.env.TOKENLESS_HOOK_RUNNER,
     adapterDir ? join(adapterDir, "common", "hooks", "run-hook.sh") : "",
@@ -80,12 +78,14 @@ function runHook(runner, hookName, payload) {
     let settled = false;
     let child;
     let timer;
+    const ownProcessGroup = process.platform !== "win32";
     try {
       child = spawn("bash", [runner, hookName], {
         env: {
           ...process.env,
           TOKENLESS_AGENT_ID: AGENT_ID,
         },
+        detached: ownProcessGroup,
         stdio: ["pipe", "pipe", "ignore"],
       });
     } catch {
@@ -93,16 +93,29 @@ function runHook(runner, hookName, payload) {
       return;
     }
 
-    const finish = (value) => {
+    const finish = (value, terminate = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (terminate) {
+        // A hook can exit while its descendants still hold stdout open. Kill
+        // only our detached group, and do not let inherited pipes pin the host.
+        if (ownProcessGroup && child.pid) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+        } else {
+          child.kill("SIGKILL");
+        }
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.unref();
+      }
       resolve(value);
     };
-    timer = setTimeout(() => {
-      child.kill();
-      finish(null);
-    }, HOOK_TIMEOUT_MS);
+    timer = setTimeout(() => finish(null, true), HOOK_TIMEOUT_MS);
 
     child.on("error", () => finish(null));
     child.stdout.setEncoding("utf8");
@@ -116,8 +129,7 @@ function runHook(runner, hookName, payload) {
     });
 
     child.stdin.on("error", () => {
-      child.kill();
-      finish(null);
+      finish(null, true);
     });
     child.stdin.end(serialized);
   });
@@ -172,9 +184,7 @@ export const TokenlessPlugin = async () => {
       const payload = toolPayload(input, output.args);
       const readyResult = await runHook(runner, "tool_ready_hook.sh", payload);
       if (readyResult?.decision === "block") {
-        throw new Error(
-          readyResult.reason || "Tokenless reports that the tool is not ready",
-        );
+        throw new Error(readyResult.reason || "Tokenless reports that the tool is not ready");
       }
 
       const readyOutput = hookSpecificOutput(readyResult);
