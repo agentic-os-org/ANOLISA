@@ -209,6 +209,14 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
     num_fmts = styles["num_fmts"]
 
     # ── Check A: count attribute integrity ──────────────────────────────────
+    if styles["num_fmts_declared"] != styles["num_fmts_actual"]:
+        v.append({
+            "type": "count_mismatch",
+            "element": "numFmts",
+            "declared": styles["num_fmts_declared"],
+            "actual": styles["num_fmts_actual"],
+            "fix": f"Update <numFmts count=\"{styles['num_fmts_actual']}\">",
+        })
     if styles["fonts_declared"] != styles["fonts_actual"]:
         v.append({
             "type": "count_mismatch",
