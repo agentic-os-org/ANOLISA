@@ -500,18 +500,26 @@ fn systemctl_quiet(args: &[&str]) {
 }
 
 pub fn rollback_preview() -> Result<Vec<(String, String, String)>> {
+    // No ledger = nothing pending, which is not an error (a fresh install, or
+    // a completed rollback): --list reports an empty pending set.
     if !Path::new(ROLLBACK_PATH).exists() {
         return Ok(Vec::new());
     }
-
     let json = fs::read_to_string(ROLLBACK_PATH).context("读取 rollback 文件失败")?;
-    let data: RollbackData = serde_json::from_str(&json).context("解析 rollback 文件失败")?;
+    parse_rollback_entries(&json)
+}
 
-    let mut result = Vec::new();
-    for (param, entry) in &data.entries {
-        result.push((param.clone(), entry.applied.clone(), entry.previous.clone()));
-    }
-    Ok(result)
+/// Parse rollback-ledger JSON into (param, applied, previous) triples in
+/// BTreeMap order. A corrupt ledger is an error, never an empty list —
+/// silently treating a corrupt ledger as empty is how the original values
+/// get lost (cf. #3578).
+fn parse_rollback_entries(json: &str) -> Result<Vec<(String, String, String)>> {
+    let data: RollbackData = serde_json::from_str(json).context("解析 rollback 文件失败")?;
+    Ok(data
+        .entries
+        .iter()
+        .map(|(param, entry)| (param.clone(), entry.applied.clone(), entry.previous.clone()))
+        .collect())
 }
 
 /// Outcome of a rollback attempt: how many params were restored vs. failed to
@@ -761,6 +769,98 @@ pub fn auto_rollback_on_degradation(result: &VerifyResult) -> Result<Option<Roll
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_rollback_entries_round_trip() {
+        let data = RollbackData {
+            version: 1,
+            entries: [
+                (
+                    "vm.swappiness".to_string(),
+                    RollbackEntry {
+                        previous: "60".to_string(),
+                        applied: "1".to_string(),
+                        path: "/proc/sys/vm/swappiness".to_string(),
+                    },
+                ),
+                (
+                    "block/sda/scheduler".to_string(),
+                    RollbackEntry {
+                        previous: "mq-deadline".to_string(),
+                        applied: "none".to_string(),
+                        path: "/sys/block/sda/queue/scheduler".to_string(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let entries = parse_rollback_entries(&json).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "block/sda/scheduler".to_string(),
+                    "none".to_string(),
+                    "mq-deadline".to_string()
+                ),
+                (
+                    "vm.swappiness".to_string(),
+                    "1".to_string(),
+                    "60".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_empty_ledger() {
+        // Fresh install / post-rollback state: empty, not an error.
+        let entries = parse_rollback_entries(r#"{"version":1,"entries":{}}"#).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_rejects_corrupt_json() {
+        // The #3578 "corrupt is not empty" contract.
+        let err = parse_rollback_entries("not json").unwrap_err();
+        assert!(err.to_string().contains("解析"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_rejects_wrong_shape() {
+        // Wrong top-level type and wrong entries type: Err, no panic, no
+        // silent default.
+        assert!(parse_rollback_entries("[1,2,3]").is_err());
+        assert!(parse_rollback_entries(r#"{"entries":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_sorted_by_param() {
+        // BTreeMap serialization emits sorted keys, so the parse output is
+        // sorted by param — the ordering --list's output promises.
+        let data = RollbackData {
+            version: 1,
+            entries: ["c", "a", "b"]
+                .iter()
+                .map(|p| {
+                    (
+                        p.to_string(),
+                        RollbackEntry {
+                            previous: "0".to_string(),
+                            applied: "1".to_string(),
+                            path: format!("/proc/sys/{p}"),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let entries = parse_rollback_entries(&json).unwrap();
+        let params: Vec<&str> = entries.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(params, vec!["a", "b", "c"]);
+    }
 
     #[test]
     fn test_param_to_path_sysctl() {

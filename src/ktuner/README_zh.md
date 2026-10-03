@@ -24,7 +24,8 @@ sudo ktuner fix <param>        # 例如 sudo ktuner fix vm.swappiness
 ktuner why <param>             # 例如 ktuner why net.core.somaxconn
 
 # 回滚所有变更（需要 root 权限）
-sudo ktuner rollback
+sudo ktuner rollback          # 破坏性且终结（删除 ledger）
+sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ```
 
 ## JSON 输出
@@ -77,6 +78,16 @@ sudo ktuner rollback
 ```json
 { "restored": 5, "failed": 0, "skipped": 0, "status": "Full" }
 ```
+
+### rollback --list 输出
+
+`sudo ktuner rollback --list` 预览回滚将恢复的内容——只读，不写入不删除（ledger 是 0700 root 目录下的 0600 文件，因此与 rollback 共用 root 门槛；损坏的 ledger 报错而不是当作空列表）：
+
+```json
+{ "count": 2, "pending": [ { "param": "vm.swappiness", "applied": "1", "previous": "60" } ] }
+```
+
+普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
 
 ### 错误输出（stderr）
 
