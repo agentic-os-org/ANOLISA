@@ -2818,6 +2818,31 @@ async fn cmd_mount(
 // Classify Command
 // ---------------------------------------------------------------------------
 
+/// Render diagnostic free text safe for terminal output.
+///
+/// `LoadError` paths and messages carry attacker-influenceable bytes from
+/// directory names and SKILL.md content. Printed raw, an embedded newline
+/// forges diagnostic lines and ESC/OSC sequences are live terminal
+/// commands — and the classify diagnostics print in the default
+/// configuration (the structured warn! fields and the stderr summary
+/// alike). Same escaping as the list/validate text-output fix (kept as a
+/// separate helper so the two audit fixes land independently).
+fn escape_ctl_stderr(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                escaped.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 async fn cmd_classify(
     source: PathBuf,
     primary_count: usize,
@@ -2834,7 +2859,49 @@ async fn cmd_classify(
 
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let _errors = store.load_from_directory(&source, &config);
+    let load_errors = store.load_from_directory(&source, &config);
+
+    // A skill whose SKILL.md cannot be loaded (unreadable, oversized, ...) is
+    // absent from the store, so it silently drops out of the generated
+    // skillfs-views.toml — and the views config then hides it from every
+    // mount. Surface every load error instead, mirroring cmd_mount. Warnings,
+    // not failure: classify still produces a valid config for the skills that
+    // did load (exit 0), matching mount's precedent.
+    if !load_errors.is_empty() {
+        // Attacker-influenceable bytes: skill names come verbatim from
+        // directory names, and the error text embeds those paths. Both the
+        // structured warn! fields and the human stderr summary print in the
+        // default configuration, so both get the same escaping — a raw
+        // newline in a name would forge diagnostic lines and an ESC/OSC
+        // sequence is a live terminal command.
+        warn!(
+            count = load_errors.len(),
+            "some skills failed to load and could not be classified"
+        );
+        for err in &load_errors {
+            warn!(
+                path = %escape_ctl_stderr(&err.path.display().to_string()),
+                error = %escape_ctl_stderr(&err.error),
+                "load error"
+            );
+        }
+        // Outcome-neutral wording: classify may not write anything at all
+        // (an existing skillfs-views.toml is only reported, `--dry-run`
+        // writes nothing), and a pre-existing views file may still list an
+        // unloadable skill. What holds in every flow is that these skills
+        // are not in the store, so this run could not classify them.
+        eprintln!(
+            "warning: {} skill(s) failed to load and could not be classified:",
+            load_errors.len()
+        );
+        for err in &load_errors {
+            eprintln!(
+                "  - {}: {}",
+                escape_ctl_stderr(&err.path.display().to_string()),
+                escape_ctl_stderr(&err.error)
+            );
+        }
+    }
 
     let mut all_names: Vec<String> = store.list().iter().map(|s| s.to_string()).collect();
     all_names.sort();
@@ -3199,6 +3266,34 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn escape_ctl_stderr_neutralizes_terminal_control_bytes() {
+        // Newline/CR/tab become visible mnemonics, not line breaks.
+        assert_eq!(escape_ctl_stderr("evil\ninjected"), "evil\\ninjected");
+        assert_eq!(escape_ctl_stderr("a\rb"), "a\\rb");
+        assert_eq!(escape_ctl_stderr("a\tb"), "a\\tb");
+        // ESC (CSI/OSC introducer) and BEL become \xNN; DEL likewise.
+        assert_eq!(
+            escape_ctl_stderr("ansi\u{1b}]777;id\u{7}"),
+            "ansi\\x1b]777;id\\x07"
+        );
+        assert_eq!(escape_ctl_stderr("\u{7f}"), "\\x7f");
+        assert_eq!(escape_ctl_stderr("a\u{0}b"), "a\\x00b");
+        // No raw control byte survives.
+        assert!(
+            !escape_ctl_stderr("\u{1}\u{2}\n\u{1b}\u{7f}")
+                .chars()
+                .any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
+        );
+        // Visible text — including multi-byte characters — passes through.
+        assert_eq!(
+            escape_ctl_stderr("big-skill/SKILL.md"),
+            "big-skill/SKILL.md"
+        );
+        assert_eq!(escape_ctl_stderr("技能 v1.2"), "技能 v1.2");
+        assert_eq!(escape_ctl_stderr(""), "");
+    }
 
     #[derive(Debug, Clone)]
     struct CapturedNotify {
