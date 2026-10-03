@@ -39,6 +39,26 @@ impl std::fmt::Debug for HpackConnectionState {
     }
 }
 
+/// Strip the PADDED framing from a DATA frame payload (RFC 7540 §6.1).
+///
+/// A padded DATA frame carries a one-byte pad length followed by the body and
+/// that many padding bytes; both belong to the framing, not to the body. The
+/// HEADERS side already strips its framing (`strip_headers_framing`), and DATA
+/// frames have no PRIORITY field, so only the padding applies here.
+fn strip_data_padding(payload: &[u8], flags: u8) -> &[u8] {
+    if flags & 0x08 == 0 {
+        return payload;
+    }
+    let Some((&pad_length, body)) = payload.split_first() else {
+        return &[];
+    };
+    let pad_length = pad_length as usize;
+    if pad_length >= body.len() {
+        return &[];
+    }
+    &body[..body.len() - pad_length]
+}
+
 /// Buffer for reassembling CONTINUATION frames
 #[derive(Debug, Clone)]
 struct ContinuationBuffer {
@@ -329,7 +349,7 @@ impl Http2Stream {
     pub fn request_body(&self) -> Vec<u8> {
         let mut result = Vec::new();
         for frame in &self.request_data_frames {
-            result.extend_from_slice(frame.payload());
+            result.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
         }
         result
     }
@@ -339,7 +359,7 @@ impl Http2Stream {
     pub fn response_body(&self) -> Vec<u8> {
         let mut result = Vec::new();
         for frame in &self.response_data_frames {
-            result.extend_from_slice(frame.payload());
+            result.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
         }
         result
     }
@@ -411,7 +431,7 @@ impl Http2Stream {
         // Re-parsing the accumulated body is O(frames^2) worst-case, but meaningful output
         // normally arrives early and returns; an algorithm redesign is out of scope here.
         for frame in &self.response_data_frames {
-            body.extend_from_slice(frame.payload());
+            body.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
             let Ok(body_str) = std::str::from_utf8(&body) else {
                 continue;
             };
@@ -1051,7 +1071,8 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
-                        let sse_ended = response_sse_stream_ended(frame.payload());
+                        let sse_ended =
+                            response_sse_stream_ended(strip_data_padding(frame.payload(), frame.flags));
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() || sse_ended {
                             // Response is complete
@@ -1117,7 +1138,8 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
-                        let sse_ended = response_sse_stream_ended(frame.payload());
+                        let sse_ended =
+                            response_sse_stream_ended(strip_data_padding(frame.payload(), frame.flags));
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() || sse_ended {
                             // Response is complete
@@ -1847,6 +1869,52 @@ mod tests {
     // --- HPACK stateful decode tests ---
 
     #[test]
+    #[test]
+    fn data_frame_padding_is_not_part_of_the_body() {
+        // RFC 7540 §6.1 allows DATA frames to be padded: the pad-length byte
+        // and the padding bytes are framing, not body. They used to be
+        // concatenated into the body, so a padded response was unparseable.
+        let connection_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x1000,
+        };
+        let event = create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 1);
+        // flags 0x08 = PADDED, payload = pad_length(2) + "hi" + two pad bytes
+        let frame = create_test_frame(1, 0x00, 0x08, vec![2, b'h', b'i', 0, 0], event);
+
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        assert_eq!(stream.request_body(), Vec::<u8>::new());
+        stream.response_data_frames.push(frame);
+        assert_eq!(stream.response_body(), b"hi".to_vec());
+
+        // An unpadded DATA frame is unchanged.
+        let plain_event = create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2);
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0x00,
+            0x00,
+            b" there".to_vec(),
+            plain_event,
+        ));
+        assert_eq!(stream.response_body(), b"hi there".to_vec());
+
+        // The framing must stay out of the SSE scan too: the pad-length byte
+        // otherwise prefixes the body and the event is no longer recognised.
+        let sse = Http2Stream::new(StreamId::new(connection_id, 2), 0);
+        let mut padded_body = vec![1];
+        padded_body.extend_from_slice(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n");
+        padded_body.push(0);
+        let mut stream_with_sse = sse;
+        stream_with_sse.response_data_frames.push(create_test_frame(
+            2,
+            0x00,
+            0x08,
+            padded_body,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 33),
+        ));
+        assert_eq!(stream_with_sse.first_output_timestamp_ns(), Some(33));
+    }
+
     fn test_strip_headers_framing_bare() {
         let payload = b"\x82\x86\x84";
         assert_eq!(strip_headers_framing(payload, 0x00), payload.as_slice());
