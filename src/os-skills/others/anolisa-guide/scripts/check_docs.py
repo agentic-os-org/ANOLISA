@@ -149,7 +149,11 @@ def ensure_venv() -> Path | None:
             print("[虚拟环境] 创建成功，后续可直接复用")
             return get_venv_python()
         else:
-            print(f"[失败] {result.stderr}")
+            # setup_env.py 的进度与失败原因都打印在 stdout 上，stderr
+            # 常常为空 —— 只打印 stderr 会得到一个没有原因的 [失败]。
+            detail = (result.stderr.strip()
+                      or "\n".join(result.stdout.strip().splitlines()[-5:]))
+            print(f"[失败] {detail}")
             return None
             
     except Exception as e:
@@ -186,7 +190,11 @@ def run_crawl(output_dir: Path) -> bool:
             print("[成功] 文档已更新")
             return True
         else:
-            print(f"[失败] {result.stderr}")
+            # crawl_docs.py 把逐页失败原因打印在 stdout 上，stderr 常为空，
+            # 因此失败时优先展示 stdout 的最后几行。
+            detail = (result.stderr.strip()
+                      or "\n".join(result.stdout.strip().splitlines()[-5:]))
+            print(f"[失败] {detail}")
             return False
             
     except subprocess.TimeoutExpired:
@@ -199,50 +207,52 @@ def run_crawl(output_dir: Path) -> bool:
 
 def main():
     """主函数：检查并选择文档目录（优先静态文档）"""
-    
+
     # 1. 优先检查静态文档
     if STATIC_DIR.exists():
         fresh, msg = check_freshness(STATIC_DIR)
-        
+
         if fresh:
             # 静态文档新鲜，直接使用
             print(f"[使用静态] {msg}")
             print(STATIC_DIR)
             return 0
-        
-        # 静态文档过期，进入更新流程
-        print(f"[静态过期] {msg}")
-    
-    # 2. 检查用户缓存目录
+
+        # 静态文档不可用（过期/不完整/时间戳不可解析），进入更新流程
+        print(f"[静态不可用] {msg}")
+
+    # 2. 检查用户缓存目录（新鲜则直接使用）
     if CACHE_DIR.exists():
         fresh, msg = check_freshness(CACHE_DIR)
-        
+
         if fresh:
-            # 缓存文档新鲜，使用缓存
             print(f"[使用缓存] {msg}")
             print(CACHE_DIR)
             return 0
-        
-        # 缓存过期，更新缓存
-        print(f"[缓存过期] {msg}")
+
+        print(f"[缓存不可用] {msg}")
+
+    # 3. 尝试（重新）爬取一次 —— 刚刚失败的爬取立即重试必然再次失败，
+    #    因此无论缓存目录是否已存在，都只爬一次，然后进入静态兜底。
+    print("[更新缓存] 正在准备文档...")
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # 缓存目录不可写（只读 HOME、磁盘满）时不能让脚本带着堆栈崩溃：
+        # 静态文档兜底依然可用。
+        print(f"[错误] 无法创建缓存目录: {e}")
+    else:
         if run_crawl(CACHE_DIR):
             print(CACHE_DIR)
             return 0
-    
-    # 3. 需要创建缓存并更新
-    print("[创建缓存] 正在准备文档...")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    if run_crawl(CACHE_DIR):
-        print(CACHE_DIR)
-        return 0
-    
+        print("[爬取失败] 转入静态文档兜底")
+
     # 4. 爬取失败，使用静态文档兜底
     if STATIC_DIR.exists():
         print("[兜底] 使用静态文档")
         print(STATIC_DIR)
         return 0
-    
+
     # 5. 完全失败
     print("[错误] 无法获取文档")
     return 1
