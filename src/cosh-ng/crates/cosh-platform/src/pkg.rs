@@ -716,7 +716,9 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
                         } else {
                             String::new()
                         },
-                        installed: parts[0].trim() == "i",
+                        // 'i' installed, 'i+' installed by user request,
+                        // 'v' a different version is installed.
+                        installed: matches!(parts[0].trim(), "i" | "i+" | "v"),
                     });
                 }
             }
@@ -997,6 +999,23 @@ mod tests {
         assert_eq!(results[1].name, "nginx-common");
         assert!(!results[1].installed); // empty marker
         assert_eq!(results[1].version, None);
+    }
+
+    #[test]
+    fn test_parse_search_zypper_installed_markers() {
+        let output = "S  | Name           | Summary                    | Type\n---+----------------+----------------------------+--------\ni+ | nginx          | A proxy server and web ser | package\nv  | nginx-macros   | Set of RPM macros for ngin | package\ni  | libnginx       | Shared libraries used by n | package\n   | nginx-devel    | Development files for ngin | package";
+        let results = parse_search_output(output, PkgManager::Zypper);
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0].name, "nginx");
+        // 'i+' = installed by explicit user request; 'v' = a different
+        // version is installed; both must count as installed.
+        assert!(results[0].installed, "i+ marker must count as installed");
+        assert_eq!(results[1].name, "nginx-macros");
+        assert!(results[1].installed, "v marker must count as installed");
+        assert_eq!(results[2].name, "libnginx");
+        assert!(results[2].installed, "i marker must count as installed");
+        assert_eq!(results[3].name, "nginx-devel");
+        assert!(!results[3].installed, "blank marker means not installed");
     }
 
     #[test]
