@@ -51,15 +51,21 @@ fn make_block(command: &str) -> CommandBlock {
     }
 }
 
-#[cfg(unix)]
-fn write_executable_hook(dir_name: &str, file_name: &str, body: &str) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
+/// A temp directory path unique to this process and call, so concurrent test
+/// processes never share (or delete) each other's hook directories.
+fn unique_temp_dir(dir_name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{dir_name}-{}-{unique}", std::process::id()));
+    std::env::temp_dir().join(format!("{dir_name}-{}-{unique}", std::process::id()))
+}
+
+#[cfg(unix)]
+fn write_executable_hook(dir_name: &str, file_name: &str, body: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = unique_temp_dir(dir_name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(file_name);

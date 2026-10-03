@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn load_hooks_from_dir_skips_non_executable() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_noexec");
+    let dir = unique_temp_dir("cosh_hook_test_noexec");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::create_dir_all(&dir);
 
@@ -41,7 +41,7 @@ fn load_hooks_from_dir_skips_non_executable() {
 
 #[test]
 fn load_project_hooks_missing_dir_is_noop() {
-    let project = std::env::temp_dir().join("cosh_hook_test_project_missing_dir");
+    let project = unique_temp_dir("cosh_hook_test_project_missing_dir");
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(&project).unwrap();
 

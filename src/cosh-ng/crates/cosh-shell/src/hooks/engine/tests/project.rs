@@ -3,7 +3,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn untrusted_project_hook_is_discovered_but_not_executed() {
-    let project = std::env::temp_dir().join("cosh_hook_test_project_untrusted");
+    let project = unique_temp_dir("cosh_hook_test_project_untrusted");
     let hooks_dir = project.join(".cosh/hooks");
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(&hooks_dir).unwrap();
@@ -41,7 +41,7 @@ fn untrusted_project_hook_is_discovered_but_not_executed() {
 #[cfg(unix)]
 #[test]
 fn trusted_project_hook_executes_after_match() {
-    let project = std::env::temp_dir().join("cosh_hook_test_project_trusted");
+    let project = unique_temp_dir("cosh_hook_test_project_trusted");
     let hooks_dir = project.join(".cosh/hooks");
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(&hooks_dir).unwrap();
@@ -74,7 +74,7 @@ fn trusted_project_hook_executes_after_match() {
 #[cfg(unix)]
 #[test]
 fn trusted_project_hook_runs_only_for_user_shell_origins() {
-    let project = std::env::temp_dir().join("cosh_hook_test_project_origin_gate");
+    let project = unique_temp_dir("cosh_hook_test_project_origin_gate");
     let hooks_dir = project.join(".cosh/hooks");
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(&hooks_dir).unwrap();
@@ -175,7 +175,7 @@ fn user_external_hook_runs_only_for_user_shell_origins() {
 #[cfg(unix)]
 #[test]
 fn trusted_project_hook_still_respects_disabled_filter() {
-    let project = std::env::temp_dir().join("cosh_hook_test_project_disabled");
+    let project = unique_temp_dir("cosh_hook_test_project_disabled");
     let hooks_dir = project.join(".cosh/hooks");
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(&hooks_dir).unwrap();

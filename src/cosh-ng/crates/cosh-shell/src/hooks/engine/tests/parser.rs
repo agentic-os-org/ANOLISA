@@ -25,7 +25,7 @@ fn parse_timeout_invalid_falls_back() {
 
 #[test]
 fn parse_hook_header_full() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_full");
+    let dir = unique_temp_dir("cosh_hook_test_full");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("my-hook.sh");
     fs::write(
@@ -46,7 +46,7 @@ fn parse_hook_header_full() {
 
 #[test]
 fn parse_hook_header_defaults() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_defaults");
+    let dir = unique_temp_dir("cosh_hook_test_defaults");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("simple.sh");
     fs::write(&path, "#!/bin/bash\n# cosh-hook: simple\n").unwrap();
@@ -62,7 +62,7 @@ fn parse_hook_header_defaults() {
 
 #[test]
 fn parse_hook_header_missing_id_returns_none() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_no_id");
+    let dir = unique_temp_dir("cosh_hook_test_no_id");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("no-id.sh");
     fs::write(&path, "#!/bin/bash\n# match-commands: git\n").unwrap();
@@ -74,7 +74,7 @@ fn parse_hook_header_missing_id_returns_none() {
 
 #[test]
 fn parse_hook_header_on_success_trigger() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_success");
+    let dir = unique_temp_dir("cosh_hook_test_success");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("ok.sh");
     fs::write(
@@ -91,7 +91,7 @@ fn parse_hook_header_on_success_trigger() {
 
 #[test]
 fn parse_hook_header_on_complete_trigger() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_complete");
+    let dir = unique_temp_dir("cosh_hook_test_complete");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("complete.sh");
     fs::write(
@@ -108,7 +108,7 @@ fn parse_hook_header_on_complete_trigger() {
 
 #[test]
 fn parse_hook_header_timeout_ms_format() {
-    let dir = std::env::temp_dir().join("cosh_hook_test_tms");
+    let dir = unique_temp_dir("cosh_hook_test_tms");
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("tms.sh");
     fs::write(
