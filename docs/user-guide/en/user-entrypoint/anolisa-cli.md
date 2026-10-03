@@ -81,13 +81,19 @@ Remove one installation from the selected scope:
 
 ```bash
 anolisa uninstall <component>
-anolisa uninstall <component> --purge
+anolisa uninstall <component> --purge --dry-run
 sudo anolisa --install-mode system uninstall <component> --remove-system-package
 ```
 
 ANOLISA-owned files and managed RPM packages are removed by their owning
 backend. Adopted or observed system RPMs are left installed by default; use
 `--remove-system-package` only when native package removal is intended.
+
+`--purge` is currently plan-only: only `--dry-run` is supported in this
+release, which previews the purge plan (config, cache, and state removal is
+gated pending manifest-driven discovery). Executing a purge is not
+implemented yet and returns a not-implemented error; use plain
+`anolisa uninstall <component>` for the file-removal subset.
 
 ### update
 

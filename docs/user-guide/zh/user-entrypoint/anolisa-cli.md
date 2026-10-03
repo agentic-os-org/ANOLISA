@@ -74,13 +74,18 @@ sudo anolisa --install-mode system --dry-run install cosh --backend rpm
 
 ```bash
 anolisa uninstall <component>
-anolisa uninstall <component> --purge
+anolisa uninstall <component> --purge --dry-run
 sudo anolisa --install-mode system uninstall <component> --remove-system-package
 ```
 
 ANOLISA-owned 文件和 managed RPM package 由各自的 owner backend 移除。
 adopted 或 observed system RPM 默认保留；只有确实要移除 native package 时
 才使用 `--remove-system-package`。
+
+`--purge` 目前仅是 plan-only：本版本只支持 `--dry-run` 预览清理计划（config、
+cache 与 state 的发现仍受 manifest 驱动的发现机制制约）。执行 purge 尚未实现，
+会返回 not-implemented 错误；如需移除文件子集，请使用
+`anolisa uninstall <component>`。
 
 ### update
 
