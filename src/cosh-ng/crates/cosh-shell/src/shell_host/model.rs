@@ -8,6 +8,7 @@ use nix::pty::Winsize;
 use crate::input::InputClassifier;
 use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
 
+use super::login_effect::LoginEffectGuard;
 use super::raw_relay::interactive_sentinel::InputWaitStatus;
 use super::transcript::TranscriptRetention;
 
@@ -197,6 +198,7 @@ pub struct ShellHostConfig {
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
     pub(super) transcript_retention: TranscriptRetention,
+    login_effect_guard: LoginEffectGuard,
 }
 
 impl ShellHostConfig {
@@ -227,6 +229,7 @@ impl ShellHostConfig {
             shell_environment_observer: None,
             shell_history_file_observer: None,
             transcript_retention: TranscriptRetention::Full,
+            login_effect_guard: LoginEffectGuard::new(),
         }
     }
 
@@ -253,6 +256,11 @@ impl ShellHostConfig {
 
     pub(crate) fn set_assistance_control(&mut self, control: crate::input::AssistanceControl) {
         self.assistance_control = Some(control);
+    }
+
+    /// Returns a clone sharing this host's login-effect state.
+    pub(crate) fn login_effect_guard(&self) -> LoginEffectGuard {
+        self.login_effect_guard.clone()
     }
 
     /// Installs the input-wait hint card frame renderer (#2196 review):
