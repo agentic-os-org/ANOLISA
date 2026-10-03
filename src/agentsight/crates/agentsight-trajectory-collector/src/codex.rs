@@ -304,10 +304,23 @@ pub fn extract_private_metadata(
                         .map(String::from);
                 }
             }
-            "event_msg" if payload_type(e) == "user_message" => user_count += 1,
+            // The counts ride on the same events as the trajectory and have to
+            // agree with the steps it contains, so an event that produces no
+            // step must not be counted either (see `convert_codex_events`).
+            "event_msg" if payload_type(e) == "user_message" => {
+                let text = payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !text.is_empty() {
+                    user_count += 1;
+                }
+            }
             "response_item" if payload_type(e) == "message" => {
                 if let Some("assistant") = payload.get("role").and_then(|v| v.as_str()) {
-                    assistant_count += 1
+                    if !joined_text(payload.get("content")).is_empty() {
+                        assistant_count += 1;
+                    }
                 }
             }
             _ => {}
@@ -664,5 +677,43 @@ mod tests {
         assert_eq!(extra["project"], "sysom-dev");
         assert_eq!(extra["user_message_count"], 1);
         assert_eq!(extra["assistant_message_count"], 1);
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_match_the_trajectory() {
+        // The counts ride on the same events as the trajectory, so an event
+        // that produces no step must not be counted either: a message-less
+        // event_msg/user_message (skipped by `convert_codex_events` since
+        // d4fdb97b9) and an assistant message with no text.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-3\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let extra = extract_private_metadata(&events, "codex");
+
+        let user_steps = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .count();
+        let assistant_messages: usize = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::Agent)
+            .count();
+        assert_eq!(user_steps, 1);
+        assert_eq!(assistant_messages, 1);
+        let counted_user = extra["user_message_count"].as_u64().unwrap();
+        let counted_assistant = extra["assistant_message_count"].as_u64().unwrap();
+        assert_eq!(
+            (counted_user, counted_assistant),
+            (user_steps as u64, assistant_messages as u64),
+            "the counts must describe the trajectory they ride on"
+        );
     }
 }
