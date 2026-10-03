@@ -263,13 +263,11 @@ fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
+    // `s` comes from a hand-editable legacy credential file, so it may contain
+    // multi-byte UTF-8; slicing it at byte offsets would panic on a char
+    // boundary. The hex crate rejects non-hex input (including non-ASCII)
+    // instead, which keeps `decrypt_credential`'s malformed-input contract.
+    hex::decode(s).ok()
 }
 
 fn map_approval_mode(mode: &str) -> &str {
@@ -403,6 +401,54 @@ mod tests {
 
         let result = decrypt_credential(&encrypted, &salt_path);
         assert_eq!(result, Some("sk-test-secret-key".to_string()));
+    }
+
+    #[test]
+    fn hex_decode_rejects_non_ascii_without_panicking() {
+        assert_eq!(hex_decode("中文"), None);
+        assert_eq!(hex_decode("00中0"), None);
+        assert_eq!(hex_decode("001122330"), None, "odd input length");
+        assert_eq!(
+            hex_decode("00112233445566778899aabbccddeeff")
+                .unwrap()
+                .len(),
+            16
+        );
+    }
+
+    #[test]
+    fn decrypt_credential_returns_none_for_multibyte_hex_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let salt_path = tmp.path().join(".encryption-salt");
+        std::fs::write(&salt_path, [0x42u8; 32]).unwrap();
+
+        // A corrupted/hand-edited legacy credential: the IV field contains
+        // multi-byte UTF-8. The migration fail-safe must reject it, not abort
+        // the process with a char-boundary panic.
+        let encrypted = "enc:中文:00112233445566778899aabbccddeeff:00";
+        assert_eq!(decrypt_credential(encrypted, &salt_path), None);
+    }
+
+    #[test]
+    fn migration_survives_multibyte_encrypted_credential() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let config_path = tmp.path().join("config.toml");
+        let salt_path = tmp.path().join(".encryption-salt");
+        std::fs::write(&salt_path, [0x42u8; 32]).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"security":{"auth":{"selectedType":"openai","apiKey":"enc:中文:00112233445566778899aabbccddeeff:00","baseUrl":"","openaiModel":"qwen-plus"}},"model":{"name":"qwen-plus"}}"#,
+        )
+        .unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        // The migration completed and produced a parseable config; the
+        // undecryptable key was dropped instead of copied verbatim.
+        toml::from_str::<crate::config::CoreConfig>(&content).unwrap();
+        assert!(!content.contains("enc:中文"));
     }
 
     #[test]
