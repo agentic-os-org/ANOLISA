@@ -181,10 +181,14 @@ fn run_watcher(
                 }
                 Ok(Err(e)) => {
                     if is_overflow(&e) {
-                        tracing::warn!("inotify overflow detected; triggering full rescan");
-                        full_scan(&mount, &store, embedding.as_deref(), rt_handle.as_ref())?;
-                        pending_modify.clear();
-                        pending_remove.clear();
+                        recover_from_overflow(
+                            &mount,
+                            &store,
+                            embedding.as_deref(),
+                            rt_handle.as_ref(),
+                            &mut pending_modify,
+                            &mut pending_remove,
+                        );
                     } else {
                         tracing::warn!("watcher error: {e}");
                     }
@@ -212,6 +216,42 @@ fn run_watcher(
     }
 
     Ok(())
+}
+
+/// Recover from a watcher overflow: rebuild the index from disk, then
+/// discard the pending event sets. The kernel has already lost an unknown
+/// subset of events, so the rebuild is the only complete picture; pending
+/// entries collected around the overflow may be stale — a delete that
+/// straddled the overflow and was followed by a recreate would otherwise
+/// remove a freshly re-indexed file — so they are dropped whether the
+/// rebuild succeeds or not.
+///
+/// A failed rescan must not end the watcher thread. This runs inside the
+/// watcher's event loop, and propagating the error would exit the loop:
+/// every later event would be silently dropped and the index would rot
+/// until the service restarts, with nothing but a single warn line when
+/// the thread winds down. The transient failures that can break a rescan
+/// (SQLITE_BUSY from an external writer outlasting the 5 s busy timeout,
+/// a full disk, a corrupted page) do not get worse by continuing to
+/// watch: log, keep the loop alive, and let the next overflow or restart
+/// retry the rescan.
+fn recover_from_overflow(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+    pending_modify: &mut HashSet<PathBuf>,
+    pending_remove: &mut HashSet<PathBuf>,
+) {
+    tracing::warn!("inotify overflow detected; triggering full rescan");
+    if let Err(e) = full_scan(mount, store, embedding, rt_handle) {
+        tracing::error!(
+            "full rescan after watcher overflow failed ({e}); continuing to watch — \
+             the index may stay stale until the next overflow or restart"
+        );
+    }
+    pending_modify.clear();
+    pending_remove.clear();
 }
 
 fn classify(
@@ -535,5 +575,86 @@ fn is_overflow(e: &notify::Error) -> bool {
         }
         notify::ErrorKind::MaxFilesWatch => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ns::Namespace;
+
+    /// A file-backed store under a real mount point, so a second SQLite
+    /// connection can break the schema underneath the watcher the way an
+    /// external writer (or a full disk) would.
+    fn file_backed_setup() -> (tempfile::TempDir, MountPointLite, Arc<Mutex<BM25Store>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = MountPoint::ensure(Namespace::user("tester").unwrap(), tmp.path()).unwrap();
+        let index_dir = mount.meta_dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let store = Arc::new(Mutex::new(
+            BM25Store::open(&index_dir.join("bm25.db"), 0.01, 0.3, true).unwrap(),
+        ));
+        (tmp, mount.clone_lite(), store)
+    }
+
+    #[test]
+    fn overflow_recovery_survives_a_failed_rescan() {
+        // Before the fix the overflow arm ran `full_scan(...)?` inside the
+        // watcher's event loop: one failed rescan ended the thread and
+        // every later event was silently dropped — the index rotted until
+        // the service restarted. The recovery must contain the error and
+        // still reset the pending sets (replaying events collected around
+        // the overflow against a failed rebuild could delete freshly
+        // re-indexed files).
+        let (_tmp, mount, store) = file_backed_setup();
+        {
+            let mut s = store.lock().unwrap();
+            s.upsert("note.md", 0, 6, "cobaltzebra body", None).unwrap();
+        }
+
+        // Break the store behind the watcher's back: the next SELECT in
+        // full_scan errors out, the same class of transient failure a
+        // SQLITE_BUSY or a full disk produces.
+        let db = mount.meta_dir.join("index").join("bm25.db");
+        let saboteur = rusqlite::Connection::open(&db).unwrap();
+        saboteur.execute_batch("DROP TABLE files;").unwrap();
+        drop(saboteur);
+
+        let mut modified = HashSet::from([mount.root.join("stale.md")]);
+        let mut removed = HashSet::from([mount.root.join("gone.md")]);
+
+        // Must return normally (not propagate, not panic).
+        recover_from_overflow(&mount, &store, None, None, &mut modified, &mut removed);
+
+        assert!(modified.is_empty(), "pending modifies must be discarded");
+        assert!(removed.is_empty(), "pending removes must be discarded");
+    }
+
+    #[test]
+    fn overflow_recovery_rebuilds_from_disk_on_success() {
+        let (_tmp, mount, store) = file_backed_setup();
+        std::fs::write(mount.root.join("new.md"), "heliotrope body").unwrap();
+        {
+            let mut s = store.lock().unwrap();
+            s.upsert("obsolete.md", 0, 6, "cobaltzebra obsolete", None)
+                .unwrap();
+        }
+
+        let mut modified = HashSet::from([mount.root.join("obsolete.md")]);
+        let mut removed = HashSet::from([mount.root.join("new.md")]);
+
+        recover_from_overflow(&mount, &store, None, None, &mut modified, &mut removed);
+
+        assert!(modified.is_empty());
+        assert!(removed.is_empty());
+        // The rebuild re-derived the truth from disk: new.md is indexed,
+        // obsolete.md (never on disk) is evicted.
+        let s = store.lock().unwrap();
+        let paths = s.known_paths().unwrap();
+        assert!(paths.contains(&"new.md".to_string()), "paths: {paths:?}");
+        assert!(
+            !paths.contains(&"obsolete.md".to_string()),
+            "paths: {paths:?}"
+        );
     }
 }
