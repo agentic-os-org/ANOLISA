@@ -174,6 +174,44 @@ impl AnthropicParser {
             },
         }
         let mut current_block: Option<CurrentBlock> = None;
+        // Finish a streamed block, pushing it when it carries content. Called
+        // by `content_block_stop`, by the next `content_block_start` (a stop
+        // lost to a split read must not swallow the block it ended), and once
+        // after the stream.
+        let finish_block = |block: CurrentBlock, out: &mut Vec<AnthropicContentBlock>| match block {
+            CurrentBlock::Text { text } => {
+                if !text.is_empty() {
+                    out.push(AnthropicContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    });
+                }
+            }
+            CurrentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                if !thinking.is_empty() {
+                    out.push(AnthropicContentBlock::Thinking {
+                        thinking,
+                        signature: if signature.is_empty() {
+                            None
+                        } else {
+                            Some(signature)
+                        },
+                    });
+                }
+            }
+            CurrentBlock::ToolUse {
+                id,
+                name,
+                input_json,
+            } => {
+                let input = serde_json::from_str::<serde_json::Value>(&input_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                out.push(AnthropicContentBlock::ToolUse { id, name, input });
+            }
+        };
 
         for event_value in events {
             // Try to parse as AnthropicSseEvent
@@ -185,6 +223,11 @@ impl AnthropicParser {
                         usage = Some(message.usage.clone());
                     }
                     AnthropicSseEvent::ContentBlockStart { content_block, .. } => {
+                        // A new block ends the previous one even when its stop
+                        // event never arrived.
+                        if let Some(block) = current_block.take() {
+                            finish_block(block, &mut content_blocks);
+                        }
                         // Begin a new content block based on its type
                         current_block = match content_block {
                             AnthropicContentBlock::ToolUse { id, name, .. } => {
@@ -257,47 +300,7 @@ impl AnthropicParser {
                     AnthropicSseEvent::ContentBlockStop { .. } => {
                         // Finalize and push the current block
                         if let Some(block) = current_block.take() {
-                            match block {
-                                CurrentBlock::Text { text } => {
-                                    if !text.is_empty() {
-                                        content_blocks.push(AnthropicContentBlock::Text {
-                                            text,
-                                            cache_control: None,
-                                        });
-                                    }
-                                }
-                                CurrentBlock::Thinking {
-                                    thinking,
-                                    signature,
-                                } => {
-                                    if !thinking.is_empty() {
-                                        content_blocks.push(AnthropicContentBlock::Thinking {
-                                            thinking,
-                                            signature: if signature.is_empty() {
-                                                None
-                                            } else {
-                                                Some(signature)
-                                            },
-                                        });
-                                    }
-                                }
-                                CurrentBlock::ToolUse {
-                                    id,
-                                    name,
-                                    input_json,
-                                } => {
-                                    let input =
-                                        serde_json::from_str::<serde_json::Value>(&input_json)
-                                            .unwrap_or(serde_json::Value::Object(
-                                                serde_json::Map::new(),
-                                            ));
-                                    content_blocks.push(AnthropicContentBlock::ToolUse {
-                                        id,
-                                        name,
-                                        input,
-                                    });
-                                }
-                            }
+                            finish_block(block, &mut content_blocks);
                         }
                     }
                     AnthropicSseEvent::MessageDelta {
@@ -339,40 +342,7 @@ impl AnthropicParser {
 
         // Flush any remaining block that didn't get a ContentBlockStop
         if let Some(block) = current_block.take() {
-            match block {
-                CurrentBlock::Text { text } => {
-                    if !text.is_empty() {
-                        content_blocks.push(AnthropicContentBlock::Text {
-                            text,
-                            cache_control: None,
-                        });
-                    }
-                }
-                CurrentBlock::Thinking {
-                    thinking,
-                    signature,
-                } => {
-                    if !thinking.is_empty() {
-                        content_blocks.push(AnthropicContentBlock::Thinking {
-                            thinking,
-                            signature: if signature.is_empty() {
-                                None
-                            } else {
-                                Some(signature)
-                            },
-                        });
-                    }
-                }
-                CurrentBlock::ToolUse {
-                    id,
-                    name,
-                    input_json,
-                } => {
-                    let input = serde_json::from_str::<serde_json::Value>(&input_json)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    content_blocks.push(AnthropicContentBlock::ToolUse { id, name, input });
-                }
-            }
+            finish_block(block, &mut content_blocks);
         }
 
         // Build aggregated response
@@ -697,6 +667,45 @@ mod tests {
     }
 
     /// Test: SSE stream with text + tool_use mixed content (Claude Code typical pattern)
+    #[test]
+    fn test_aggregate_sse_flushes_a_block_whose_stop_never_arrived() {
+        // Two blocks start in sequence with no `content_block_stop` between
+        // them: the stop can be lost when an event is split across reads, and
+        // some proxies omit it. The first block used to be overwritten by the
+        // second and disappeared, so its text never reached the response.
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_flush", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "first"}},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "second"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 4}}
+        ]);
+
+        let response = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        let texts: Vec<&str> = response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["first", "second"],
+            "a block whose stop never arrived must still reach the response"
+        );
+    }
+
     #[test]
     fn test_aggregate_sse_with_tool_use() {
         let events = serde_json::json!([
