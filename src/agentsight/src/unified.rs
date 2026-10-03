@@ -183,10 +183,6 @@ impl PendingGenAiQueue {
         self.bytes = self.entries.iter().map(|p| p.estimated_bytes()).sum();
     }
 
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     fn len(&self) -> usize {
         self.entries.len()
     }

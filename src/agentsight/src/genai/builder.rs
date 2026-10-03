@@ -5,7 +5,7 @@
 
 use super::helpers::PidAgentNameCache;
 use super::id_resolver::IdResolver;
-use super::semantic::{GenAISemanticEvent, MessagePart, OutputMessage};
+use super::semantic::{GenAISemanticEvent, OutputMessage};
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::AnalysisResult;
 use crate::analyzer::token::{TokenParser, merge_usage};
@@ -607,6 +607,7 @@ impl GenAIBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::genai::semantic::MessagePart;
     use crate::probes::sslsniff::SslEvent;
     use std::rc::Rc;
 
