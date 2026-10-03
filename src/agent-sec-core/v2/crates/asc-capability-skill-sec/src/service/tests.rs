@@ -575,3 +575,41 @@ fn unicode_override_cannot_be_signed_as_pass_or_activated() {
         );
     }
 }
+
+#[test]
+fn failed_export_does_not_leave_partial_output() {
+    // Swap the output directory after the snapshot write starts: the final
+    // verify_path() then fails after snapshot/, manifest.json and
+    // findings.json were written, exercising the write-phase failure path.
+    // A failed export must clean up its partial tree, otherwise the same
+    // --output is permanently blocked by the "must be empty" guard with a
+    // misleading error.
+    let (_temporary, service, root) = fixture();
+    service
+        .certify(&root, "fixture", None, &json!([]), deadline())
+        .unwrap();
+    let output = root.io_dir.with_file_name("export");
+    fs::create_dir(&output).unwrap();
+    let moved = output.with_file_name("export-moved");
+    let uid = rustix::process::geteuid().as_raw();
+    let watcher_output = output.clone();
+    let moved_for_watcher = moved.clone();
+    let watcher = std::thread::spawn(move || {
+        while !watcher_output.join("snapshot").exists() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fs::rename(&watcher_output, &moved_for_watcher).unwrap();
+        fs::create_dir(&watcher_output).unwrap();
+    });
+    let result = service.export(&root, "latest", &output, uid, deadline());
+    watcher.join().unwrap();
+    assert!(result.is_err(), "swapped output must fail verify_path");
+    assert!(
+        fs::read_dir(&moved).unwrap().next().is_none(),
+        "the partial tree written through the pinned handle must be removed"
+    );
+    assert!(
+        fs::read_dir(&output).unwrap().next().is_none(),
+        "the replacement directory must stay untouched"
+    );
+}
