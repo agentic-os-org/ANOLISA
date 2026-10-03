@@ -282,7 +282,7 @@ fn check_file_exists(env: &CheckEnv<'_>, path: &str, mode: Option<&str>) -> Chec
             if let Some(want) = mode {
                 match parse_octal_mode(want) {
                     Some(want_bits) => {
-                        let actual = meta.permissions().mode() & 0o777;
+                        let actual = meta.permissions().mode() & 0o7777;
                         if actual != want_bits {
                             return CheckOutcome::leaf(
                                 label,
@@ -598,6 +598,13 @@ mod tests {
         path
     }
 
+    /// Force `path` to exactly `mode`, including any setuid/setgid/sticky bit.
+    fn set_mode(path: &Path, mode: u32) {
+        let mut perms = fs::metadata(path).expect("stat").permissions();
+        perms.set_mode(mode);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+
     #[test]
     fn binary_version_ok_for_owned_executable() {
         let home = tempdir().expect("tempdir");
@@ -699,6 +706,57 @@ mod tests {
             },
         );
         assert_eq!(out.status, CheckStatus::Failed);
+    }
+
+    /// `mode` is a Unix mode: the setuid/setgid/sticky bits are part of the
+    /// declared contract, so a file carrying exactly those bits passes.
+    #[test]
+    fn file_exists_ok_for_declared_special_mode_bits() {
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let tool = write_exec(&layout.bin_dir, "setuid-tool", "x");
+        set_mode(&tool, 0o6755);
+        let out = run_check(
+            &CheckSpec::FileExists {
+                path: tool.display().to_string(),
+                mode: Some("6755".to_string()),
+                owner: None,
+            },
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: None,
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Ok, "detail={:?}", out.detail);
+    }
+
+    /// Special bits the contract does not declare must fail the check: masking
+    /// the actual mode to nine bits would accept a setuid binary as `0755`.
+    #[test]
+    fn file_exists_rejects_undeclared_special_mode_bits() {
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let tool = write_exec(&layout.bin_dir, "setuid-tool", "x");
+        set_mode(&tool, 0o6755);
+        let out = run_check(
+            &CheckSpec::FileExists {
+                path: tool.display().to_string(),
+                mode: Some("0755".to_string()),
+                owner: None,
+            },
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: None,
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Failed, "detail={:?}", out.detail);
+        let detail = out.detail.expect("mode mismatch detail");
+        assert!(
+            detail.contains("6755") && detail.contains("0755"),
+            "detail={detail}"
+        );
     }
 
     #[test]
