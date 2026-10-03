@@ -1,4 +1,8 @@
-FROM alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+# Pinned to the digest of tag alinux4/alinux4:latest as resolved on
+# 2026-10-03 (multi-arch manifest list: linux/amd64 + linux/arm64).
+# Move deliberately: re-resolve the tag and update this digest together
+# with .github/workflows/_rpm-build.yaml and sec-core-rpmbuild.yaml.
+FROM alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4@sha256:87143e49580a7309bbc04c528f35274ead263b47c0c7c66d047e076797b851e9
 
 ARG VERSION=unknown
 ARG TARGETARCH
