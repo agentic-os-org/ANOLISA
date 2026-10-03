@@ -34,6 +34,25 @@ pub struct AuditCommand {
     pub exclude: Vec<String>,
 }
 
+/// Resolve the optional `--type` filter into an [`AuditEventType`].
+///
+/// Unknown values are rejected instead of silently ignored: a typo like
+/// `--type llm_calls` used to fall through to "no filter" and return every
+/// audit event with exit code 0, which is worse than an error for a
+/// machine-facing command (`token --period` and `interruption --type` reject
+/// invalid values the same way, via structopt possible_values).
+fn resolve_event_type(raw: Option<&str>) -> Result<Option<AuditEventType>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    raw.parse::<AuditEventType>().map(Some).map_err(|_| {
+        format!(
+            "invalid --type '{raw}': valid values are 'llm' (llm_call) and \
+             'process' (process_action)"
+        )
+    })
+}
+
 impl AuditCommand {
     pub fn execute(&self) {
         let db_path = SqliteConfig::default().db_path();
@@ -56,10 +75,13 @@ impl AuditCommand {
             }
         };
 
-        let event_type = self
-            .event_type
-            .as_ref()
-            .and_then(|t| t.parse::<AuditEventType>().ok());
+        let event_type = match resolve_event_type(self.event_type.as_deref()) {
+            Ok(event_type) => event_type,
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        };
 
         if self.summary {
             if !self.exclude.is_empty() {
@@ -270,5 +292,48 @@ mod tests {
         // the filtered / hidden-count paths in output_records.
         cmd(vec!["grepconf".to_string()], false).output_records(&records, "test");
         cmd(vec!["grepconf".to_string()], true).output_records(&records, "test");
+    }
+
+    #[test]
+    fn resolve_event_type_accepts_absence_and_both_aliases() {
+        assert!(matches!(resolve_event_type(None), Ok(None)));
+        for raw in ["llm", "llm_call"] {
+            assert!(
+                matches!(
+                    resolve_event_type(Some(raw)),
+                    Ok(Some(AuditEventType::LlmCall))
+                ),
+                "{raw} must resolve to LlmCall"
+            );
+        }
+        for raw in ["process", "process_action"] {
+            assert!(
+                matches!(
+                    resolve_event_type(Some(raw)),
+                    Ok(Some(AuditEventType::ProcessAction))
+                ),
+                "{raw} must resolve to ProcessAction"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_event_type_rejects_unknown_values() {
+        // Before this guard a typo like "llm_calls" was silently dropped and
+        // the query returned BOTH event types with exit code 0 — worse than an
+        // error for a machine-facing command.
+        for raw in ["llm_calls", "processes", ""] {
+            let Err(error) = resolve_event_type(Some(raw)) else {
+                panic!("{raw:?} must be rejected, not silently treated as no filter");
+            };
+            assert!(
+                error.contains("--type"),
+                "{raw:?}: error must name the flag: {error}"
+            );
+            assert!(
+                error.contains("llm") && error.contains("process"),
+                "{raw:?}: error must list the valid values: {error}"
+            );
+        }
     }
 }
