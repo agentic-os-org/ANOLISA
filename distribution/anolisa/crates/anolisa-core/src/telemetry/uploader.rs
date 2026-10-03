@@ -410,23 +410,41 @@ impl Uploader {
                 // single oversized POST that would exceed the SLS 10 MB body
                 // limit and retry forever. When the cap is hit the offset stays
                 // on the rotated file so the remainder drains next round.
+                //
+                // The stored offset only applies while the rotated file is
+                // still the one we were tailing. After a double rotation the
+                // offset belongs to a file that is gone; applying it would
+                // slice the wrong rotated file mid-line (and a non-UTF-8
+                // boundary would fail the read every round), so verify the
+                // inode first and drain from the start on mismatch. The
+                // verification and the read share one open handle: statting
+                // the path and reopening would let a rotation swap the file
+                // in between, making the offset/inode describe the old file
+                // while the read returns the new one.
                 let rotated = self.rotated_path(component);
-                if rotated.exists()
-                    && let Ok((mut residue, res_consumed)) =
-                        read_from(&rotated, o.offset, MAX_LINES_PER_ROUND)
-                {
-                    lines.append(&mut residue);
-                    if lines.len() >= MAX_LINES_PER_ROUND {
-                        // Cap hit: keep the offset on the rotated file so
-                        // the remainder is drained next round instead of
-                        // being skipped.
-                        return Ok(Some((
-                            lines,
-                            FileOffset {
-                                inode: o.inode,
-                                offset: o.offset + res_consumed,
-                            },
-                        )));
+                if let Ok(handle) = File::open(&rotated) {
+                    let rotated_inode = inode_of(&handle.metadata()?);
+                    let drain_from = if rotated_inode == o.inode {
+                        o.offset
+                    } else {
+                        0
+                    };
+                    if let Ok((mut residue, res_consumed)) =
+                        read_from_handle(handle, drain_from, MAX_LINES_PER_ROUND)
+                    {
+                        lines.append(&mut residue);
+                        if lines.len() >= MAX_LINES_PER_ROUND {
+                            // Cap hit: keep the offset on the rotated file so
+                            // the remainder is drained next round instead of
+                            // being skipped.
+                            return Ok(Some((
+                                lines,
+                                FileOffset {
+                                    inode: rotated_inode,
+                                    offset: drain_from + res_consumed,
+                                },
+                            )));
+                        }
                     }
                 }
                 0
@@ -655,10 +673,21 @@ fn unix_now() -> u64 {
 /// Reads line-by-line via a `BufReader` so a large file does not have to be
 /// fully loaded into memory before `max_lines` takes effect.
 fn read_from(path: &Path, offset: u64, max_lines: usize) -> io::Result<(Vec<String>, u64)> {
+    let f = File::open(path)?;
+    read_from_handle(f, offset, max_lines)
+}
+
+/// Handle-based counterpart of [`read_from`]: the caller opens the file and
+/// supplies the metadata used to pick `offset`, so both refer to the same
+/// inode even if the path is swapped underneath (e.g. by logrotate).
+fn read_from_handle(
+    mut file: File,
+    offset: u64,
+    max_lines: usize,
+) -> io::Result<(Vec<String>, u64)> {
     use std::io::{BufRead, BufReader};
-    let mut f = File::open(path)?;
-    f.seek(SeekFrom::Start(offset))?;
-    let mut reader = BufReader::new(f);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
 
     let mut lines = Vec::new();
     let mut consumed: u64 = 0;
@@ -1253,6 +1282,125 @@ mod tests {
         // New offset tracks the fresh file's inode + consumed bytes.
         assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
         assert_eq!(off.offset, 8);
+    }
+
+    #[test]
+    fn test_collect_component_residue_inode_mismatch_drains_from_start() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+
+        // The stored offset refers to a rotated file that has since been
+        // rotated away again (double rotation): the `.jsonl.1` present now
+        // has a different inode, so the stale byte offset must not be
+        // applied to it.
+        write_lines(&up.rotated_path("cosh"), "{\"a\":1}\n{\"b\":2}\n");
+        write_lines(&path, "{\"c\":3}\n");
+        let stored = FileOffset {
+            inode: inode_of(&fs::metadata(up.rotated_path("cosh")).unwrap()).wrapping_add(1),
+            offset: 5,
+        };
+
+        let (lines, off) = up
+            .collect_component("cosh", Some(&stored))
+            .unwrap()
+            .unwrap();
+        // Applying the stale offset would slice the rotated file mid-line
+        // (first line "1}"); the mismatch must drain from the start instead.
+        assert_eq!(
+            lines,
+            vec![
+                "{\"a\":1}".to_string(),
+                "{\"b\":2}".to_string(),
+                "{\"c\":3}".to_string()
+            ]
+        );
+        assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(off.offset, 8);
+    }
+
+    #[test]
+    fn test_rotated_drain_binds_stat_and_read_to_one_handle() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let rotated = up.rotated_path("cosh");
+        write_lines(&rotated, "{\"old\":1}\n");
+
+        // The exact production sequence from collect_component: open once,
+        // stat the handle, then read through the same handle. Swapping the
+        // path underneath (the logrotate window between a path stat and a
+        // path re-open) must not change what the metadata described or what
+        // the read returns.
+        let handle = File::open(&rotated).unwrap();
+        let stat_inode = inode_of(&handle.metadata().unwrap());
+
+        fs::rename(&rotated, dir.path().join("swapped-out")).unwrap();
+        write_lines(&rotated, "{\"new\":1}\n");
+
+        let (lines, consumed) = read_from_handle(handle, 0, 0).unwrap();
+        // The read still serves the file the stat described...
+        assert_eq!(lines, vec!["{\"old\":1}".to_string()]);
+        assert_eq!(consumed, "{\"old\":1}\n".len() as u64);
+        // ...and the new tenant of the path is a different file, so a
+        // persisted {stat_inode, offset} can never be mistaken for it.
+        assert_ne!(stat_inode, inode_of(&fs::metadata(&rotated).unwrap()));
+    }
+
+    #[test]
+    fn test_collect_component_residue_cap_survives_rotated_swap() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let rotated = up.rotated_path("cosh");
+
+        // More residue than one round drains: the continuation offset must
+        // describe the file that was actually drained, never the path's next
+        // tenant.
+        let mut residue = String::new();
+        for i in 0..MAX_LINES_PER_ROUND {
+            residue.push_str(&format!("{{\"old\":{i}}}\n"));
+        }
+        residue.push_str("{\"tail\":1}\n");
+        write_lines(&rotated, &residue);
+        write_lines(&path, "{\"fresh\":1}\n");
+        let stored = FileOffset {
+            inode: inode_of(&fs::metadata(&rotated).unwrap()),
+            offset: 0,
+        };
+
+        let (lines, cont) = up
+            .collect_component("cosh", Some(&stored))
+            .unwrap()
+            .unwrap();
+        assert_eq!(lines.len(), MAX_LINES_PER_ROUND);
+        assert_eq!(lines[0], "{\"old\":0}".to_string());
+        assert_eq!(cont.inode, stored.inode);
+        assert_eq!(
+            cont.offset,
+            residue.len() as u64 - "{\"tail\":1}\n".len() as u64
+        );
+
+        // logrotate swaps the rotated path before the next round: the
+        // continuation offset must not be applied to the new file.
+        fs::rename(&rotated, dir.path().join("gone.1")).unwrap();
+        write_lines(&rotated, "{\"new\":1}\n{\"new\":2}\n");
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"fresh\":2}\n").unwrap();
+
+        let (lines2, off2) = up.collect_component("cosh", Some(&cont)).unwrap().unwrap();
+        // New rotated file drains from the start; the fresh file restarts
+        // from 0 because round 1 hit the cap before draining it.
+        assert_eq!(
+            lines2,
+            vec![
+                "{\"new\":1}".to_string(),
+                "{\"new\":2}".to_string(),
+                "{\"fresh\":1}".to_string(),
+                "{\"fresh\":2}".to_string(),
+            ]
+        );
+        assert_eq!(off2.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(off2.offset, 24);
     }
 
     #[test]
