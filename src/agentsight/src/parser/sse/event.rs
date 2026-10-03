@@ -1,4 +1,4 @@
-use crate::chrome_trace::{ChromeTraceEvent, ns_to_us};
+use crate::chrome_trace::{ChromeTraceEvent, ns_to_us, truncate_at_char_boundary};
 use crate::probes::sslsniff::SslEvent;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -440,7 +440,11 @@ impl SSEEvent {
 
         // Add data (truncated for display if very long)
         let data_preview = if self.data.len() > 500 {
-            format!("{}... ({} bytes total)", &self.data[..500], self.data.len())
+            format!(
+                "{}... ({} bytes total)",
+                truncate_at_char_boundary(&self.data, 500),
+                self.data.len()
+            )
         } else {
             self.data.clone()
         };
@@ -777,6 +781,31 @@ mod tests {
         assert_eq!(trace.cat, "sse");
         assert_eq!(trace.ph, "i");
         assert_eq!(trace.ts, 1); // 1000ns = 1us
+    }
+
+    #[test]
+    fn chrome_trace_preview_cuts_multibyte_data_at_char_boundary() {
+        // 499 ASCII bytes + one 3-byte char: byte 500 falls inside it — the
+        // exact input on which a raw &self.data[..500] slice panics.
+        let mut data = "x".repeat(499);
+        data.push('中');
+        let e = SSEEvent {
+            id: Some("1".to_string()),
+            event: Some("delta".to_string()),
+            data,
+            retry: None,
+        };
+        let trace = e.to_chrome_trace_event(10, 20, 1000);
+        let args = trace.args.unwrap();
+        let preview = args["data"].as_str().unwrap();
+        assert!(
+            preview.ends_with("... (502 bytes total)"),
+            "preview must keep the byte-total suffix: {preview}"
+        );
+        assert_eq!(
+            preview.trim_end_matches("... (502 bytes total)"),
+            "x".repeat(499)
+        );
     }
 
     #[test]

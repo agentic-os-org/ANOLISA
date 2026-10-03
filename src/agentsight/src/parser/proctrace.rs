@@ -2,7 +2,7 @@
 //!
 //! Parses process events (execve, stdout, exit) from VariableEvent.
 
-use crate::chrome_trace::{ChromeTraceEvent, TraceArgs, ns_to_us};
+use crate::chrome_trace::{ChromeTraceEvent, TraceArgs, ns_to_us, truncate_at_char_boundary};
 use crate::probes::proctrace::VariableEvent;
 use serde_json::json;
 
@@ -124,7 +124,7 @@ impl ProcTraceParser {
             ProcEventType::Stdout => {
                 let data = parsed.stdout_data?;
                 let display_data = if data.len() > 100 {
-                    format!("{}...", &data[..100])
+                    format!("{}...", truncate_at_char_boundary(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -202,7 +202,11 @@ impl TraceArgs for ParsedProcEvent {
 
                     // Add data preview (truncated)
                     let preview = if data.len() > 200 {
-                        format!("{}... ({} bytes total)", &data[..200], data.len())
+                        format!(
+                            "{}... ({} bytes total)",
+                            truncate_at_char_boundary(data, 200),
+                            data.len()
+                        )
                     } else {
                         data.clone()
                     };
@@ -227,7 +231,7 @@ impl ParsedProcEvent {
             ProcEventType::Stdout => {
                 let data = self.stdout_data.as_ref().cloned().unwrap_or_default();
                 let display_data = if data.len() > 100 {
-                    format!("{}...", &data[..100])
+                    format!("{}...", truncate_at_char_boundary(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -254,5 +258,75 @@ impl ParsedProcEvent {
             id: None,
             bp: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 99 ASCII bytes + one 3-byte char: byte 100 falls inside it — the exact
+    /// input on which a raw &data[..100] slice panics.
+    fn multibyte_stdout() -> String {
+        let mut data = "x".repeat(99);
+        data.push('中');
+        data
+    }
+
+    /// 199 ASCII bytes + one 3-byte char: byte 200 falls inside it — the exact
+    /// input on which a raw &data[..200] slice panics.
+    fn long_multibyte_stdout() -> String {
+        let mut data = "x".repeat(199);
+        data.push('中');
+        data
+    }
+
+    fn stdout_event(data: &str) -> ParsedProcEvent {
+        ParsedProcEvent {
+            event_type: ProcEventType::Stdout,
+            pid: 1,
+            tid: 1,
+            ppid: 0,
+            ptid: 0,
+            comm: "test".to_string(),
+            timestamp_ns: 1000,
+            args: None,
+            stdout_data: Some(data.to_string()),
+        }
+    }
+
+    #[test]
+    fn stdout_event_name_cuts_multibyte_output_at_char_boundary() {
+        let event = stdout_event(&multibyte_stdout());
+        let trace = event.to_chrome_trace_event();
+        assert!(trace.name.contains("x".repeat(99).as_str()));
+    }
+
+    #[test]
+    fn stdout_trace_args_cut_multibyte_output_at_char_boundary() {
+        let event = stdout_event(&long_multibyte_stdout());
+        let args = event.to_trace_args();
+        let preview = args["data"].as_str().unwrap();
+        assert!(preview.starts_with("x".repeat(199).as_str()));
+        assert!(preview.ends_with("... (202 bytes total)"));
+    }
+
+    #[test]
+    fn variable_stdout_conversion_cuts_multibyte_output_at_char_boundary() {
+        /// A zeroed header stands in for the fixed part of a proc event.
+        ///
+        /// SAFETY: `ProcEventHeader` is a `#[repr(C)]` bindgen struct of plain
+        /// integers, so an all-zero bit pattern is a valid value (same stand-in
+        /// as the `event.rs` tests).
+        fn header() -> crate::probes::proctrace::ProcEventHeader {
+            unsafe { std::mem::zeroed() }
+        }
+        let event = crate::probes::proctrace::VariableEvent::Stdout {
+            header: header(),
+            fd: 1,
+            payload: multibyte_stdout().into_bytes(),
+        };
+        let trace = ProcTraceParser::to_chrome_trace_event(&event).expect("stdout event converts");
+        assert!(trace.name.contains("x".repeat(99).as_str()));
     }
 }

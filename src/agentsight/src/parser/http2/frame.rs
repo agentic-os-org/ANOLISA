@@ -3,7 +3,9 @@
 //! Defines `Http2FrameType` and `ParsedHttp2Frame` for zero-copy
 //! HTTP/2 binary frame representation.
 
-use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us};
+use crate::chrome_trace::{
+    ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us, truncate_at_char_boundary,
+};
 use crate::probes::sslsniff::SslEvent;
 use hpack::Decoder;
 use serde_json::json;
@@ -454,11 +456,7 @@ impl TraceArgs for ParsedHttp2Frame {
             } else {
                 let preview = self.body_str();
                 if !preview.is_empty() {
-                    let truncated = if preview.len() > 200 {
-                        &preview[..200]
-                    } else {
-                        preview
-                    };
+                    let truncated = truncate_at_char_boundary(preview, 200);
                     args.insert("body_preview".to_string(), json!(truncated));
                 }
             }
@@ -527,7 +525,11 @@ impl fmt::Debug for ParsedHttp2Frame {
                 if text.len() > 200 {
                     debug.field(
                         "body",
-                        &format!("(text, {} bytes)\n{}...", body.len(), &text[..200]),
+                        &format!(
+                            "(text, {} bytes)\n{}...",
+                            body.len(),
+                            truncate_at_char_boundary(text, 200)
+                        ),
                     );
                 } else {
                     debug.field("body", &format!("(text, {} bytes)\n{}", body.len(), text));
@@ -588,5 +590,41 @@ mod tests {
         // return the old "<huffman:N bytes>" placeholder.
         let out = ParsedHttp2Frame::huffman_decode(&[0x00]);
         assert!(!out.starts_with("<huffman:"));
+    }
+
+    fn frame_with_payload(payload: &[u8]) -> ParsedHttp2Frame {
+        ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: payload.len(),
+            source_event: Rc::new(SslEvent {
+                source: 0,
+                timestamp_ns: 1000,
+                delta_ns: 0,
+                pid: 1234,
+                tid: 1,
+                uid: 0,
+                len: payload.len() as u32,
+                rw: 0,
+                comm: "test".to_string(),
+                buf: payload.to_vec(),
+                is_handshake: false,
+                ssl_ptr: 0x1000,
+            }),
+        }
+    }
+
+    #[test]
+    fn body_preview_cuts_multibyte_payload_at_char_boundary() {
+        // 199 ASCII bytes + one 3-byte char: byte 200 falls inside it — the
+        // exact input on which a raw &preview[..200] slice panics.
+        let mut payload = b"x".repeat(199);
+        payload.extend_from_slice("中".as_bytes());
+        let frame = frame_with_payload(&payload);
+        let args = frame.to_trace_args();
+        let preview = args["body_preview"].as_str().unwrap();
+        assert_eq!(preview, "x".repeat(199));
     }
 }

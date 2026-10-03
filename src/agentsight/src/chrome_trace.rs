@@ -339,6 +339,22 @@ pub fn ns_to_us(ns: u64) -> u64 {
     ns / 1000
 }
 
+/// Truncate `s` to at most `max_bytes` bytes for a trace preview.
+///
+/// The cut is backed off to a UTF-8 char boundary: captured payloads carry
+/// non-ASCII text (Chinese prompts, responses, process output), and a raw
+/// byte slice panics when the cut point splits a multi-byte character.
+pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Helper function to format a trace file header
 pub fn trace_file_header() -> &'static str {
     "[\n"
@@ -445,6 +461,35 @@ mod tests {
     fn test_trace_file_header_footer() {
         assert_eq!(trace_file_header(), "[\n");
         assert_eq!(trace_file_footer(), "\n]");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_keeps_ascii_behavior() {
+        // Short input is returned verbatim; an ASCII cut lands on a boundary
+        // and keeps exactly max_bytes bytes.
+        assert_eq!(truncate_at_char_boundary("short", 100), "short");
+        assert_eq!(
+            truncate_at_char_boundary(&"x".repeat(200), 100),
+            "x".repeat(100)
+        );
+        assert_eq!(truncate_at_char_boundary("exact", 5), "exact");
+        assert_eq!(truncate_at_char_boundary("", 10), "");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_backs_off_to_a_boundary() {
+        // 76 ASCII bytes + a 3-byte char: byte 77 splits it, so the cut must
+        // back off to 76 instead of panicking.
+        let mut s = "x".repeat(76);
+        s.push('中');
+        s.push_str("文内容");
+        assert_eq!(truncate_at_char_boundary(&s, 77), "x".repeat(76));
+
+        // A pure multi-byte run: 100 cut inside 3-byte chars backs off to 99.
+        let cjk = "中".repeat(50);
+        assert_eq!(truncate_at_char_boundary(&cjk, 100).len(), 99);
+        // The result is always a prefix of the original.
+        assert!(cjk.starts_with(truncate_at_char_boundary(&cjk, 100)));
     }
 
     #[test]
