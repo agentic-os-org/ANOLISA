@@ -1002,6 +1002,88 @@ mod tests {
         assert!(bodies.contains(&final_content));
     }
 
+    /// Helper process for `write_repo_config_concurrent_processes_converge`:
+    /// when the parent sets `ANOLISA_REPO_CONFIG_HELPER_DEST`/`_BODY`, this
+    /// entry point performs the same write in its own process. Without the
+    /// env vars (a normal test run) it is a no-op pass.
+    #[test]
+    fn write_repo_config_process_helper() {
+        let Ok(dest) = std::env::var("ANOLISA_REPO_CONFIG_HELPER_DEST") else {
+            return;
+        };
+        let body = std::env::var("ANOLISA_REPO_CONFIG_HELPER_BODY").unwrap_or_default();
+        write_repo_config(Path::new(&dest), &body).unwrap();
+    }
+
+    #[test]
+    fn write_repo_config_concurrent_processes_converge() {
+        // Threads share the process-wide tmp counter and pid; separate
+        // processes share neither, so this is the contention the thread test
+        // cannot reach. Every writer must succeed and the destination must
+        // hold exactly one writer's complete body.
+        let exe = std::env::current_exe().expect("test binary path");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("repo.toml");
+        let bodies: Vec<String> = (0..8)
+            .map(|i| format!("default_backend = \"raw{i}\"\n"))
+            .collect();
+
+        let mut children = Vec::new();
+        for body in &bodies {
+            let child = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "repo_config::tests::write_repo_config_process_helper",
+                ])
+                .env("ANOLISA_REPO_CONFIG_HELPER_DEST", &dest)
+                .env("ANOLISA_REPO_CONFIG_HELPER_BODY", body)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn helper process");
+            children.push(child);
+        }
+        for mut child in children {
+            let status = child.wait().expect("wait helper process");
+            assert!(status.success(), "helper process failed: {status}");
+        }
+
+        let final_content = std::fs::read_to_string(&dest).unwrap();
+        assert!(
+            bodies.contains(&final_content),
+            "destination must hold one writer's complete body, got {final_content:?}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging file may be left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn write_repo_config_ignores_abandoned_staging_file() {
+        // A writer killed between creating its staging file and renaming it
+        // leaves that file behind; the unique name means the next run must
+        // ignore it instead of reusing or truncating it.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("repo.toml");
+        let abandoned = dir.path().join(".repo.toml.1234.0.9999.tmp");
+        std::fs::write(&abandoned, "partial").unwrap();
+
+        write_repo_config(&dest, "default_backend = \"raw\"\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "default_backend = \"raw\"\n"
+        );
+        assert_eq!(std::fs::read_to_string(&abandoned).unwrap(), "partial");
+    }
+
     fn serve_once(body: String) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
