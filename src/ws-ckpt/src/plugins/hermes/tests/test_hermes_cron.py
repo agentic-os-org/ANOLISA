@@ -169,6 +169,37 @@ class TestWriteCrontab:
         assert _write_crontab(["line1"]) is False
 
 
+class TestQuotedWorkspace:
+    """Workspaces containing a single quote are shell-escaped on disk
+    ('\'' runs); extraction must undo the escape or every sync appends a
+    duplicate crontab entry."""
+
+    WS = "/home/it's/proj"
+
+    def test_extract_workspace_unescapes_posix_quotes(self):
+        line = _build_cron_line(self.WS, "0 * * * *")
+        assert _extract_workspace(line) == self.WS
+
+    def test_match_workspace_with_quote(self):
+        line = _build_cron_line(self.WS, "0 * * * *")
+        assert _match_workspace(line, self.WS) is True
+
+    @patch("hermes.cron.os.close")
+    @patch("hermes.cron.os.open", return_value=99)
+    @patch("hermes.cron.fcntl.flock")
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab")
+    def test_sync_is_idempotent_for_quoted_workspace(
+        self, mock_read, mock_write, _flock, _open, _close
+    ):
+        first_line = _build_cron_line(self.WS, "0 * * * *")
+        mock_read.return_value = [first_line]
+        assert CrontabManager.sync(self.WS, ["0 * * * *"]) is True
+        written = mock_write.call_args[0][0]
+        entries = [l for l in written if "ws-ckpt" in l]
+        assert entries == [first_line]
+
+
 class TestCrontabManagerSync:
     @patch("hermes.cron.os.close")
     @patch("hermes.cron.os.open", return_value=99)

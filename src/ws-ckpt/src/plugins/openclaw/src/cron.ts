@@ -10,12 +10,19 @@ export function validateCronExpr(expr: string): boolean {
   return CRON_RE.test(expr.trim());
 }
 
-// Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
-const MARKER_RE_QUOTED = /ws-ckpt\s+checkpoint\s+.*-w\s+'([^']+)'/;
+// Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>. The quoted value
+// is POSIX-escaped by shellQuote ('\'' runs), so the quoted form must
+// re-parse those escapes or workspaces containing a quote never match and
+// every sync appends a duplicate crontab entry.
+const MARKER_RE_QUOTED = /ws-ckpt\s+checkpoint\s+.*-w\s+'((?:[^']|'\\'')*)'/;
 const MARKER_RE_UNQUOTED = /ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)/;
 
 function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function shellUnquote(s: string): string {
+  return s.replace(/'\\''/g, "'");
 }
 
 function buildCronLine(workspace: string, schedule: string): string {
@@ -69,9 +76,9 @@ async function writeCrontab(lines: string[]): Promise<boolean> {
 
 function extractWorkspace(line: string): string | null {
   let m = MARKER_RE_QUOTED.exec(line);
-  if (m) return m[1];
+  if (m) return shellUnquote(m[1]);
   m = MARKER_RE_UNQUOTED.exec(line);
-  if (m) return m[1];
+  if (m) return shellUnquote(m[1]);
   return null;
 }
 
