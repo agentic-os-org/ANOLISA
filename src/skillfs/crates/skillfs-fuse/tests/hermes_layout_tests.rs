@@ -1281,6 +1281,100 @@ fn hermes_mixed_layout_top_level_and_nested() {
 }
 
 // -----------------------------------------------------------------------
+// 18b. Top-level files in an in-place Hermes mount.
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_top_level_file_is_listed_and_readable() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        // A plain file at the workspace root. The in-place root readdir
+        // lists the physical workspace, so this entry must be readable:
+        // leaving it classified as a category made it a phantom that
+        // `stat`, `cat` and `ls -l` all failed on with ENOENT.
+        std::fs::write(dir.join("README.md"), "top-level readme\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "*.tmp\n").unwrap();
+    });
+
+    let mp = fix.mountpoint();
+
+    let root_entries = list_dir_names(mp);
+    assert!(
+        root_entries.contains(&"README.md".to_string()),
+        "root must list the top-level file, got: {root_entries:?}"
+    );
+
+    let readme = std::fs::read_to_string(mp.join("README.md"))
+        .expect("top-level file must be readable through the mount");
+    assert_eq!(readme, "top-level readme\n");
+    assert!(
+        std::fs::metadata(mp.join("README.md")).unwrap().is_file(),
+        "top-level file must keep its file attrs"
+    );
+
+    let ignore = std::fs::read_to_string(mp.join(".gitignore"))
+        .expect("top-level dot-file must be readable through the mount");
+    assert_eq!(ignore, "*.tmp\n");
+
+    // The management file and the nested skill keep working alongside it.
+    assert_eq!(
+        std::fs::read_to_string(mp.join(".bundled_manifest")).unwrap(),
+        "manifest-content"
+    );
+    let nested_md = std::fs::read_to_string(mp.join("apple/apple-notes/SKILL.md"))
+        .expect("read nested SKILL.md");
+    assert!(nested_md.contains("Apple Notes skill body"));
+}
+
+// -----------------------------------------------------------------------
+// 18c. Reserved lifecycle names stay hidden in an in-place Hermes mount.
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_reserved_lifecycle_files_stay_hidden() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        // Plain-file shapes of the reserved lifecycle names. The S3 contract
+        // keeps these names out of the ordinary view and denies mutation, so
+        // the top-level file rewrite must not turn them into readable,
+        // writable files.
+        std::fs::write(dir.join(".certified"), "certified\n").unwrap();
+        std::fs::write(dir.join(".staging"), "staging\n").unwrap();
+        std::fs::write(dir.join(".quarantine"), "quarantine\n").unwrap();
+        std::fs::write(dir.join(".archive"), "archive\n").unwrap();
+    });
+
+    let mp = fix.mountpoint();
+
+    for name in [".certified", ".staging", ".quarantine", ".archive"] {
+        let path = mp.join(name);
+        assert!(
+            std::fs::symlink_metadata(&path).is_err(),
+            "{name} must stay hidden from the ordinary view"
+        );
+        assert!(
+            std::fs::read_to_string(&path).is_err(),
+            "{name} must not be readable"
+        );
+        assert!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .is_err(),
+            "{name} must not be openable for writing"
+        );
+        assert!(
+            std::fs::remove_file(&path).is_err(),
+            "{name} must not be removable"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
 // 19. Conservative layout auto-detection.
 // -----------------------------------------------------------------------
 
