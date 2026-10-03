@@ -6290,6 +6290,8 @@ entry = "cosh-extension.json"
             resources: Vec::new(),
             driver_payload: DriverPayload::Cosh(CoshClaim {
                 extension_dir_resource: "cosh_extension_dir".to_string(),
+                // The contract fixture declares the default entry.
+                bundle_manifest: "cosh-extension.json".to_string(),
             }),
         }
     }

@@ -1730,6 +1730,7 @@ mod tests {
                 resources: Vec::new(),
                 driver_payload: DriverPayload::Cosh(CoshClaim {
                     extension_dir_resource: "ext".to_string(),
+                    bundle_manifest: "cosh-extension.json".to_string(),
                 }),
             }
         }

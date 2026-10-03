@@ -194,6 +194,16 @@ impl FrameworkDriver for CoshDriver {
                 resources,
                 driver_payload: DriverPayload::Cosh(CoshClaim {
                     extension_dir_resource: RES_EXTENSION_DIR.to_string(),
+                    // Which manifest file the delivered tree must carry:
+                    // the entry declared by the component manifest (any
+                    // framework contract may name one), falling back to
+                    // the cosh default. Recorded so `status` — which has no
+                    // manifest to consult — verifies the same entry that
+                    // `read_bundle` validated at enable time.
+                    bundle_manifest: ctx
+                        .declared_bundle_entry
+                        .clone()
+                        .unwrap_or_else(|| COSH_MANIFEST.to_string()),
                 }),
             },
             PreparedEnable::None,
@@ -294,11 +304,17 @@ impl FrameworkDriver for CoshDriver {
         //    ANOLISA-managed (user replaced it, or a marker write failed),
         //    which is a degraded state — not a healthy one. This is a
         //    reliable, read-only filesystem check, so verification is always
-        //    supported for cosh.
+        //    supported for cosh. The manifest checked is the one the receipt
+        //    recorded at enable time — the contract may declare a bundle
+        //    entry other than the cosh default, and enable already honored
+        //    it.
+        let manifest = claim_bundle_manifest(claim);
         let (tree_present, tree_reason) = match claim_extension_dir(claim) {
-            Some(dir) if !dir.is_dir() || !dir.join(COSH_MANIFEST).is_file() => (
+            Some(dir) if !dir.is_dir() || !dir.join(&manifest).is_file() => (
                 false,
-                Some("cosh extension directory or manifest missing".to_string()),
+                Some(format!(
+                    "cosh extension directory or manifest '{manifest}' missing"
+                )),
             ),
             Some(dir) if !is_anolisa_owned(&dir) => (
                 false,
@@ -454,6 +470,17 @@ fn claim_extension_dir(claim: &AdapterClaim) -> Option<PathBuf> {
         ClaimResourceKind::ExternalPath { path } => Some(path.clone()),
         _ => None,
     })
+}
+
+/// Manifest file name a receipt's extension tree must carry: the bundle
+/// entry declared at enable time, recorded in the [`CoshClaim`]. Receipts
+/// from before the field existed default to the cosh manifest, so they
+/// verify exactly as before.
+fn claim_bundle_manifest(claim: &AdapterClaim) -> String {
+    match &claim.driver_payload {
+        DriverPayload::Cosh(c) => c.bundle_manifest.clone(),
+        _ => COSH_MANIFEST.to_string(),
+    }
 }
 
 /// Roll the detect and tree-present signals into a summary, honoring a
@@ -618,8 +645,8 @@ mod tests {
         root
     }
 
-    fn attach_materialized_inventory(claim: &mut AdapterClaim, root: &Path) {
-        let managed = [root.join(COSH_MANIFEST), root.join("hooks/run-hook.sh")]
+    fn attach_materialized_inventory(claim: &mut AdapterClaim, root: &Path, manifest: &str) {
+        let managed = [root.join(manifest), root.join("hooks/run-hook.sh")]
             .into_iter()
             .map(|path| ManagedFile {
                 sha256: Some(format!(
@@ -691,7 +718,7 @@ mod tests {
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
 
         let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
-        attach_materialized_inventory(&mut claim, &resource_root);
+        attach_materialized_inventory(&mut claim, &resource_root, COSH_MANIFEST);
         driver
             .apply_enable(&mut claim, &prepared, &ctx, &mut ())
             .expect("apply");
@@ -716,6 +743,61 @@ mod tests {
         assert!(
             sibling.join("keep.txt").is_file(),
             "disable must not touch other extensions"
+        );
+    }
+
+    #[test]
+    fn status_verifies_the_declared_bundle_entry() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        let cosh = tmp.path().join("cosh-home");
+        guard.set_home(&cosh);
+
+        // The resource root carries a contract-declared entry instead of the
+        // driver default cosh-extension.json.
+        const ENTRY: &str = "custom-extension.json";
+        let root = tmp.path().join("common");
+        std::fs::create_dir_all(root.join("hooks")).expect("mkdir");
+        std::fs::write(root.join(ENTRY), br#"{"name":"tokenless"}"#).expect("manifest");
+        std::fs::write(root.join("hooks/run-hook.sh"), b"#!/bin/sh\n").expect("hook");
+
+        let ops = FsOps;
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let mut ctx = ctx(&root, &user_home, &ops, &layout);
+        ctx.declared_bundle_entry = Some(ENTRY.to_string());
+        let driver = CoshDriver::new();
+
+        // Enable honors the declared entry (read_bundle validates it)…
+        let bundle = driver
+            .read_bundle(&ctx)
+            .expect("read bundle with declared entry");
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        attach_materialized_inventory(&mut claim, &root, ENTRY);
+        driver
+            .apply_enable(&mut claim, &prepared, &ctx, &mut ())
+            .expect("apply");
+        let ext_dir = cosh.join("extensions").join("tokenless");
+        assert!(ext_dir.join(ENTRY).is_file(), "declared entry delivered");
+
+        // …and status must verify that same entry. The status path has no
+        // manifest to consult (the Manager's status DriverCtx passes
+        // declared_bundle_entry: None), so the receipt must carry the fact.
+        ctx.declared_bundle_entry = None;
+        let report = driver.status(&claim, &ctx).expect("status");
+        assert_eq!(
+            report.summary,
+            AdapterSummary::Healthy,
+            "custom-entry extension must not read as degraded: {report:?}"
+        );
+        assert!(
+            report
+                .conditions
+                .iter()
+                .any(|c| c.kind == AdapterConditionKind::TreePresent
+                    && c.status == ConditionStatus::True),
+            "TreePresent must verify the declared entry, got {report:?}"
         );
     }
 

@@ -651,6 +651,22 @@ pub struct CoshClaim {
     /// Resource id of the delivered extension directory
     /// ([`ClaimResourceKind::ExternalPath`]).
     pub extension_dir_resource: String,
+    /// Manifest file name the delivered tree must carry for `status` to
+    /// verify it: the bundle entry declared at enable time (manifest
+    /// `[adapters.bundle].entry`), or the cosh driver's default
+    /// `cosh-extension.json`. Recorded in the receipt because the status
+    /// path has no component manifest to consult — the receipt is the only
+    /// carrier of enable facts.
+    #[serde(default = "default_cosh_bundle_manifest")]
+    pub bundle_manifest: String,
+}
+
+/// Default [`CoshClaim::bundle_manifest`], matching the cosh driver's
+/// `COSH_MANIFEST` constant. Receipts written before the field existed (and
+/// receipts enabled against the default entry) deserialize to it, so old
+/// receipts verify exactly as they did before.
+fn default_cosh_bundle_manifest() -> String {
+    "cosh-extension.json".to_string()
 }
 
 /// Codex driver payload. Holds only [`ClaimResource::id`] references. Codex
@@ -1970,11 +1986,26 @@ mod tests {
             }],
             driver_payload: DriverPayload::Cosh(CoshClaim {
                 extension_dir_resource: "cosh_extension_dir".to_string(),
+                bundle_manifest: default_cosh_bundle_manifest(),
             }),
         };
         let json = serde_json::to_string(&claim).expect("serialize Cosh JSON");
         let back: AdapterClaim = serde_json::from_str(&json).expect("parse Cosh JSON");
         assert_eq!(claim, back);
+
+        // Receipts written before `bundle_manifest` existed deserialize to
+        // the cosh default, so pre-existing receipts keep verifying the
+        // manifest they were enabled with (the driver default).
+        let legacy = json.replace(
+            &format!(
+                "{{\"extension_dir_resource\":\"cosh_extension_dir\",\"bundle_manifest\":\"{}\"}}",
+                default_cosh_bundle_manifest()
+            ),
+            "{\"extension_dir_resource\":\"cosh_extension_dir\"}",
+        );
+        assert_ne!(legacy, json, "fixture must exercise the legacy shape");
+        let parsed: AdapterClaim = serde_json::from_str(&legacy).expect("parse legacy Cosh JSON");
+        assert_eq!(parsed, claim);
 
         let layout = FsLayout::system(None);
         let allowed = vec![PathBuf::from("/home/alice/.copilot-shell")];
