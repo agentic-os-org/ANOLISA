@@ -45,6 +45,7 @@ repository = "https://github.com/alibaba/anolisa"
 publish = false
 
 [workspace.dependencies]
+aw-provider = { path = "../../aw/crates/aw-provider" }
 asc-policy-runtime = { path = "crates/asc-policy-runtime" }
 asc-action-runtime = { path = "crates/asc-action-runtime" }
 asc-action-types = { path = "crates/asc-action-types" }
