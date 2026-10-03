@@ -115,18 +115,19 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
         };
         let reader = BufReader::new(f);
         for (idx, line_result) in reader.lines().enumerate() {
-            let mut line = match line_result {
+            let line = match line_result {
                 Ok(l) => l,
                 Err(_) => break,
             };
-            if line.len() > MAX_LINE_LEN {
-                line.truncate(MAX_LINE_LEN);
-            }
+            // Match against the FULL line: truncating first would both hide
+            // matches past MAX_LINE_LEN and panic when byte MAX_LINE_LEN
+            // splits a multi-byte char (String::truncate requires a char
+            // boundary). The cap applies only to the reported text below.
             if re.is_match(&line) {
                 hits.push(GrepHit {
                     path: rel_path.clone(),
                     line: idx + 1,
-                    text: line,
+                    text: take_chars(&line, MAX_LINE_LEN),
                 });
                 if hits.len() >= max {
                     break 'outer;
@@ -142,4 +143,19 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
     );
 
     Ok(hits)
+}
+
+/// Truncate to at most `max_bytes`, walking back to a UTF-8 char boundary
+/// so a multi-byte character straddling the cap cannot panic. Mirrors the
+/// `memory_get_context::take_chars` idiom.
+fn take_chars(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Find a safe char boundary at or below max_bytes
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    s[..idx].to_string()
 }

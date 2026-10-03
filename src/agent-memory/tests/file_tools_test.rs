@@ -282,6 +282,43 @@ fn grep_respects_glob_filter() {
     assert_eq!(hits[0].path, "notes/a.md");
 }
 
+#[test]
+fn grep_multibyte_line_at_cap_does_not_panic() {
+    // Regression: `String::truncate(4096)` panicked with
+    // `assertion failed: self.is_char_boundary(new_len)` when byte 4096
+    // fell in the middle of a multi-byte character, so any mem_grep whose
+    // mount contained such a line crashed the tool call.
+    let (_t, svc) = setup();
+    // 4095 ASCII bytes, then a 2-byte 'é' straddling the 4096-byte cap.
+    let mut line = "a".repeat(4095);
+    line.push('é');
+    line.push_str(&"z".repeat(32));
+    svc.write("long.md", &line, false).unwrap();
+
+    let hits = svc.grep("zzz", GrepOptions::default()).unwrap();
+    assert_eq!(hits.len(), 1, "match past the é must be found");
+    assert_eq!(hits[0].path, "long.md");
+    // The reported text is capped and stays on a char boundary.
+    assert!(hits[0].text.len() <= 4096);
+    assert!(hits[0].text.chars().all(|c| c == 'a'));
+}
+
+#[test]
+fn grep_matches_beyond_line_cap() {
+    // Regression: the needle sat past byte 4096, so truncating the line
+    // BEFORE the regex match made it invisible (minified one-line files).
+    let (_t, svc) = setup();
+    let line = format!("{}{}", "x".repeat(4990), "NEEDLE_AT_5000");
+    svc.write("long.md", &line, false).unwrap();
+
+    let hits = svc.grep("NEEDLE_AT_5000", GrepOptions::default()).unwrap();
+    assert_eq!(hits.len(), 1, "needle at byte 4990 must be found");
+    assert_eq!(hits[0].line, 1);
+    // The full line matched, but only a capped prefix is reported.
+    assert!(hits[0].text.len() <= 4096);
+    assert!(!hits[0].text.contains("NEEDLE_AT_5000"));
+}
+
 // ---------- mem_diff ----------
 
 #[test]
