@@ -157,6 +157,22 @@
         "install":   "qwenpaw/scripts/install.sh",
         "uninstall": "qwenpaw/scripts/uninstall.sh"
       }
+    },
+    "workbuddy": {
+      "compatibleVersions": ">=1.16.0",
+      "capabilities": {
+        "hooks": [
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "tool-ready"
+        ]
+      },
+      "actions": {
+        "detect":    "workbuddy/scripts/detect.sh",
+        "install":   "workbuddy/scripts/install.sh",
+        "uninstall": "workbuddy/scripts/uninstall.sh"
+      }
     }
   }
 }
