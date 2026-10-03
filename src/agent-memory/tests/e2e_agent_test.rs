@@ -10,6 +10,65 @@ use common::McpAgent;
 use serde_json::json;
 use std::time::Duration;
 
+#[tokio::test]
+async fn index_refresh_keeps_long_title_and_path_links() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut agent = McpAgent::spawn(
+        temporary.path(),
+        &[
+            ("MEMORY_INDEX_ENABLED", "false"),
+            ("MEMORY_CONSOLIDATION_ENABLED", "false"),
+            ("MEMORY_CGROUP_ENABLED", "false"),
+        ],
+    )
+    .await;
+    let memories = [
+        ("notes/ascii.md".to_string(), "A".repeat(200)),
+        ("notes/chinese.md".to_string(), "记".repeat(80)),
+        ("notes/short.md".to_string(), "Short title".to_string()),
+        (
+            format!("notes/{}.md", "p".repeat(170)),
+            "Long path".to_string(),
+        ),
+    ];
+    let mut writes = Vec::new();
+    let mut contents = Vec::new();
+    for (path, title) in &memories {
+        let content = format!("---\ntitle: {title}\n---\n\nBody for {path}.\n");
+        writes.push(
+            agent
+                .call("mem_write", json!({"path": path, "content": &content}))
+                .await,
+        );
+        contents.push(content);
+    }
+    let refreshed = agent.call("mem_index_refresh", json!({})).await;
+    let index = agent.call("mem_read", json!({"path": "MEMORY.md"})).await;
+    let parsed = agent_memory::tools::memory_index::parse_index(&index);
+    let mut read_back = Vec::new();
+    for (path, _) in &memories {
+        let entry = parsed.iter().find(|entry| entry.path == *path);
+        let content = if let Some(entry) = entry {
+            Some(agent.call("mem_read", json!({"path": &entry.path})).await)
+        } else {
+            None
+        };
+        read_back.push(content);
+    }
+    agent.cleanup().await;
+
+    assert!(writes.iter().all(|response| response.contains("wrote")));
+    assert!(refreshed.contains("refreshed MEMORY.md"), "{refreshed}");
+    assert!(index.contains("[Short title](notes/short.md)"), "{index}");
+    for ((path, _), (actual, expected)) in memories.iter().zip(read_back.iter().zip(&contents)) {
+        assert_eq!(
+            actual.as_ref(),
+            Some(expected),
+            "index target lost for {path}: {index}"
+        );
+    }
+}
+
 // ---- Test 1: Tier A/B + snapshots + sandbox ----
 
 #[tokio::test]
