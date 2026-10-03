@@ -91,6 +91,10 @@ def shift_formula(formula: str, at: int, delta: int) -> str:
     Skips content inside single-quoted sheet name prefixes to avoid
     corrupting names like 'Budget FY2025' (where FY2025 is NOT a cell ref).
 
+    Skips content inside double-quoted string literals (Excel escapes a
+    literal quote by doubling it) to avoid corrupting display text like
+    "FY2025" or "Q1 review".
+
     Does NOT handle:
       - Named ranges
       - Structured references (Table[@Col])
@@ -103,8 +107,21 @@ def shift_formula(formula: str, at: int, delta: int) -> str:
         if i % 2 == 1:
             result.append(seg)
         else:
-            result.append(_shift_refs(seg, at, delta))
+            result.append(_shift_refs_outside_strings(seg, at, delta))
     return "".join(result)
+
+
+def _shift_refs_outside_strings(text: str, at: int, delta: int) -> str:
+    """Shift cell refs outside double-quoted string literals.
+
+    String-literal content like "FY2025" or "Q1 review" must never be
+    treated as a cell reference.
+    """
+    segments = re.split(r'("[^"]*(?:""[^"]*)*")', text)
+    return "".join(
+        seg if i % 2 == 1 else _shift_refs(seg, at, delta)
+        for i, seg in enumerate(segments)
+    )
 
 
 def shift_sqref(sqref: str, at: int, delta: int) -> str:
