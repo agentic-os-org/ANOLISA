@@ -482,7 +482,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Import memories from AMA JSON. Strategy: 'skip-existing' (default) or 'overwrite'. Set dry_run=true for preview."
+        description = "Import memories from AMA JSON. Strategy: 'skip-existing' (default) or 'overwrite'. 'overwrite' deletes every existing note first, so it saves a recoverable backup under .anolisa/backups/ and fails if that backup cannot be written. Set dry_run=true for preview."
     )]
     async fn mem_import(
         &self,

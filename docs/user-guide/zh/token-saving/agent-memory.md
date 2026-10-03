@@ -263,7 +263,7 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `memory_consent` | — | `action`（query/allow/deny）、`scope`（all/consolidation/capture） | 同意/撤回记忆操作 |
 | `memory_forget` | `topic` | `confirm`（默认 `false`=预览，`true`=删除） | 删除指定 topic 的记忆条目 |
 | `mem_export` | — | `category`、`source` | 导出记忆仓为 AMA JSON 字符串（不写文件） |
-| `mem_import` | `json_data` | `strategy`（skip-existing/overwrite，默认 skip-existing）、`dry_run`（默认 false） | 从 AMA JSON 字符串导入记忆 |
+| `mem_import` | `json_data` | `strategy`（skip-existing/overwrite，默认 skip-existing）、`dry_run`（默认 false） | 从 AMA JSON 字符串导入记忆。`overwrite` 会先删除全部现有笔记，因此会先把当前记忆仓的可恢复备份写入 `.anolisa/backups/<时间戳>-pre-import.ama.json`（保留最近 8 份），备份写不进去时拒绝执行；备份路径会在返回摘要中给出并记入审计日志 |
 | `memory_task_save` | `title` | `status`、`progress`、`next_steps`、`blockers`、`files_modified`、`decisions`、`context`、`id` | 保存/更新任务，返回 task id（传 `id` 更新已有任务） |
 | `memory_task_list` | — | `status`（in-progress/blocked/done/cancelled） | 任务摘要 JSON 数组 |
 | `memory_task_resume` | `id` | — | 恢复任务上下文（格式化为新会话续作用） |
