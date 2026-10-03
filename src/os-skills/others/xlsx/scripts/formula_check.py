@@ -307,9 +307,19 @@ def build_report(results: dict) -> dict:
 
     errors = results.get("errors", [])
     error_types = [e.get("error", e.get("type", "unknown")) for e in errors]
+    # Mirror the human mode's vocabulary: heuristic warnings alone do not
+    # make the file "errors_found".
+    hard_errors = [e for e in errors if e.get("type") != "unknown_name_ref"]
+
+    if results["error_count"] == 0:
+        status = "success"
+    elif hard_errors:
+        status = "errors_found"
+    else:
+        status = "warnings_only"
 
     return {
-        "status": "success" if results["error_count"] == 0 else "errors_found",
+        "status": status,
         "file": results["file"],
         "sheets_checked": results["sheets_checked"],
         "total_formulas": results["formula_count"],
@@ -349,6 +359,12 @@ def main() -> None:
 
     results = check(args_clean[0], sheet_filter=sheet_filter)
 
+    # Split definitive failures from heuristic warnings once; every output
+    # mode keys its exit code off the same hard errors (heuristic warnings
+    # alone do not block delivery).
+    hard_errors = [e for e in results["errors"] if e["type"] != "unknown_name_ref"]
+    warnings = [e for e in results["errors"] if e["type"] == "unknown_name_ref"]
+
     if use_report:
         report = build_report(results)
         output = json.dumps(report, indent=2, ensure_ascii=False)
@@ -357,11 +373,11 @@ def main() -> None:
                 f.write(output + "\n")
         else:
             print(output)
-        sys.exit(1 if results["error_count"] > 0 else 0)
+        sys.exit(1 if hard_errors else 0)
 
     if use_json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
-        sys.exit(1 if results["error_count"] > 0 else 0)
+        sys.exit(1 if hard_errors else 0)
 
     # Human-readable output
     sheets = ", ".join(results["sheets_checked"]) or "(none)"
@@ -404,8 +420,6 @@ def main() -> None:
         print("PASS — No formula errors detected")
     else:
         # Separate definitive failures from heuristic warnings
-        hard_errors = [e for e in results["errors"] if e["type"] != "unknown_name_ref"]
-        warnings = [e for e in results["errors"] if e["type"] == "unknown_name_ref"]
         if hard_errors:
             print(f"FAIL — {len(hard_errors)} error(s) must be fixed before delivery")
             if warnings:
