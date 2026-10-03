@@ -990,55 +990,107 @@ impl SkillFs {
                 // Update inode mappings.
                 self.inodes.rename_path(&old_path, &new_path);
 
-                // Store sync for skill-level renames.
+                // Store sync for skill-level renames. SkillDir is a flat
+                // `/skills/<name>` rename; InboxSkillDir is an inbox-internal
+                // rename of the physical `source/<name>` candidate (mkdir /
+                // rmdir already sync inbox entries, so rename must too);
+                // NestedSkillDir is the Hermes-layout equivalent, whose store
+                // key is likewise the directory leaf name. Cross-namespace
+                // (inbox <-> /skills) renames were rejected with EXDEV above,
+                // so old and new are both in or both out of the inbox here.
                 let old_type = old_path_type.clone();
                 let new_type = new_path_type.clone();
                 match (&old_type, &new_type) {
                     (
                         PathType::SkillDir {
                             skill_name: old_name,
+                        }
+                        | PathType::InboxSkillDir {
+                            skill_name: old_name,
+                        }
+                        | PathType::NestedSkillDir {
+                            skill_name: old_name,
+                            ..
                         },
                         PathType::SkillDir {
                             skill_name: new_name,
+                        }
+                        | PathType::InboxSkillDir {
+                            skill_name: new_name,
+                        }
+                        | PathType::NestedSkillDir {
+                            skill_name: new_name,
+                            ..
                         },
                     ) => {
-                        self.store.write().remove(old_name);
-                        // Synchronously update the store under the new directory name.
-                        // We must use the *directory* name as the store key regardless
-                        // of what SKILL.md frontmatter says (the user may not have
-                        // updated the `name:` field yet).
-                        let md_path = new_physical.join("SKILL.md");
-                        let new_entry = match parser::parse_skill_file(&md_path) {
-                            Ok(mut entry) => {
-                                // Ensure the store key matches the directory name.
-                                entry.metadata.name = new_name.clone();
-                                entry
-                            }
-                            Err(_) => {
-                                // SKILL.md not readable yet — insert a placeholder so
-                                // the directory appears in readdir immediately.
-                                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
-                                SkillEntry {
-                                    metadata: SkillMetadata {
-                                        name: new_name.clone(),
-                                        ..SkillMetadata::default()
-                                    },
-                                    parameters: vec![],
-                                    returns: vec![],
-                                    body: String::new(),
-                                    parse_status: ParseStatus::Degraded(
-                                        "renamed, awaiting SKILL.md update".to_string(),
-                                    ),
-                                    source_path: md_path,
-                                    last_modified: std::time::SystemTime::now(),
-                                }
-                            }
+                        // Identity migration needs proof that the source
+                        // directory actually backs the managed skill keyed
+                        // by `old_name`. Lexical path classification is not
+                        // identity: path.rs deliberately classifies a plain
+                        // category child with no SKILL.md (e.g. `apple/docs`)
+                        // as NestedSkillDir for traversal, and the store keys
+                        // skills by bare leaf name, so a different category
+                        // may already own a real skill with the same leaf.
+                        // An ungated remove+upsert would delete that
+                        // unrelated entry and/or fabricate a placeholder for
+                        // a plain directory. Require the store's entry for
+                        // the old identity to originate from this directory
+                        // (category component included for nested skills).
+                        let origin_tail: Vec<String> = match &old_type {
+                            PathType::NestedSkillDir {
+                                category,
+                                skill_name,
+                            } => vec![category.clone(), skill_name.clone()],
+                            _ => vec![old_name.clone()],
                         };
-                        self.store.write().upsert(new_entry);
-                        info!(
-                            old = %old_name, new = %new_name,
-                            "sync: skill renamed (immediate store update)"
-                        );
+                        if !self.rename_source_backs_store_entry(old_name, &origin_tail) {
+                            // Plain (never-activated) directory rename: the
+                            // store holds no entry originating here, so
+                            // leave it untouched — same stance as the
+                            // sentinel-gated inbox activation flow.
+                            info!(
+                                old = %old_name, new = %new_name,
+                                "sync: non-skill dir rename left the store untouched"
+                            );
+                        } else {
+                            self.store.write().remove(old_name);
+                            // Synchronously update the store under the new directory name.
+                            // We must use the *directory* name as the store key regardless
+                            // of what SKILL.md frontmatter says (the user may not have
+                            // updated the `name:` field yet).
+                            let md_path = new_physical.join("SKILL.md");
+                            let new_entry = match parser::parse_skill_file(&md_path) {
+                                Ok(mut entry) => {
+                                    // Ensure the store key matches the directory name.
+                                    entry.metadata.name = new_name.clone();
+                                    entry
+                                }
+                                Err(_) => {
+                                    // SKILL.md not readable yet — insert a placeholder so
+                                    // the directory appears in readdir immediately.
+                                    use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
+                                    SkillEntry {
+                                        metadata: SkillMetadata {
+                                            name: new_name.clone(),
+                                            ..SkillMetadata::default()
+                                        },
+                                        parameters: vec![],
+                                        returns: vec![],
+                                        body: String::new(),
+                                        parse_status: ParseStatus::Degraded(
+                                            "renamed, awaiting SKILL.md update".to_string(),
+                                        ),
+                                        source_path: md_path,
+                                        last_modified: std::time::SystemTime::now(),
+                                    }
+                                }
+                            };
+                            self.store.write().upsert(new_entry);
+                            info!(
+                                old = %old_name, new = %new_name,
+                                "sync: skill renamed (immediate store update)"
+                            );
+                        }
                     }
                     _ => {
                         // File-level rename inside a skill — trigger re-parse
@@ -1231,5 +1283,40 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+
+    /// Whether the store entry keyed by `skill_name` demonstrably
+    /// originates from the directory addressed by `origin_tail` (its
+    /// components below the source root): the entry's recorded source
+    /// must be the `SKILL.md` living directly under that directory.
+    ///
+    /// Whole-path equality is unusable here — in-place mounts address
+    /// the source through `/proc/self/fd/<n>` while scanned entries
+    /// keep the real source prefix — so only the tail below the source
+    /// root is compared. Including the category component for nested
+    /// skills is what keeps a plain `apple/docs` rename from deleting a
+    /// real same-leaf skill owned by another category.
+    fn rename_source_backs_store_entry(&self, skill_name: &str, origin_tail: &[String]) -> bool {
+        if origin_tail.is_empty() {
+            return false;
+        }
+        let store = self.store.read();
+        let Some(entry) = store.get(skill_name) else {
+            return false;
+        };
+        if entry.source_path.file_name() != Some(std::ffi::OsStr::new("SKILL.md")) {
+            return false;
+        }
+        let Some(origin) = entry.source_path.parent() else {
+            return false;
+        };
+        let mut components = origin.components();
+        for expected in origin_tail.iter().rev() {
+            match components.next_back() {
+                Some(component) if component.as_os_str() == std::ffi::OsStr::new(expected) => {}
+                _ => return false,
+            }
+        }
+        true
     }
 }

@@ -1141,3 +1141,83 @@ fn rename_into_invalid_inbox_name_is_refused() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
+
+/// An inbox-internal skill-dir rename (`mv /.skillfs-inbox/foo
+/// /.skillfs-inbox/foo-v2`) physically renames `source/foo` to
+/// `source/foo-v2`, so the store must follow the same way mkdir/rmdir
+/// sync inbox entries: drop the old name and parse-or-placeholder the
+/// new one. Otherwise `/skills` keeps listing the dead `foo` and the
+/// renamed skill is invisible until an unrelated rescan.
+#[test]
+fn inbox_skill_dir_rename_syncs_store() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let source = tempfile::tempdir().expect("source");
+    create_skill_dir(source.path(), "foo");
+    let mountpoint = tempfile::tempdir().expect("mount");
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount");
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::rename(
+        mountpoint.path().join(".skillfs-inbox/foo"),
+        mountpoint.path().join(".skillfs-inbox/foo-v2"),
+    )
+    .expect("rename inbox skill dir");
+
+    // The physical candidate directory moved.
+    assert!(
+        source.path().join("foo-v2").is_dir(),
+        "physical rename must land at source/foo-v2"
+    );
+    assert!(
+        !source.path().join("foo").exists(),
+        "physical source/foo must be gone"
+    );
+
+    // The store dropped the dead name and adopted the new one.
+    assert!(
+        shared.read().get("foo").is_none(),
+        "stale store entry for the old name must be removed"
+    );
+    let guard = shared.read();
+    let entry = guard
+        .get("foo-v2")
+        .expect("renamed skill must appear in the store");
+    assert_eq!(
+        entry.source_path,
+        source.path().join("foo-v2/SKILL.md"),
+        "renamed entry must point at the new source path"
+    );
+    drop(guard);
+
+    // The /skills listing follows the store without an unrelated rescan.
+    let listing = sorted_dir(&mountpoint.path().join("skills"));
+    assert!(
+        !listing.contains(&"foo".to_string()),
+        "/skills must not list the dead name, got {listing:?}"
+    );
+    assert!(
+        listing.contains(&"foo-v2".to_string()),
+        "/skills must list the renamed skill, got {listing:?}"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}

@@ -1382,3 +1382,280 @@ fn set_user_xattr(path: &Path, name: &str, value: &[u8]) {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// Nested skill-dir rename keeps the store in sync (same rule as the
+// flat /skills rename path: drop the old leaf name, parse the new one).
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_nested_skill_dir_rename_syncs_store() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let mp = mountpoint.path();
+
+    std::fs::rename(
+        mp.join("apple/apple-notes"),
+        mp.join("apple/apple-notes-v2"),
+    )
+    .unwrap();
+
+    // The physical nested skill moved.
+    assert!(
+        source.path().join("apple/apple-notes-v2").is_dir(),
+        "physical rename must land at apple/apple-notes-v2"
+    );
+    assert!(
+        !source.path().join("apple/apple-notes").exists(),
+        "physical apple/apple-notes must be gone"
+    );
+
+    // The store dropped the dead leaf name and adopted the new one.
+    assert!(
+        shared.read().get("apple-notes").is_none(),
+        "stale store entry for the old leaf name must be removed"
+    );
+    let guard = shared.read();
+    let entry = guard
+        .get("apple-notes-v2")
+        .expect("renamed nested skill must appear in the store");
+    // In in-place mode the physical source is addressed through
+    // /proc/self/fd/<n>, so compare the meaningful suffix.
+    assert!(
+        entry.source_path.ends_with("apple/apple-notes-v2/SKILL.md"),
+        "renamed entry must point at the new source path, got {}",
+        entry.source_path.display()
+    );
+    drop(guard);
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mp.to_string_lossy()])
+        .output();
+}
+
+/// Regression (P1): a plain category child with no SKILL.md anywhere
+/// inside is lexically classified as NestedSkillDir, but it is not a
+/// skill and the store never held an entry for it — renaming it must
+/// not fabricate one (no placeholder for the new name) and must not
+/// disturb the unrelated real skills in the store.
+#[test]
+fn hermes_plain_nested_dir_rename_leaves_store_unchanged() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    // A plain directory under a category: content, but no SKILL.md.
+    std::fs::create_dir_all(source.path().join("apple/docs")).unwrap();
+    std::fs::write(source.path().join("apple/docs/readme.txt"), "not a skill").unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let before: Vec<String> = {
+        let guard = shared.read();
+        let mut names = guard
+            .list()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert!(
+        !before.contains(&"docs".to_string()),
+        "plain dir must not be in the store before the rename, got {before:?}"
+    );
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let mp = mountpoint.path();
+
+    std::fs::rename(mp.join("apple/docs"), mp.join("apple/guides")).unwrap();
+
+    // The physical plain directory moved.
+    assert!(
+        source.path().join("apple/guides/readme.txt").is_file(),
+        "physical rename must land at apple/guides"
+    );
+    assert!(
+        !source.path().join("apple/docs").exists(),
+        "physical apple/docs must be gone"
+    );
+
+    // The store is untouched: no placeholder for the new name, and the
+    // real skills keep their entries.
+    assert!(
+        shared.read().get("guides").is_none(),
+        "plain dir rename must not fabricate a store entry for the new name"
+    );
+    assert!(
+        shared.read().get("docs").is_none(),
+        "plain dir rename must not create an entry for the old name"
+    );
+    let after: Vec<String> = {
+        let guard = shared.read();
+        let mut names = guard
+            .list()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        before, after,
+        "plain dir rename must leave the store unchanged"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mp.to_string_lossy()])
+        .output();
+}
+
+/// Regression (P1): the store keys skills by bare leaf name, so a real
+/// nested skill `beta/docs` may already own the key "docs" when a plain
+/// `apple/docs` (no SKILL.md) is renamed. The rename must not delete
+/// that unrelated entry — identity migration requires the entry to
+/// originate from the renamed directory, category included.
+#[test]
+fn hermes_plain_nested_dir_rename_spares_same_leaf_real_skill() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    // A real same-leaf skill under ANOTHER category.
+    let beta_docs = source.path().join("beta/docs");
+    std::fs::create_dir_all(&beta_docs).unwrap();
+    std::fs::write(
+        beta_docs.join("SKILL.md"),
+        "---\nname: docs\ndescription: real docs skill\n---\nbody\n",
+    )
+    .unwrap();
+    // A plain directory under `apple` sharing the leaf name.
+    std::fs::create_dir_all(source.path().join("apple/docs")).unwrap();
+    std::fs::write(source.path().join("apple/docs/readme.txt"), "not a skill").unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    {
+        let guard = shared.read();
+        let entry = guard
+            .get("docs")
+            .expect("the real beta/docs skill must be in the store");
+        assert!(
+            entry.source_path.ends_with("beta/docs/SKILL.md"),
+            "store key 'docs' must be owned by beta/docs, got {}",
+            entry.source_path.display()
+        );
+    }
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let mp = mountpoint.path();
+
+    std::fs::rename(mp.join("apple/docs"), mp.join("apple/guides")).unwrap();
+
+    // The physical plain directory moved.
+    assert!(
+        source.path().join("apple/guides/readme.txt").is_file(),
+        "physical rename must land at apple/guides"
+    );
+    assert!(
+        source.path().join("beta/docs/SKILL.md").is_file(),
+        "the real beta/docs skill must be physically untouched"
+    );
+
+    // The other category's real skill keeps its store entry, and no
+    // placeholder is fabricated for the plain directory's new name.
+    {
+        let guard = shared.read();
+        let entry = guard
+            .get("docs")
+            .expect("the real beta/docs skill must survive the plain-dir rename");
+        assert!(
+            entry.source_path.ends_with("beta/docs/SKILL.md"),
+            "the surviving 'docs' entry must still be beta/docs, got {}",
+            entry.source_path.display()
+        );
+        assert!(
+            guard.get("guides").is_none(),
+            "plain dir rename must not fabricate a store entry for the new name"
+        );
+    }
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mp.to_string_lossy()])
+        .output();
+}
