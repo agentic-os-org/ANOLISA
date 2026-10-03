@@ -1,6 +1,6 @@
 //! FUSE namespace-mutation callbacks: `mkdir`, `unlink`, `rmdir`, `rename`.
 
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -951,6 +951,20 @@ impl SkillFs {
             "rename"
         );
 
+        // POSIX rename(2) over hard links to the same backing object is a
+        // successful no-op: both directory entries survive. Detect it by
+        // object identity BEFORE the physical rename (the old path is gone
+        // afterwards in every other case), because the post-rename inode
+        // surgery below would otherwise evict the replaced name's mapping
+        // even though that path is still live.
+        let hardlink_noop = match (
+            std::fs::symlink_metadata(&old_physical),
+            std::fs::symlink_metadata(&new_physical),
+        ) {
+            (Ok(old_meta), Ok(new_meta)) => is_same_backing_object(&old_meta, &new_meta),
+            _ => false,
+        };
+
         let rename_result = if no_replace {
             rename_noreplace(&old_physical, &new_physical)
         } else {
@@ -987,6 +1001,28 @@ impl SkillFs {
 
         match rename_result {
             Ok(()) => {
+                if hardlink_noop {
+                    // Same backing object: the physical rename was a no-op
+                    // and both directory entries still resolve. Record the
+                    // syscall for the audit trail and leave the inode map,
+                    // store, staging notify, and mutation observe untouched
+                    // — nothing on disk moved.
+                    debug!(
+                        old = %old_path, new = %new_path,
+                        "rename: same-object hard link, mappings untouched"
+                    );
+                    self.emit_event(
+                        SkillEvent::new(SkillEventKind::Rename)
+                            .with_optional_skill_name(event_skill)
+                            .with_optional_relative_path(event_relative)
+                            .with_action(SkillEventAction::Allowed)
+                            .with_caller(req.uid(), req.gid())
+                            .with_detail(new_path.clone()),
+                    );
+                    reply.ok();
+                    return;
+                }
+
                 // Update inode mappings.
                 self.inodes.rename_path(&old_path, &new_path);
 
@@ -1231,5 +1267,70 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+}
+
+/// Whether two lstat metadata describe the same backing object.
+///
+/// rename(2) over hard links to one object is a POSIX no-op: both names
+/// survive and the kernel reports success, so the inode-map surgery that
+/// a real replacement needs must not run. The kernel's VFS short-circuits
+/// same-inode renames before they reach FUSE, but SkillFS assigns
+/// per-path FUSE inodes to hard links, so a rename whose two names hold
+/// *distinct* FUSE inodes CAN reach this daemon with a single backing
+/// object — the caller must recognize it by dev/ino identity.
+fn is_same_backing_object(old: &std::fs::Metadata, new: &std::fs::Metadata) -> bool {
+    old.dev() == new.dev() && old.ino() == new.ino()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_backing_object_is_detected_for_hard_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::hard_link(&a, &b).expect("hard link a b");
+
+        let a_meta = std::fs::symlink_metadata(&a).expect("lstat a");
+        let b_meta = std::fs::symlink_metadata(&b).expect("lstat b");
+        assert!(
+            is_same_backing_object(&a_meta, &b_meta),
+            "two names for one object must be recognized"
+        );
+    }
+
+    #[test]
+    fn distinct_objects_are_not_confused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let d = dir.path().join("d");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::write(&b, b"y").expect("file b");
+        std::fs::create_dir(&d).expect("dir d");
+
+        let a_meta = std::fs::symlink_metadata(&a).expect("lstat a");
+        let b_meta = std::fs::symlink_metadata(&b).expect("lstat b");
+        let d_meta = std::fs::symlink_metadata(&d).expect("lstat d");
+        assert!(!is_same_backing_object(&a_meta, &b_meta));
+        assert!(!is_same_backing_object(&a_meta, &d_meta));
+    }
+
+    #[test]
+    fn a_replaced_file_is_not_the_same_object() {
+        // The ordinary replacement case: rename over an unrelated file
+        // must NOT be treated as a no-op.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::write(&b, b"y").expect("file b");
+        let a_meta = std::fs::symlink_metadata(&a).expect("lstat a");
+        let b_meta = std::fs::symlink_metadata(&b).expect("lstat b");
+        assert!(!is_same_backing_object(&a_meta, &b_meta));
     }
 }
