@@ -141,14 +141,18 @@ def grade_trace(trace_path: str, task_yaml_path: str, judge_config: dict | None 
 
     # Update trace_end with real scores (was placeholder 0.0 from converter)
     # then rewrite trace file: original events (with patched trace_end) + grading_result
-    real_scores = {
+    #
+    # Grader-set rubric dims only: the grader's grade() signature receives no
+    # session totals, so its efficiency_* fields are always the dataclass
+    # defaults (0.0) — merging them would clobber the converter-computed
+    # efficiency_* (total_turns / token sums / wall time) that trace_end.scores
+    # already carries. The grader's raw values stay recorded in the
+    # grading_result event below.
+    grader_scores = {
         "completion": scores.completion,
         "robustness": scores.robustness,
         "communication": scores.communication,
         "safety": scores.safety,
-        "efficiency_turns": scores.efficiency_turns,
-        "efficiency_tokens": scores.efficiency_tokens,
-        "efficiency_wall_time_s": scores.efficiency_wall_time_s,
     }
     try:
         with open(trace_path) as _f:
@@ -157,9 +161,10 @@ def grade_trace(trace_path: str, task_yaml_path: str, judge_config: dict | None 
         _existing = [e for e in _existing if e.get("type") != "grading_result"]
         for ev in _existing:
             if ev.get("type") == "trace_end":
-                # Preserve efficiency_* values already computed by converter when grader didn't set them
+                # Preserve efficiency_* values already computed by converter
+                # (grader cannot supply them; see grader_scores above)
                 merged_scores = dict(ev.get("scores") or {})
-                merged_scores.update(real_scores)
+                merged_scores.update(grader_scores)
                 ev["scores"] = merged_scores
                 ev["task_score"] = task_score
                 ev["passed"] = passed
