@@ -23,6 +23,20 @@ const HTTP_REQUEST_DEADLINE: Duration = Duration::from_secs(2);
 const HTTP_WORKERS: usize = 4;
 const HTTP_QUEUE_CAPACITY: usize = 16;
 
+/// Whether this build ships a Runtime that satisfies the brokered-only token
+/// boundary the Web beta requires.
+///
+/// No sealed Runtime does today: the Gateway brokers only checkpoint creation
+/// (`BrokeredOperation` has no write variant), Core executes its approved
+/// `write_file` effects runtime-natively, and the ACP Runtime rejects brokered
+/// execution entirely. Every Runtime therefore still executes effects with
+/// delegated local authority, which the startup attestation must refuse.
+const fn web_beta_runtime_available() -> bool {
+    false
+}
+
+const WEB_BETA_UNAVAILABLE_MESSAGE: &str = "Web beta is not yet available in this build: every sealed Runtime (Core and Codex) executes effects with delegated local authority, so the brokered-only token boundary it requires cannot be attested; use the `task` subcommands instead";
+
 #[derive(Debug, Clone, Args)]
 pub(super) struct WebArgs {
     /// Loopback address for the local browser beta.
@@ -43,6 +57,9 @@ pub(super) struct WebArgs {
 }
 
 pub(super) fn web(args: WebArgs, reporter: &Reporter) -> Result<u8, CliError> {
+    if !web_beta_runtime_available() {
+        return Err(CliError::Web(WEB_BETA_UNAVAILABLE_MESSAGE.to_owned()));
+    }
     validate_bind(args.bind)?;
     let workspace = canonical_workspace(&args.workspace)?;
     let token = read_token(&args.token_file)?;

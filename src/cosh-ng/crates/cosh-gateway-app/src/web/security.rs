@@ -190,6 +190,42 @@ mod tests {
     use cosh_gateway_contracts::common::{BoundedText, Digest};
 
     #[test]
+    fn sealed_catalog_readiness_space_never_satisfies_the_web_attestation() {
+        let workspace = WorkspaceRef {
+            scope_digest: Digest::parse("a".repeat(64)).unwrap(),
+            display_name: None,
+        };
+        let states = [
+            LaunchReadiness::ready(),
+            LaunchReadiness::unavailable(BoundedText::new("disabled").unwrap()),
+        ];
+        for core in &states {
+            for codex in &states {
+                for checkpoint in &states {
+                    let capabilities = TaskLaunchCatalog::new(
+                        workspace.clone(),
+                        core.clone(),
+                        codex.clone(),
+                        checkpoint.clone(),
+                    )
+                    .capabilities();
+                    assert!(
+                        capabilities.runtimes.iter().all(|entry| {
+                            entry.security.delegated_local_authority
+                                && !entry.security.gateway_brokered_effects
+                        }),
+                        "the sealed catalog must keep reporting the honest delegated posture"
+                    );
+                    assert!(
+                        validate_capabilities(&capabilities, &workspace).is_err(),
+                        "no readiness combination may attest a brokered-only boundary"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn attestation_rejects_unknown_catalogs_and_unavailable_delegated_authority() {
         let workspace = WorkspaceRef {
             scope_digest: Digest::parse("a".repeat(64)).unwrap(),

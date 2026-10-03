@@ -106,8 +106,9 @@ enum Command {
     Task(TaskArgs),
     /// Run local read-only Gateway administration commands.
     Admin(AdminArgs),
-    /// Open a loopback-only browser view for brokered-only Tasks (Linux only).
+    /// Not yet available in this build; reserved for brokered-only Tasks (Linux only).
     #[cfg(target_os = "linux")]
+    #[command(hide = true)]
     Web(WebArgs),
 }
 
