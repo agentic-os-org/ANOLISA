@@ -101,6 +101,25 @@ step()  { echo -e "\n${CYAN}${BOLD}==> $*${NC}"; }
 
 cmd_exists() { command -v "$1" &>/dev/null; }
 
+# llvm-config is often installed only under a versioned name (llvm-config-NN),
+# and `command -v` does not glob its argument, so probe the plain name plus
+# every PATH entry for an executable llvm-config-*.
+llvm_config_exists() {
+    if cmd_exists llvm-config; then
+        return 0
+    fi
+    local dir candidate
+    local IFS=:
+    for dir in $PATH; do
+        for candidate in "$dir"/llvm-config-*; do
+            if [[ -x "$candidate" ]]; then
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 perl_module_exists() {
     local module="$1"
     cmd_exists perl && perl -M"$module" -e1 &>/dev/null
@@ -1453,7 +1472,7 @@ check_ebpf_deps() {
     local missing=()
 
     if ! cmd_exists clang; then missing+=("clang"); fi
-    if ! cmd_exists llvm-config && ! cmd_exists llvm-config-*; then missing+=("llvm"); fi
+    if ! llvm_config_exists; then missing+=("llvm"); fi
 
     if [[ "$PKG_BASE" == "rpm" ]]; then
         local pkgs=("libbpf-devel" "libbpf-static" "elfutils-libelf-devel" "zlib-devel" "openssl-devel" "perl" "perl-core" "pkg-config")
