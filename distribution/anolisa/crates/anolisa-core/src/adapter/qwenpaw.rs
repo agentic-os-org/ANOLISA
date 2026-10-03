@@ -873,6 +873,7 @@ mod tests {
             declared_bundle_entry: Some(MANIFEST.to_string()),
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: true,
             ops: &ops,
         };

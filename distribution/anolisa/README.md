@@ -55,9 +55,11 @@ files while continuing to check their presence, permissions, and path safety.
 | `env` | Show environment detection results |
 | `bug` | Generate a bug report (`--component cosh-ng` also summarizes the cosh-shell diagnostic bundle; `COSH_SHELL_BIN` overrides the binary) |
 
-Running `anolisa adapter enable <component> openclaw` accepts the plugin's
-declared capabilities when the host supports capability consent. This does
-not authorize an unsafe-install bypass.
+By default, `anolisa adapter enable <component> openclaw` accepts the plugin's
+declared capabilities when each host command supports capability consent.
+Add `--no-accept-capabilities` to withhold automatic consent during both
+installation and activation. This does not revoke existing host authorization
+or authorize an unsafe-install bypass.
 
 Enable the Tokenless local plugin with `anolisa adapter enable tokenless opencode`.
 ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it.

@@ -20,7 +20,8 @@
 //! `plugins install --help`, `plugins enable --help`, `plugins inspect --help`).
 //! From it the driver gates on the adapter's declared framework version, chooses
 //! version-conditioned config, requires install `--force`, and accepts declared
-//! capabilities when each subcommand advertises `--accept-capabilities`. It adds
+//! capabilities when each subcommand advertises `--accept-capabilities`, unless
+//! the caller withholds consent. It adds
 //! `--dangerously-force-unsafe-install` only when both authorized and
 //! advertised as effective by the host, and records the inspect capabilities.
 //! The install/verify capabilities flow to `apply_enable` as typed
@@ -172,7 +173,7 @@ impl FrameworkDriver for OpenClawDriver {
                 &plugin_id,
                 &home,
                 ctx.user_home.as_deref(),
-                preflight.supports_enable_accept_capabilities,
+                preflight.supports_enable_accept_capabilities && !ctx.no_accept_capabilities,
             )));
             selected_config = preflight.selected_config;
             register_command = Some(display_command(&preflight.install_cmd));
@@ -273,6 +274,7 @@ impl FrameworkDriver for OpenClawDriver {
         } else {
             let preflight = self.plugin_preflight(&bundle.resource_root, ctx)?;
             PreparedEnable::OpenClaw {
+                no_accept_capabilities: ctx.no_accept_capabilities,
                 supports_accept_capabilities: preflight.supports_accept_capabilities,
                 supports_enable_accept_capabilities: preflight.supports_enable_accept_capabilities,
                 supports_unsafe_install: preflight.supports_unsafe_install,
@@ -462,6 +464,7 @@ impl FrameworkDriver for OpenClawDriver {
         } else {
             match prepared {
                 PreparedEnable::OpenClaw {
+                    no_accept_capabilities,
                     supports_accept_capabilities,
                     supports_enable_accept_capabilities,
                     supports_unsafe_install,
@@ -469,6 +472,11 @@ impl FrameworkDriver for OpenClawDriver {
                     supports_inspect_runtime,
                     selected_config_indices,
                 } => {
+                    if *no_accept_capabilities != ctx.no_accept_capabilities {
+                        return Err(prepared_state_mismatch(
+                            "prepared capability consent does not match the caller's decision",
+                        ));
+                    }
                     if !supports_inspect_json {
                         return Err(AdapterError::FrameworkCli {
                             program: openclaw_bin(),
@@ -487,8 +495,8 @@ impl FrameworkDriver for OpenClawDriver {
                     }
                     validate_prepared_config_indices(selected_config_indices, ctx)?;
                     (
-                        *supports_accept_capabilities,
-                        *supports_enable_accept_capabilities,
+                        *supports_accept_capabilities && !*no_accept_capabilities,
+                        *supports_enable_accept_capabilities && !*no_accept_capabilities,
                         *supports_unsafe_install,
                         *supports_inspect_runtime,
                         selected_config_indices.clone(),
@@ -534,11 +542,8 @@ impl FrameworkDriver for OpenClawDriver {
                 // it could actually help: the host exposes the unsafe flag, the
                 // user did not already authorize it, and the failure looks like
                 // a plugin-safety rejection. Never retry automatically.
-                if install_output_requires_capability_consent(&output) {
-                    reason.push_str(
-                        "; OpenClaw capability consent was not accepted; inspect the reported \
-                         capability requirements and the host's --accept-capabilities support",
-                    );
+                if output_requires_capability_consent(&output) {
+                    reason.push_str(capability_consent_failure_note(ctx.no_accept_capabilities));
                 } else if host_supports_unsafe
                     && !ctx.allow_unsafe_plugin_install
                     && install_output_looks_like_safety_rejection(&output)
@@ -593,10 +598,11 @@ impl FrameworkDriver for OpenClawDriver {
             let program = cmd.program.clone();
             let output = ctx.ops.run_framework_cli(cmd)?;
             if !output.success() {
-                return Err(AdapterError::FrameworkCli {
-                    program,
-                    reason: full_failure_reason("plugins enable", &output),
-                });
+                let mut reason = full_failure_reason("plugins enable", &output);
+                if ctx.no_accept_capabilities && output_requires_capability_consent(&output) {
+                    reason.push_str(capability_consent_failure_note(true));
+                }
+                return Err(AdapterError::FrameworkCli { program, reason });
             }
 
             // Post-enable runtime verification: the plugin must report
@@ -1178,6 +1184,7 @@ impl OpenClawDriver {
             ctx.user_home.as_deref(),
             &profile,
             ctx.allow_unsafe_plugin_install,
+            ctx.no_accept_capabilities,
         )?;
         let selected_config = self.select_config(ctx, &profile)?;
         Ok(PluginPreflight {
@@ -1760,7 +1767,7 @@ fn install_output_looks_like_safety_rejection(output: &CliOutput) -> bool {
         .any(|marker| haystack.contains(marker))
 }
 
-fn install_output_requires_capability_consent(output: &CliOutput) -> bool {
+fn output_requires_capability_consent(output: &CliOutput) -> bool {
     format!(
         "{}\n{}",
         strip_ansi(&output.stdout),
@@ -1768,6 +1775,16 @@ fn install_output_requires_capability_consent(output: &CliOutput) -> bool {
     )
     .to_ascii_lowercase()
     .contains("capability consent")
+}
+
+fn capability_consent_failure_note(no_accept_capabilities: bool) -> &'static str {
+    if no_accept_capabilities {
+        "; OpenClaw capability consent was withheld by --no-accept-capabilities; \
+         review the reported capability requirements and authorize them separately if appropriate"
+    } else {
+        "; OpenClaw capability consent was not accepted; inspect the reported \
+         capability requirements and the host's --accept-capabilities support"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2287,8 +2304,8 @@ fn base_cmd(args: Vec<String>, home: &Path, user_home: Option<&Path>) -> Framewo
 /// (`allow_unsafe`) and the host's help describes it as effective. An
 /// authorized request fails when the option is absent or advertised as a
 /// deprecated no-op, and a normal install never carries it.
-/// Enabling a plugin accepts its declared capabilities, so the consent flag
-/// is included whenever the installer advertises it.
+/// The consent flag is included only when the installer advertises it and
+/// the caller has not withheld the automatic grant.
 ///
 /// # Errors
 ///
@@ -2301,6 +2318,7 @@ fn build_install_cmd(
     user_home: Option<&Path>,
     profile: &OpenClawHostProfile,
     allow_unsafe: bool,
+    no_accept_capabilities: bool,
 ) -> Result<FrameworkCommand, AdapterError> {
     if !profile.supports_install_force {
         return Err(AdapterError::FrameworkCli {
@@ -2336,7 +2354,7 @@ fn build_install_cmd(
         install_argv(
             resource_root,
             allow_unsafe,
-            profile.supports_accept_capabilities,
+            profile.supports_accept_capabilities && !no_accept_capabilities,
         ),
         home,
         user_home,
@@ -3368,6 +3386,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(true, true),
             false,
+            false,
         )
         .expect("force-capable host builds an install command");
         assert_eq!(cmd.program, "openclaw");
@@ -3401,6 +3420,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(false, true),
             false,
+            false,
         )
         .expect_err("no --force must fail before mutation");
         assert!(matches!(err, AdapterError::FrameworkCli { .. }));
@@ -3415,6 +3435,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(true, true),
             true,
+            false,
         )
         .expect("authorized + supported unsafe install builds a command");
         assert_eq!(
@@ -3439,6 +3460,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(true, false),
             true,
+            false,
         )
         .expect_err("authorized but unsupported unsafe must fail before mutation");
         assert!(matches!(err, AdapterError::FrameworkCli { .. }));
@@ -3455,6 +3477,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &host,
             true,
+            false,
         )
         .expect_err("a deprecated no-op must not be treated as an unsafe bypass");
         match err {
@@ -3938,6 +3961,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: true,
             ops: &ops,
         };
@@ -4030,6 +4054,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: allow_unsafe,
+            no_accept_capabilities: false,
             dry_run: false,
             ops: &ops,
         };
@@ -4069,6 +4094,30 @@ mod tests {
         let driver = OpenClawDriver::new();
         let _env = OpenClawBinEnvGuard::unset();
 
+        // A public prepared value cannot override the operation's consent
+        // decision in either direction, even when both host commands support it.
+        for (ctx_withholds, prepared_withholds) in [(true, false), (false, true)] {
+            let mut ctx = mk_ctx(None, false);
+            ctx.no_accept_capabilities = ctx_withholds;
+            let err = driver
+                .apply_enable(
+                    &mut plugin_claim,
+                    &PreparedEnable::OpenClaw {
+                        no_accept_capabilities: prepared_withholds,
+                        supports_accept_capabilities: true,
+                        supports_enable_accept_capabilities: true,
+                        supports_unsafe_install: false,
+                        supports_inspect_json: true,
+                        supports_inspect_runtime: false,
+                        selected_config_indices: Vec::new(),
+                    },
+                    &ctx,
+                    &mut (),
+                )
+                .expect_err("mismatched consent must fail before any mutation");
+            assert!(err.to_string().contains("caller's decision"), "{err}");
+        }
+
         // Plugin adapter but no prepared capabilities → reject.
         assert!(matches!(
             driver.apply_enable(
@@ -4085,6 +4134,7 @@ mod tests {
             driver.apply_enable(
                 &mut skill_claim,
                 &PreparedEnable::OpenClaw {
+                    no_accept_capabilities: false,
                     supports_accept_capabilities: false,
                     supports_enable_accept_capabilities: false,
                     supports_unsafe_install: true,
@@ -4103,6 +4153,7 @@ mod tests {
             driver.apply_enable(
                 &mut plugin_claim,
                 &PreparedEnable::OpenClaw {
+                    no_accept_capabilities: false,
                     supports_accept_capabilities: false,
                     supports_enable_accept_capabilities: false,
                     supports_unsafe_install: true,
@@ -4122,6 +4173,7 @@ mod tests {
             driver.apply_enable(
                 &mut plugin_claim,
                 &PreparedEnable::OpenClaw {
+                    no_accept_capabilities: false,
                     supports_accept_capabilities: false,
                     supports_enable_accept_capabilities: false,
                     supports_unsafe_install: false,

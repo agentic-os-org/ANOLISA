@@ -87,6 +87,11 @@ pub enum AdapterCommands {
         /// default; a normal install never bypasses OpenClaw's checks.
         #[arg(long)]
         allow_unsafe_plugin_install: bool,
+        /// Withhold automatic OpenClaw capability consent during both
+        /// install and enable. Existing host authorization is not revoked.
+        /// Only valid for an OpenClaw plugin adapter.
+        #[arg(long)]
+        no_accept_capabilities: bool,
         /// dsh profile to enable. Repeat for multiple profiles; required
         /// when the selected framework is profile-scoped.
         #[arg(long = "profile", action = ArgAction::Append)]
@@ -227,12 +232,14 @@ pub fn handle(args: AdapterArgs, ctx: &CliContext) -> Result<(), CliError> {
             component,
             framework,
             allow_unsafe_plugin_install,
+            no_accept_capabilities,
             profiles,
         } => handle_enable(
             ctx,
             &component,
             framework.as_deref(),
             allow_unsafe_plugin_install,
+            no_accept_capabilities,
             profiles,
         ),
         AdapterCommands::Disable {
@@ -353,6 +360,7 @@ fn handle_enable(
     component: &str,
     framework: Option<&str>,
     allow_unsafe_plugin_install: bool,
+    no_accept_capabilities: bool,
     profiles: Vec<String>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
@@ -362,6 +370,7 @@ fn handle_enable(
             framework,
             options: EnableOptions {
                 allow_unsafe_plugin_install,
+                no_accept_capabilities,
                 profiles,
             },
             intent: execution_intent(ctx.dry_run),
@@ -740,6 +749,7 @@ mod tests {
                 component,
                 framework,
                 allow_unsafe_plugin_install,
+                no_accept_capabilities,
                 profiles,
             } => {
                 assert_eq!(component, "tokenless");
@@ -749,6 +759,7 @@ mod tests {
                     "unsafe install must default to false"
                 );
                 assert!(profiles.is_empty());
+                assert!(!no_accept_capabilities, "consent grants remain the default");
             }
             _ => panic!("expected enable"),
         }
@@ -777,6 +788,7 @@ mod tests {
                 component,
                 framework,
                 allow_unsafe_plugin_install,
+                no_accept_capabilities,
                 profiles,
             } => {
                 assert_eq!(component, "tokenless");
@@ -786,6 +798,7 @@ mod tests {
                     "flag must be captured when passed"
                 );
                 assert!(profiles.is_empty());
+                assert!(!no_accept_capabilities);
             }
             _ => panic!("expected enable"),
         }
@@ -810,6 +823,30 @@ mod tests {
             }
             _ => panic!("expected enable"),
         }
+    }
+
+    #[test]
+    fn enable_parses_capability_consent_opt_out() {
+        let cli = TestCli::try_parse_from([
+            "x",
+            "enable",
+            "tokenless",
+            "openclaw",
+            "--no-accept-capabilities",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            AdapterCommands::Enable {
+                no_accept_capabilities: true,
+                allow_unsafe_plugin_install: false,
+                ..
+            }
+        ));
+        assert!(
+            TestCli::try_parse_from(["x", "disable", "tokenless", "--no-accept-capabilities"])
+                .is_err()
+        );
     }
 
     /// An absent component reports the same code here as it does from
