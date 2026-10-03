@@ -22,10 +22,7 @@ pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&p| p > 0);
 
-    let enabled = props
-        .get("UnitFileState")
-        .map(|s| s == "enabled")
-        .unwrap_or(false);
+    let enabled = enabled_from_properties(&props);
 
     let memory_bytes = props
         .get("MemoryCurrent")
@@ -245,6 +242,16 @@ fn load_service_properties(
     }
 
     Ok(props)
+}
+
+/// Whether the unit is enabled on this boot. `systemctl enable --runtime`
+/// units report `UnitFileState=enabled-runtime` and stay enabled until
+/// reboot, so both states count as enabled.
+fn enabled_from_properties(props: &std::collections::HashMap<String, String>) -> bool {
+    props
+        .get("UnitFileState")
+        .map(|s| matches!(s.as_str(), "enabled" | "enabled-runtime"))
+        .unwrap_or(false)
 }
 
 fn state_from_properties(props: &std::collections::HashMap<String, String>) -> SvcState {
@@ -623,5 +630,67 @@ mod tests {
     fn test_validate_state_filter_shell_metachar() {
         assert!(validate_state_filter("running;evil").is_err());
         assert!(validate_state_filter("").is_err());
+    }
+
+    // --- runtime-enabled unit reporting ---
+
+    #[test]
+    fn test_enabled_from_unit_file_state() {
+        // systemctl show reports UnitFileState; `systemctl enable --runtime`
+        // units report "enabled-runtime" and are enabled until reboot.
+        assert!(enabled_from_properties(&parse_systemctl_show(
+            "UnitFileState=enabled"
+        )));
+        assert!(enabled_from_properties(&parse_systemctl_show(
+            "UnitFileState=enabled-runtime"
+        )));
+        assert!(!enabled_from_properties(&parse_systemctl_show(
+            "UnitFileState=disabled"
+        )));
+        assert!(!enabled_from_properties(&parse_systemctl_show(
+            "UnitFileState=static"
+        )));
+        assert!(!enabled_from_properties(&parse_systemctl_show(
+            "UnitFileState=masked"
+        )));
+        // Missing UnitFileState entirely.
+        assert!(!enabled_from_properties(&parse_systemctl_show(
+            "ActiveState=active"
+        )));
+    }
+
+    #[test]
+    fn test_svc_status_reports_runtime_enabled_unit_as_enabled() {
+        // Units enabled with `systemctl enable --runtime` report
+        // UnitFileState=enabled-runtime and are enabled until reboot, so
+        // svc_status must report them as enabled. Discover one from
+        // list-unit-files; skip when the host has none or lacks systemctl.
+        let Ok(output) = run_command(
+            Command::new("systemctl").args([
+                "list-unit-files",
+                "--type=service",
+                "--state=enabled-runtime",
+                "--no-pager",
+                "--no-legend",
+            ]),
+            SVC_TIMEOUT,
+            "svc",
+        ) else {
+            return; // systemctl unavailable (non-Linux CI)
+        };
+        if !output.status.success() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(unit) = text.lines().find_map(|l| l.split_whitespace().next()) else {
+            return; // no runtime-enabled units on this host
+        };
+        let name = unit.trim_end_matches(".service");
+        let status =
+            svc_status(name).unwrap_or_else(|e| panic!("svc_status({name}) failed: {e:?}"));
+        assert!(
+            status.enabled,
+            "{name} is runtime-enabled (UnitFileState=enabled-runtime) but reported disabled"
+        );
     }
 }
