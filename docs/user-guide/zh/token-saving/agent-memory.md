@@ -681,5 +681,5 @@ RUST_LOG=agent_memory=debug agent-memory
 ---
 
 **许可证**：Apache-2.0
-**版本**：0.2.1
+**版本**：0.2.8
 **文档版本**：2.0（对齐 ANOLISA-design user-guide 结构）
