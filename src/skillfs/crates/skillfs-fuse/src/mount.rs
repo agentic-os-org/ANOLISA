@@ -200,8 +200,13 @@ fn mount_inner(
             if crate::proc_mounts::mounts_contain_target(&bytes, mountpoint.as_os_str().as_bytes())
             {
                 warn!(mountpoint = %mountpoint.display(), "mount point already mounted, attempting cleanup");
+                // Raw OS-string argument: the byte-exact mount check above
+                // matched this path, so the unmount must address the same
+                // bytes — a lossy UTF-8 view of an invalid-byte mountpoint
+                // names a different path and the cleanup silently fails.
                 let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", &mountpoint.to_string_lossy()])
+                    .arg("-u")
+                    .arg(mountpoint.as_os_str())
                     .output();
                 // Give the kernel time to process the unmount
                 std::thread::sleep(std::time::Duration::from_millis(300));

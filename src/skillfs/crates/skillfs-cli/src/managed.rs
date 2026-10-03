@@ -340,9 +340,15 @@ fn is_mount_ready(mountpoint: &Path) -> bool {
 
 /// Attempt a single unmount pass: `fusermount3 -u`, then `umount` as a
 /// fallback. Returns `true` if the mountpoint is gone afterward.
+///
+/// The mountpoint is passed as the raw OS string, matching the byte-exact
+/// `is_mounted` probe: `to_string_lossy()` would turn an invalid-byte
+/// mountpoint into a different (nonexistent) path, so fusermount3 would
+/// fail and only the `umount` fallback would address the real mount.
 fn unmount_once(mountpoint: &Path) -> bool {
     let _ = std::process::Command::new("fusermount3")
-        .args(["-u", &mountpoint.to_string_lossy()])
+        .arg("-u")
+        .arg(mountpoint.as_os_str())
         .output();
     if !is_mounted(mountpoint) {
         return true;

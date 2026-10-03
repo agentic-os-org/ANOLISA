@@ -2722,9 +2722,17 @@ async fn cmd_mount(
     /// Trigger a clean FUSE unmount by calling fusermount3 -u.
     /// This causes fuser::mount2 event loop to exit, which unblocks the
     /// spawn_blocking thread and allows the process to exit cleanly.
+    ///
+    /// The mountpoint is passed as the raw OS string, like every other
+    /// unmount call site in this change: a lossy UTF-8 view of an
+    /// invalid-byte mountpoint names a different (U+FFFD-mangled,
+    /// nonexistent) path, so fusermount3 would unmount nothing, the
+    /// mount would stay live, and the blocking FUSE task would keep the
+    /// process from exiting after the handler returns.
     fn trigger_unmount(mountpoint: &std::path::Path) {
         let _ = std::process::Command::new("fusermount3")
-            .args(["-u", &mountpoint.to_string_lossy()])
+            .arg("-u")
+            .arg(mountpoint.as_os_str())
             .output();
     }
 
