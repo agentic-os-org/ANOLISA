@@ -166,9 +166,14 @@ export class BtrfsManager {
     }
 
     try {
+      // The daemon uses the caller-supplied ID verbatim, so compute the
+      // fallback once and report exactly the ID that was sent — recomputing
+      // after the roundtrip would drift by the elapsed milliseconds and
+      // name a snapshot that does not exist.
+      const snapshotId = options?.id ?? `snap-${Date.now()}`;
       const output = await this.executor.checkpoint(
         this.workspacePath,
-        options?.id ?? `snap-${Date.now()}`,
+        snapshotId,
         {
           message: options?.message,
           metadata: options?.metadata,
@@ -186,10 +191,6 @@ export class BtrfsManager {
       if (`${output.stdout}\n${output.stderr}`.includes("Empty workspace, no snapshot created.")) {
         return { success: true, skipped: true, reason: 'Empty workspace, no snapshot created.', message: 'Empty workspace, no snapshot created.' };
       }
-
-      // Use the caller-supplied ID directly — CLI stdout may contain
-      // ANSI codes / prompt text that breaks parseSnapshotIdFromOutput.
-      const snapshotId = options?.id ?? `snap-${Date.now()}`;
 
       // Update local cache
       let parsedMetadata: Record<string, unknown> | undefined;
