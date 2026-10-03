@@ -427,4 +427,39 @@ mod tests {
         assert!(!is_sanitized_query_marker("len="));
         assert!(!is_sanitized_query_marker("len=12ab"));
     }
+
+    #[test]
+    fn session_log_reader_counts_only_recorded_queries() {
+        // Reader-path regression: two sanitized markers previously became a
+        // repeated "len=9" topic and surfaced as "interested in: len=9";
+        // a recorded query must still be counted.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("session.jsonl");
+        let lines = [
+            r#"{"tool":"memory_search","path":"bm25:len=9"}"#,
+            r#"{"tool":"memory_search","path":"bm25:len=9"}"#,
+            r#"{"tool":"memory_search","path":"bm25:rust ownership"}"#,
+            r#"{"tool":"memory_search","path":"bm25:rust ownership"}"#,
+        ];
+        std::fs::write(&log, lines.join("\n")).unwrap();
+
+        let mut profile = UserProfile::default();
+        analyze_session_logs(dir.path(), &mut profile).unwrap();
+
+        let descriptions: Vec<&str> = profile
+            .context
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert!(
+            !descriptions.iter().any(|d| d.contains("len=")),
+            "sanitized markers must not become topics: {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("interested in: rust ownership")),
+            "a recorded query must still become a topic: {descriptions:?}"
+        );
+    }
 }
