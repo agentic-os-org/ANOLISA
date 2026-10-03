@@ -176,6 +176,41 @@ fn remote_parent_baggage_and_bad_content_are_independent() {
 }
 
 #[test]
+fn malformed_foreign_members_keep_agent_attribution() {
+    // A single member that is not one of the five allowlisted keys cannot
+    // change what the allowlisted members say, so it must be skipped like the
+    // syntactically valid foreign keys above instead of dropping the whole
+    // header. This mirrors the W3C Baggage rule that invalid entries may be
+    // removed individually, and the per-member behaviour of the bundled
+    // OpenTelemetry SDK's BaggagePropagator.
+    for baggage in [
+        // A trailing comma is one empty list member.
+        "agentsec.session.id=sess,agentsec.run.id=run,",
+        // A member without "=" cannot define any allowlisted key.
+        "agentsec.session.id=sess,flagtoken",
+        // A foreign key with a syntactically invalid value.
+        "agentsec.session.id=sess,thirdparty=bad value",
+        // A foreign key with a syntactically invalid property.
+        "agentsec.session.id=sess,thirdparty=a;bad prop",
+        // A foreign key with an invalid key spelling.
+        "agentsec.session.id=sess,bad key=1",
+        // Whitespace-only list members are empty after OWS trimming.
+        " , agentsec.session.id=sess",
+    ] {
+        let headers = HashMap::from([("baggage".to_owned(), baggage.to_owned())]);
+        let parent = extract_parent(&headers);
+        assert_eq!(
+            parent
+                .baggage()
+                .get("agentsec.session.id")
+                .map(ToString::to_string),
+            Some("sess".to_owned()),
+            "attribution must survive the foreign member in {baggage:?}"
+        );
+    }
+}
+
+#[test]
 fn unicode_roundtrip_and_original_normalization() {
     let long = "🦀".repeat(300);
     assert_eq!(bounded(&long).chars().count(), 256);
