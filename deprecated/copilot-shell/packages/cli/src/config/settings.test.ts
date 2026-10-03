@@ -609,6 +609,92 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.model?.name).toBe('qwen-coder');
     });
 
+    it('should concatenate hooks for events beyond PreToolUse across scopes', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              hooks: {
+                PostToolUse: [
+                  {
+                    matcher: 'Edit',
+                    hooks: [{ type: 'command', command: 'echo user' }],
+                  },
+                ],
+              },
+            });
+          }
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              hooks: {
+                PostToolUse: [
+                  {
+                    matcher: '*',
+                    hooks: [{ type: 'command', command: 'echo workspace' }],
+                  },
+                ],
+              },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      const mergedHooks = settings.merged.hooks as
+        | { PostToolUse?: unknown[] }
+        | undefined;
+      expect(mergedHooks?.PostToolUse).toHaveLength(2);
+    });
+
+    it('should concatenate PreToolUse hooks across scopes', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: 'Edit',
+                    hooks: [{ type: 'command', command: 'echo user' }],
+                  },
+                ],
+              },
+            });
+          }
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: '*',
+                    hooks: [{ type: 'command', command: 'echo workspace' }],
+                  },
+                ],
+              },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      const mergedHooks = settings.merged.hooks as
+        | { PreToolUse?: unknown[] }
+        | undefined;
+      expect(mergedHooks?.PreToolUse).toHaveLength(2);
+    });
+
     it('should correctly handle partially migrated settings without version field', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
