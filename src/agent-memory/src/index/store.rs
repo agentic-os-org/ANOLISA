@@ -1594,6 +1594,46 @@ mod tests {
         assert_eq!(hits[1].path, "old.md");
     }
 
+    #[test]
+    fn negative_lambda_inverts_recency_ranking() {
+        // Pins the misbehavior the AppConfig guard prevents, at the layer
+        // where it happens: exp(-lambda * age) with a negative lambda grows
+        // with age, so at identical BM25 relevance the older file outranks
+        // the newer one. The store API accepts raw values; validate() is
+        // what keeps this configuration out of production.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(-0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "rust ownership rules",
+            None,
+        )
+        .unwrap();
+        s.upsert("new.md", now_ms, 20, "rust ownership rules", None)
+            .unwrap();
+
+        let hits = s.search("rust", 5, true).unwrap();
+        assert_eq!(hits.len(), 2);
+        // Identical bodies mean identical BM25 relevance, so the whole gap
+        // is the recency boost: 0.3 * (e^{0.01 * 100} - 1) ~= 0.515. Order
+        // alone proves nothing here — on an exact tie the stable sort at
+        // the ranking site keeps the SQL row order, which already puts
+        // old.md first (it was upserted first).
+        let gap = hits[0].score - hits[1].score;
+        assert!(
+            gap > 0.4,
+            "negative lambda must inflate the older file's boost: gap={gap}"
+        );
+        assert_eq!(hits[0].path, "old.md");
+        assert_eq!(hits[1].path, "new.md");
+    }
+
     /// Corpus for the relevance-ordering tests below.
     ///
     /// Four unrelated documents keep `walrus` a discriminative term: with
