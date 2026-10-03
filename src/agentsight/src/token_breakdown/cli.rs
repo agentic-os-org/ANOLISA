@@ -70,23 +70,7 @@ impl AnalyzeChatmlCommand {
                     // Extract messages and tools from request body and process directly
                     if let Some(ref args) = event.args {
                         if let Some(body) = args.get("body") {
-                            let (messages, tools) = if let Some(body_str) = body.as_str() {
-                                serde_json::from_str::<serde_json::Value>(body_str)
-                                    .ok()
-                                    .map(|v| {
-                                        let msgs = v.get("messages").cloned();
-                                        let tools =
-                                            v.get("tools").and_then(|t| t.as_array().cloned());
-                                        (msgs, tools)
-                                    })
-                                    .unwrap_or((None, None))
-                            } else {
-                                let msgs = body.get("messages").cloned();
-                                let tools = body.get("tools").and_then(|t| t.as_array().cloned());
-                                (msgs, tools)
-                            };
-
-                            if let Some(mut msgs) = messages.and_then(|v| v.as_array().cloned()) {
+                            if let Some((mut msgs, tools)) = Self::request_body_messages(body) {
                                 // Process tool_calls arguments: parse JSON string to object in place
                                 for msg in msgs.iter_mut() {
                                     if let Some(tool_calls) =
@@ -197,8 +181,21 @@ impl AnalyzeChatmlCommand {
 
     /// Parse Chrome Trace file with relaxed format (handle trailing commas)
     fn parse_trace_relaxed(content: &str) -> anyhow::Result<Vec<ChromeTraceEvent>> {
-        // Remove trailing commas before ] to handle non-standard JSON
-        let cleaned = content
+        // Trailing commas before a closing bracket are the one deviation
+        // serde_json cannot read (several trace exporters emit them). Strip
+        // them and parse the array as a whole: that also covers
+        // pretty-printed (multi-line) traces, which the previous line-by-line
+        // fallback could not read at all — every line of a multi-line event
+        // failed to parse on its own, so a pretty-printed trace answered
+        // "no valid events found" even though every event was present.
+        let cleaned = strip_trailing_commas(content);
+        if let Ok(events) = serde_json::from_str::<Vec<ChromeTraceEvent>>(&cleaned) {
+            return Ok(events);
+        }
+
+        // Last resort: one event per line, for traces that are neither a
+        // valid array nor multi-line pretty-printed.
+        let cleaned = cleaned
             .trim()
             .trim_start_matches('[')
             .trim_end_matches(']')
@@ -224,6 +221,41 @@ impl AnalyzeChatmlCommand {
         }
 
         Ok(events)
+    }
+
+    /// Normalize a captured request body into the message list the chat
+    /// template consumes, plus the tools array.
+    ///
+    /// The body is stored either as a JSON string (the trace writer's
+    /// fallback for non-JSON bodies) or as the parsed object. The message
+    /// list itself comes from the same protocol shapes the genai request
+    /// parser understands (`GenAIBuilder::extract_messages_view`): a plain
+    /// `messages` array, the OpenAI Responses `input` array with its
+    /// `instructions`, or an Anthropic `messages` array with the system
+    /// prompt in the top-level `system` field. Without this, a Responses
+    /// request event was silently skipped (no request breakdown at all) and
+    /// an Anthropic request's system prompt vanished from the breakdown.
+    /// The out-of-band system text is prepended as a system message so the
+    /// template renders it.
+    fn request_body_messages(
+        body: &serde_json::Value,
+    ) -> Option<(Vec<serde_json::Value>, Option<Vec<serde_json::Value>>)> {
+        let parsed: Option<serde_json::Value> = match body {
+            serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+            obj @ serde_json::Value::Object(_) => Some(obj.clone()),
+            _ => None,
+        };
+        let body = parsed.as_ref()?;
+
+        let tools = body.get("tools").and_then(|t| t.as_array().cloned());
+
+        let (mut msgs, system_text) = crate::genai::GenAIBuilder::extract_messages_view(body)?;
+        if let Some(system) = system_text {
+            if !system.is_empty() {
+                msgs.insert(0, serde_json::json!({"role": "system", "content": system}));
+            }
+        }
+        Some((msgs, tools))
     }
 
     /// Extract response data from SSE events array
@@ -329,6 +361,64 @@ impl AnalyzeChatmlCommand {
     }
 }
 
+/// Remove commas that precede only whitespace and a closing bracket, so a
+/// trace with trailing commas becomes valid JSON serde can parse. String
+/// literals (and escaped characters inside them) are respected, so a comma
+/// inside a quoted value survives.
+fn strip_trailing_commas(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut out = String::with_capacity(content.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            let ch = content[i..].chars().next().expect("char boundary");
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                out.push(b as char);
+                i += 1;
+            }
+            b',' => {
+                // Drop the comma when only whitespace separates it from a
+                // closing bracket (an object or array close).
+                let mut j = i + 1;
+                while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
+                    i += 1; // skip the comma
+                } else {
+                    out.push(',');
+                    i += 1;
+                }
+            }
+            _ => {
+                // Copy the (possibly multi-byte) character verbatim.
+                let ch = content[i..].chars().next().expect("char boundary");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +495,155 @@ mod tests {
         assert_eq!(resp.content, vec!["hi ".to_string(), "there".to_string()]);
         assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
         assert_eq!(resp.tool_calls, vec!["noop: ".to_string()]);
+    }
+
+    /// The chrome trace stores the request body either as the parsed JSON
+    /// object or as its string form; both must yield the same messages.
+    #[test]
+    fn request_messages_accepts_string_and_object_bodies() {
+        let object = json!({
+            "model": "qwen3.5-plus",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "noop"}}],
+        });
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&object).expect("object body parses");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(
+            tools.as_ref().expect("tools survive").len(),
+            1,
+            "tools survive"
+        );
+
+        let string = serde_json::Value::String(object.to_string());
+        let (msgs2, tools2) =
+            AnalyzeChatmlCommand::request_body_messages(&string).expect("string body parses");
+        assert_eq!(msgs2, msgs);
+        assert_eq!(tools2, tools);
+    }
+
+    /// An OpenAI Responses request (codex 0.137+ via /v1/responses) carries
+    /// `input` + `instructions` instead of `messages`. The old arm read only
+    /// `messages`, so such request events were silently skipped — no request
+    /// breakdown at all for a codex trace.
+    #[test]
+    fn request_messages_reads_responses_api_input() {
+        let body = json!({
+            "model": "qwen3-coder-plus",
+            "instructions": "Be terse.",
+            "input": [
+                {"type": "message", "role": "user", "content": "list the files"},
+            ],
+        });
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("responses body parses");
+        assert_eq!(tools, None);
+        assert_eq!(msgs.len(), 2, "instructions prepend a system message");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "Be terse.");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "list the files");
+    }
+
+    /// An Anthropic request carries the system prompt in the top-level
+    /// `system` field, outside the messages array. The old arm read only the
+    /// `messages` array, so the system prompt vanished from the request
+    /// breakdown.
+    #[test]
+    fn request_messages_keeps_anthropic_system_prompt() {
+        let body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "system": "You are a helpful assistant.",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (msgs, _) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("anthropic body parses");
+        assert_eq!(msgs.len(), 2, "the system prompt is prepended");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "You are a helpful assistant.");
+        assert_eq!(msgs[1]["role"], "user");
+
+        // Anthropic's system field may also be an array of text blocks.
+        let body = json!({
+            "system": [{"type": "text", "text": "First."}, {"type": "text", "text": "Second."}],
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (msgs, _) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("block system parses");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "First.\nSecond.");
+    }
+
+    /// Bodies without any known message shape (e.g. a GET with no body, or a
+    /// non-LLM JSON body) stay skipped, and an OpenAI body with no top-level
+    /// system field gets no synthetic system message.
+    #[test]
+    fn request_messages_skips_unknown_shapes_and_adds_no_system() {
+        assert!(AnalyzeChatmlCommand::request_body_messages(&json!({"foo": 1})).is_none());
+        assert!(
+            AnalyzeChatmlCommand::request_body_messages(&serde_json::Value::String(
+                "not json at all".to_string()
+            ))
+            .is_none()
+        );
+
+        let plain = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&plain).expect("plain body parses");
+        assert_eq!(msgs.len(), 1, "no synthetic system message");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(tools, None);
+    }
+
+    /// A pretty-printed trace (one event spread over multiple lines) with a
+    /// trailing comma: the relaxed parser used to split by lines, so every
+    /// line of a multi-line event failed to parse on its own and the command
+    /// answered "no valid events found" even though every event was present.
+    #[test]
+    fn parse_trace_relaxed_reads_pretty_printed_traces() {
+        let content = "[\n{\n  \"ph\": \"X\",\n  \"name\": \"POST /v1/messages\",\n  \"cat\": \"http.request\",\n  \"ts\": 100,\n  \"dur\": 50,\n  \"pid\": 1,\n  \"tid\": 2,\n  \"args\": {\"body\": \"{\\\"messages\\\":[]}\"}\n},\n{\n  \"ph\": \"X\",\n  \"name\": \"200 OK\",\n  \"cat\": \"http.response\",\n  \"ts\": 200,\n  \"dur\": 50,\n  \"pid\": 1,\n  \"tid\": 2\n},\n]\n";
+        let events = AnalyzeChatmlCommand::parse_trace_relaxed(content)
+            .expect("pretty-printed trace with trailing comma parses");
+        assert_eq!(events.len(), 2, "both events must survive");
+        assert_eq!(events[0].cat, "http.request");
+        assert_eq!(
+            events[0].args.as_ref().unwrap()["body"],
+            "{\"messages\":[]}"
+        );
+        assert_eq!(events[1].cat, "http.response");
+    }
+
+    /// The single-line-per-event shape with trailing commas (the case the
+    /// line fallback was built for) keeps working, and commas inside string
+    /// values survive the strip.
+    #[test]
+    fn parse_trace_relaxed_keeps_single_line_and_string_commas() {
+        let content = concat!(
+            "[\n",
+            "{\"ph\":\"i\",\"name\":\"a, b\",\"cat\":\"c\",\"ts\":1,\"pid\":1,\"tid\":1},\n",
+            "{\"ph\":\"i\",\"name\":\"second\",\"cat\":\"c\",\"ts\":2,\"pid\":1,\"tid\":1},\n",
+            "]\n"
+        );
+        let events = AnalyzeChatmlCommand::parse_trace_relaxed(content)
+            .expect("single-line trace with trailing commas parses");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].name, "a, b",
+            "commas inside string values survive"
+        );
+        assert_eq!(events[1].name, "second");
+    }
+
+    /// An empty array (with or without a trailing comma) still yields no
+    /// events rather than an error.
+    #[test]
+    fn parse_trace_relaxed_empty_array_yields_no_events() {
+        let empty = AnalyzeChatmlCommand::parse_trace_relaxed("[]\n").expect("empty array");
+        assert!(empty.is_empty());
+        let empty_pretty =
+            AnalyzeChatmlCommand::parse_trace_relaxed("[\n]\n").expect("empty pretty array");
+        assert!(empty_pretty.is_empty());
     }
 }

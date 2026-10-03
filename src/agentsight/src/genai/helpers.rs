@@ -286,7 +286,7 @@ impl GenAIBuilder {
     ///
     /// The native protocol needs no fallback: its system prompt lives inside
     /// `input.messages`.
-    pub(super) fn extract_messages_view(
+    pub(crate) fn extract_messages_view(
         body: &serde_json::Value,
     ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
         if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
