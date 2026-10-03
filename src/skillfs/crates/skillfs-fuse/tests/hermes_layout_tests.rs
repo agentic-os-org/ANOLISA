@@ -1382,3 +1382,77 @@ fn set_user_xattr(path: &Path, name: &str, value: &[u8]) {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// Nested (Hermes) skill directory rename must sync the store (issue #4278)
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_nested_skill_dir_rename_syncs_store() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{ActiveSkillResolver, ActiveTarget};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+    assert!(
+        shared.read().get("apple-notes").is_some(),
+        "seed workspace must load the nested skill under its leaf name"
+    );
+
+    // Same activation setup as hermes_activation_current: without an
+    // active resolver the nested leaf is hidden (ENOENT on lookup).
+    let resolver = ActiveSkillResolver::new(source.path());
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        active_resolver: Some(Arc::new(resolver)),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .expect("mount");
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::rename(
+        mountpoint.path().join("apple/apple-notes"),
+        mountpoint.path().join("apple/apple-notes-v2"),
+    )
+    .expect("nested skill dir rename must succeed");
+
+    assert!(source.path().join("apple/apple-notes-v2").is_dir());
+    assert!(
+        shared.read().get("apple-notes").is_none(),
+        "stale store entry for the old leaf name must be removed"
+    );
+    assert!(
+        shared.read().get("apple-notes-v2").is_some(),
+        "renamed nested skill must be present under the new leaf name"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}

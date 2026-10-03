@@ -1141,3 +1141,77 @@ fn rename_into_invalid_inbox_name_is_refused() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
+
+// -----------------------------------------------------------------------
+// Inbox-internal skill directory rename must sync the store (issue #4278)
+// -----------------------------------------------------------------------
+
+#[test]
+fn inbox_skill_dir_rename_syncs_store() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let source = tempfile::tempdir().expect("source");
+    create_skill_dir(source.path(), "alpha");
+    let mountpoint = tempfile::tempdir().expect("mount");
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig {
+            active_resolver: None,
+            ..MountConfig::default()
+        },
+    )
+    .expect("mount");
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::rename(
+        mountpoint.path().join(".skillfs-inbox/alpha"),
+        mountpoint.path().join(".skillfs-inbox/alpha-v2"),
+    )
+    .expect("inbox rename must succeed");
+
+    // The physical rename lands on the source candidate dir.
+    assert!(source.path().join("alpha-v2").is_dir());
+    assert!(!source.path().join("alpha").exists());
+
+    // The store must follow the rename synchronously: no stale entry for
+    // the old name, and the renamed skill present under the new name.
+    assert!(
+        shared.read().get("alpha").is_none(),
+        "stale store entry for the old name must be removed"
+    );
+    assert!(
+        shared.read().get("alpha-v2").is_some(),
+        "renamed skill must be present in the store immediately"
+    );
+
+    // /skills reflects the rename for readers.
+    let names: Vec<String> = std::fs::read_dir(mountpoint.path().join("skills"))
+        .expect("read /skills")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "alpha-v2"),
+        "/skills must list the renamed skill: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "alpha"),
+        "/skills must not list the stale name: {names:?}"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}

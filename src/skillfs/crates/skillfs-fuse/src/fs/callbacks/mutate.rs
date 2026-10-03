@@ -604,6 +604,46 @@ impl SkillFs {
             }
         }
     }
+    /// Sync the store after a skill-directory rename: drop the old key and
+    /// re-parse under the new one. Shared by the flat/inbox and the Hermes
+    /// nested rename arms. The *directory* name is the store key regardless
+    /// of what the SKILL.md frontmatter says (the user may not have updated
+    /// the `name:` field yet); when SKILL.md is not readable yet, a degraded
+    /// placeholder keeps the directory visible in readdir immediately — the
+    /// same contract mkdir_impl uses for inbox placeholders.
+    fn sync_store_for_skill_rename(&self, old_name: &str, new_name: &str, new_physical: &Path) {
+        self.store.write().remove(old_name);
+        let md_path = new_physical.join("SKILL.md");
+        let new_entry = match parser::parse_skill_file(&md_path) {
+            Ok(mut entry) => {
+                entry.metadata.name = new_name.to_string();
+                entry
+            }
+            Err(_) => {
+                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
+                SkillEntry {
+                    metadata: SkillMetadata {
+                        name: new_name.to_string(),
+                        ..SkillMetadata::default()
+                    },
+                    parameters: vec![],
+                    returns: vec![],
+                    body: String::new(),
+                    parse_status: ParseStatus::Degraded(
+                        "renamed, awaiting SKILL.md update".to_string(),
+                    ),
+                    source_path: md_path,
+                    last_modified: std::time::SystemTime::now(),
+                }
+            }
+        };
+        self.store.write().upsert(new_entry);
+        info!(
+            old = %old_name, new = %new_name,
+            "sync: skill renamed (immediate store update)"
+        );
+    }
+
     pub(in crate::fs) fn rename_impl(
         &mut self,
         req: &Request,
@@ -994,51 +1034,42 @@ impl SkillFs {
                 let old_type = old_path_type.clone();
                 let new_type = new_path_type.clone();
                 match (&old_type, &new_type) {
+                    // Flat and inbox skill dirs share one store namespace
+                    // (the bare directory name) — mirror rmdir_impl's
+                    // `SkillDir | InboxSkillDir` pairing so an inbox-internal
+                    // rename (`mv /.skillfs-inbox/foo /.skillfs-inbox/foo-v2`)
+                    // syncs the store instead of leaving the old entry listed
+                    // and the new directory invisible.
                     (
                         PathType::SkillDir {
+                            skill_name: old_name,
+                        }
+                        | PathType::InboxSkillDir {
                             skill_name: old_name,
                         },
                         PathType::SkillDir {
                             skill_name: new_name,
+                        }
+                        | PathType::InboxSkillDir {
+                            skill_name: new_name,
                         },
                     ) => {
-                        self.store.write().remove(old_name);
-                        // Synchronously update the store under the new directory name.
-                        // We must use the *directory* name as the store key regardless
-                        // of what SKILL.md frontmatter says (the user may not have
-                        // updated the `name:` field yet).
-                        let md_path = new_physical.join("SKILL.md");
-                        let new_entry = match parser::parse_skill_file(&md_path) {
-                            Ok(mut entry) => {
-                                // Ensure the store key matches the directory name.
-                                entry.metadata.name = new_name.clone();
-                                entry
-                            }
-                            Err(_) => {
-                                // SKILL.md not readable yet — insert a placeholder so
-                                // the directory appears in readdir immediately.
-                                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
-                                SkillEntry {
-                                    metadata: SkillMetadata {
-                                        name: new_name.clone(),
-                                        ..SkillMetadata::default()
-                                    },
-                                    parameters: vec![],
-                                    returns: vec![],
-                                    body: String::new(),
-                                    parse_status: ParseStatus::Degraded(
-                                        "renamed, awaiting SKILL.md update".to_string(),
-                                    ),
-                                    source_path: md_path,
-                                    last_modified: std::time::SystemTime::now(),
-                                }
-                            }
-                        };
-                        self.store.write().upsert(new_entry);
-                        info!(
-                            old = %old_name, new = %new_name,
-                            "sync: skill renamed (immediate store update)"
-                        );
+                        self.sync_store_for_skill_rename(old_name, new_name, &new_physical);
+                    }
+                    // Hermes nested skills are store-keyed by their leaf
+                    // directory name (the loader rewrites metadata.name to
+                    // the dir name), so a nested rename syncs the same way.
+                    (
+                        PathType::NestedSkillDir {
+                            skill_name: old_name,
+                            ..
+                        },
+                        PathType::NestedSkillDir {
+                            skill_name: new_name,
+                            ..
+                        },
+                    ) => {
+                        self.sync_store_for_skill_rename(old_name, new_name, &new_physical);
                     }
                     _ => {
                         // File-level rename inside a skill — trigger re-parse
