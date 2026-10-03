@@ -37,7 +37,6 @@ pub(crate) enum BlazeDaemonError {
     #[error(
         "could not connect to blaze daemon at {socket}: {source}\nIs the daemon running? Try: blazed daemon start --foreground"
     )]
-    #[allow(dead_code)] // Constructed by client code; kept for future use.
     SocketConnect {
         socket: PathBuf,
         #[source]
@@ -45,7 +44,6 @@ pub(crate) enum BlazeDaemonError {
     },
 
     #[error("daemon returned status {status}: {body}")]
-    #[allow(dead_code)] // Constructed by client code; kept for future use.
     HttpStatus { status: u16, body: String },
 
     #[error("invalid request: {0}")]
