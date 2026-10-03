@@ -26,6 +26,15 @@ _SEVERITY_ORDER = {
 }
 
 
+def _enabled_rules(language: Language, rules: Optional[List[str]]) -> List:
+    """Load the rules for *language*, filtered to *rules* when given."""
+    all_rules = load_rules(language)
+    if rules is not None:
+        enabled = set(rules)
+        all_rules = [r for r in all_rules if r.rule_id in enabled]
+    return all_rules
+
+
 def _compute_verdict(findings: List[Finding]) -> Verdict:
     """Return the verdict based on the highest severity across all findings."""
     if not findings:
@@ -90,29 +99,39 @@ def scan(
         return scan_with_llm(code, language)
 
     try:
+        result_language = language
+        inline_findings: List[Finding] = []
+
         # For bash code, attempt inline extraction to detect nested python etc.
         if language == Language.BASH:
             # NOTE: nested Python-in-Bash-in-Python is not handled for now.
-            # Also not handled: multi-command strings where only one part
-            # is an interpreter call (e.g. "cd /tmp && python3 -c 'code'").
             inline = extract_inline_code(code)
             if inline is not None:
-                code, language = inline
+                inline_code, inline_language = inline
+                result_language = inline_language
+                # The extraction isolates the interpreter -c payload, but the
+                # rest of the command chain (&& / ; / newline) must still be
+                # scanned with the shell rules — replacing the input let
+                # `python3 -c 'print(1)' && curl ... | bash` pass unscanned.
+                inline_findings = run_regex_rules(
+                    inline_code, _enabled_rules(inline_language, rules), inline_language
+                )
 
-        all_rules = load_rules(language)
-        if rules is not None:
-            enabled = set(rules)
-            all_rules = [r for r in all_rules if r.rule_id in enabled]
-        findings = run_regex_rules(code, all_rules, language)
+        findings = run_regex_rules(code, _enabled_rules(language, rules), language)
+        if inline_findings:
+            inline_rule_ids = {f.rule_id for f in inline_findings}
+            findings = inline_findings + [
+                f for f in findings if f.rule_id not in inline_rule_ids
+            ]
         verdict = _compute_verdict(findings)
-        summary = _build_summary(findings, language)
+        summary = _build_summary(findings, result_language)
         elapsed = (time.monotonic_ns() - start) // 1_000_000
         return ScanResult(
             ok=True,
             verdict=verdict,
             summary=summary,
             findings=findings,
-            language=language,
+            language=result_language,
             elapsed_ms=elapsed,
         )
     except CodeScanError as exc:

