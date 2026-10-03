@@ -46,7 +46,7 @@ impl CardInputState {
 
     pub(super) fn draft_select_command(&mut self, capture: &RawInputCapture, code: u8) -> bool {
         let commands = self.draft_commands(capture);
-        if commands.is_empty() || !matches!(code, b'A' | b'B') || self.draft_paste {
+        if commands.is_empty() || !matches!(code, b'A' | b'B') || self.pasting {
             return false;
         }
         let selected = self.draft_selected().min(commands.len() - 1);
@@ -124,7 +124,7 @@ impl CardInputState {
         capture: &RawInputCapture,
         events: &mut Vec<RawInputEvent>,
     ) -> bool {
-        if !matches!(capture, RawInputCapture::PromptDraft { .. }) || !self.draft_paste {
+        if !matches!(capture, RawInputCapture::PromptDraft { .. }) || !self.pasting {
             return false;
         }
         self.draft.insert_text("\t");

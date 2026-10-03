@@ -1112,6 +1112,98 @@ fn draft_pasted_tab_is_inserted_as_data() {
     assert_eq!(changed, "第一行A\tB", "pasted tab must survive: {changed}");
 }
 
+// Pasted data integrity (#1721): control bytes and lone ESC inside a
+// bracketed paste are payload, not editing keys.
+#[test]
+fn draft_pasted_del_is_data_not_backspace() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[200~A\x7fB\x1b[201~");
+    let changed = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("paste must report a draft change");
+    assert_eq!(
+        changed, "第一行AB",
+        "pasted 0x7f must be data, not a backspace edit: {changed}"
+    );
+}
+
+#[test]
+fn draft_pasted_ctrl_u_is_data_not_line_kill() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[200~A\x15B\x1b[201~");
+    let changed = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("paste must report a draft change");
+    assert_eq!(
+        changed, "第一行AB",
+        "pasted Ctrl+U must be data, not a line kill: {changed}"
+    );
+}
+
+#[test]
+fn draft_pasted_esc_is_data_not_cancel() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[200~A\x1bZB\x1b[201~");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "a pasted lone ESC must not discard the draft: {events:?}"
+    );
+    let changed = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("paste must report a draft change");
+    assert_eq!(
+        changed, "第一行AZB",
+        "a pasted lone ESC is payload, not a cancel key: {changed}"
+    );
+}
+
+// Free-text captures share the invariant: a pasted DEL byte is data and
+// must not delete typed answer text.
+#[test]
+fn text_question_pasted_del_keeps_typed_text() {
+    let capture = RawInputCapture::TextQuestion {
+        id: "auth@field-0-0".to_string(),
+        initial_text: "ab".to_string(),
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let _ = state.consume(&capture, b"\x1b[200~\x7f\x1b[201~");
+    let events = state.consume(&capture, b"c\n");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardAnswer("abc".to_string())),
+        "pasted 0x7f must not pop typed answer text: {events:?}"
+    );
+}
+
 // CSI-u Backspace (#2150) edits the draft like 0x7f: one character per
 // sequence, numeric modifier variants included.
 #[test]
