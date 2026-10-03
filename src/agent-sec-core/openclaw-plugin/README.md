@@ -465,7 +465,11 @@ openclaw config set 'plugins.entries.agent-sec.config.capabilities.skill-ledger.
 
 Skill Ledger global `activationPolicy` belongs to SkillFS/daemon activation. OpenClaw `policy` only controls this host hook's user-visible behavior and log level. User decisions must be made with `agent-sec-cli skill-ledger decide`; approving an OpenClaw prompt does not write a Ledger decision.
 
-**Prerequisites**: `agent-sec-cli skill-ledger show` must be available. Signing keys are auto-initialized (no passphrase) if not present.
+**Prerequisites**: the Rust `agent-sec-cli` and its root daemon must be available. Each matched
+Skill call first runs idempotent `init --no-baseline`; only then does it run `show`. Initialization
+does not scan or rotate keys and ignores legacy HOME keys. Failed initialization stops that check
+with a diagnostic. Registration and unmatched calls do not initialize; later calls retry after a
+daemon restart. See the [V2 Hook contract](../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration).
 
 ---
 

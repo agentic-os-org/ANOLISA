@@ -132,10 +132,17 @@ def daemon_settings() -> Callable[[Path], tuple[Path, dict[str, str]]]:
 
 
 def _start_daemon(
-    socket_path: Path, admin_uids: list[int], pii_rules: Path | None = None
+    socket_path: Path,
+    admin_uids: list[int],
+    pii_rules: Path | None = None,
+    skillsec_roots: list[Path] | None = None,
 ) -> subprocess.Popen:
     """Starts a foreground daemon and waits for a complete protocol response."""
     config, environment = _daemon_settings(socket_path)
+    if skillsec_roots is not None:
+        settings = json.loads(config.read_text())
+        settings["managedSkillDirs"] = [str(root) for root in skillsec_roots]
+        config.write_text(json.dumps(settings))
     argv = [
         _require(DAEMON_BIN),
         "--socket",
@@ -215,10 +222,11 @@ def start_daemon(tmp_path: Path):
         admin_uids: list[int] | None = None,
         name: str = "daemon.sock",
         pii_rules: Path | None = None,
+        skillsec_roots: list[Path] | None = None,
     ) -> DaemonHandle:
         socket_path = tmp_path / name
         uids = admin_uids if admin_uids is not None else [os.getuid()]
-        process = _start_daemon(socket_path, uids, pii_rules)
+        process = _start_daemon(socket_path, uids, pii_rules, skillsec_roots)
         started.append(process)
         return DaemonHandle(process, socket_path)
 

@@ -52,7 +52,10 @@ Rust V2 核心通过现有 `skill-ledger` 命令提供 **SkillSec**：本地扫�
 启动后在后台补扫获授权的普通 Skill，与 SkillFS 共用同一个 worker。
 配置、命令以及单独的部署和 Agent Hook 验收边界见
 [V2 核心指南](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md)。
-不导入 V1 历史及用户密钥；本 PR 保留现有 Agent Hook 实现。
+不导入 V1 历史及用户密钥。Hook 适配器通过 daemon 初始化，校验 `check`／`show` 结果，
+保留各宿主策略；详见 [Hook 接入边界](../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
+
+Cosh-NG 为同一次 SkillSec Hook 调用中的初始化和查询共预留 10 秒。
 
 源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供全部 15 条 Policy、Scope、Binding
 CRUD 命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)

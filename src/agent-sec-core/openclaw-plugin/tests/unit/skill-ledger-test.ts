@@ -1,7 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
 import { _resetCliMock, _setCliMock } from "../../src/utils.js";
@@ -110,6 +109,8 @@ function mockSkillLedgerInitFailure(stderr: string): void {
     }
 
     if (args[offset] === "skill-ledger" && args[offset + 1] === "show") {
+      checkCallCount++;
+      lastCheckArgs = args;
       return {
         exitCode: 0,
         stdout: JSON.stringify({ latestStatus: "pass", message: null }),
@@ -187,117 +188,41 @@ describe("skill-ledger", () => {
     assert.equal(lastInitArgs, undefined);
   });
 
-  it("logs key init failures without blocking registration", async () => {
-    const previousXdgDataHome = process.env.XDG_DATA_HOME;
-    process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
-    mockSkillLedgerInitFailure("init exploded");
-
-    try {
-      const { logs } = registerHandlers();
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
-      assert.ok(
-        logs.some((log) => log.includes("init --no-baseline failed: init exploded")),
-      );
-    } finally {
-      if (previousXdgDataHome === undefined) {
-        delete process.env.XDG_DATA_HOME;
-      } else {
-        process.env.XDG_DATA_HOME = previousXdgDataHome;
-      }
-    }
-  });
-
-  it("eager key init does not prepend trace context", async () => {
-    const previousXdgDataHome = process.env.XDG_DATA_HOME;
-    process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
+  it("does not initialize on registration or unrelated tool calls", async () => {
     mockSkillLedgerStatus("pass");
-
-    try {
-      const { api } = createMockApi();
-      skillLedger.register(api);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
-
-      assert.equal(lastInitArgs?.[0], "skill-ledger");
-      assert.equal(lastInitArgs?.[1], "init");
-    } finally {
-      if (previousXdgDataHome === undefined) {
-        delete process.env.XDG_DATA_HOME;
-      } else {
-        process.env.XDG_DATA_HOME = previousXdgDataHome;
-      }
-    }
+    const { beforeToolCall } = registerHandlers();
+    assert.equal(lastInitArgs, undefined);
+    await beforeToolCall.handler({ toolName: "read", params: { path: "/tmp/a.txt" } }, {});
+    assert.equal(lastInitArgs, undefined);
+    assert.equal(checkCallCount, 0);
   });
 
-  it("retries failed key init with hook trace context", async () => {
-    const previousXdgDataHome = process.env.XDG_DATA_HOME;
-    process.env.XDG_DATA_HOME = mkdtempSync(resolve(tmpdir(), "skill-ledger-test-"));
-    let initAttempts = 0;
-    _setCliMock(async (args) => {
-      const offset = agentSecCommandOffset(args);
-      if (
-        args[offset] === "skill-ledger" &&
-        args[offset + 1] === "init" &&
-        args[offset + 2] === "--no-baseline"
-      ) {
-        initAttempts++;
-        lastInitArgs = args;
-        return initAttempts === 1
-          ? { exitCode: 1, stdout: "", stderr: "eager init failed" }
-          : {
-              exitCode: 0,
-              stdout: JSON.stringify({ fingerprint: "test-fingerprint" }),
-              stderr: "",
-            };
-      }
+  it("reports initialization failure without checking the Skill", async () => {
+    mockSkillLedgerInitFailure("private diagnostic");
+    const { beforeToolCall, logs } = registerHandlers();
+    assert.equal(await beforeToolCall.handler(readSkillEvent(), {}), undefined);
+    assert.equal(lastCheckArgs, undefined);
+    assert.ok(logs.some((log) => log.includes("init --no-baseline failed: exit 1")));
+    assert.ok(logs.every((log) => !log.includes("private diagnostic")));
+  });
 
-      if (args[offset] === "skill-ledger" && args[offset + 1] === "show") {
-        checkCallCount++;
-        lastCheckArgs = args;
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify({ latestStatus: "pass", message: null }),
-          stderr: "",
-        };
-      }
-
-      return { exitCode: 0, stdout: "", stderr: "" };
+  it("rechecks daemon readiness on the next invocation and preserves context", async () => {
+    mockSkillLedgerInitFailure("failed");
+    const { beforeToolCall } = registerHandlers();
+    await beforeToolCall.handler(readSkillEvent(), {});
+    mockSkillLedgerStatus("pass");
+    await beforeToolCall.handler(
+      { ...readSkillEvent(), sessionId: "session-1", toolCallId: "tool-1" }, {},
+    );
+    assert.equal(checkCallCount, 1);
+    assert.equal(lastInitArgs?.[0], "--trace-context");
+    assert.deepEqual(JSON.parse(lastInitArgs![1]), {
+      agent_name: "openclaw", session_id: "session-1", run_id: "run-1", tool_call_id: "tool-1",
     });
-
-    try {
-      const { beforeToolCall } = registerHandlers();
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
-      lastInitArgs = undefined;
-
-      await beforeToolCall.handler(
-        {
-          toolName: "read",
-          params: { file_path: "/skills/retry/SKILL.md" },
-          sessionId: "session-1",
-          runId: "run-1",
-          toolCallId: "tool-1",
-          trace: { traceId: "nested-trace-is-not-hook-input" },
-        },
-        {},
-      );
-
-      assert.equal(lastInitArgs?.[0], "--trace-context");
-      assert.equal(
-        lastInitArgs?.[1],
-        JSON.stringify({
-          agent_name: "openclaw",
-          session_id: "session-1",
-          run_id: "run-1",
-          tool_call_id: "tool-1",
-        }),
-      );
-      assert.equal(lastInitArgs?.[2], "skill-ledger");
-    } finally {
-      if (previousXdgDataHome === undefined) {
-        delete process.env.XDG_DATA_HOME;
-      } else {
-        process.env.XDG_DATA_HOME = previousXdgDataHome;
-      }
-    }
+    assert.deepEqual(lastInitArgs?.slice(2), ["skill-ledger", "init", "--no-baseline"]);
+    lastInitArgs = undefined;
+    await beforeToolCall.handler(readSkillEvent(), {});
+    assert.ok(lastInitArgs, "readiness must not be cached across daemon restarts");
   });
 
   it("matches read SKILL.md calls and preserves file_path priority", async () => {
@@ -443,7 +368,7 @@ describe("skill-ledger", () => {
 
   for (const status of ["none", "drifted", "deny", "tampered"]) {
     it(`${status} asks for approval by default`, async () => {
-      mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
+      mockSkillLedgerStatus(status);
       const { beforeToolCall } = registerHandlers();
 
       const result = await beforeToolCall.handler(
@@ -489,7 +414,7 @@ describe("skill-ledger", () => {
 
   for (const status of ["none", "drifted", "deny", "tampered"]) {
     it(`${status} logs debug and allows with debug policy`, async () => {
-      mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
+      mockSkillLedgerStatus(status);
       const { beforeToolCall, logs } = registerHandlers(policyConfig("debug"));
 
       const result = await beforeToolCall.handler(
@@ -504,7 +429,7 @@ describe("skill-ledger", () => {
   }
 
   it("invalid explicit policy falls back to default ask policy", async () => {
-    mockSkillLedgerStatus("deny", 1);
+    mockSkillLedgerStatus("deny");
     const { beforeToolCall, logs } = registerHandlers({
       capabilities: {
         "skill-ledger": { policy: "blcok" },
@@ -526,7 +451,7 @@ describe("skill-ledger", () => {
 
   it("lets the environment policy override capability configuration", async () => {
     process.env.SKILL_LEDGER_MODE = "observe";
-    mockSkillLedgerStatus("deny", 1);
+    mockSkillLedgerStatus("deny");
     const { beforeToolCall, logs } = registerHandlers(policyConfig("block"));
 
     const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
@@ -537,7 +462,7 @@ describe("skill-ledger", () => {
 
   it("invalid environment mode falls back to default ask policy", async () => {
     process.env.SKILL_LEDGER_MODE = "blcok";
-    mockSkillLedgerStatus("deny", 1);
+    mockSkillLedgerStatus("deny");
     const { beforeToolCall, logs } = registerHandlers(policyConfig("observe"));
 
     const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
@@ -552,7 +477,7 @@ describe("skill-ledger", () => {
 
   it("maps deny in the environment mode to block", async () => {
     process.env.SKILL_LEDGER_MODE = "deny";
-    mockSkillLedgerStatus("deny", 1);
+    mockSkillLedgerStatus("deny");
     const { beforeToolCall } = registerHandlers(policyConfig("observe"));
 
     const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
@@ -562,7 +487,7 @@ describe("skill-ledger", () => {
   });
 
   it("block policy hard-blocks with the summary message", async () => {
-    mockSkillLedgerStatus("deny", 1);
+    mockSkillLedgerStatus("deny");
     const { beforeToolCall } = registerHandlers(policyConfig("block"));
 
     const result = await beforeToolCall.handler(
@@ -607,7 +532,7 @@ describe("skill-ledger", () => {
   }
 
   it("maps legacy enableBlock=true to block policy", async () => {
-    mockSkillLedgerStatus("deny", 1);
+    mockSkillLedgerStatus("deny");
     const { beforeToolCall } = registerHandlers(legacyEnableBlockConfig(true));
 
     const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
@@ -615,4 +540,29 @@ describe("skill-ledger", () => {
     assert.equal(result?.block, true);
     assert.match(result?.blockReason, /summary message for deny/);
   });
+  for (const [value, exitCode] of [
+    [{ status: "error", error: "private failure" }, 1],
+    [{ status: "error", error: "private failure" }, 0],
+    [{ latestStatus: "pass", message: null }, 1],
+    [{ latestStatus: "deny" }, 0],
+    [{ latestStatus: "mystery", message: "private failure" }, 0],
+    [{ latestStatus: "pass", message: 7 }, 0],
+    [null, 0], [[], 0],
+  ] as const) {
+    it(`diagnoses invalid show result ${JSON.stringify(value)} / ${exitCode}`, async () => {
+      mockSkillLedgerCheck({ exitCode, stdout: JSON.stringify(value), stderr: "private failure" });
+      const { beforeToolCall, logs } = registerHandlers(policyConfig("block"));
+      assert.equal(await beforeToolCall.handler(readSkillEvent(), {}), undefined);
+      assert.ok(logs.some((log) => log.includes("[WARN] [skill-ledger]")));
+      assert.ok(logs.every((log) => !log.includes("private failure")));
+    });
+  }
+
+  it("retains unmanaged show results without treating them as malformed", async () => {
+    mockSkillLedgerCheck({ exitCode: 0, stdout: JSON.stringify({ managed: false, latestStatus: "unmanaged", message: null }), stderr: "" });
+    const { beforeToolCall, logs } = registerHandlers(policyConfig("block"));
+    assert.equal(await beforeToolCall.handler(readSkillEvent(), {}), undefined);
+    assert.deepEqual(logs, []);
+  });
+
 });

@@ -566,3 +566,113 @@ CHOWN、DAC_OVERRIDE、FOWNER，并启用 `NoNewPrivileges`。UID 1001 可管理
 system manager fixture 还验证产品的 75 秒强制停止期限及启动限流。由于 `/run` 可能为
 noexec，用例原位执行选定产物，仅在隔离测试 unit 注入非终止的停止信号，并验证真实的启动
 拒绝行为，避免依赖发行版相关的 `Result` 字符串。此前失败的 fixture 尝试单独保留。
+
+## Hook 后续交付
+
+后续交付保留 `skill-ledger` 命令和能力 ID、宿主语言、匹配规则、默认策略及启用状态，
+调整 daemon 初始化与命令结果校验，并将 Cosh 宿主超时设为 10 秒，覆盖顺序执行的
+3 秒初始化和 5 秒查询；不引入统一 Hook 框架或第二套策略层。
+六类适配器的行为和执行错误边界见
+[用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-接入)。
+
+按四个逻辑提交交付：初始化、结果处理、真实 Rust CLI／daemon 合同、文档与验收记录。
+真实宿主验收单独推进。
+每批代码附带测试。合同用例位于 `tests/v2/e2e/test_skillsec_hook_contracts.py`；记录器通过
+exec 调用真实 Rust CLI，不替换输出。源码资产与安装资产分别验证，安装模式缺失插件即失败，
+并接入 `make test-e2e-rpm-v2`。以源码暂存资产执行安装模式，只证明安装布局，不证明 RPM
+已经构建或安装。
+
+本轮验证状态单独记录如下，不把先前核心／RPM 结果当作新增适配器的证据。宿主确认、工具
+阻断及模型行为需要真实宿主单独验收。`SKILL_LEDGER_HOOK_ENABLED=false` 是临时运营绕过；
+恢复旧插件会恢复旧行为，但不能把 V1 信任导入 V2。
+
+### 当前 Hook 基线（2026-09-30）
+
+四个 Hook 提交已对齐到合入核心 PR #3295 后的主干 `5e811c459`。产品及测试修订
+`6227e1772` 在 Alinux 4 x86_64、Python 3.11.6、Node.js 22.23.0、Rust 1.93.1 下
+重新完成基本验收，Rust CLI 和 daemon 使用新的 target 目录构建。
+
+| 检查 | 结果 |
+| --- | --- |
+| Python Hook 适配器，含 Hermes | 373 项通过 |
+| 能力环境变量视图 | 178 项通过，1 项既有 native 扩展检查跳过 |
+| OpenClaw 构建与完整单元测试 | 构建通过，204 项测试通过 |
+| 启动、重启及 Skill 状态子集 | 48 项通过 |
+| 真实 Rust CLI／daemon Hook 合同 | 源码布局 112 项、安装布局 112 项通过 |
+| 安装后的 Cosh 直接调用 | 15 项通过 |
+| 公共 V2 E2E | 420 项通过 |
+| raw 打包 | 通过 |
+
+主干现在会在启动时扫描获授权的普通 Skill。合同夹具等待真实启动激活的审计事件后，
+才创建待测 Skill；重启时等待两个 Skill 完成处理。未初始化密钥场景使用独立的空授权
+范围 daemon，审计断言按 Hook 子进程 PID 排除后台调用。此次仅调整测试准备流程，
+保留产品启动行为。安装资产由源码构建，这些结果不代表 RPM 安装或真实 Agent／模型
+验收。后续文档修改不改变已验证的代码。
+
+```text
+CLI SHA-256:    10f983c4ae63130105510d23a33d887aaf3c8aa0ed5bf756553fca98f7ef1e86
+Daemon SHA-256: f623b214408ff333af87ab17fef826b2adbd5851443a855a5c15232f295747cc
+```
+
+以下记录作为历史证据保留，不作为当前基线通过的证明。
+
+### 历史 Hook 验证记录
+
+四个 Hook 提交已对齐核心基线 `0d252302`，保留离线构建参数、RPM 依赖和 daemon
+启动／退出测试。代码修订 `687d2e5d8` 在 Alinux 4 x86_64、Python 3.11.6、Node.js 22.23.0、
+Rust 1.93.1 下重新完成基本验收：
+
+| 检查 | 结果 |
+| --- | --- |
+| Python Hook 适配器，含 Hermes | 373 项通过 |
+| 能力环境变量视图 | 178 项通过，1 项既有 native 扩展检查跳过 |
+| OpenClaw 构建与完整单元测试 | 构建通过，204 项测试通过 |
+| 安装后的 Cosh 直接调用 | 15 项通过 |
+| 真实 Rust CLI／daemon Hook 合同 | 源码布局 112 项、安装布局 112 项通过 |
+| 公共 V2 E2E | 420 项通过 |
+| raw 打包 | 通过 |
+
+CLI 和 daemon 从空 target 目录重新编译。安装布局使用源码构建资产，不代表 RPM 验收。
+受管目录回归改为验证范围拒绝、原有 Hook 错误策略，以及不写元数据或登记记录。
+Cosh 用例读取安装后的 manifest，模拟 2 秒初始化和 3.4 秒查询；独立变异验证确认
+5 秒配置会失败，10 秒配置返回预期 `ask`。旧范围用例的四项失败及容器缺少 `cmp` 的
+首轮结果均保留；修正测试合同并补齐该测试依赖后，上述检查全部通过。
+用户要求的真实 Agent／模型验收继续暂缓。后续仅补充验收文档，不改变已验证的产品及测试文件。
+
+```text
+CLI SHA-256:    a020cd6eeb85dce879b67256c1043aa3f8af27ec905097ec17ddc0671fba26e4
+Daemon SHA-256: e8baaa547d58c63764e8270785d60e62b8499fc30455302ccff0864f2fca6def
+```
+
+以下 `72d50d82` 结果为历史证据，不作为新基线通过的证明。
+
+在 Alinux 4 x86_64、Python 3.11.6、Node.js 22.23.0 的独立容器中，373 项针对性 Python
+测试、175 项 OpenClaw 单元测试及 OpenClaw TypeScript 构建通过。112 项真实后端 Hook
+合同分别在源码资产、源码构建后安装到包路径的资产上通过。两轮使用相同的全新核心构建
+`72d50d82`：
+
+```text
+CLI SHA-256:    1b8f56588478e99a8537278171b53df56ea236f660fb5aff23f9804fb5cda0f0
+Daemon SHA-256: bef6f9e3694ce9c35c9cf28d65fe392aaa0c4515410e0c0ef99a3f55c3b9b3d6
+```
+
+在 Linux 的 `src/agent-sec-core` 下执行；需要独立的 root daemon 环境、`PATH` 中的真实
+二进制及已编译插件资产：
+
+```sh
+SKILLSEC_HOOK_LAYOUT=source python3 -m pytest -q tests/v2/e2e/test_skillsec_hook_contracts.py
+SKILLSEC_HOOK_LAYOUT=installed python3 -m pytest -q tests/v2/e2e/test_skillsec_hook_contracts.py
+```
+
+公共 `tests/v2/e2e` 回归 415 项全部通过。首轮两项失败来自夹具配置：未启动外部 daemon，
+以及跨 UID 用例继承了私有构建 `TMPDIR`。改用 CI 方式启动独立 daemon，并使用容器 `/tmp`
+后通过，未修改产品代码。文档命名、双语目录一致性及相对链接检查通过。
+
+旧 Qwen 直接 Hook E2E 文件使用当前 Python V1 源码，6 项全部通过。审计断言同时覆盖
+幂等初始化和后续暴露状态查询；这属于向后兼容证据，不代表原生 Qwen 验收。
+
+真实宿主验收**尚未完成**。Qwen 启动时的自动更新在业务请求前将测试机共享安装从 0.19.9
+改为 0.24.6。按用户要求，真实宿主验收与共享安装恢复暂缓，本轮仅做基本验收。此事记为测试控制违规，不作为 SkillSec
+产品结论。已准备的离线恢复方案可恢复官方 0.19.9 及 Linux 可选依赖；由于更新前没有完整
+目录哈希，不能证明逐字节恢复。重启宿主进行干净验收前，需要禁用自动更新并保护共享安装路径。
+独立容器合同测试与这轮中断的真实宿主试验分别记录。

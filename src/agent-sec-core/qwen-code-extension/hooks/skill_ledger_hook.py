@@ -542,18 +542,8 @@ def _is_model_invocable(
     return True
 
 
-def _keys_exist() -> bool:
-    """Return whether the Skill Ledger public and private key files exist."""
-    xdg_data = os.environ.get("XDG_DATA_HOME")
-    data_root = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
-    ledger_dir = data_root / "agent-sec" / "skill-ledger"
-    return (ledger_dir / "key.pub").is_file() and (ledger_dir / "key.enc").is_file()
-
-
-def _ensure_keys(input_data: dict[str, Any], skill_name: str) -> None:
-    """Best-effort initialize Skill Ledger keys without baselining skills."""
-    if _keys_exist():
-        return
+def _ensure_keys(input_data: dict[str, Any], skill_name: str) -> bool:
+    """Ask the daemon to initialize missing trust without scanning Skills."""
     command = with_trace_context(
         ["agent-sec-cli", "skill-ledger", "init", "--no-baseline"],
         input_data,
@@ -573,7 +563,7 @@ def _ensure_keys(input_data: dict[str, Any], skill_name: str) -> None:
             skill_name=skill_name,
             detail=type(exc).__name__,
         )
-        return
+        return False
     if result.returncode != 0:
         _diagnostic(
             "key_init_failed",
@@ -581,6 +571,8 @@ def _ensure_keys(input_data: dict[str, Any], skill_name: str) -> None:
             skill_name=skill_name,
             detail=f"exit_code={result.returncode}",
         )
+        return False
+    return True
 
 
 def _show_skill(
@@ -638,6 +630,9 @@ def _format_qwen(
     # ``skill-ledger show`` marks only unmanaged results explicitly. Managed
     # results omit the field, while accepting ``True`` keeps the hook compatible
     # with callers that already provide an explicit marker.
+    if summary.get("status") == "error":
+        _diagnostic("show_failed", input_data, skill_name=skill_name)
+        return _noop()
     managed = summary.get("managed")
     if managed is False:
         _diagnostic("unmanaged", input_data, skill_name=skill_name)
@@ -737,7 +732,9 @@ def main() -> None:
             return
 
         policy = _read_policy(input_data)
-        _ensure_keys(input_data, skill_name)
+        if not _ensure_keys(input_data, skill_name):
+            print(_noop())
+            return
         summary = _show_skill(skill.directory, input_data, skill_name)
         if summary is None:
             print(_noop())

@@ -57,7 +57,11 @@ Caller discovery and successful registration cannot expand that boundary.
 Startup scans authorized ordinary Skills in the background, using the same worker as SkillFS.
 See the [V2 core guide](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
 for configuration, commands and the separate deployment/Agent Hook acceptance boundaries.
-V1 history and per-user keys are not imported. Existing Agent Hooks remain unchanged in this PR.
+V1 history and per-user keys are not imported. Hook adapters use daemon-owned initialization and
+validated `check`/`show` results while retaining host policies; see the
+[Hook integration boundary](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration).
+
+Cosh-NG reserves 10 seconds for SkillSec initialization and querying in one Hook invocation.
 
 The source-built Rust `agent-sec-cli` provides all 15 Policy, Scope and Binding CRUD
 commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)

@@ -6,8 +6,8 @@ SkillSec 扫描 Skill 内容、签名扫描结果、保留可恢复的版本，�
 内置扫描全部在本地执行，不调用模型。Rust CLI 保留 `agent-sec-cli skill-ledger` 入口，
 由一个 root daemon 执行业务操作。
 
-本文说明 V2 核心能力。[Skill Ledger 指南](skill-ledger.md)说明 V1 及其 Agent 集成。
-V2 Agent Hook 迁移单独交付；本次核心迁移不更新现有 Hook 的初始化检查、默认策略或启用状态。
+本文说明 V2 核心及 Hook 适配器。[Skill Ledger 指南](skill-ledger.md)保留 V1 参考和
+各宿主的匹配、策略控制规则。适配器沿用现有语言、默认策略和启用状态，通过 CLI 调用 Rust daemon。
 
 ## 安装边界
 
@@ -24,7 +24,8 @@ pkg-config 和 OpenSSL 开发头文件：
 sudo yum install ./scripts/rpmbuild/RPMS/x86_64/agent-sec-cli-*.rpm
 ```
 
-aarch64 使用对应架构目录。本阶段安装核心 CLI 包；元包还会拉入本次尚未迁移的 Agent 集成。
+aarch64 使用对应架构目录。本阶段安装核心 CLI 包；元包还会拉入 Agent 集成。插件包应与本次 Hook 迁移使用相同修订，
+仅升级 CLI 不会更新进程中已加载的插件。
 V1 和 V2 CLI 使用相同包名和可执行文件路径，安装 V2 会替换 V1。先停止 V1 写入者并保留匹配备份，
 具体见下文部署回退。
 
@@ -75,6 +76,43 @@ bash src/agent-sec-core/tests/packaging/test-skillsec-install.sh
 
 原位 SkillFS backing 挂载要求内核支持 `open_tree`、`move_mount`，并可访问 `/proc/self/fd`。
 操作不支持或被拒绝时直接失败；daemon 无需增加挂载 capability。
+
+## Agent Hook 接入
+
+安装配套插件或修改可信启动环境后，重启 Agent。使用自定义 socket 时，确保
+`AGENT_SEC_DAEMON_SOCKET` 与 daemon 一致。加载 Skill 前先运行
+`agent-sec-cli skill-ledger status`，再显式扫描该 Skill 建立 V2 信任；V1 密钥或 manifest
+不能建立 V2 信任。
+
+| 宿主 | 查询 | 命中 Skill 时的初始化 | 默认策略 |
+| --- | --- | --- | --- |
+| Codex | `check` | 幂等 `init --no-baseline` | `ask`，在 UserPromptSubmit 以警告呈现 |
+| Qoder | `check` | 无 | `ask` |
+| Qwen Code | `show` | 幂等 `init --no-baseline` | `ask` |
+| Cosh-NG | `show` | 幂等 `init --no-baseline` | `ask` |
+| OpenClaw | `show` | 幂等 `init --no-baseline` | `ask` |
+| Hermes | `show` | 无 | `observe` |
+
+四类执行初始化的适配器在每次命中调用时询问 daemon，不检查 HOME 密钥文件，不扫描 Skill，
+不重置不安全的密钥，也不换钥。OpenClaw 不在插件注册时初始化，不缓存进程级就绪结果。
+禁用或未命中的 Hook 不调用 CLI。Qoder、Hermes 保持只读，需显式建立信任。
+宿主确认仅允许当前操作继续，不写入 Ledger 人工决策。
+
+`check` 消费者接受退出码 1 的有效风险结果，不把它当作通信失败。`show` 消费者要求
+退出码 0 及有效发布摘要，再按 `message` 应用原有策略。已激活的 `warn` 版本或显式人工决策
+可能没有消息。`hidden` 由 SkillFS 发布视图执行；Hook 不根据该字段单独拒绝直接文件系统访问。
+未受管 Skill 不在这一受管发布路径内。
+
+CLI 缺失、daemon 不可用、超时或响应无效时记录诊断。Codex、Cosh-NG、Qwen Code、OpenClaw、
+Hermes 保持执行错误时 fail-open；Qoder 与原来一样把错误交给配置策略处理。
+初始化失败时，本次调用在 `check`／`show` 之前停止，不回退 Python。诊断不复制 CLI 原始 stderr。
+
+Cosh-NG 为整个 SkillSec Hook 预留 10 秒：初始化最多 3 秒，`show` 最多 5 秒，
+另留 2 秒用于启动及结果处理。`capabilities` 环境变量视图仍显示单次查询的 5 秒预算，
+不表示宿主 manifest 的整体超时。
+
+适配器到 daemon 的测试与真实 Agent 验收分别记录。当前证据及宿主限制见
+[迁移文档](../../../../../src/agent-sec-core/docs/design/SKILL_SEC_PHASE_ONE_zh.md#hook-后续交付)。
 
 ## 系统配置与信任
 

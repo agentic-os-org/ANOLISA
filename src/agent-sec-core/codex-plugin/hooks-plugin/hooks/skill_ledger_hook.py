@@ -313,33 +313,28 @@ def _extract_skill_mentions(prompt: str) -> list[str]:
 # -- key management --------------------------------------------------------
 
 
-def _keys_exist() -> bool:
-    """Return True if both key.pub and key.enc exist."""
-    xdg_data = os.environ.get("XDG_DATA_HOME", "")
-    if not xdg_data:
-        xdg_data = str(Path.home() / ".local" / "share")
-    data_dir = Path(xdg_data) / "agent-sec" / "skill-ledger"
-    return (data_dir / "key.pub").is_file() and (data_dir / "key.enc").is_file()
-
-
-def _ensure_keys(input_data: dict[str, Any]) -> None:
-    """Auto-initialize signing keys if missing (fire-and-forget)."""
-    if _keys_exist():
-        return
+def _ensure_keys(input_data: dict[str, Any]) -> bool:
+    """Let the daemon initialize missing trust without replacing existing keys."""
     try:
         cmd = with_trace_context(
             ["agent-sec-cli", "skill-ledger", "init", "--no-baseline"],
             input_data,
         )
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             capture_output=True,
             check=False,
             text=True,
             timeout=_INIT_TIMEOUT,
         )
-    except Exception:
-        pass
+        if result.returncode == 0:
+            return True
+        print(
+            f"[skill-ledger] key init failed: exit {result.returncode}", file=sys.stderr
+        )
+    except Exception as exc:
+        print(f"[skill-ledger] key init failed: {type(exc).__name__}", file=sys.stderr)
+    return False
 
 
 # -- output helpers --------------------------------------------------------
@@ -409,7 +404,8 @@ def main() -> None:
         return  # no matching installed skills, allow
 
     # 5. Ensure signing keys exist (auto-init if missing)
-    _ensure_keys(input_data)
+    if not _ensure_keys(input_data):
+        return
 
     # 6. Check each skill via agent-sec-cli
     failed: list[tuple[str, str]] = []  # (name, status)
@@ -426,15 +422,30 @@ def main() -> None:
                 text=True,
                 timeout=TIMEOUT,
             )
-        except Exception:
-            continue  # fail-open on subprocess error
+        except Exception as exc:
+            print(f"[skill-ledger] check failed: {type(exc).__name__}", file=sys.stderr)
+            continue
 
         try:
             check_result = json.loads(proc.stdout)
         except (json.JSONDecodeError, ValueError):
-            continue  # fail-open on parse error
+            print("[skill-ledger] invalid check JSON", file=sys.stderr)
+            continue
 
-        status = check_result.get("status", "unknown")
+        if not isinstance(check_result, dict):
+            print("[skill-ledger] invalid check response", file=sys.stderr)
+            continue
+        status = check_result.get("status")
+        if (
+            not isinstance(status, str)
+            or status not in _BLOCK_STATUSES | {"pass"}
+            or proc.returncode not in (0, 1)
+            or (proc.returncode != 0 and status == "pass")
+        ):
+            print(
+                "[skill-ledger] check did not produce a valid verdict", file=sys.stderr
+            )
+            continue
         if status in _BLOCK_STATUSES:
             failed.append((skill_name, status))
 

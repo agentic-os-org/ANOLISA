@@ -792,3 +792,9 @@ def test_openclaw_pii_lists_version_dependent_input_hooks() -> None:
         "after_tool_call",
         "llm_output",
     ]
+
+
+def test_cosh_skill_ledger_view_reports_query_timeout() -> None:
+    record = _single_record("cosh", "skill-ledger")
+    # The environment view does not include the host manifest's init + show deadline.
+    assert record.timeout == "5"

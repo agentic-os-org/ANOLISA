@@ -682,7 +682,7 @@ def test_main_calls_show_for_project_candidate_without_falling_back(
         "_read_disabled_skill_names",
         lambda *_args: frozenset(),
     )
-    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: None)
+    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
     captured = {}
 
     def fake_show(skill_dir, input_data, skill_name):
@@ -721,7 +721,7 @@ def test_main_defaults_to_ask_for_managed_risk(
         "_read_disabled_skill_names",
         lambda *_args: frozenset(),
     )
-    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: None)
+    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
     monkeypatch.setattr(
         skill_ledger_hook,
         "_show_skill",
@@ -901,7 +901,6 @@ def test_invalid_mode_defaults_to_ask(
 
 def test_missing_keys_trigger_best_effort_init(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: False)
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
@@ -942,3 +941,14 @@ def test_show_process_exception_is_fail_open(monkeypatch):
     )
 
     assert skill_ledger_hook._show_skill(Path("/skill"), _event(), "test-skill") is None
+
+
+def test_error_payload_cannot_hide_behind_unmanaged(monkeypatch, capsys):
+    summary = {"managed": False, "status": "error", "error": "private failure"}
+    assert (
+        skill_ledger_hook._format_qwen(summary, "example", "block", _event())
+        == skill_ledger_hook._noop()
+    )
+    diagnostic = capsys.readouterr().err
+    assert '"code":"show_failed"' in diagnostic
+    assert "private failure" not in diagnostic

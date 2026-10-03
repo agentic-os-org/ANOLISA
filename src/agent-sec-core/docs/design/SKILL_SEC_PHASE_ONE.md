@@ -679,3 +679,123 @@ The system-manager fixture also verifies the shipped 75-second forced-stop deadl
 rate limit. It uses the selected executable in place because `/run` may be noexec, injects a
 non-terminating stop signal only in the isolated test unit, and checks actual admission rejection
 instead of a distribution-specific `Result` string. Earlier failed fixture attempts remain recorded.
+
+## Hook follow-up
+
+The follow-up keeps the `skill-ledger` command and capability IDs, host languages, matching rules,
+policy defaults and enablement. It changes daemon-owned initialization and validation of command-specific results. Cosh receives
+a 10-second host deadline for sequential initialization (3 seconds) and querying (5 seconds). It does not introduce a shared Hook framework or a second policy layer.
+The [user guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration)
+defines the six adapters' behavior and execution-error boundaries.
+
+The work is delivered as four logical commits: initialization; result handling; real Rust CLI/daemon
+contracts; documentation and acceptance records. Native-host acceptance is separate.
+Tests accompany each code change. The contract
+suite is `tests/v2/e2e/test_skillsec_hook_contracts.py`; its recorder execs the real Rust CLI without
+replacing output. Source and installed-asset layouts run separately. Installed mode fails when a
+plugin asset is absent and is wired into `make test-e2e-rpm-v2`. Running that mode on staged source
+assets proves their installed layout, not that an RPM was built or installed.
+
+Validation status for this follow-up is recorded below; earlier core/RPM evidence is not reused as
+proof of the new adapters. Native-host approval, tool blocking and model behavior require a separate
+real-host run. Disabling `SKILL_LEDGER_HOOK_ENABLED` is a temporary operational bypass; restoring a
+previous plugin restores its previous behavior but cannot import V1 trust into V2.
+
+### Current Hook baseline (2026-09-30)
+
+The four Hook commits now follow merged core PR #3295 on main `5e811c459`. Product and test
+revision `6227e1772` passed fresh basic acceptance on Alinux 4 x86_64, Python 3.11.6,
+Node.js 22.23.0 and Rust 1.93.1. The Rust CLI and daemon were rebuilt into a new target directory.
+
+| Check | Result |
+| --- | --- |
+| Python Hook adapters, including Hermes | 373 passed |
+| Capability environment view | 178 passed, 1 existing native-extension check skipped |
+| OpenClaw build and complete unit suite | Build passed, 204 tests passed |
+| Startup, restart and Skill-state subset | 48 passed |
+| Real Rust CLI/daemon Hook contracts | 112 source + 112 installed passed |
+| Installed Cosh direct execution | 15 passed |
+| Shared V2 E2E | 420 passed |
+| Raw packaging | Passed |
+
+Main now scans authorized ordinary Skills during startup. The contract fixture waits for a real
+startup activation audit event before creating its test Skill; restart waits for both Skills.
+A separate empty-scope daemon tests uninitialized keys, and audit assertions use Hook subprocess
+PIDs to exclude background calls. This changes test setup only and preserves production startup
+behavior. Installed assets were built from source; these results do not claim RPM installation
+or native Agent/model acceptance. Subsequent documentation changes do not alter tested code.
+
+```text
+CLI SHA-256:    10f983c4ae63130105510d23a33d887aaf3c8aa0ed5bf756553fca98f7ef1e86
+Daemon SHA-256: f623b214408ff333af87ab17fef826b2adbd5851443a855a5c15232f295747cc
+```
+
+The following records are historical and are not used as proof for this baseline.
+
+### Historical Hook validation records
+
+The four Hook commits are aligned to core baseline `0d252302`, preserving offline build flags,
+RPM dependencies and daemon startup/exit tests. Fresh basic acceptance of code revision `687d2e5d8`
+passed on Alinux 4 x86_64 with Python 3.11.6, Node.js 22.23.0 and Rust 1.93.1:
+
+| Check | Result |
+| --- | --- |
+| Python Hook adapters, including Hermes | 373 passed |
+| Capability environment view | 178 passed, 1 existing native-extension check skipped |
+| OpenClaw build and complete unit suite | Build passed, 204 tests passed |
+| Installed Cosh direct execution | 15 passed |
+| Real Rust CLI/daemon Hook contracts | 112 source + 112 installed passed |
+| Shared V2 E2E | 420 passed |
+| Raw packaging | Passed |
+
+The CLI and daemon were rebuilt from an empty target directory. Installed-layout tests used
+source-built assets, not an RPM. The managed-directory regression now expects a scope error and
+verifies the existing Hook error policy without metadata or registration writes. The Cosh test
+reads the installed manifest and simulates 2-second initialization plus a 3.4-second query;
+independent mutation review confirms 5 seconds fails while 10 seconds returns the expected `ask`.
+The original four scope-test failures and missing container `cmp` dependency remain recorded;
+after correcting the test contract and installing that test dependency, all checks above passed.
+Real Agent/model acceptance remains deferred by the user. Subsequent evidence-only documentation
+updates do not change the tested product or test files.
+
+```text
+CLI SHA-256:    a020cd6eeb85dce879b67256c1043aa3f8af27ec905097ec17ddc0671fba26e4
+Daemon SHA-256: e8baaa547d58c63764e8270785d60e62b8499fc30455302ccff0864f2fca6def
+```
+
+The following `72d50d82` results are historical evidence, not proof for the new baseline.
+
+On Alinux 4 x86_64, Python 3.11.6 and Node.js 22.23.0, an isolated container passed
+373 targeted Python tests, 175 OpenClaw unit tests and the OpenClaw TypeScript build.
+The 112 real-backend Hook contracts passed both with source assets and with source-built assets
+installed at the package paths. Both runs used the same freshly rebuilt core at `72d50d82`:
+
+```text
+CLI SHA-256:    1b8f56588478e99a8537278171b53df56ea236f660fb5aff23f9804fb5cda0f0
+Daemon SHA-256: bef6f9e3694ce9c35c9cf28d65fe392aaa0c4515410e0c0ef99a3f55c3b9b3d6
+```
+
+Run from `src/agent-sec-core` on Linux with an isolated root daemon environment, real binaries
+on `PATH` and compiled plugin assets:
+
+```sh
+SKILLSEC_HOOK_LAYOUT=source python3 -m pytest -q tests/v2/e2e/test_skillsec_hook_contracts.py
+SKILLSEC_HOOK_LAYOUT=installed python3 -m pytest -q tests/v2/e2e/test_skillsec_hook_contracts.py
+```
+
+The shared `tests/v2/e2e` regression also passed all 415 cases. Its first run had two harness
+configuration failures (missing external daemon and private build `TMPDIR` inherited by a
+cross-UID test); rerunning with the CI-style isolated daemon and container `/tmp` passed without
+product changes. Naming, bilingual tree parity and relative-link checks passed.
+
+The legacy Qwen direct-Hook E2E file also passed all six cases with the current Python V1 source.
+Its audit assertion now covers both idempotent initialization and the subsequent exposure query;
+this is backward-compatibility evidence, not native Qwen acceptance.
+
+Native-host acceptance is **not complete**. A Qwen startup auto-update modified the shared host
+installation from 0.19.9 to 0.24.6 before any behavior request. Native acceptance and shared-installation restoration are deferred by the user; this run covers
+basic acceptance only. The incident remains a test-control violation, not a SkillSec product verdict.
+The prepared offline recovery restores the official 0.19.9 package and Linux optional dependencies;
+there is no pre-update full-tree hash to prove byte-for-byte restoration. A clean native run must
+disable automatic updates and protect shared installation paths before restarting the hosts.
+The independent container contracts remain separate from this interrupted native pilot.
