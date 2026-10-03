@@ -744,11 +744,30 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
                     mountpoint = %mountpoint.display(),
                     "managed worker keeps failing fast; giving up crash-loop remount"
                 );
-                // Mark the instance stopped so nothing resurrects it, then fall
-                // through to finish(): unmount and clear residual state.
-                if let Ok(mut state) = ManagedState::load(&paths.state) {
-                    state.desired_state = DesiredState::Stopped;
-                    let _ = state.save(&paths.state);
+                // Best-effort persistence of the stopped marker. A failure
+                // here is not itself a resurrection: finish() below deletes
+                // the state file, and current_desired_state() treats a
+                // missing or unreadable state as Stopped, so the common
+                // path still converges. The log makes the swallowed error
+                // visible so operators can see when the marker was not
+                // written; only a stale pre-Mounted state that survives
+                // cleanup could mislead a later start.
+                match ManagedState::load(&paths.state) {
+                    Ok(mut state) => {
+                        state.desired_state = DesiredState::Stopped;
+                        if let Err(error) = state.save(&paths.state) {
+                            warn!(
+                                error = %error,
+                                "failed to persist stopped marker; the state file may be stale"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "failed to load state for stopped marker; treating as stopped"
+                        );
+                    }
                 }
                 break;
             }
