@@ -219,9 +219,14 @@ fn cmd_fix(param: &str) -> Result<i32> {
 fn cmd_why(param: &str) -> Result<i32> {
     let (_, eval) = gather()?;
     let (output, code) = why_with(param, &eval, |path| {
-        std::path::Path::new(path)
-            .exists()
-            .then(|| std::fs::read_to_string(path).unwrap_or_default())
+        let path = std::path::Path::new(path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        // A failed read is an error, never a value: write-only sysctls
+        // (mode 0200, e.g. vm.compact_memory) and transient EIO must not
+        // collapse into an empty "current".
+        std::fs::read_to_string(path).map(Some)
     })?;
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(code)
@@ -230,7 +235,7 @@ fn cmd_why(param: &str) -> Result<i32> {
 fn why_with(
     param: &str,
     eval: &rules::EvalResult,
-    read_current: impl FnOnce(&str) -> Option<String>,
+    read_current: impl FnOnce(&str) -> Result<Option<String>, std::io::Error>,
 ) -> Result<(serde_json::Value, i32)> {
     // sysfs names are filesystem identities, while sysctl names accept aliases.
     let normalized = if param.starts_with("block/") || param.starts_with("transparent_hugepage/") {
@@ -256,11 +261,17 @@ fn why_with(
         return Ok((output, 1));
     }
     let path = tuner::param_to_path(&normalized);
-    if let Some(val) = read_current(&path) {
-        let output = json!({ "param": normalized, "current": val.trim(), "status": "optimal" });
-        return Ok((output, 0));
+    match read_current(&path) {
+        Ok(Some(val)) => {
+            let output = json!({ "param": normalized, "current": val.trim(), "status": "optimal" });
+            Ok((output, 0))
+        }
+        Ok(None) => anyhow::bail!("parameter not found: {param}"),
+        // README exit-code contract: 2 = error, details in stderr JSON.
+        // Claiming "optimal" from a value that was never read would make
+        // the structured output untrustworthy for agents.
+        Err(err) => anyhow::bail!("cannot read current value of {param} at {path}: {err}"),
     }
-    anyhow::bail!("parameter not found: {param}")
 }
 
 fn cmd_rollback() -> Result<i32> {
@@ -364,8 +375,9 @@ mod tests {
             ),
         ] {
             let current = CurrentFile::new(value);
-            let (output, code) = why_with(param, &eval, |actual| current.read_for(actual, path))
-                .expect("existing sysfs parameter must be readable without a recommendation");
+            let (output, code) =
+                why_with(param, &eval, |actual| Ok(current.read_for(actual, path)))
+                    .expect("existing sysfs parameter must be readable without a recommendation");
             assert_eq!(code, 0);
             assert_eq!(
                 output,
@@ -385,7 +397,7 @@ mod tests {
             "KERNEL/OSTYPE",
         ] {
             let (output, code) = why_with(param, &eval, |path| {
-                current.read_for(path, "/proc/sys/kernel/ostype")
+                Ok(current.read_for(path, "/proc/sys/kernel/ostype"))
             })
             .expect("sysctl spellings must resolve to the same parameter");
             assert_eq!(code, 0);
@@ -452,14 +464,35 @@ mod tests {
             "no_such_ktuner_parameter",
         ] {
             let error = why_with(param, &eval, |path| {
-                current
+                Ok(current
                     .read_for(path, "/sys/block/Disk.0/queue/scheduler")
                     .or_else(|| {
                         thp_current.read_for(path, "/sys/kernel/mm/transparent_hugepage/enabled")
-                    })
+                    }))
             })
             .expect_err("only the exact existing sysfs spelling may be accepted");
             assert_eq!(error.to_string(), format!("parameter not found: {param}"));
         }
+    }
+
+    #[test]
+    fn why_reports_read_failures_as_errors_not_optimal() {
+        let eval = evaluation(Vec::new());
+        // Write-only sysctls (vm.compact_memory, vm.drop_caches,
+        // net.ipv4.route.flush — mode 0200, present on every kernel) and
+        // transient EIO/EACCES must surface as exit-2 errors per the README
+        // contract, never as {"current":"","status":"optimal"} with code 0.
+        let error = why_with("vm.compact_memory", &eval, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        })
+        .expect_err("a failed read must not masquerade as a value");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("cannot read current value") && msg.contains("vm.compact_memory"),
+            "error must name the parameter and the failed read: {msg}"
+        );
     }
 }
