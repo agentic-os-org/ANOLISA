@@ -1840,6 +1840,56 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
 }
 
 #[test]
+fn compress_post_tool_passes_through_content_the_json_domain_rejects() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    // An NDJSON stream sniffs as JSON — `{` head, `}` tail — but is not one
+    // document, and an `[INFO] … [ok]` log is not JSON at all. The bracket
+    // sniff only routes content; the JSON domain's parse is the authority, so
+    // the operation degrades to passthrough instead of exiting non-zero.
+    let inputs = [
+        (0..12)
+            .map(|index| format!(r#"{{"id": {index}, "message": "record-{index} payload"}}"#))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        (0..12)
+            .map(|index| {
+                format!("[2026-09-25 10:00:{index:02}] INFO worker {index} handled req-{index} status=200 latency=12ms [ok]")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ];
+    for content in inputs {
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &post_tool_request_json(&content, true, "json-domain-rejected"),
+        );
+        assert!(
+            output.status.success(),
+            "compress failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["operation"], "post_tool");
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "passthrough");
+        assert_eq!(result["output"], serde_json::json!(content));
+        assert_eq!(result["applied_operations"], serde_json::json!([]));
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert_eq!(result["before_tokens"], result["after_tokens"]);
+        assert_ne!(result["content_type"], "json");
+    }
+}
+
+#[test]
 fn compress_post_tool_dry_run_previews_record_reduction_without_stash_writes() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,

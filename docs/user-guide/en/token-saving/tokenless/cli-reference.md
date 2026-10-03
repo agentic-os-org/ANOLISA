@@ -114,6 +114,9 @@ Operations:
 - Retrieve results, interrupted or denied calls, and RTK-optimized output bypass compression.
 - Tool errors pass through unchanged and may include bounded `additional_context` diagnostics.
 - Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
+- Content that only looks like JSON — an NDJSON stream, two concatenated documents, or an
+  `[INFO] … [ok]` log — passes through under the classification that describes it. The JSON
+  domain owns the parse, so its rejection is a routing answer rather than a failed operation.
 - Recognized successful build/test command output uses `BuildLogCompressor`; terminal cleanup and
   recoverable routine-progress reduction may be selected.
 - Successful CSV/TSV uses `TabularCompressor` when the host supports arbitrary text replacement;
