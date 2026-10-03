@@ -2,13 +2,38 @@
 
 [English](README.md)
 
-LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
+LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗：
+
+- **生命周期感知压缩** — Protocol v2 负责 BeforeModel Schema 处理、PreTool RTK 改写、PostTool 路由与授权 Retrieve；PostTool Pipeline 压缩 JSON、CSV/TSV 表格、受支持的搜索列表和已识别的构建/测试命令日志。
+- **TOON 上下文压缩** — 通过链接进 `tokenless` 的 `toon-format` 库把 JSON 响应编码为 TOON（Token-Oriented Object Notation）格式，削减合适结构化数据的语法开销。
+- **命令重写** — 集成 [RTK](https://github.com/rtk-ai/rtk) 过滤并改写 CLI 命令输出，消除原本会浪费 60–90% Token 的噪声。
+- **Tool Ready（旧版，硬关闭）** — 调用前依赖检查保留在源码中，但在就绪模型重新设计期间无条件旁路。
 
 随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
 并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
+
+Agent Adapter 覆盖以下产品：
+
+- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
+- **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
+- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
+- **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
+- **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
+  协议不支持替换原始输出，因此不追加压缩副本
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
+- **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
+- **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
+- **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
+
+面向框架开发者，Python SDK 提供框架中立层和 **AgentScope 专用层**：
+
+- **通用 Python SDK** — 面向任意 Agent 框架的生命周期 API、单项 Runtime 操作与统计查询。
+- **AgentScope 专用层** — 基于通用 SDK，完整开放 Schema 压缩、RTK 改写、响应压缩、
+  TOON、受 marker 约束的恢复和归属统计。
 
 ## 核心能力
 
@@ -21,19 +46,28 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
+| 可逆压缩（Stash） | — | 被省略的 Record 集合和有界值会进入 Stash；受支持的 Agent 在需要完整数据时运行 `tokenless retrieve HASH` 或调用其静态 Retrieve Tool |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
+| OpenClaw 插件 | — | RTK ✅，无损 transcript PostTool ✅；宿主不支持 Schema 压缩与授权 Retrieve |
+| copilot-shell 钩子 | — | Tool Ready ⛔ 硬关闭，命令重写 ✅；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损；Common BeforeModel 透传 Schema，没有授权 Retrieve |
+| Hermes Agent 插件 | — | Tool Ready ⛔ 硬关闭，Core 接管的命令重写/响应/TOON ✅，Marker 命令恢复 ✅；无 Schema 压缩 |
+| Qoder CLI 插件 | — | Tool Ready ⛔ 硬关闭，命令重写 ✅，响应压缩 ✅，Marker 命令恢复 ✅ |
+| Claude Code 插件 | — | Tool Ready ⛔ 硬关闭，命令重写 ✅，响应压缩 ✅，TOON ✅；Claude Code 2.1.121 及以上支持 Marker 命令恢复 ✅ |
+| Codex 插件 | — | Tool Ready ⛔ 硬关闭，命令重写 ✅，环境诊断 ✅；响应压缩——受协议阻断 |
+| OpenCode 插件 | — | Tool Ready ⛔ 硬关闭，命令重写 ✅，Schema 压缩 ✅，响应压缩 ✅，TOON ✅，Marker 命令恢复 ✅ |
+| Qwen Code Extension | — | Tool Ready ⛔ 硬关闭，命令重写 ✅；当前宿主不支持响应/Schema 替换 |
+| QwenPaw 插件 | — | Schema 压缩 ✅，命令重写 ✅，响应压缩 ✅，TOON ✅，Retrieve Tool 恢复 ✅ |
+| DeepSeek Harness 插件 | — | 响应压缩 ✅，Marker 命令恢复 ✅，环境错误归因 ✅ |
+| AgentScope 框架集成 | — | Schema ✅，RTK ✅，响应 ✅，TOON ✅，恢复 ✅ |
+| 零运行时依赖 | — | 纯 Rust，单一静态二进制 |
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
 结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、可移除字段、
 配置阈值，以及工具数据在会话中的占比。短小或已经紧凑的 Payload 可能只节省几个百分
 点，也可能直接原样透传。精确输入、命令、完整结果和限制见
 [Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#运行仓库参考负载)。
-
-Tool Ready 当前在所有 Adapter 中无条件硬旁路，不会读取依赖规范、执行调用前检查、自动修复环境或阻止工具调用。任何环境变量都无法恢复旧行为；重新启用必须修改源码并重新发布。
-
-工具执行后的失败归因、响应压缩、RTK 命令重写、TOON、Stash 和统计是独立能力，仍保持原有行为。
 
 ## 适用场景与预期效果
 
@@ -82,41 +116,39 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 > 对支持实时结果替换的 Agent，恢复提示通过已有 Shell Tool 执行裸 Hash 命令；成功的恢复结果原样返回，不会再次压缩。
 > 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
 
-## 集成路径
+## 架构
 
-### Agent Adapter
-
-- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
-- **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
-- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
-- **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
-- **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
-  协议不支持替换原始输出，因此不追加压缩副本
-- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
-- **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
-- **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
-- **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
-
-OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
-`tokenless compress`，`tool_result_persist` 把 OpenClaw 自己持久化的 Tool Result 交给同一
-Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
-把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
-本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
-候选。该 PostTool Hook 只改写持久化 transcript，不会改变同一轮中模型已经看到的实时结果；
-Media 与多个 Content Block 也会透传。
-
-该 Adapter 要求 OpenClaw Plugin API `2026.4.22` 或更高版本；支持兼容性检查的宿主会在
-安装阶段根据 Package Metadata 强制执行该下限。OpenClaw 配置只包含
-`rtk_enabled`、`post_tool_enabled`、`tool_ready_enabled` 和 `verbose`；
-默认值依次为 `true`、`true`、`true` 和 `false`。旧的 Response、TOON 与工具分类开关已经
-删除，所有压缩策略由 Core 统一决定。
-
-### Agent 开发框架集成
-
-- **通用 Python SDK** — 面向任意 Agent 框架的生命周期 API、单项 Runtime 操作与统计查询。
-- **AgentScope 专用层** — 基于通用 SDK，完整开放 Schema 压缩、RTK 改写、响应压缩、
-  TOON、受 marker 约束的恢复和归属统计。
+```
+Token-Less/
+├── crates/tokenless-schema/   # BeforeModel 工具 Schema 压缩器
+├── crates/tokenless-ccr/      # 可逆压缩缓存（Compress-Cache-Retrieve）
+├── crates/tokenless-runtime/  # 生命周期 API 与 Runtime 内部的 PostTool Pipeline
+├── crates/tokenless-protocol/ # 版本化 Adapter 契约与 Token Estimator
+├── crates/tokenless-compressors/ # JSON、表格和 Build Log 压缩器
+├── crates/tokenless-cli/      # CLI 二进制：`tokenless` 命令（env-check、compress、retrieve、stats）
+├── python/tokenless/          # PyO3 包：`anolisa_tokenless`
+├── python/agentscope/         # 纯 Python AgentScope 集成包
+├── adapters/tokenless/        # 面向 Agent 插件、Hook 和 Extension 的 FHS Bundle
+│   ├── manifest.json            # 受支持 Agent 产品的 Adapter Manifest
+│   ├── common/                  # 共享：hooks、spec、env-fix、commands、cosh-extension
+│   │   ├── hooks/               # copilot-shell 钩子（tool-ready + rewrite + compression）
+│   │   ├── cosh-extension.json  # copilot-shell extension manifest（引用 common/hooks/）
+│   │   ├── tool-ready-spec.json # 休眠的旧版依赖规范
+│   │   ├── tokenless-env-fix.sh # 缺失依赖自动修复脚本
+│   │   └── commands/            # Hook 命令配置
+│   ├── openclaw/                # OpenClaw 插件 + Agent 脚本
+│   ├── hermes/                  # Hermes Agent 插件 + 脚本
+│   ├── qoder/                   # Qoder CLI 插件 + 脚本
+│   ├── claude-code/             # Claude Code 插件 + marketplace + hooks
+│   ├── codex/                   # Codex 插件 + 脚本
+│   ├── opencode/                # OpenCode 本地插件 + 脚本
+│   ├── qwenpaw/                 # QwenPaw 插件（AgentScope 中间件）+ 脚本
+│   └── dsh/                     # DeepSeek Harness 原生 Bundle
+├── third_party/rtk/           # RTK vendored 源码（justfile 从 GitHub clone+patch）
+├── third_party/patches/      # vendored third_party 源码的 Patch
+├── Makefile                   # 统一构建系统
+└── scripts/                    # 辅助脚本
+```
 
 ## 快速开始
 
@@ -202,59 +234,6 @@ anolisa adapter enable tokenless dsh --profile <profile>
 dsh --profile <profile>
 ```
 
-### `compress` 压缩入口
-
-共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
-PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
-旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
-
-PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
-输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写，其结果继续旁路 PostTool 压缩。
-
-Claude Code 2.1.121 及以上版本、Qoder CLI、
-OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
-PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有 Shell Tool 执行精确的
-`tokenless retrieve` 命令。Hook 只识别成功执行、参数为
-有效 Hash 或 Marker 的单条恢复命令，并让其结果绕过压缩，避免二次处理。旧 copilot-shell 和
-不能替换结果的宿主保持无损模式。BeforeModel Schema 压缩仍需要独立的授权恢复能力。
-请求/响应契约和可执行示例见
-[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
-
-### Schema 压缩 CLI
-
-`compress-schema` 支持单个工具定义、工具定义 JSON 数组，以及包含顶层
-`tools` 数组的完整请求对象。处理完整请求对象时不传 `--batch`；其中的 OpenAI
-Wrapper、Gemini `functionDeclarations` 工具对象及裸 Function Calling 定义会被压缩，
-非函数工具及 `tools` 之外的字段会原样保留。
-
-```bash
-# 单个工具定义
-tokenless compress-schema -f tool.json
-
-# 工具定义数组
-tokenless compress-schema -f tools.json --batch
-
-# 包含顶层 tools 数组的请求对象
-tokenless compress-schema -f request.json
-```
-
-### TOON 压缩 CLI
-
-`compress-toon` 将 JSON 编码为 TOON 格式（`decompress-toon` 解码回
-JSON）。短于 500 字符的负载默认原样透传（与 Adapter Hook 应用的最小
-长度一致）；传入 `--min-toon-chars 0` 可强制编码：
-
-```bash
-# TOON 编码（短负载，本次调用关闭最小长度门槛）
-echo '{"name":"Alice","age":30}' | tokenless compress-toon --min-toon-chars 0
-# name: Alice
-# age: 30
-
-# TOON 解码回 JSON
-printf 'name: Alice\nage: 30\n' | tokenless decompress-toon
-# {"name":"Alice","age":30}
-```
-
 从源码构建适合开发者。
 
 ```bash
@@ -311,13 +290,398 @@ Token 数量是估算值，并且只有产生正向节省的操作才会记录�
 或 Tool-use Diff 最多读取最近 10,000 条匹配记录。要获得有意义的对比，应先传入 dry-run
 Session，再传入启用 Tokenless 的 Session。
 
-### OpenCode 安装
+## CLI 用法
+
+独立的 `compress-schema` 和 `compress-response` 命令使用这种基于内容感知的
+节省判定，而不是固定的字节或字符下限。[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md)
+中的描述、字符串、数组和深度阈值分别触发单项转换，并不是整个 Payload 的最小大小。
+Agent Adapter 可能另有预检门槛，见
+[Agent 集成指南](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#adapter-处理规则)。
+
+### `compress` 压缩入口
+
+共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
+PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
+旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
+
+PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
+输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写，其结果继续旁路 PostTool 压缩。
+
+Claude Code 2.1.121 及以上版本、Qoder CLI、
+OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
+PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有 Shell Tool 执行精确的
+`tokenless retrieve` 命令。Hook 只识别成功执行、参数为
+有效 Hash 或 Marker 的单条恢复命令，并让其结果绕过压缩，避免二次处理。旧 copilot-shell 和
+不能替换结果的宿主保持无损模式。BeforeModel Schema 压缩仍需要独立的授权恢复能力。
+请求/响应契约和可执行示例见
+[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
+
+### Schema 压缩 CLI
+
+`compress-schema` 支持单个工具定义、工具定义 JSON 数组，以及包含顶层
+`tools` 数组的完整请求对象。处理完整请求对象时不传 `--batch`；其中的 OpenAI
+Wrapper、Gemini `functionDeclarations` 工具对象及裸 Function Calling 定义会被压缩，
+非函数工具及 `tools` 之外的字段会原样保留。
+
+```bash
+# 单个工具定义
+tokenless compress-schema -f tool.json
+
+# 从 stdin 读取
+cat tool.json | tokenless compress-schema
+
+# 工具定义数组
+tokenless compress-schema -f tools.json --batch
+
+# 包含顶层 tools 数组的请求对象
+tokenless compress-schema -f request.json
+```
+
+### `compress-response` 响应压缩 CLI
+
+压缩 API 响应：
+
+```bash
+# 从文件读取
+tokenless compress-response -f response.json
+
+# 从 stdin 读取
+curl -s https://api.example.com/data | tokenless compress-response
+```
+
+长数组会截断为「头部 + 尾部」窗口：前 `--truncate-arrays-at` 项（默认 32）加
+最后 `--array-tail-preserve` 项（默认 8），中间放置截断标记；传入
+`--array-tail-preserve 0` 可只保留头部。默认情况下 `compress-response` 会把被
+丢弃的中段存入 Stash 供后续取回（见[可逆压缩](docs/stash-reversible-compression.md)）。
+传入 `--no-stash` 表示有损截断，或用 `--stash-db <path>` 覆盖 Stash 数据库
+（默认 `~/.tokenless/stash.db`）。
+
+### `retrieve` 取回
+
+取回 `compress-response` 期间存入 Stash 的内容。接受裸 24 位十六进制 Hash，
+或任何包含 `<<tokenless:HASH>>` Marker 的文本：
+
+```bash
+# 裸 Hash
+tokenless retrieve c30ccf5ed1125e0ed871ba8e
+
+# 历史 Marker 仍可接受
+tokenless retrieve '<<tokenless:c30ccf5ed1125e0ed871ba8e>>'
+```
+
+### TOON 压缩 CLI
+
+`compress-toon` 将 JSON 编码为 TOON 格式（`decompress-toon` 解码回
+JSON）。短于 500 字符的负载默认原样透传（与 Adapter Hook 应用的最小
+长度一致）；传入 `--min-toon-chars 0` 可强制编码：
+
+```bash
+# TOON 编码（短负载，本次调用关闭最小长度门槛）
+echo '{"name":"Alice","age":30}' | tokenless compress-toon --min-toon-chars 0
+# name: Alice
+# age: 30
+
+# TOON 解码回 JSON
+echo 'name: Alice\nage: 30' | tokenless decompress-toon
+# {"name":"Alice","age":30}
+```
+
+### 查看 Token 节省明细
+
+`stats summary` 用于查看合计；`show` 用于原样打印完整的压缩前后内容；
+`diff` 用于解释估算 Token 节省，并只突出发生变化的行：
+
+```bash
+tokenless stats summary
+tokenless stats summary --limit 1000
+tokenless stats summary --compare <baseline-session> <active-session>
+tokenless stats show 42
+tokenless stats diff 42
+tokenless stats diff --session <session-id>
+tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
+tokenless stats diff 42 --json
+```
+
+`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝。
+`--compare` 在任一 Session 没有记录时失败，而不是报告 0% 节省。Session
+总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
+active 阶段的输出与输入内容完全一致时才会串成一条链，从而避免重复计算中间
+阶段的 Token。完整选项和度量限制见
+[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
+
+### Trace 关联
+
+导出的 SLS 记录会带上产生它的宿主 span 的 trace 标识，AgentLoop
+这类可观测后端因此可以把 Token 节省量归因到具体 trace。两个可选
+环境变量负责传入该标识：
+
+- `TOKENLESS_TRACEPARENT` —— 面向 Adapter 的覆盖项，优先读取。
+- `TRACEPARENT` —— 标准 W3C 变量，覆盖项缺失、为空或无法解析时使用。
+
+注入是启动方的责任：OpenTelemetry 只在进程内 carrier 中保存 active
+span，不会导出到子进程，因此需要关联能力的宿主或 Adapter 必须
+在启动 Tokenless 前写入其中一个。没有可用上下文时记录结构不变，
+且该标识只写入 SLS JSONL，不会写入本地 `stats.db`。详见
+[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)
+与
+[配置与数据隐私](../../docs/user-guide/zh/token-saving/tokenless/configuration-and-privacy.md)。
+
+### 数据库位置
+
+Tokenless 默认将统计数据和可逆压缩数据分别存储在
+`~/.tokenless/stats.db` 与 `~/.tokenless/stash.db`。可为两个数据库统一
+指定目录：
+
+```bash
+export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+```
+
+该目录可以是当前用户有权访问的任意绝对路径，包括 `/var/lib` 下由服务管理
+的目录；文件系统根目录、相对路径和父目录遍历会被拒绝。若只需自定义一个
+数据库，现有的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 和 `--stash-db`
+覆盖项优先级更高，但必须位于真实用户 home 或选定的数据目录下。配置文件
+仍位于 `~/.tokenless/config.json`。
+
+## copilot-shell 钩子
+
+Adapter 通过 cosh extension manifest 提供钩子，copilot-shell 会自动发现它们：
+
+| Hook | 事件 | 文件 | 说明 |
+|------|-------|------|-------------|
+| Tool Ready（硬关闭） | PreToolUse（全部工具） | `tool_ready_hook.sh` | 静默透传；不检查、不修复、不附加上下文、不阻断 |
+| 命令重写 | PreToolUse（Shell） | `rewrite_hook.py` | 通过 RTK 改写命令 |
+| 响应压缩 + 归因 + TOON | PostToolUse | `compress_response_hook.py` | 压缩 + 环境错误归因 + TOON |
+| Schema 压缩 | BeforeModel | `compress_schema_hook.py` | 在宿主提供 Marker 授权恢复之前，透传有损转换 |
+
+### 安装
+
+```bash
+make cosh-extension-install  # 或：make openclaw-install, make hermes-install
+```
+
+Hook 通过 cosh extension manifest（`cosh-extension.json`）注册，由 copilot-shell 自动发现——无需手工配置 `settings.json`。
+
+## Tool Ready
+
+Tool Ready 的设计目标是避免因环境依赖缺失而反复重试命令、浪费 LLM Token。
+
+**旧版行为**：每次工具调用前，`tool_ready_hook.sh` Hook 会检查该工具的依赖清单（来自 `tool-ready-spec.json`）。依赖缺失时可能报告 `NOT_READY` 并提示跳过重试。
+
+Tool Ready 当前在所有 Adapter 中硬关闭：已注册的 Hook 会在读取依赖规范、检查环境、尝试修复或输出阻断决策之前直接返回。任何环境变量都无法恢复旧行为；重新启用必须修改源码并重新发布。
+
+工具执行后的失败归因、响应压缩、命令重写、TOON 编码、Stash 和统计是独立能力，仍保持原有行为。
+
+### env-check CLI
+
+```bash
+# 报告单个工具对应的硬关闭状态
+tokenless env-check --tool Shell
+
+# 报告全部工具模式的硬关闭状态
+tokenless env-check --all
+
+# 报告清单模式的硬关闭状态
+tokenless env-check --checklist
+
+# 机器可读的硬关闭状态；不会输出 tools/summary 清单
+tokenless env-check --checklist --json
+
+# 为兼容性保留；不会检查或修复环境
+tokenless env-check --tool Shell --fix
+```
+
+这些命令当前只报告 Tool Ready 已硬关闭，不会检查或修改环境。
+所有 JSON 模式都只返回相同的三个字段：
+
+```json
+{"tool":"checklist","status":"UNKNOWN","enabled":false}
+```
+
+`tool` 表示指定的工具或 `all`/`checklist` 范围。硬旁路生效期间绝不会输出
+休眠旧版实现的 `tools` 与 `summary` 清单字段。
+
+### 配置
+
+休眠的旧版逐工具依赖保留在 `tool-ready-spec.json` 中（随 Adapter Bundle 发布于
+`common/tool-ready-spec.json`）。硬旁路不会读取该文件：
+
+```json
+{
+  "Shell": {
+    "required": [
+      { "binary": "jq", "package": "jq", "manager": "apt" }
+    ],
+    "recommended": [
+      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+字符串格式 `"jq"` 同样受支持（自动转换为对象）。
+
+## OpenClaw 插件
+
+插件把两个 OpenClaw 事件转换为 Protocol v2 生命周期操作：
+
+| Hook | 事件 | 动作 | 状态 |
+|---|---|---|---|
+| Tool Ready | `before_tool_call` | 注册的静默透传；不检查、不修复、不附加上下文、不阻断 | ⛔ 硬关闭 |
+| PreTool | `before_tool_call` | 把 `exec` 参数发给 Core，并应用返回的 RTK 改写 | ✅ 启用 |
+| PostTool | `tool_result_persist` | 改写受支持的 OpenClaw 持久化 transcript 工具结果 | ✅ 启用 |
+| BeforeModel / Retrieve | — | OpenClaw 既不提供可靠的 Schema 转换接缝，也不提供 Marker 授权恢复 | — |
+
+Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
+把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK
+输出。本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw
+只应用无损候选。两个操作都走 `tokenless compress` 这一个入口；Tokenless 缺失或返回
+无效响应时 fail open。
+
+`tool_result_persist` 是 OpenClaw 的同步 transcript 接缝：可在保留 Tool Result
+外层结构的同时，替换持久化的字符串、结构化值或单个文本块；Media 与多 Content Block 的
+结果原样透传。它不会替换同一轮中模型已经消费的工具结果，也不覆盖非 OpenClaw 的
+transcript 实现。
+
+### 配置
+
+该 Adapter 要求 OpenClaw Plugin API `2026.4.22` 或更高版本；支持兼容性检查的宿主会在
+安装阶段根据 Package Metadata 强制执行该下限。`openclaw.plugin.json` 中的选项：
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `rtk_enabled` | `true` | 启用 RTK 命令重写 |
+| `post_tool_enabled` | `true` | 启用 Protocol v2 对持久化工具结果的 PostTool 处理 |
+| `tool_ready_enabled` | `true` | 注册当前硬关闭的 Tool Ready Hook |
+| `verbose` | `false` | 记录生命周期改写和已应用的 PostTool 结果 |
+
+旧的 Response、TOON 与工具分类开关已经删除，这些决策改由 Core 统一持有。
+
+## Hermes Agent 插件
+
+插件在三个 Hermes 事件上注册 Hook，生命周期策略由 Core 持有：
+
+| 策略 | 事件 | 动作 | 状态 |
+|---|---|---|---|
+| Tool Ready | `pre_tool_call` | 注册的静默透传；不检查、不修复、不附加上下文、不阻断 | ⛔ 硬关闭 |
+| 命令重写 | `pre_tool_call` | 把命令发给 Core，随后阻断原命令并建议返回的 RTK 形式 | ✅ 启用 |
+| PostTool 优化 | `transform_tool_result` | 把最终发给模型的结果交给 Core，并应用被接受的结果 | ✅ 启用 |
+| 会话跟踪 | `on_session_start` | 传递 agent/session ID 用于统计记录 | ✅ 启用 |
+| Schema 压缩 | — | Hermes 不提供 Schema 转换接缝 | — |
+| Marker 恢复 | `transform_tool_result` | 识别成功的单条 `tokenless retrieve` Shell 结果并交给 Core 旁路 | ✅ 启用 |
+
+**Hermes 中命令重写的工作方式**：为兼容只支持阻断的 Hermes 版本，插件先向 Core
+请求改写，阻断原 Shell 命令，并提示 Agent 用返回的命令重试。重试会增加一次工具调用
+往返。最后的 Hook 会从 Hermes 实际执行的命令中识别 Core 标记的 RTK 包装，因此 RTK
+输出不会经过第二次压缩，也无需关联两个不同的 tool-call ID。
+
+压缩省略了可恢复数据时，Marker 会提示 Hermes 通过已有 Shell Tool 执行
+`tokenless retrieve`。Adapter 检查实际执行的命令；成功执行的单条恢复命令原样返回，
+不会再次压缩。Tokenless 操作不可用或失败时，Hook 保持宿主值不变。
+
+### 安装
+
+```bash
+make hermes-install
+```
+
+启用插件：
+
+```bash
+hermes plugins enable tokenless
+```
+
+或添加到 `~/.hermes/config.yaml`：
+
+```yaml
+plugins:
+  enabled:
+    - tokenless
+```
+
+## Qoder CLI 插件
+
+插件在三个 Qoder 事件上注册 Hook，覆盖三种策略：
+
+| 策略 | 事件 | 动作 | 状态 |
+|---|---|---|---|
+| Tool Ready | `PreToolUse` | 注册的静默透传；不检查、不修复、不附加上下文、不阻断 | ⛔ 硬关闭 |
+| 命令重写 | `PreToolUse` | 通过 RTK 改写 Shell 命令以节省 Token | ✅ 启用 |
+| 响应压缩 | `PostToolUse` | 压缩工具响应并编码为 TOON 格式 | ✅ 启用 |
+
+每个 Hook 都会优雅降级——对应二进制未安装时，该 Hook 被静默跳过。
+
+压缩结果包含 Retrieve Marker 时，Qoder 可以通过已有 Shell Tool 执行其中的
+命令；成功的结果会绕过响应压缩，恢复的完整内容原样到达模型。
+
+### 安装
+
+```bash
+make qoder-install
+```
+
+## Claude Code 插件
+
+插件在两个 Claude Code 事件上注册 Hook，覆盖四种策略：
+
+| 策略 | 事件 | 动作 | 状态 |
+|---|---|---|---|
+| Tool Ready | `PreToolUse` | 注册的静默透传；不检查、不修复、不附加上下文、不阻断 | ⛔ 硬关闭 |
+| 命令重写 | `PreToolUse`（Bash） | 通过 RTK 改写 Shell 命令以节省 Token | ✅ 启用 |
+| 响应压缩 | `PostToolUse` | 压缩工具响应并编码为 TOON 格式 | ✅ 启用 |
+| TOON 编码 | `PostToolUse` | 响应压缩之后的 Pipeline 步骤——把 JSON 编码为 TOON 格式 | ✅ 启用 |
+
+Claude Code v2 要求插件来自已注册的 marketplace。我们把 Adapter 的 `claude-code/`
+目录暴露为单插件 marketplace（`anolisa-tokenless`），再从中安装
+`tokenless@anolisa-tokenless`。marketplace 名称按组件隔离，多个 ANOLISA 组件可以
+各自注册而不冲突。
+
+Claude Code 2.1.121 及以上版本中，压缩结果可以引导模型通过 Bash 执行
+`tokenless retrieve`；成功的命令结果绕过压缩，完整恢复原始内容。
+
+### 安装
+
+```bash
+make claude-code-install
+```
+
+## Codex 插件
+
+插件在四个 Codex 事件上注册 Hook，覆盖四种策略：
+
+| 策略 | 事件 | 动作 | 状态 |
+|---|---|---|---|
+| 会话检查 | `SessionStart` | 检查 tokenless CLI 已安装且可用（非阻断） | ✅ 启用 |
+| Tool Ready | `PreToolUse` | 注册的静默透传；不检查、不修复、不附加上下文、不阻断 | ⛔ 硬关闭 |
+| 命令重写 | `PreToolUse` | 通过 RTK 改写 Shell 命令以节省 Token | ✅ 启用 |
+| 环境诊断 | `PostToolUse` | 仅为已分类的环境失败追加可执行的上下文 | ✅ 启用 |
+
+> **Codex 协议限制**：`PostToolUse` 无法替换或抑制原始工具输出。Tokenless 因此
+> 不会追加压缩内容——那会让模型可见的 Payload 更大。受支持 Shell 命令的首轮
+> 节省来自执行前 RTK 对命令的改写。
+
+### 安装
+
+```bash
+make codex-install
+```
+
+## OpenCode 插件
 
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
 RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
-压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
-响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
-`tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
+本地插件使用 OpenCode 的可变工具 Hook，压缩后的响应会替换原始模型可见输出，
+避免重复占用上下文：
+
+| 策略 | 事件 | 动作 | 状态 |
+|---|---|---|---|
+| Tool Ready | `tool.execute.before` | 注册的静默透传；不检查、不修复、不附加上下文、不阻断 | ⛔ 硬关闭 |
+| 命令重写 | `tool.execute.before`（bash） | 通过 RTK 改写 Shell 命令 | ✅ 启用 |
+| 响应 + TOON 压缩 | `tool.execute.after` | 用更小的表示替换结构化工具输出 | ✅ 启用 |
+| Schema 压缩 | `tool.definition` | 压缩工具描述和 JSON Schema | ✅ 启用 |
 
 通过 ANOLISA 启用已安装的插件，然后重启 OpenCode：
 
@@ -341,12 +705,21 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 `make opencode-install` 或 Bundle 中的 `scripts/install.sh`。
 完整生命周期参阅[框架集成](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#opencode)。
 
-### QwenPaw 安装
+响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
+`tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
+
+## QwenPaw 插件
 
 QwenPaw 适配器是一个原生 QwenPaw 插件：`plugin.py` 通过 `api.register_middleware` 注册
 AgentScope 中间件，通过 `api.register_tool` 注册 `tokenless_retrieve` 工具，并直接调用进程内的
-`anolisa_tokenless.TokenlessSdk`。`on_model_call` 压缩工具 Schema，`on_acting` 在 QwenPaw 审批之后
-用 RTK 改写 `execute_shell_command` 的输入，并替换 QwenPaw 内置工具结果中的文本块（文件读取类工具和内置表之外的工具原样透传）。
+`anolisa_tokenless.TokenlessSdk`：
+
+| 能力 | 中间件 Hook | 行为 | 状态 |
+|---|---|---|---|
+| Schema 压缩 | `on_model_call` | 压缩工具 Schema 并追加 retrieve 工具 | ✅ 启用 |
+| 命令重写 | `on_acting` | 在 QwenPaw 审批之后用 RTK 改写 `execute_shell_command` 输入 | ✅ 启用 |
+| 响应 + TOON 压缩 | `on_acting` | 替换 QwenPaw 内置工具结果中的文本块；文件读取类工具和内置表之外的工具原样透传 | ✅ 启用 |
+| 恢复 | `tokenless_retrieve` 工具 | 从可见恢复指令中的 Hash 还原被省略内容 | ✅ 启用 |
 
 ```bash
 make qwenpaw-install
@@ -362,7 +735,7 @@ make qwenpaw-install
 `ANOLISA_TOKENLESS_PROBE_TIMEOUT` 用于设置单次探测的超时秒数（默认 15）。完整参考见
 [故障排查](../../docs/user-guide/zh/token-saving/tokenless/troubleshooting.md#qwenpaw-安装提示-sdk-wheel-不可用)。
 
-### DeepSeek Harness 插件
+## DeepSeek Harness 插件
 
 DSH 原生 Bundle 通过 `tools/post-execute` 把可替换的单文本工具结果交给 Tokenless
 PostTool Core。内容检测、JSON 清理、TOON 选择、最终接受和环境错误诊断均由 Core
@@ -391,7 +764,7 @@ Tokenless 的全部 profile。每个名称必须与 `dsh --profile <profile>` �
 一致。配置写在对应 profile 的 `cordis.patch.yml` 中。全部配置项和默认值见
 [DeepSeek Harness 集成参考](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#deepseek-harness-原生处理路径)。
 
-### AgentScope 框架集成
+## AgentScope 框架集成
 
 AgentScope 1.0.11 至 1.0.x 及 AgentScope 2.0.x 应用需要显式安装两个相同版本的 Python
 Wheel。框架集成直接调用 `anolisa-tokenless` Runtime，不会启动 CLI 子进程。两个 Python
@@ -491,6 +864,52 @@ Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值�
 宿主对象和流式 chunk 保持不变，只转换复制后的调用参数和最终模型可见文本。Tool Ready
 仍保持硬关闭。
 
+## 构建
+
+安装产物检查与可选的真实 Agent 任务见
+[发布前回归测试](tests/release_regression/README_zh.md)，它会分别报告工具输出节省和恢复开销。
+
+| 目标 | 说明 |
+|---|---|
+| `make build` | 构建 `tokenless` + `rtk`（release 模式） |
+| `make build-tokenless` | 构建 `tokenless` + `rtk`（经由 justfile） |
+| `make python-wheel` | 构建原生 `anolisa-tokenless` wheel |
+| `make agentscope-wheel` | 构建纯 Python AgentScope 集成 wheel |
+| `make test-python-runtime` | 在隔离环境中安装并测试 wheel |
+| `make test-agentscope-integration` | 以受支持的 AgentScope 版本测试两个 wheel |
+| `make install` | 构建并把二进制安装到 `BIN_DIR`（默认：~/.local/bin） |
+| `make test` | 运行全部测试（Rust + hooks） |
+| `make test-hooks` | 针对已安装的 `tokenless` 二进制运行 Hook 集成测试，其版本必须与当前 checkout 一致（`TOKENLESS_ALLOW_VERSION_SKEW=1` 可覆盖） |
+| `make lint` | 运行 clippy 检查 |
+| `make fmt` | 格式化代码 |
+| `make clean` | 清理构建产物 |
+| `make package-raw` | 把预构建的目标二进制打包为 ANOLISA raw 归档 |
+| `make adapter-install` | 安装全部可用框架 Adapter |
+| `make adapter-uninstall` | 移除全部 Adapter |
+| `make cosh-extension-install` | 安装 Copilot Shell Extension |
+| `make cosh-extension-uninstall` | 移除 Copilot Shell Extension |
+| `make openclaw-install` | 安装 OpenClaw 插件 |
+| `make openclaw-uninstall` | 移除 OpenClaw 插件 |
+| `make hermes-install` | 安装 Hermes Agent 插件 |
+| `make hermes-uninstall` | 移除 Hermes Agent 插件 |
+| `make qoder-install` | 安装 Qoder CLI 插件 |
+| `make qoder-uninstall` | 移除 Qoder CLI 插件 |
+| `make claude-code-install` | 安装 Claude Code 插件 |
+| `make claude-code-uninstall` | 移除 Claude Code 插件 |
+| `make codex-install` | 安装 Codex 插件 |
+| `make codex-uninstall` | 移除 Codex 插件 |
+| `make opencode-install` | 安装 OpenCode 本地插件 |
+| `make opencode-uninstall` | 移除 OpenCode 本地插件 |
+| `make qwenpaw-install` | 通过 qwenpaw CLI 安装 QwenPaw 插件 |
+| `make qwenpaw-uninstall` | 移除 QwenPaw 插件 |
+| `make setup` | 完整安装：构建 + 安装 + 全部 Adapter |
+
+覆盖安装路径：
+
+```bash
+make install BIN_DIR=/usr/local/bin
+```
+
 ## Raw 打包
 
 Raw 打包接收同一目录中已经构建好的 `tokenless` 和 `rtk`，并按照
@@ -521,112 +940,28 @@ node npm/scripts/package-npm.js --all
 
 固定目录结构和单目标接口见 [npm/README.md](npm/README.md#packaging-for-npm)。
 
-## 查看 Token 节省明细
+## 项目结构
 
-`stats summary` 用于查看合计；`show` 用于原样打印完整的压缩前后内容；
-`diff` 用于解释估算 Token 节省，并只突出发生变化的行：
-
-```bash
-tokenless stats summary
-tokenless stats summary --limit 1000
-tokenless stats summary --compare <baseline-session> <active-session>
-tokenless stats show 42
-tokenless stats diff 42
-tokenless stats diff --session <session-id>
-tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
-tokenless stats diff 42 --json
-```
-
-`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝。
-`--compare` 在任一 Session 没有记录时失败，而不是报告 0% 节省。Session
-总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
-active 阶段的输出与输入内容完全一致时才会串成一条链，从而避免重复计算中间
-阶段的 Token。完整选项和度量限制见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
-
-## Trace 关联
-
-导出的 SLS 记录会带上产生它的宿主 span 的 trace 标识，AgentLoop
-这类可观测后端因此可以把 Token 节省量归因到具体 trace。两个可选
-环境变量负责传入该标识：
-
-- `TOKENLESS_TRACEPARENT` —— 面向 Adapter 的覆盖项，优先读取。
-- `TRACEPARENT` —— 标准 W3C 变量，覆盖项缺失、为空或无法解析时使用。
-
-注入是启动方的责任：OpenTelemetry 只在进程内 carrier 中保存 active
-span，不会导出到子进程，因此需要关联能力的宿主或 Adapter 必须
-在启动 Tokenless 前写入其中一个。没有可用上下文时记录结构不变，
-且该标识只写入 SLS JSONL，不会写入本地 `stats.db`。详见
-[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)
-与
-[配置与数据隐私](../../docs/user-guide/zh/token-saving/tokenless/configuration-and-privacy.md)。
-
-## 数据库位置
-
-Tokenless 默认将统计数据和可逆压缩数据分别存储在
-`~/.tokenless/stats.db` 与 `~/.tokenless/stash.db`。可为两个数据库统一
-指定目录：
-
-```bash
-export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
-```
-
-该目录可以是当前用户有权访问的任意绝对路径，包括 `/var/lib` 下由服务管理
-的目录；文件系统根目录、相对路径和父目录遍历会被拒绝。若只需自定义一个
-数据库，现有的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 和 `--stash-db`
-覆盖项优先级更高，但必须位于真实用户 home 或选定的数据目录下。配置文件
-仍位于 `~/.tokenless/config.json`。
-
-## Tool Ready
-
-旧版 Tool Ready 会在工具调用前预检 `tool-ready-spec.json` 中声明的环境依赖，
-缺失时报告 `NOT_READY` 并提示跳过重试。当前已无条件硬关闭，Hook 会在读取规范、
-检查、修复或阻断之前返回；工具执行后的失败归因保持独立。
-
-```bash
-# 报告单个工具对应的硬关闭状态
-tokenless env-check --tool Shell
-
-# 报告全部工具模式的硬关闭状态
-tokenless env-check --all
-
-# 报告清单模式的硬关闭状态
-tokenless env-check --checklist
-
-# 机器可读的硬关闭状态；不会输出 tools/summary 清单
-tokenless env-check --checklist --json
-
-# 为兼容性保留；不会检查或修复环境
-tokenless env-check --tool Shell --fix
-```
-
-这些命令当前只报告 Tool Ready 已硬关闭，不会检查或修改环境。
-所有 JSON 模式都只返回相同的三个字段：
-
-```json
-{"tool":"checklist","status":"UNKNOWN","enabled":false}
-```
-
-`tool` 表示指定的工具或 `all`/`checklist` 范围。硬旁路生效期间绝不会输出
-休眠旧版实现的 `tools` 与 `summary` 清单字段。
-
-## 架构
-
-安装产物检查与可选的真实 Agent 任务见
-[发布前回归测试](tests/release_regression/README_zh.md)，分别报告工具输出节省和恢复开销。
-
-- `crates/tokenless-schema/` — BeforeModel 工具 Schema 压缩：`SchemaCompressor`
-- `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
-- `crates/tokenless-runtime/` — 生命周期 API 与 Runtime 内部的 `PostToolPipeline`
-- `crates/tokenless-protocol/` — 版本化 Adapter 契约与共享 `heuristic-v1` Token Estimator
-- `crates/tokenless-compressors/` — 已接入 PostTool 的 `JsonCompressor`、`TabularCompressor` 与 `BuildLogCompressor`
-- `crates/tokenless-cli/` — CLI 二进制
-- `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
-- `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据
-- `adapters/tokenless/` — 面向具体 Agent/CLI 的 Plugin、Hook 与 Extension 适配器包
-- `adapters/tokenless/dsh/`。DeepSeek Harness 原生 Bundle
-- `third_party/rtk/` — RTK 命令重写引擎（vendored）
-- `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
+| 路径 | 说明 |
+|---|---|
+| `crates/tokenless-cli/` | CLI 二进制——`tokenless` 命令（compress、stats、env-check） |
+| `crates/tokenless-schema/` | BeforeModel 工具 Schema 压缩——`SchemaCompressor` |
+| `crates/tokenless-compressors/` | 内容领域引擎——`JsonCompressor`、`TabularCompressor` 与 `BuildLogCompressor` 已接入 PostTool |
+| `crates/tokenless-runtime/` | 生命周期 API 与 Runtime 内部的 `PostToolPipeline`，CLI 和语言绑定共用 |
+| `crates/tokenless-protocol/` | 版本化 Adapter 契约与共享 `heuristic-v1` Token Estimator |
+| `python/tokenless/` | 面向 CPython 3.11+ 的 PyO3 包 `anolisa_tokenless` |
+| `python/agentscope/` | 独立的 AgentScope 框架集成与 Wheel 元数据 |
+| `adapters/tokenless/` | FHS Adapter Bundle——manifest、env-check spec/fix、hooks、OpenClaw 插件 |
+| `adapters/tokenless/hermes/` | Hermes Agent Adapter——插件 + detect/install/uninstall 脚本 |
+| `adapters/tokenless/qoder/` | Qoder CLI Adapter——插件 + detect/install/uninstall 脚本 |
+| `adapters/tokenless/claude-code/` | Claude Code Adapter——marketplace + 插件 + hooks 分发器 |
+| `adapters/tokenless/codex/` | Codex Adapter——插件 + Python Hook 脚本 |
+| `adapters/tokenless/opencode/` | OpenCode Adapter——本地 JavaScript 插件 + 生命周期脚本 |
+| `adapters/tokenless/qwenpaw/` | QwenPaw Adapter——插件 manifest、AgentScope 中间件、wheel requirements + 生命周期脚本 |
+| `third_party/rtk/` | RTK vendored 源码——命令重写引擎（justfile clone+patch） |
+| `third_party/patches/` | vendored third_party 源码的 Patch |
+| `packaging/raw/` | 组件自维护的 ANOLISA Raw 打包器与目标校验 |
+| `Makefile` | 整个 workspace 的统一构建系统 |
 
 ## 前置依赖
 
