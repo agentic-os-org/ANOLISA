@@ -68,34 +68,12 @@ impl FactWriter {
     /// Write a single fact: creates `<category>/<ulid>.md` and appends to `facts.jsonl`.
     /// Uses safe_fs (openat2 + RESOLVE_BENEATH) when root_fd is available,
     /// falling back to std::fs for tests with temp dirs.
-    /// If conflict detection is enabled, marks similar existing facts as superseded.
-    /// Facts are organized into category subdirectories under facts/.
+    /// If conflict detection is enabled, marks similar existing facts as
+    /// superseded — but only after the replacement fact is durably written,
+    /// so a failed write can never leave the old fact invisible with no
+    /// replacement. Facts are organized into category subdirectories under facts/.
     pub fn write(&self, fact: &ConsolidatedFact) -> Result<()> {
         std::fs::create_dir_all(&self.facts_dir)?;
-
-        // Conflict detection: search for similar facts before writing.
-        if let Some(ref store) = self.index {
-            let search_text = format!(
-                "{} {}",
-                fact.title,
-                fact.content.chars().take(100).collect::<String>()
-            );
-            let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-            match s.detect_conflicts(&search_text, self.conflict_threshold) {
-                Ok(conflicts) => {
-                    for (old_path, score) in &conflicts {
-                        tracing::info!(
-                            "conflict detected: new fact '{}' conflicts with '{}' (score={:.2})",
-                            fact.title,
-                            old_path,
-                            score
-                        );
-                        let _ = s.supersede(old_path, &fact.id);
-                    }
-                }
-                Err(e) => tracing::warn!("conflict detection failed: {e}"),
-            }
-        }
 
         // Write markdown file under category subdirectory.
         let category_dir = self.facts_dir.join(fact.category.to_string());
@@ -138,6 +116,33 @@ impl FactWriter {
             f.sync_all()?;
         }
 
+        // Conflict detection runs only after the replacement is durable
+        // (markdown on disk + JSONL appended). Superseding first would let
+        // any later write failure flip the old fact to is_superseded=1
+        // while the replacement never lands, dropping it from recall.
+        if let Some(ref store) = self.index {
+            let search_text = format!(
+                "{} {}",
+                fact.title,
+                fact.content.chars().take(100).collect::<String>()
+            );
+            let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
+            match s.detect_conflicts(&search_text, self.conflict_threshold) {
+                Ok(conflicts) => {
+                    for (old_path, score) in &conflicts {
+                        tracing::info!(
+                            "conflict detected: new fact '{}' conflicts with '{}' (score={:.2})",
+                            fact.title,
+                            old_path,
+                            score
+                        );
+                        let _ = s.supersede(old_path, &fact.id);
+                    }
+                }
+                Err(e) => tracing::warn!("conflict detection failed: {e}"),
+            }
+        }
+
         tracing::debug!("wrote fact: {}", md_path.display());
         Ok(())
     }
@@ -171,6 +176,26 @@ impl FactWriter {
 mod tests {
     use super::*;
     use crate::consolidation::fact::{ConsolidatedFact, FactCategory};
+    use crate::index::store::BM25Store;
+
+    /// Index a conflicting old fact into a fresh in-memory store and
+    /// return the store, shared in the same Arc<Mutex<..>> shape the
+    /// service wires into FactWriter.
+    fn store_with_conflict() -> Arc<Mutex<BM25Store>> {
+        let store = Arc::new(Mutex::new(BM25Store::open_in_memory().unwrap()));
+        {
+            let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
+            s.upsert(
+                "facts/lesson/00000000000000000000000000.md",
+                1,
+                64,
+                "rust ownership borrow checker conflict lesson body",
+                None,
+            )
+            .unwrap();
+        }
+        store
+    }
 
     #[test]
     fn write_single_fact() {
@@ -238,5 +263,78 @@ mod tests {
         let content = std::fs::read_to_string(&jsonl_path).unwrap();
         let lines: Vec<_> = content.lines().collect();
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn write_failure_keeps_conflicting_fact_searchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_conflict();
+
+        // Block the category dir: a regular file where `facts/lesson/`
+        // must be created makes the markdown write fail.
+        std::fs::create_dir_all(tmp.path().join("facts")).unwrap();
+        std::fs::write(tmp.path().join("facts").join("lesson"), "not a dir").unwrap();
+
+        // Threshold f64::MIN: every detected conflict counts, so the
+        // ordering under test is deterministic.
+        let writer = FactWriter::new(tmp.path()).with_index(store.clone(), f64::MIN);
+        let fact = ConsolidatedFact::new(
+            "sid",
+            FactCategory::Lesson,
+            "rust ownership borrow checker conflict lesson".into(),
+            "rust ownership borrow checker conflict lesson body".into(),
+            "mem_read".into(),
+            vec![],
+            0.6,
+        );
+
+        let res = writer.write(&fact);
+        assert!(res.is_err(), "category dir is blocked, write must fail");
+
+        // The old fact must still be searchable: supersede may only commit
+        // once the replacement is durable.
+        let hits = {
+            let s = store.lock().unwrap_or_else(|e| e.into_inner());
+            s.search("borrow checker", 10, true).unwrap()
+        };
+        assert!(
+            hits.iter().any(|h| h.path.contains("lesson")),
+            "old fact lost from recall after a failed write: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn successful_write_supersedes_conflicting_fact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_conflict();
+        let writer = FactWriter::new(tmp.path()).with_index(store.clone(), f64::MIN);
+        let fact = ConsolidatedFact::new(
+            "sid",
+            FactCategory::Lesson,
+            "rust ownership borrow checker conflict lesson".into(),
+            "rust ownership borrow checker conflict lesson body".into(),
+            "mem_read".into(),
+            vec![],
+            0.6,
+        );
+
+        writer.write(&fact).unwrap();
+
+        // Replacement is durable...
+        let md_path = tmp
+            .path()
+            .join("facts")
+            .join("lesson")
+            .join(format!("{}.md", fact.id));
+        assert!(md_path.exists());
+        // ...so the old conflicting fact is now superseded and hidden.
+        let hits = {
+            let s = store.lock().unwrap_or_else(|e| e.into_inner());
+            s.search("borrow checker", 10, true).unwrap()
+        };
+        assert!(
+            hits.iter().all(|h| !h.path.contains("lesson")),
+            "supersede must apply on success: {hits:?}"
+        );
     }
 }
