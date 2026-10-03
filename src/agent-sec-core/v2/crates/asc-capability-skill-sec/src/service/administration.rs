@@ -197,6 +197,10 @@ impl SkillSecService {
                 }
             }
             check_deadline(deadline)?;
+            // An earlier interrupted rotation may have stranded its temporary
+            // key here; sweep before generating the next so repeated crashes
+            // cannot accumulate orphaned private keys in the state directory.
+            store.reclaim_temporaries(deadline)?;
             store.replace()?;
         }
         let fingerprint = store.load()?.fingerprint();
@@ -313,6 +317,40 @@ mod tests {
         assert_eq!(
             service.key_status(deadline()).unwrap()["fingerprint"],
             replaced
+        );
+        assert_eq!(
+            service.key_status(deadline()).unwrap()["rotationPending"],
+            false
+        );
+    }
+
+    #[test]
+    fn rotate_keys_reclaims_stranded_rotation_temporaries() {
+        let (_temporary, service, root) = fixture();
+        service
+            .certify(&root, "fixture", None, &json!([]), deadline())
+            .unwrap();
+        let before = service.key_status(deadline()).unwrap()["fingerprint"].clone();
+        // Simulate a crash between replace()'s temp write and its rename: the
+        // unlinkat cleanup never ran, so the private key stays stranded.
+        let stranded = service
+            .config
+            .state_dir
+            .join(format!(".key-{}", "a".repeat(64)));
+        fs::write(&stranded, b"orphaned-rotation-key").unwrap();
+        let file = fs::File::options().write(true).open(&stranded).unwrap();
+        file.set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200)),
+        )
+        .unwrap();
+        service
+            .rotate_keys(std::slice::from_ref(&root), 0, deadline())
+            .unwrap();
+        assert!(!stranded.exists());
+        assert_ne!(
+            service.key_status(deadline()).unwrap()["fingerprint"],
+            before
         );
         assert_eq!(
             service.key_status(deadline()).unwrap()["rotationPending"],

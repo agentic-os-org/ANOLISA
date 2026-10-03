@@ -319,3 +319,43 @@ fn a_symlinked_io_root_is_not_followed_implicitly() {
     assert!(hash_tree(&link.join("child"), false).is_err());
     assert!(KeyStore::open(link.join("child")).is_err());
 }
+
+#[test]
+fn service_construction_reclaims_crashed_key_temporaries() {
+    use asc_capability_skill_sec::SkillSecService;
+
+    let base = tempfile::tempdir().unwrap();
+    let state = base.path().canonicalize().unwrap().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    // A private key stranded by a crash between the temp write and the rename.
+    let stranded = state.join(format!(".key-{}", "a".repeat(64)));
+    fs::write(&stranded, b"orphaned-private-key").unwrap();
+    fs::set_permissions(&stranded, fs::Permissions::from_mode(0o600)).unwrap();
+    let file = fs::File::options().write(true).open(&stranded).unwrap();
+    file.set_times(
+        fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)),
+    )
+    .unwrap();
+
+    let service = SkillSecService::new(
+        asc_capability_skill_sec::SkillSecConfig {
+            state_dir: state.clone(),
+            managed_skill_dirs: vec![
+                asc_capability_skill_sec::ManagedSkillDir::new(
+                    base.path().canonicalize().unwrap().join("*"),
+                )
+                .unwrap(),
+            ],
+        },
+        asc_capability_skill_sec::scanner::ScannerRegistry::default(),
+    )
+    .unwrap();
+
+    // The startup sweep removed the stranded key without creating one.
+    assert!(!stranded.exists());
+    assert!(!state.join("signing-key.pk8").exists());
+    drop(service);
+    assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+}
