@@ -69,15 +69,17 @@ export function parseWorkspaceCleanupJson(stdout: string): WorkspaceCleanupParse
   if (keep.mode === "count") {
     // `typeof === "number"` alone admits NaN, Infinity, and floats. Match
     // hermes's int() and the daemon's u32 contract: require a finite,
-    // non-negative integer.
+    // non-negative integer within 0..=0xffffffff (numbers beyond u32 cannot
+    // have come from the daemon's `keep: Option<u32>` wire field).
     if (
       typeof keep.count !== "number" ||
       !Number.isInteger(keep.count) ||
-      keep.count < 0
+      keep.count < 0 ||
+      keep.count > 0xffffffff
     ) {
       return {
         kind: "parse-error",
-        reason: "`count` field must be a non-negative integer",
+        reason: "`count` field must be an integer in 0..=4294967295 (u32)",
       };
     }
     return { kind: "count", num: keep.count };
