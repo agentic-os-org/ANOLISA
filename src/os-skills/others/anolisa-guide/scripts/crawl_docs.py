@@ -113,11 +113,17 @@ def post_process_markdown(content):
     
     # 2. 清理标题中分散的加粗：#### **什么** **是** → #### 什么是
     content = re.sub(r'^(#{1,6}) (\*{2}[^\*]+\*{2}\s*)+', r'\1 ', content, flags=re.MULTILINE)
-    # 更精确的处理
+    # 更精确的处理（跳过代码块内的行，避免改写代码示例）
     lines = content.split('\n')
     processed_lines = []
+    in_code_block = False
     for line in lines:
-        if re.match(r'^#{1,6} ', line):
+        if re.match(r'^\s*(```|~~~)', line):
+            in_code_block = not in_code_block
+            processed_lines.append(line)
+        elif in_code_block:
+            processed_lines.append(line)
+        elif re.match(r'^#{1,6} ', line):
             # 提取标题级别
             level = re.match(r'^#{1,6}', line).group()
             # 提取标题内容，去掉所有 ** 标记
