@@ -162,6 +162,15 @@ impl ScenarioConfig {
             .trim_start_matches('>')
             .trim();
 
+        // A requirement without at least one numeric release component (or
+        // with a component beyond u32) is a manifest error: the comparator
+        // would silently treat it as "always satisfied".
+        if parse_kernel_release(min_version).is_none() {
+            return Err(format!(
+                "invalid requires_kernel requirement {requirement:?}: expected >=X.Y or >=X.Y.Z"
+            ));
+        }
+
         if compare_kernel_versions(running, min_version) {
             Ok(())
         } else {
@@ -172,18 +181,28 @@ impl ScenarioConfig {
     }
 }
 
+/// Parse the first three numeric release components of a kernel version.
+///
+/// Returns `None` when the string carries no numeric component at all or a
+/// component overflows `u32` — callers treat that as malformed input rather
+/// than silently dropping the component.
+fn parse_kernel_release(v: &str) -> Option<Vec<u32>> {
+    let mut parts = Vec::new();
+    for token in v
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .take(3)
+    {
+        parts.push(token.parse::<u32>().ok()?);
+    }
+    (!parts.is_empty()).then_some(parts)
+}
+
 /// Simple kernel version comparison: returns true if `running >= required`.
 /// Handles formats like "6.6.30-xxxx" vs "5.10".
 fn compare_kernel_versions(running: &str, required: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split(|c: char| !c.is_ascii_digit())
-            .filter(|s| !s.is_empty())
-            .take(3)
-            .filter_map(|s| s.parse::<u32>().ok())
-            .collect()
-    };
-    let r = parse(running);
-    let q = parse(required);
+    let r = parse_kernel_release(running).unwrap_or_default();
+    let q = parse_kernel_release(required).unwrap_or_default();
     for (i, &qv) in q.iter().enumerate() {
         let rv = r.get(i).copied().unwrap_or(0);
         if rv > qv {
@@ -281,6 +300,53 @@ mod tests {
         assert!(compare_kernel_versions("5.13.0", "5.13"));
         assert!(!compare_kernel_versions("5.9.99", "5.10"));
         assert!(!compare_kernel_versions("4.4.0", "5.0"));
+    }
+
+    fn scenario_with_kernel(requirement: &str) -> ScenarioConfig {
+        ScenarioConfig {
+            name: "test".to_string(),
+            packages: vec![],
+            packages_optional: vec![],
+            services: vec![],
+            verify_commands: vec![],
+            requires_kvm: false,
+            requires_kernel: requirement.to_string(),
+        }
+    }
+
+    #[test]
+    fn kernel_requirement_without_digits_is_rejected() {
+        // A garbage requirement used to compare as "always satisfied".
+        let s = scenario_with_kernel(">=cloud-native");
+        let err = s.check_kernel(Some("6.6.30")).expect_err("must reject");
+        assert!(err.contains("invalid requires_kernel"), "{err}");
+    }
+
+    #[test]
+    fn kernel_requirement_with_overflowing_component_is_rejected() {
+        // 20-digit components used to be dropped silently, degrading the
+        // requirement to whatever preceded them.
+        let s = scenario_with_kernel(">=99999999999999999999.1");
+        let err = s.check_kernel(Some("6.6.30")).expect_err("must reject");
+        assert!(err.contains("invalid requires_kernel"), "{err}");
+    }
+
+    #[test]
+    fn kernel_requirement_at_u32_ceiling_is_accepted() {
+        let s = scenario_with_kernel(">=4294967295");
+        assert!(s.check_kernel(Some("4294967295.1")).is_ok());
+        assert!(s.check_kernel(Some("4294967294")).is_err());
+    }
+
+    #[test]
+    fn kernel_parse_release_shapes() {
+        assert_eq!(parse_kernel_release("5.10"), Some(vec![5, 10]));
+        assert_eq!(
+            parse_kernel_release("6.6.30-2024.al8"),
+            Some(vec![6, 6, 30])
+        );
+        assert_eq!(parse_kernel_release(""), None);
+        assert_eq!(parse_kernel_release("latest"), None);
     }
 
     #[test]
