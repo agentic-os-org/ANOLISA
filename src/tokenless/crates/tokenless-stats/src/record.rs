@@ -22,6 +22,7 @@ pub enum OperationType {
 }
 
 impl OperationType {
+    /// Stable string form used in the SQLite `operation` column and CLI output.
     pub fn as_str(&self) -> &'static str {
         match self {
             OperationType::CompressSchema => "compress-schema",
@@ -62,6 +63,7 @@ pub enum CompressionMode {
 }
 
 impl CompressionMode {
+    /// Stable string form used in the SQLite `mode` column and CLI output.
     pub fn as_str(&self) -> &'static str {
         match self {
             CompressionMode::Active => "active",
