@@ -197,20 +197,26 @@ fn parse_frontmatter(
     }
 }
 
-fn validate_name(name: &str, issues: &mut Vec<String>) {
+pub(crate) fn validate_name(name: &str, issues: &mut Vec<String>) {
     if name.len() > 64 {
         issues.push("name too long (max 64 chars)".to_string());
     }
-    // kebab-case: lowercase letters, digits, hyphens; must not start/end with hyphen
-    let is_kebab = !name.is_empty()
+    if !is_kebab_case(name) {
+        issues.push("name not kebab-case".to_string());
+    }
+}
+
+/// Non-empty kebab-case identifier (`[a-z0-9-]`, no leading/trailing
+/// hyphen). Length is enforced separately by [`validate_name`]; this is
+/// the single grammar definition, shared with the store's
+/// directory-name adoption check.
+pub(crate) fn is_kebab_case(name: &str) -> bool {
+    !name.is_empty()
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !name.starts_with('-')
-        && !name.ends_with('-');
-    if !is_kebab {
-        issues.push("name not kebab-case".to_string());
-    }
+        && !name.ends_with('-')
 }
 
 fn extract_first_paragraph(body: &str) -> String {

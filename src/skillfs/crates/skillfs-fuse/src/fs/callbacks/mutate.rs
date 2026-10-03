@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fuser::{FileType, ReplyEmpty, ReplyEntry, Request};
-use skillfs_core::parser;
+use skillfs_core::{parser, store::adopt_directory_name};
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
@@ -1002,39 +1002,7 @@ impl SkillFs {
                             skill_name: new_name,
                         },
                     ) => {
-                        self.store.write().remove(old_name);
-                        // Synchronously update the store under the new directory name.
-                        // We must use the *directory* name as the store key regardless
-                        // of what SKILL.md frontmatter says (the user may not have
-                        // updated the `name:` field yet).
-                        let md_path = new_physical.join("SKILL.md");
-                        let new_entry = match parser::parse_skill_file(&md_path) {
-                            Ok(mut entry) => {
-                                // Ensure the store key matches the directory name.
-                                entry.metadata.name = new_name.clone();
-                                entry
-                            }
-                            Err(_) => {
-                                // SKILL.md not readable yet — insert a placeholder so
-                                // the directory appears in readdir immediately.
-                                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
-                                SkillEntry {
-                                    metadata: SkillMetadata {
-                                        name: new_name.clone(),
-                                        ..SkillMetadata::default()
-                                    },
-                                    parameters: vec![],
-                                    returns: vec![],
-                                    body: String::new(),
-                                    parse_status: ParseStatus::Degraded(
-                                        "renamed, awaiting SKILL.md update".to_string(),
-                                    ),
-                                    source_path: md_path,
-                                    last_modified: std::time::SystemTime::now(),
-                                }
-                            }
-                        };
-                        self.store.write().upsert(new_entry);
+                        self.update_store_after_skill_rename(old_name, new_name, &new_physical);
                         info!(
                             old = %old_name, new = %new_name,
                             "sync: skill renamed (immediate store update)"
@@ -1231,5 +1199,134 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+
+    /// Synchronously refresh the store after a skill-directory rename.
+    ///
+    /// Drops the old store key and re-parses the `SKILL.md` under its new
+    /// path; the *directory* name becomes the store key regardless of what
+    /// the frontmatter says (the user may not have updated the `name:`
+    /// field yet). Adoption goes through the shared
+    /// [`skillfs_core::store::adopt_directory_name`], so renaming a valid
+    /// skill to a non-conforming directory (e.g. `foo_bar`) degrades the
+    /// entry exactly like the initial scan would, instead of inserting a
+    /// cleanly parsed entry under an illegal name.
+    fn update_store_after_skill_rename(&self, old_name: &str, new_name: &str, new_physical: &Path) {
+        self.store.write().remove(old_name);
+        let md_path = new_physical.join("SKILL.md");
+        let mut new_entry = match parser::parse_skill_file(&md_path) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // SKILL.md not readable yet — insert a placeholder so the
+                // directory appears in readdir immediately.
+                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
+                SkillEntry {
+                    metadata: SkillMetadata::default(),
+                    parameters: vec![],
+                    returns: vec![],
+                    body: String::new(),
+                    parse_status: ParseStatus::Degraded(
+                        "renamed, awaiting SKILL.md update".to_string(),
+                    ),
+                    source_path: md_path,
+                    last_modified: std::time::SystemTime::now(),
+                }
+            }
+        };
+        adopt_directory_name(&mut new_entry, new_name);
+        self.store.write().upsert(new_entry);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, ParseStatus, store::SkillStore};
+
+    use super::*;
+
+    fn write_skill(dir: &Path, frontmatter_name: &str) {
+        std::fs::create_dir_all(dir).expect("skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {frontmatter_name}\ndescription: demo\n---\nbody\n"),
+        )
+        .expect("SKILL.md");
+    }
+
+    #[test]
+    fn skill_dir_rename_to_invalid_name_degrades_entry() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("good-skill"), "good-skill");
+        // The post-rename tree: the same valid frontmatter now sits under
+        // a directory whose name violates the grammar.
+        write_skill(&source.path().join("foo_bar"), "good-skill");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        assert!(
+            store
+                .get("good-skill")
+                .expect("loaded before rename")
+                .parse_status
+                .is_ok()
+        );
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        );
+
+        fs.update_store_after_skill_rename("good-skill", "foo_bar", &source.path().join("foo_bar"));
+
+        let guard = shared.read();
+        assert!(guard.get("good-skill").is_none(), "old store key removed");
+        let entry = guard.get("foo_bar").expect("renamed store entry");
+        assert_eq!(entry.metadata.name, "foo_bar");
+        assert!(
+            matches!(&entry.parse_status, ParseStatus::Degraded(msg)
+                if msg.contains("foo_bar") && msg.contains("kebab")),
+            "rename to a non-conforming directory must degrade the entry, got {:?}",
+            entry.parse_status
+        );
+    }
+
+    #[test]
+    fn skill_dir_rename_without_skill_md_keeps_degradation() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("good-skill"), "good-skill");
+        // SKILL.md not yet present under the renamed directory: the
+        // placeholder must still adopt the directory identity and carry
+        // the directory-name degradation alongside its own reason.
+        std::fs::create_dir_all(source.path().join("foo_bar")).expect("renamed dir");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        );
+
+        fs.update_store_after_skill_rename("good-skill", "foo_bar", &source.path().join("foo_bar"));
+
+        let guard = shared.read();
+        let entry = guard.get("foo_bar").expect("placeholder store entry");
+        assert_eq!(entry.metadata.name, "foo_bar");
+        assert!(
+            matches!(&entry.parse_status, ParseStatus::Degraded(msg)
+                if msg.contains("awaiting SKILL.md") && msg.contains("foo_bar")),
+            "placeholder must merge the directory-name issue, got {:?}",
+            entry.parse_status
+        );
     }
 }
