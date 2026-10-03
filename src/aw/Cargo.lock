@@ -77,6 +77,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aw-host"
+version = "0.1.0"
+dependencies = [
+ "aw-config",
+ "aw-exec",
+ "aw-provider",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "aw-provider"
 version = "0.1.0"
 dependencies = [
@@ -84,6 +96,23 @@ dependencies = [
  "jsonschema",
  "serde",
  "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "aw-service"
+version = "0.1.0"
+dependencies = [
+ "aw-config",
+ "aw-core",
+ "aw-exec",
+ "aw-host",
+ "aw-provider",
+ "libc",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "thiserror",
 ]

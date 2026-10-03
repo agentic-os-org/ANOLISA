@@ -2,63 +2,77 @@
 
 [English](README.md)
 
-AW 提供统一配置、版本化能力合同和可嵌入的 Core 编排。`aw-config` 校验配置结构和引用；`aw-provider` 离线检查外部 Provider 消息与能力准入；`aw-contracts` 检查数据结构及记录间关系；`aw-core` 通过调用方提供的 Host 执行固定计划，并持久记录执行事实。AW 没有独立服务进程，原生 Agent 控制和最终工具执行仍由接入方负责。
+AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以通过已验证的原生
+入口启动 Qoder CLI 和 Hermes，运行外部 Provider，并独立于 Agent 会话保存
+执行元数据。原生调度与权限仍由框架负责，当前接口处于实验阶段。
 
-当前接口仍处于实验阶段。合同测试使用合成记录，命令传输测试使用本地子进程；
-两者均不证明 Agent 已完成接入。
+## 当前可用范围
 
-## 校验配置
+| 能力 | 可用状态 |
+| --- | --- |
+| 校验一份包含命名 Provider 和全部 16 个事件名的 `aw.yaml` | ✅ |
+| 启动 Qoder CLI 1.1.64 并接通工具前后 Hook | ✅ Linux 源码构建 |
+| 工具前执行结构化 Provider 的 `observe`/`block`，工具后执行 `observe` | ✅ 结果覆盖范围随框架而异 |
+| 执行回调输入保持不变的原生 Hook 命令 | ✅ 保留原生输出和退出语义；不含通用参数改写与审批 |
+| 启动或复用独立服务，查询执行元数据 | ✅ |
+| 通过 AW 启动 Hermes | ✅ 显式安装原生插件后的本地 chat |
+| 启动其余首批框架 | ❌ 相应 Adapter 独立交付 |
+| 安装已发布的 AW 包、跨框架请求审批或在原生 Hook 之外强制执行策略 | ❌ |
 
-在仓库根目录使用离线示例检查配置：
+## 启动 Qoder
+
+AW 尚未通过 `anolisa install` 或 RPM 发布。在 Linux 上安装 rustup 和 Qoder CLI
+1.1.64 后，从仓库根目录构建。如果该版本不在 `PATH` 中，先修改示例的
+`spec.agents.qoder.argv`。
 
 ```bash
 cd src/aw
-cargo run --locked -p aw-config --example validate -- crates/aw-config/examples/aw.minimal.yaml
+cargo build --locked -p aw-service --bin aw
+target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
-校验通过表示配置语法和静态引用正确，不会启动 Agent 或启用策略。
-字段和示例见[配置指南](../../docs/developer-guide/zh/aw/configuration.md)，
-开发环境、测试与 CI 说明见[参与 AW 开发](CONTRIBUTING_zh.md)。
+示例在工具执行前和成功后运行一条中性命令，用于演示 Hook 接线，没有安装安全
+规则。AW 启动或复用配置指定的服务，再打开 Qoder 的原有界面。退出 Qoder 后
+回到原终端并释放本次会话，共享服务和审计历史继续保留。
 
-## 嵌入 Core
+```bash
+target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
+```
 
-`aw-core` 提供 `Core::prepare`、`Core::execute`、可信 Host/Clock/Journal 端口，
-以及支持持久写入的 Linux `FileJournal`。准备阶段在调用任何 Provider 前检查完整
-计划；执行阶段先记录调用再分发，Journal 确认后才返回终态结果。失败或中断的事件
-仍保留占用记录，不自动重试或恢复。
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明原生配置共存、Hook
+串并行、Provider 配置、显式服务启动和记录查询。原生 Hook 仍受框架自身能力约束，
+仅凭服务状态不能证明 Qoder 已采用策略。
 
-所有权、取消、失败和接入约束见 [Core 执行与存储](docs/design/core-execution_zh.md)。
-Core 测试使用合成 Host；Agent 原生接入和效果采用需要单独进行运行时验收。
+## 启动 Hermes
 
-## 命令执行
+使用 Hermes 官方提交 `952c941e`，保留其原生模型配置。
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明必需的 profile 参数和
+工具生命周期范围。从 `src/aw` 执行：
 
-`aw-exec` 在 Linux 上执行单条命令，提供绝对截止时间、字节上限、取消及所属进程组清理。
-原生 stdout、stderr 和退出状态保留给调用方解释。该库提供进程传输能力；Provider 协议接线、
-daemon 和 Agent 适配另行交付。API、所有权与验证边界见[有界命令执行](docs/design/bounded-execution_zh.md)。
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
 
-## 源码参考
+## 接入与开发
 
-- [用户指南与可用范围](../../docs/user-guide/zh/user-entrypoint/aw.md)、
-  [配置参考](../../docs/developer-guide/zh/aw/configuration.md)、
-  [起步模板](crates/aw-config/examples/aw.minimal.yaml)、
-  [完整示例](crates/aw-config/examples/aw.yaml)与
-  [配置 API](crates/aw-config/src/lib.rs)
-- [已注册的 Schema](schemas/)与[合成输入输出样例](tests/fixtures/contracts.json)
-- [公共 API](src/lib.rs)、[记录校验](src/validation.rs)与[计划校验](src/orchestration.rs)
-- [外部 Provider 协议与准入](docs/design/provider-protocol_zh.md)及
-  [Provider API](crates/aw-provider/src/lib.rs)
-- [编码测试](tests/canonical.rs)、[Schema 测试](tests/schemas.rs)、
-  [记录测试](tests/contracts.rs)与[计划测试](tests/orchestration.rs)
+可复用的 `aw-service::Client` 绑定一次服务启动及其配置版本。Adapter 归一化
+回调并保留原生调度。相关回调共享同一个事件截止时间，每个步骤只能尝试一次。
+服务先记录执行元数据，再返回结果；结果不确定的调用不会自动重试。
 
-Registry 包含 21 个 Schema 资源。`crates/aw-contracts/schemas/` 中的 8 份 v1 文件仅作参考，未注册到当前库。调用方需要匹配 Schema ID 和摘要，当前没有自动版本转换。
+`aw-host` 同时支持结构化 Provider 消息和显式选择的原生 Hook 字节传输。
+`aw-core` 提供独立的固定计划执行 API，以及被服务复用的持久 `FileJournal`
+存储。这些边界让 cosh、桌面客户端和 Herdr 保持独立于服务实现。
 
-收到 wire 记录后，先用 `canonical::parse` 严格解析字节，再检查结构。结构检查通过不代表记录之间的关系正确，也不授予执行权限。计划级检查的用法见公共 API 文档，证据认证和实际动作仍由调用方负责。
-
-用户配置由独立的 `aw-config` crate 及其 `aw/v1alpha1` Schema 处理。
-文件使用一个包含 `apiVersion`、`kind`、`metadata`、`spec` 的 `AWConfiguration`
-对象，Provider 实例是 `spec.providers` 中的命名对象。Schema 识别 QwenPaw、
-Qoder CLI、OpenClaw、Hermes 及全部 16 个事件名，不表示适配器已经实现。
-配置中没有运行时 `status`。`aw-provider` 校验外部提供的操作声明和私有配置响应，
-并依据调用方信任的 Adapter 能力准入工具步骤；它不执行发现，也不证明原生采用。
-Provider 执行和绑定安装由后续增量交付。与既有 wire 合同的关系见
-[配置设计](docs/design/configuration_zh.md)。
+- [使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)与
+  [配置参考](../../docs/developer-guide/zh/aw/configuration.md)
+- [本地服务与客户端合同](docs/design/local-service_zh.md)
+- [Provider 协议](docs/design/provider-protocol_zh.md)、
+  [Provider Host](docs/design/provider-host_zh.md)与
+  [有界命令执行](docs/design/bounded-execution_zh.md)
+- [Core 执行与存储](docs/design/core-execution_zh.md)
+- [开发环境、Crate 职责与测试](CONTRIBUTING_zh.md)

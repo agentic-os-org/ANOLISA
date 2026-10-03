@@ -141,6 +141,8 @@ def check_inventory() -> None:
         ("aw-provider", "protocol"),
         ("aw-provider", "admission"),
         ("aw-exec", "execution"),
+        ("aw-host", "host"),
+        ("aw-service", "service"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
@@ -158,6 +160,8 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
         "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-exec": {"libc", "thiserror"},
+        "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
+        "aw-service": {"aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"},
     }
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
@@ -176,7 +180,7 @@ def structure(metadata: dict, root: Path) -> None:
         for dependency in package["dependencies"]:
             if dependency["name"] not in allowed[name]:
                 raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
-            local = {"aw-contracts": root, "aw-config": root / "crates/aw-config"}
+            local = {name: root if name == "aw-contracts" else root / "crates" / name for name in allowed}
             if dependency["name"] in local:
                 path = dependency.get("path")
                 if (
