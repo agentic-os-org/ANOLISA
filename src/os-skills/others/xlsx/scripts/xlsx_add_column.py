@@ -242,6 +242,27 @@ def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
           f"(A-{new_col}, {len(style_remap)} style(s) cloned)")
 
 
+def _ensure_row(sheet_data, row_map: dict, row_num: int) -> ET.Element:
+    """Return the element for row_num, creating it in ascending-r position.
+
+    sheetData rows must be in ascending r order (ECMA-376); appending a
+    missing middle row at the end corrupts sparse sheets (1,10,2,...,9).
+    """
+    if row_num in row_map:
+        return row_map[row_num]
+    row_el = ET.Element(_tag("row"))
+    row_el.set("r", str(row_num))
+    for i, existing in enumerate(sheet_data):
+        r = existing.get("r")
+        if r and int(r) > row_num:
+            sheet_data.insert(i, row_el)
+            break
+    else:
+        sheet_data.append(row_el)
+    row_map[row_num] = row_el
+    return row_el
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Add a column to a worksheet in an unpacked xlsx")
@@ -319,10 +340,7 @@ def main() -> None:
     if args.formula and args.formula_rows:
         start, end = map(int, args.formula_rows.split(":"))
         for row_num in range(start, end + 1):
-            if row_num not in row_map:
-                row_el = ET.SubElement(sheet_data, _tag("row"))
-                row_el.set("r", str(row_num))
-                row_map[row_num] = row_el
+            _ensure_row(sheet_data, row_map, row_num)
 
             formula_text = args.formula.replace("{row}", str(row_num))
             formula_text = formula_text.lstrip("=")
@@ -338,10 +356,7 @@ def main() -> None:
 
     # Add total formula
     if args.total_row and args.total_formula:
-        if args.total_row not in row_map:
-            row_el = ET.SubElement(sheet_data, _tag("row"))
-            row_el.set("r", str(args.total_row))
-            row_map[args.total_row] = row_el
+        _ensure_row(sheet_data, row_map, args.total_row)
 
         total_f = args.total_formula.lstrip("=")
         cell = ET.SubElement(row_map[args.total_row], _tag("c"))
