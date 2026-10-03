@@ -361,19 +361,16 @@ impl MemoryService {
             return 0;
         }
 
-        // Convert to OwnedAuditEntry for heuristics.
+        // Convert to OwnedAuditEntry for heuristics. Derivable facts are
+        // dropped inside run_consolidation_owned, before the max_facts
+        // truncation, so they cannot burn budget that genuine facts need.
         let mut facts = run_consolidation_owned(&entries, session_id, config);
 
-        // Quality filter: remove derivable facts and normalize dates
-        let before = facts.len();
-        facts.retain(|f| !crate::consolidation::quality::is_derivable(&f.content));
+        // Quality filter: normalize dates. (Derivable facts were already
+        // filtered out before the budget truncation in the heuristics.)
         facts.iter_mut().for_each(|f| {
             f.content = crate::consolidation::quality::normalize_relative_dates(&f.content);
         });
-        let filtered = before - facts.len();
-        if filtered > 0 {
-            tracing::debug!("filtered {filtered} derivable facts");
-        }
 
         if facts.is_empty() {
             tracing::debug!("consolidation produced no facts for session {session_id}");

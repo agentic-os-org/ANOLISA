@@ -105,6 +105,13 @@ pub fn run_consolidation_owned(
             && !crate::safety::looks_like_prompt_injection(&f.content)
     });
 
+    // Quality filter: drop facts derivable from the codebase or git
+    // history. This must run BEFORE the max_facts truncation — filtering
+    // only afterwards would let derivable facts burn budget slots, evict
+    // genuine facts, and then get dropped themselves (worst case the
+    // persisted set ends up empty even though real facts were extracted).
+    facts.retain(|f| !super::quality::is_derivable(&f.content));
+
     // Sort by confidence descending, truncate to max_facts.
     facts.sort_by(|a, b| {
         b.confidence
@@ -606,6 +613,79 @@ mod tests {
         ];
         let facts = run_consolidation_owned(&entries, "sid", &config);
         assert!(facts.len() <= 2);
+    }
+
+    #[test]
+    fn derivable_facts_filtered_before_truncation() {
+        // 20 distinct failures whose lesson content matches is_derivable
+        // ("function ... is defined in ..."), plus one genuine interest
+        // fact. The lessons (0.6) outrank the interest (~0.51), so if the
+        // derivability filter ran after the budget the lessons would fill
+        // max_facts, evict the interest, and then be dropped themselves —
+        // persisting nothing.
+        let mut entries: Vec<OwnedAuditEntry> = (0..20)
+            .map(|i| {
+                make_entry(
+                    "mem_read",
+                    &format!("src/file{i}.rs"),
+                    false,
+                    Some(&format!(
+                        "function handler_{i} is defined in src/file{i}.rs"
+                    )),
+                )
+            })
+            .collect();
+        entries.push(make_entry(
+            "memory_search",
+            "bm25:deployment strategy",
+            true,
+            None,
+        ));
+
+        let facts = run_consolidation_owned(&entries, "budget-sid", &default_config());
+        assert!(
+            facts
+                .iter()
+                .all(|f| !crate::consolidation::quality::is_derivable(&f.content)),
+            "derivable facts must not survive the pipeline: {:?}",
+            facts.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
+        assert!(
+            facts.iter().any(|f| f.category == FactCategory::Interest),
+            "genuine interest must survive the budget: {:?}",
+            facts.iter().map(|f| f.category).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_derivable_majority_unchanged_by_filter_position() {
+        // Control: when nothing is derivable the new filter position must
+        // not change the outcome — the budget still picks the
+        // highest-confidence facts.
+        let mut config = default_config();
+        config.max_facts = 2;
+        let entries = vec![
+            make_entry(
+                "mem_read",
+                "notes/missing.md",
+                false,
+                Some("file not found"),
+            ),
+            make_entry("mem_read", "notes/other.md", false, Some("file not found")),
+            make_entry("memory_search", "bm25:deployment strategy", true, None),
+        ];
+        let facts = run_consolidation_owned(&entries, "ctrl-sid", &config);
+        assert_eq!(
+            facts.len(),
+            2,
+            "budget unchanged when nothing is derivable: {facts:?}"
+        );
+        assert!(
+            facts
+                .iter()
+                .all(|f| !crate::consolidation::quality::is_derivable(&f.content)),
+            "nothing here is derivable, nothing may be dropped"
+        );
     }
 
     #[test]
