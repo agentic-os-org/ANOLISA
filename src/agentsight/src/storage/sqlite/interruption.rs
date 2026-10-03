@@ -1644,9 +1644,11 @@ mod tests {
             Some("http 413 prompt is too long")
         ));
         // The None filter still matches any row for the conversation.
-        assert!(
-            store.exists_for_conversation("conv-efe", &InterruptionType::ContextOverflow, None)
-        );
+        assert!(store.exists_for_conversation(
+            "conv-efe",
+            &InterruptionType::ContextOverflow,
+            None
+        ));
 
         // Positive control: a stored row that does carry the error still matches.
         let mut e2 = make_event("conv-efg", InterruptionType::ContextOverflow);
