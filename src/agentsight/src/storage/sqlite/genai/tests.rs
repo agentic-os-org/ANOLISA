@@ -736,6 +736,68 @@ fn test_token_aggregations_apply_provider_cache_rule() {
 }
 
 #[test]
+fn agent_token_summary_merges_case_variants_like_agent_activity() {
+    // These summaries back the Prometheus `agent="..."` labels, and the agent
+    // activity list groups the same rows case-insensitively; a case variant
+    // used to expose one agent as two series with partial counts.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_agent_tokens_case_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,'openai','gpt-4',?5,?6,?7,\
+               ?8,?9,?10,?11,100,'complete',NULL,'{}',NULL,NULL)";
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, agent, input, output) in [
+            ("upper", "Qoder", 10_i64, 5_i64),
+            ("lower", "qoder", 20_i64, 8_i64),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    BASE_NS,
+                    BASE_NS + STEP_NS,
+                    STEP_NS,
+                    input,
+                    output,
+                    input + output,
+                    "sess-q",
+                    "trace-q",
+                    "conv-q",
+                    agent
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let summaries = store.get_agent_token_summary().unwrap();
+    let qoder: Vec<_> = summaries
+        .iter()
+        .filter(|s| s.agent_name.eq_ignore_ascii_case("qoder"))
+        .collect();
+    assert_eq!(
+        qoder.len(),
+        1,
+        "one agent must not become two series: {summaries:?}"
+    );
+    assert_eq!(qoder[0].agent_name, "Qoder");
+    assert_eq!(qoder[0].request_count, 2);
+    assert_eq!(qoder[0].total_tokens, 43);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_agent_token_summary_empty() {
     let path = std::env::temp_dir().join(format!("test_genai_ats_empty_{}.db", std::process::id()));
     cleanup_db(&path);

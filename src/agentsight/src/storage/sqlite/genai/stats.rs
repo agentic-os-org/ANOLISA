@@ -582,14 +582,17 @@ impl GenAISqliteStore {
 
     /// Return per-agent token usage aggregated over all recorded history.
     ///
-    /// Groups by `COALESCE(agent_name, process_name, 'unknown')` so that every
-    /// LLM call is attributed to some label even when agent_name is NULL.
+    /// Groups by `COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE`
+    /// so that every LLM call is attributed to some label even when agent_name
+    /// is NULL, and case variants of one agent stay a single series — the same
+    /// rule `list_agent_activity_summaries` and the latency metrics use. The
+    /// reported label is the group's `MIN` for a stable spelling.
     pub fn get_agent_token_summary(
         &self,
     ) -> Result<Vec<AgentTokenSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(concat!(
-            "SELECT COALESCE(agent_name, process_name, 'unknown') AS agent,
+            "SELECT MIN(COALESCE(agent_name, process_name, 'unknown')) AS agent,
                     COALESCE(SUM(",
             billed_input_col!(),
             "), 0)      AS input_tokens,
@@ -600,7 +603,7 @@ impl GenAISqliteStore {
                     COUNT(*)                        AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'
-             GROUP BY agent
+             GROUP BY COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE
              ORDER BY total_tokens DESC"
         ))?;
         let rows = stmt.query_map([], |row| {
