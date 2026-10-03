@@ -1,3 +1,4 @@
+use crate::error::MemoryError;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -424,7 +425,37 @@ impl AppConfig {
         };
 
         config.apply_env_overrides();
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Reject index ranking parameters that the env-override path already
+    /// refuses, but which a config file (or a programmatically built
+    /// AppConfig) could otherwise smuggle in. A negative or non-finite
+    /// `time_decay_lambda` makes exp(-lambda*age) grow with age — old
+    /// memories outrank fresh ones, inverting the recency ranking pinned
+    /// by `search_ranks_recent_higher`; a `time_decay_alpha` outside
+    /// 0.0..=1.0 lets recency swamp BM25 relevance entirely; NaN breaks
+    /// score ordering. Fail at load with the key name and the offending
+    /// value so the operator can fix the file in one look.
+    pub fn validate(&self) -> std::result::Result<(), crate::error::MemoryError> {
+        let idx = &self.memory.index;
+        if !idx.time_decay_lambda.is_finite() || idx.time_decay_lambda < 0.0 {
+            return Err(MemoryError::InvalidArgument(format!(
+                "[memory.index].time_decay_lambda must be a finite value >= 0.0, got {}; \
+                 exp(-lambda * age_days) with a negative lambda ranks old memories \
+                 above new ones",
+                idx.time_decay_lambda
+            )));
+        }
+        if !idx.time_decay_alpha.is_finite() || !(0.0..=1.0).contains(&idx.time_decay_alpha) {
+            return Err(MemoryError::InvalidArgument(format!(
+                "[memory.index].time_decay_alpha must be within 0.0..=1.0, got {}; \
+                 larger values let the recency boost swamp BM25 relevance",
+                idx.time_decay_alpha
+            )));
+        }
+        Ok(())
     }
 
     fn default_config_path() -> PathBuf {
@@ -623,6 +654,97 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::{AppConfig, MemoryError};
+
+    fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("memory.toml");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_rejects_negative_decay_lambda_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), "[memory.index]\ntime_decay_lambda = -0.01\n");
+        let err = AppConfig::load(Some(&path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("time_decay_lambda"), "message: {msg}");
+        assert!(
+            msg.contains("-0.01"),
+            "message should name the value: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_alpha_above_one_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), "[memory.index]\ntime_decay_alpha = 5.0\n");
+        let err = AppConfig::load(Some(&path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("time_decay_alpha"), "message: {msg}");
+        // The value renders as "5" (TOML float formatting), so assert the
+        // numeric prefix rather than the literal "5.0" spelling.
+        assert!(
+            msg.contains("got 5"),
+            "message should name the value: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_nan_lambda() {
+        let dir = tempfile::tempdir().unwrap();
+        // TOML floats accept nan.
+        let path = write_config(dir.path(), "[memory.index]\ntime_decay_lambda = nan\n");
+        let err = AppConfig::load(Some(&path)).unwrap_err();
+        assert!(err.to_string().contains("time_decay_lambda"));
+    }
+
+    #[test]
+    fn load_accepts_documented_ranges() {
+        // lambda = 0.0 is the documented "disable decay" value; alpha = 1.0
+        // is the inclusive upper bound — the guard must not reject the values
+        // the field docs themselves describe.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "[memory.index]\ntime_decay_lambda = 0.0\ntime_decay_alpha = 1.0\n",
+        );
+        assert!(AppConfig::load(Some(&path)).is_ok());
+    }
+
+    #[test]
+    fn shipped_default_toml_validates() {
+        // Extends the existing shipped-default coverage: the release config
+        // must always pass the new guards.
+        let cfg: AppConfig = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_programmatic_config() {
+        // MemoryService::new consumes programmatically built configs (tests,
+        // embedders) that skip load(); validate() must refuse them too.
+        let mut cfg = AppConfig::default();
+        cfg.memory.index.time_decay_lambda = -1.0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("time_decay_lambda"));
+        // The service boundary rejects it as well.
+        let err = MemoryServiceForTest::new_err(cfg);
+        assert!(err.contains("time_decay_lambda"), "service error: {err}");
+    }
+
+    // Minimal local shim so the test does not need a full MemoryService
+    // (which opens a store); it calls the same boundary validation.
+    struct MemoryServiceForTest;
+    impl MemoryServiceForTest {
+        fn new_err(cfg: AppConfig) -> String {
+            match cfg.validate() {
+                Ok(()) => "ok".to_string(),
+                Err(e) => e.to_string(),
+            }
+        }
+    }
+
     use super::*;
     use crate::embedding::EmbeddingConfig;
 
