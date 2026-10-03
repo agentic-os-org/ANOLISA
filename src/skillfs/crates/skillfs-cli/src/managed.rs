@@ -311,13 +311,51 @@ const UNMOUNT_TIMEOUT_MS: u64 = 3_000;
 
 /// Whether the mountpoint currently appears in `/proc/mounts`.
 pub fn is_mounted(mountpoint: &Path) -> bool {
-    let target = mountpoint.to_string_lossy();
     match std::fs::read_to_string("/proc/mounts") {
-        Ok(info) => info
-            .lines()
-            .any(|line| line.split_whitespace().nth(1) == Some(&*target)),
+        Ok(info) => is_mounted_in(&info, mountpoint),
         Err(_) => false,
     }
+}
+
+/// Pure form of [`is_mounted`]: whether `mountpoint` matches field 2 of any
+/// line of a `/proc/mounts`-shaped text, with the kernel's octal escapes
+/// decoded before the comparison.
+fn is_mounted_in(mounts: &str, mountpoint: &Path) -> bool {
+    let target = mountpoint.to_string_lossy();
+    mounts.lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .is_some_and(|field| decode_mount_field(field) == target)
+    })
+}
+
+/// Decode the octal escapes the kernel applies to whitespace and backslash in
+/// `/proc/mounts` fields (see `mangle()` in `fs/proc_namespace.c`): space is
+/// written `\040`, tab `\011`, newline `\012`, backslash `\134`. A mountpoint
+/// containing any of those characters never matches its own raw mount line,
+/// so the comparison must run against the decoded field.
+fn decode_mount_field(field: &str) -> String {
+    const ESCAPES: [(&str, char); 4] = [
+        ("\\040", ' '),
+        ("\\011", '\t'),
+        ("\\012", '\n'),
+        ("\\134", '\\'),
+    ];
+    let mut decoded = String::with_capacity(field.len());
+    let mut rest = field;
+    'outer: while !rest.is_empty() {
+        for (sequence, character) in ESCAPES {
+            if let Some(remainder) = rest.strip_prefix(sequence) {
+                decoded.push(character);
+                rest = remainder;
+                continue 'outer;
+            }
+        }
+        let mut characters = rest.chars();
+        decoded.push(characters.next().expect("non-empty rest has a char"));
+        rest = characters.as_str();
+    }
+    decoded
 }
 
 /// Classify the mountpoint: distinguish a healthy mount from a dead FUSE
@@ -1048,6 +1086,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let never_mounted = dir.path().join("not-a-mount");
         assert_eq!(classify_mount(&never_mounted), MountState::NotMounted);
+    }
+
+    #[test]
+    fn decode_mount_field_decodes_all_kernel_escapes() {
+        // The four sequences the kernel's mangle() emits for field characters
+        // that would otherwise break the space-separated /proc/mounts format.
+        assert_eq!(decode_mount_field("/tmp/a\\040b"), "/tmp/a b");
+        assert_eq!(decode_mount_field("/tmp/a\\011b"), "/tmp/a\tb");
+        assert_eq!(decode_mount_field("/tmp/a\\012b"), "/tmp/a\nb");
+        assert_eq!(decode_mount_field("/tmp/a\\134b"), "/tmp/a\\b");
+    }
+
+    #[test]
+    fn decode_mount_field_leaves_plain_fields_untouched() {
+        assert_eq!(decode_mount_field("/mnt/data"), "/mnt/data");
+        // Not one of the kernel's four escapes: left verbatim, never mangled.
+        assert_eq!(decode_mount_field("/tmp/a\\045b"), "/tmp/a\\045b");
+        // Multi-byte UTF-8 mountpoints survive byte-for-byte.
+        assert_eq!(decode_mount_field("/mnt/技能"), "/mnt/技能");
+    }
+
+    #[test]
+    fn is_mounted_in_matches_octal_escaped_mountpoint() {
+        // Field 2 exactly as the kernel writes it for a mountpoint whose path
+        // contains a space.
+        let mounts = "skillfs:/srv/skills /tmp/audit\\040dir/mp fuse.skillfs rw 0 0\n";
+        let spaced = Path::new("/tmp/audit dir/mp");
+        assert!(
+            is_mounted_in(mounts, spaced),
+            "a space-containing mountpoint must match its octal-escaped /proc/mounts line"
+        );
+        // Partial names must not match: the comparison is exact per line.
+        assert!(!is_mounted_in(mounts, Path::new("/tmp/audit")));
+        assert!(!is_mounted_in(mounts, Path::new("/tmp/audit dir")));
+    }
+
+    #[test]
+    fn is_mounted_in_matches_tab_newline_and_backslash_mountpoints() {
+        let mounts = "a /t\\011n\\012b fuse x 0 0\n\
+                      b /back\\134slash fuse x 0 0\n\
+                      c /plain fuse x 0 0\n";
+        assert!(is_mounted_in(mounts, Path::new("/t\tn\nb")));
+        assert!(is_mounted_in(mounts, Path::new("/back\\slash")));
+        // Unescaped fields keep matching as before.
+        assert!(is_mounted_in(mounts, Path::new("/plain")));
+        assert!(!is_mounted_in(mounts, Path::new("/elsewhere")));
+    }
+
+    #[test]
+    fn is_mounted_in_ignores_lines_without_a_second_field() {
+        // Malformed/short lines must be skipped, not panic the decoder.
+        assert!(!is_mounted_in("skillfs\n\n", Path::new("/any")));
     }
 
     #[test]
