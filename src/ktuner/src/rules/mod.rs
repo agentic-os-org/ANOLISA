@@ -4254,19 +4254,36 @@ fn eval_tcp_fack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_fack".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: "TCP Forward Acknowledgement 可改善丢包恢复效率，减少不必要的重传".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_fack_recommendation(read_sysctl_u64(path), &info.kernel_version) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_fack` recommendation for an already-read value.
+///
+/// Split out from the file probe so the version gate is testable on any host.
+fn tcp_fack_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
+    // FACK was removed from the TCP stack in Linux 4.15 (commit 95f5acbf3e12,
+    // "net: tcp: remove FACK from the code"), replaced by RACK loss detection.
+    // The sysctl file still exists on modern kernels but nothing reads it, so
+    // recommending "1" there is dead advice: it claims fewer spurious
+    // retransmits while changing no behavior at all.
+    if kernel_at_least(kernel_version, 4, 15) {
+        return None;
+    }
+    if current != 0 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_fack".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "1".to_string(),
+        reason: "TCP Forward Acknowledgement 可改善丢包恢复效率，减少不必要的重传".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_tcp_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5558,6 +5575,26 @@ fn read_sysctl_string(path: &str) -> String {
     std::fs::read_to_string(path)
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
+}
+
+/// Whether a `uname -r`-style release string is at least `major.minor`.
+///
+/// Only the leading numeric `major.minor` is compared, so distro suffixes
+/// ("6.8.0-40-generic", "5.15.0-microsoft-standard-WSL2") parse fine. Returns
+/// false when the string does not start with two dot-separated numbers, in
+/// which case the caller keeps its legacy (pre-gate) behavior.
+fn kernel_at_least(version: &str, want_major: u64, want_minor: u64) -> bool {
+    let mut parts = version
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty());
+    let (Some(major), Some(minor)) = (
+        parts.next().and_then(|s| s.parse().ok()),
+        parts.next().and_then(|s| s.parse().ok()),
+    ) else {
+        return false;
+    };
+    (major, minor) >= (want_major, want_minor)
 }
 
 #[cfg(test)]
@@ -7638,13 +7675,66 @@ mod tests {
 
     #[test]
     fn test_tcp_fack() {
+        // Shape of the recommendation on a pre-4.15 kernel, where the knob
+        // is still consumed by the TCP stack.
+        let rec = tcp_fack_recommendation(0, "3.10.0-1160.el7")
+            .expect("pre-4.15 kernel still consumes the tcp_fack knob");
+        assert_eq!(rec.recommended_value, "1");
+        assert_eq!(rec.category, Category::Performance);
+    }
+
+    #[test]
+    fn kernel_at_least_parses_release_suffixes() {
+        assert!(kernel_at_least("6.8.0-40-generic", 4, 15));
+        assert!(kernel_at_least("5.15.0-microsoft-standard-WSL2", 5, 0));
+        // The boundary itself counts: FACK was removed in 4.15.
+        assert!(kernel_at_least("4.15.0", 4, 15));
+        assert!(!kernel_at_least("4.14.209", 4, 15));
+        assert!(!kernel_at_least("3.10.0-1160.el7", 4, 15));
+        assert!(!kernel_at_least("5.4", 6, 0));
+        // Unparseable strings keep the caller's legacy behavior.
+        assert!(!kernel_at_least("", 4, 15));
+        assert!(!kernel_at_least("custom-kernel", 4, 15));
+    }
+
+    #[test]
+    fn tcp_fack_recommendation_gates_on_kernel_version() {
+        // Pre-4.15 kernels still consume the knob.
+        assert!(tcp_fack_recommendation(0, "3.10.0-1160.el7").is_some());
+        assert!(tcp_fack_recommendation(0, "4.14.209").is_some());
+        // 4.15+ removed FACK from the TCP stack (commit 95f5acbf3e12); the
+        // sysctl file still exists on modern kernels but nothing reads it, so
+        // the advice would promise loss-recovery gains that cannot happen.
+        assert!(tcp_fack_recommendation(0, "4.15.0").is_none());
+        assert!(tcp_fack_recommendation(0, "6.8.0-40-generic").is_none());
+        assert!(tcp_fack_recommendation(0, "5.4.0").is_none());
+        // Already enabled: no recommendation on any version.
+        assert!(tcp_fack_recommendation(1, "3.10.0-1160.el7").is_none());
+    }
+
+    #[test]
+    fn test_tcp_fack_not_recommended_on_modern_kernel() {
+        // Red on main: make_test_info() reports kernel 5.4 with tcp_fack=0 on
+        // the host, and the rule happily recommends a knob that no 4.15+
+        // kernel reads anymore.
+        let path = "/proc/sys/net/ipv4/tcp_fack";
+        if !std::path::Path::new(path).exists() || read_sysctl_u64(path) != 0 {
+            return; // host cannot exhibit the bug
+        }
         let info = make_test_info();
+        if !kernel_at_least(&info.kernel_version, 4, 15) {
+            return; // pre-4.15 kernels still consume the knob, advice is correct
+        }
+        if !info.has_listen_sockets() {
+            return; // the rule requires listening sockets to fire
+        }
         let mut recs = Vec::new();
         eval_tcp_fack(&info, &mut recs);
-        if let Some(rec) = recs.iter().find(|r| r.param == "net.ipv4.tcp_fack") {
-            assert_eq!(rec.recommended_value, "1");
-            assert_eq!(rec.category, Category::Performance);
-        }
+        assert!(
+            recs.iter().all(|r| r.param != "net.ipv4.tcp_fack"),
+            "tcp_fack advice must not be issued for kernel {}: FACK was removed in Linux 4.15",
+            info.kernel_version
+        );
     }
 
     #[test]
