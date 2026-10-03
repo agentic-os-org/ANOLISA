@@ -66,7 +66,8 @@ echo "[2/6] 安装 QwenPaw..."
 if command -v qwenpaw &>/dev/null; then
   echo "  qwenpaw 已安装: $(qwenpaw --version 2>/dev/null || echo '未知版本')"
 else
-  if uv pip install qwenpaw --index-url https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null; then
+  # --system: no venv is created/activated, uv would refuse to install otherwise
+  if uv pip install --system qwenpaw --index-url https://mirrors.aliyun.com/pypi/simple/; then
     echo "  安装完成 (阿里云镜像)"
   else
     echo "  阿里云镜像安装失败，尝试官方脚本..."
