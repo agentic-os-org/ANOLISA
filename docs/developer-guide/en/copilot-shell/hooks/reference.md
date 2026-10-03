@@ -50,7 +50,7 @@ Most hooks support the following fields in the `stdout` JSON:
 | `suppressOutput` | boolean | When `true`, hides internal metadata |
 | `continue` | boolean | When `false`, immediately stops the agent loop |
 | `stopReason` | string | Reason shown to user when stopping |
-| `decision` | string | `"allow"` / `"deny"` / `"ask"` / `"approve"` |
+| `decision` | string | `"allow"` / `"deny"` (alias `"block"`) / `"ask"` / `"approve"` |
 | `reason` | string | Feedback message when denying/blocking |
 | `hookSpecificOutput` | object | Event-specific output fields |
 
@@ -192,6 +192,8 @@ Triggered before the LLM decides which tools to call. Used to filter available t
 
 **Merge strategy**: Multiple hooks' allowlists are **unioned**.
 
+**Limitations**: Does **not** support `decision`, `continue`, or `systemMessage`.
+
 ### `AfterModel`
 
 Triggered after receiving an LLM response. Used for observation, logging, or stop signals.
@@ -203,8 +205,8 @@ Triggered after receiving an LLM response. Used for observation, logging, or sto
 
 **Output fields**:
 
-- `hookSpecificOutput.llm_response`: **Replaces stored history**
-- `decision`: Set to `"deny"` to discard the response from history
+- `hookSpecificOutput.llm_response`: **Replaces the stored history entry** for this turn (streaming text already rendered to the terminal cannot be reverted; only the in-memory history used for future context is updated)
+- `decision`: Set to `"deny"` to discard the response from history and block the turn (prevents tool calls from executing)
 - `continue`: Set to `false` to stop after the current turn
 
 ---
@@ -227,7 +229,7 @@ Triggered after app startup, session resume, or `/clear` command.
 
 Triggered when the CLI exits or session is cleared.
 
-**Input fields**: `reason` (`"clear"` / `"logout"` / `"prompt_input_exit"` / `"other"`)
+**Input fields**: `reason` (`"clear"` / `"logout"` / `"prompt_input_exit"` / `"bypass_permissions_disabled"` / `"other"`)
 
 **Output fields**: `systemMessage` (displayed on close)
 
@@ -247,7 +249,7 @@ Advisory only; cannot block notifications.
 
 Triggered before the CLI compresses history to save tokens.
 
-**Input fields**: `trigger` (`"auto"` / `"manual"`)
+**Input fields**: `trigger` (`"auto"` / `"manual"`), `custom_instructions` (optional string)
 
 Advisory only; cannot block or modify the compression process.
 
@@ -264,13 +266,13 @@ Triggered when a permission dialog is displayed.
 
 **Output fields**:
 
-- `hookSpecificOutput.decision`: `{ behavior: "allow"|"deny", updatedInput?, message?, interrupt? }`
+- `hookSpecificOutput.decision`: `{ behavior: "allow"|"deny", updatedInput?, updatedPermissions?, message?, interrupt? }`
 
 ---
 
 ## Stable Model API
 
-copilot-shell uses a **Hook Translator** layer to decouple hook scripts from the underlying SDK.
+copilot-shell uses a **Hook Translator** layer to decouple hook scripts from the underlying SDK types (`@google/genai`), so hooks do not break across SDK updates.
 
 ### LLMRequest
 
@@ -278,352 +280,7 @@ copilot-shell uses a **Hook Translator** layer to decouple hook scripts from the
 {
   "model": "string",
   "messages": [
-    { "role": "user | model | system", "content": "string" }
-  ],
-  "config": {
-    "temperature": 0.7,
-    "maxOutputTokens": 8192,
-    "topP": 0.95,
-    "topK": 40
-  },
-  "toolConfig": {
-    "mode": "AUTO | ANY | NONE",
-    "allowedFunctionNames": ["read_file", "write_file"]
-  }
-}
-```
-
-### LLMResponse
-
-```json
-{
-  "text": "string",
-  "candidates": [
-    {
-      "content": { "role": "model", "parts": ["text"] },
-      "finishReason": "STOP | MAX_TOKENS | SAFETY | OTHER",
-      "index": 0
-    }
-  ],
-  "usageMetadata": {
-    "promptTokenCount": 100,
-    "candidatesTokenCount": 200,
-    "totalTokenCount": 300
-  }
-}
-```
-
-### Mode Priority (Multi-Hook Aggregation)
-
-- `NONE` always takes priority (most restrictive)
-- `ANY` > `AUTO`
-- `allowedFunctionNames` are **unioned** (sorted for determinism)
-# Hooks Reference
-
-This document provides the technical specification for copilot-shell hooks,
-including JSON schemas and API details for 13 currently wired hook events.
-
-## Global hook mechanics
-
-- **Communication**: `stdin` for Input (JSON), `stdout` for Output (JSON), and
-  `stderr` for logs and feedback.
-- **Exit codes**:
-  - `0`: Success. `stdout` is parsed as JSON. **Preferred for all logic.**
-  - `2`: System Block. The action is blocked; `stderr` is used as the rejection
-    reason.
-  - `Other`: Warning. A non-fatal failure occurred; the CLI continues with a
-    warning.
-- **Silence is Mandatory**: Your script **must not** print any plain text to
-  `stdout` other than the final JSON.
-
----
-
-## Base input schema
-
-All hooks receive these common fields via `stdin`:
-
-```json
-{
-  "session_id": "string",
-  "run_id": "string | undefined",
-  "transcript_path": "string",
-  "cwd": "string",
-  "hook_event_name": "string",
-  "timestamp": "string (ISO 8601)"
-}
-```
-
-| Field             | Type                  | Description                                                                                                                                                                                                                                                        |
-| :---------------- | :-------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_id`      | `string`              | Unique identifier for the CLI session (1 session = N runs).                                                                                                                                                                                                        |
-| `run_id`          | `string \| undefined` | Unique identifier for the current agent run (1 run = 1 user prompt → complete response). Format: `{sessionId}########{counter}`. Undefined for session-level events (`SessionStart`, `SessionEnd`) and for `UserPromptSubmit` (which fires before the run begins). |
-| `transcript_path` | `string`              | Path to the session's JSONL transcript file.                                                                                                                                                                                                                       |
-| `cwd`             | `string`              | Current working directory.                                                                                                                                                                                                                                         |
-| `hook_event_name` | `string`              | The event that triggered this hook.                                                                                                                                                                                                                                |
-| `timestamp`       | `string`              | ISO 8601 timestamp of when the event fired.                                                                                                                                                                                                                        |
-
----
-
-## Common output fields
-
-Most hooks support these fields in their `stdout` JSON:
-
-| Field                | Type      | Description                                                                                                                                                                                                                         |
-| :------------------- | :-------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `systemMessage`      | `string`  | Shown to the user as a per-hook notification box labeled with the hook name, independent of the tool confirmation dialog.                                                                                                           |
-| `suppressOutput`     | `boolean` | If `true`, hides internal hook metadata from logs/telemetry.                                                                                                                                                                        |
-| `continue`           | `boolean` | If `false`, stops the entire agent loop immediately.                                                                                                                                                                                |
-| `stopReason`         | `string`  | Displayed to the user when `continue` is `false`.                                                                                                                                                                                   |
-| `decision`           | `string`  | `"allow"`, `"deny"` (alias `"block"`), `"ask"`, or `"approve"`.                                                                                                                                                                     |
-| `reason`             | `string`  | The feedback/error message used for `"deny"`/`"block"` decisions and stop-like flows. For user-visible allow/approve/ask messaging, prefer `systemMessage`; if omitted, `reason` is used as the fallback text for the notification. |
-| `hookSpecificOutput` | `object`  | Event-specific output fields (see individual event sections).                                                                                                                                                                       |
-
----
-
-## Tool hooks
-
-### `PreToolUse`
-
-Fires before a tool is invoked. Used for argument validation, security checks,
-and parameter rewriting.
-
-- **Input Fields**:
-  - `tool_use_id`: (`string`) Optional unique identifier for the tool use.
-    It is the same value exposed to `PostToolUse`, so hooks can correlate the
-    before/after events for one tool call.
-  - `tool_name`: (`string`) The name of the tool being called.
-  - `tool_input`: (`object`) The raw arguments generated by the model.
-  - `mcp_context`: (`object`) Optional metadata for MCP-based tools.
-  - `original_request_name`: (`string`) The original name if this is a tail call.
-- **Relevant Output Fields**:
-  - `decision`: Set to `"deny"` (or `"block"`) to prevent tool execution.
-  - `systemMessage`: Any informational or warning text you want the user to
-    see. It is rendered as a separate, per-hook notification box (labeled
-    with the hook name) above the tool confirmation dialog, regardless of
-    the final decision. When the overall outcome is `block`/`deny`, per-hook
-    boxes whose own `decision` is not blocking are dimmed so they do not
-    visually conflict with the denied outcome.
-  - `reason`: Required if denied. Sent to the agent as a tool error. Also
-    used as the fallback notification text when `systemMessage` is omitted.
-  - `hookSpecificOutput.tool_input`: An object that **merges with and
-    overrides** the model's arguments before execution.
-  - `continue`: Set to `false` to **kill the entire agent loop**.
-- **Ask-dialog note**: When `decision` is `"ask"`, the tool confirmation
-  dialog always uses a fixed prompt — `A hook requires your confirmation to
-proceed.` — instead of the hook's `systemMessage`. The hook's
-  `systemMessage` is still shown as a separate notification box above the
-  dialog, so users see both the reason and the confirmation choice.
-- **Exit Code 2 (Block Tool)**: Prevents execution. Uses `stderr` as reason.
-
-### `PostToolUse`
-
-Fires after a tool executes. Used for result auditing, context injection, or
-hiding sensitive output from the agent.
-
-- **Input Fields**:
-  - `tool_use_id`: (`string`) Optional unique identifier for the tool use.
-  - `tool_name`: (`string`)
-  - `tool_input`: (`object`) The original arguments.
-  - `tool_response`: (`object`) The result.
-  - `mcp_context`: (`object`) Optional MCP metadata.
-  - `original_request_name`: (`string`)
-- **Relevant Output Fields**:
-  - `decision`: Set to `"deny"` to hide the real tool output from the agent.
-  - `reason`: Required if denied. **Replaces** the tool result sent to model.
-  - `hookSpecificOutput.additionalContext`: Appended to the tool result.
-  - `hookSpecificOutput.tailToolCallRequest`: (`{ name, args }`) Execute another
-    tool immediately; its result replaces the original response.
-  - `continue`: Set to `false` to kill the agent loop.
-
-### `PostToolUseFailure`
-
-Fires when a tool execution fails. Used for error recovery and sandbox bypass.
-
-- **Input Fields**:
-  - `tool_use_id`: (`string`) Unique identifier for the tool use.
-  - `tool_name`: (`string`)
-  - `tool_input`: (`object`)
-  - `error`: (`string`) Error message describing the failure.
-  - `error_type`: (`string`) Type of error (e.g., `"timeout"`, `"permission"`).
-  - `is_interrupt`: (`boolean`) Whether failure was caused by user interruption.
-- **Relevant Output Fields**:
-  - `hookSpecificOutput.additionalContext`: Context to help the agent recover.
-  - `hookSpecificOutput.sandbox_bypass_request`: (`{ original_command, reason }`)
-    Request to bypass sandbox and re-run the original command.
-
----
-
-## Agent hooks
-
-### `UserPromptSubmit`
-
-Fires after a user submits a prompt, before the agent begins planning. Used for
-prompt validation or injecting dynamic context.
-
-- **Input Fields**:
-  - `prompt`: (`string`) The original text submitted by the user.
-- **Relevant Output Fields**:
-  - `hookSpecificOutput.additionalContext`: Text **appended** to the prompt for
-    this turn only.
-  - `decision`: Set to `"deny"` to block the turn and discard the message.
-  - `continue`: Set to `false` to block the turn but save the message.
-  - `reason`: Required if denied or stopped.
-
-### `Stop`
-
-Fires when the agent is about to stop. Used for response validation and
-automatic retries.
-
-- **Input Fields**:
-  - `stop_hook_active`: (`boolean`) Indicates if already running as part of a
-    retry sequence.
-  - `last_assistant_message`: (`string`) The final text generated by the agent.
-- **Relevant Output Fields**:
-  - `decision`: Set to `"deny"` to **reject the response** and force a retry.
-  - `reason`: Required if denied. Sent to the agent as a new prompt.
-  - `continue`: Set to `false` to stop the session.
-  - `stopReason`: Displayed to the user when stopping.
-
----
-
-## Model hooks
-
-### `BeforeModel`
-
-Fires before sending a request to the LLM. Operates on a stable, SDK-agnostic
-request format via the [Hook Translator](#stable-model-api).
-
-- **Input Fields**:
-  - `llm_request`: (`object`) Contains `model`, `messages`, `config`, and
-    optional `toolConfig`.
-- **Relevant Output Fields**:
-  - `hookSpecificOutput.llm_request`: An object that **overrides** parts of the
-    outgoing request (e.g., changing models or temperature).
-  - `hookSpecificOutput.llm_response`: A **Synthetic Response** object. If
-    provided, the CLI skips the LLM call entirely and uses this as the response.
-  - `decision`: Set to `"deny"` to block this model attempt. Without a
-    synthetic response, the request path returns an empty stream.
-- **Important Behavior Note**: If blocked without a synthetic response, the
-  empty stream may be handled by stream validation/retry logic rather than
-  immediately terminating the turn.
-- **Exit Code 2 (Block Turn)**: Treated as a blocking decision (`deny`) for
-  this model attempt.
-
-### `BeforeToolSelection`
-
-Fires before the LLM decides which tools to call. Used to filter the available
-toolset or force specific tool modes.
-
-- **Input Fields**:
-  - `llm_request`: (`object`) Same format as `BeforeModel`.
-- **Relevant Output Fields**:
-  - `hookSpecificOutput.toolConfig.mode`: (`"AUTO" | "ANY" | "NONE"`)
-    - `"NONE"`: Disables all tools (wins over other hooks).
-    - `"ANY"`: Forces at least one tool call.
-  - `hookSpecificOutput.toolConfig.allowedFunctionNames`: (`string[]`) Whitelist
-    of tool names.
-- **Union Strategy**: Multiple hooks' whitelists are **combined**.
-- **Limitations**: Does **not** support `decision`, `continue`, or
-  `systemMessage`.
-
-### `AfterModel`
-
-Fires after receiving an LLM response. Used for real-time observation, logging,
-or stop signal.
-
-- **Input Fields**:
-  - `llm_request`: (`object`) The original request.
-  - `llm_response`: (`object`) The model's response.
-- **Relevant Output Fields**:
-  - `hookSpecificOutput.llm_response`: An object that **replaces the stored history entry** for
-    this turn. Note: streaming text already rendered to the terminal cannot be
-    reverted; only the in-memory history (used for future context) is updated.
-  - `decision`: Set to `"deny"` to discard the response from history and block
-    the turn (prevents tool calls from executing).
-  - `continue`: Set to `false` to stop the agent loop after the current turn.
-
----
-
-## Lifecycle & system hooks
-
-### `SessionStart`
-
-Fires on application startup, resuming a session, or after a `/clear` command.
-
-- **Input fields**:
-  - `source`: (`"startup" | "resume" | "clear" | "compact"`)
-- **Relevant output fields**:
-  - `hookSpecificOutput.additionalContext`: Injected as the first turn.
-  - `systemMessage`: Shown at the start of the session.
-- **Advisory only**: `continue` and `decision` fields are **ignored**.
-
-### `SessionEnd`
-
-Fires when the CLI exits or a session is cleared.
-
-- **Input Fields**:
-  - `reason`: (`"clear" | "logout" | "prompt_input_exit" |
-"bypass_permissions_disabled" | "other"`)
-- **Relevant Output Fields**:
-  - `systemMessage`: Displayed to the user during shutdown.
-- **Execution Timing**: SessionEnd is executed during shutdown and is awaited in
-  normal cleanup paths. It remains non-blocking in intent (hook failures do not
-  prevent process exit).
-
-### `Notification`
-
-Fires when the CLI emits a system alert (e.g., Tool Permissions).
-
-- **Input Fields**:
-  - `notification_type`: (`"ToolPermission"`)
-  - `message`: Summary of the alert.
-  - `details`: JSON object with alert-specific metadata.
-- **Relevant Output Fields**:
-  - `systemMessage`: Displayed alongside the system alert.
-- **Observability Only**: Cannot block alerts.
-
-### `PreCompact`
-
-Fires before the CLI summarizes history to save tokens.
-
-- **Input Fields**:
-  - `trigger`: (`"auto" | "manual"`)
-  - `custom_instructions`: (`string`) Optional custom instructions.
-- **Relevant Output Fields**:
-  - `systemMessage`: Displayed before compression.
-- **Advisory Only**: Cannot block or modify the compression process.
-
-### `PermissionRequest`
-
-Fires when a permission dialog is displayed.
-
-- **Input Fields**:
-  - `permission_mode`: (`string`) Current permission mode.
-  - `tool_name`: (`string`)
-  - `tool_input`: (`object`)
-  - `permission_suggestions`: Array of `{ type, tool? }` suggestions.
-- **Relevant Output Fields**:
-  - `hookSpecificOutput.decision`: `{ behavior: "allow"|"deny",
-updatedInput?, updatedPermissions?, message?, interrupt? }`
-
----
-
-## Stable Model API
-
-copilot-shell uses a **Hook Translator** layer to decouple hook scripts from
-the underlying SDK types (`@google/genai`). This ensures hooks don't break
-across SDK updates.
-
-### LLMRequest
-
-```json
-{
-  "model": "string",
-  "messages": [
-    {
-      "role": "user | model | system",
-      "content": "string (text-only, non-text parts are filtered)"
-    }
+    { "role": "user | model | system", "content": "string (text-only; non-text parts are filtered)" }
   ],
   "config": {
     "temperature": 0.7,
@@ -645,15 +302,12 @@ across SDK updates.
   "text": "string (convenience field, first candidate text)",
   "candidates": [
     {
-      "content": {
-        "role": "model",
-        "parts": ["text part 1", "text part 2"]
-      },
+      "content": { "role": "model", "parts": ["text"] },
       "finishReason": "STOP | MAX_TOKENS | SAFETY | RECITATION | OTHER",
-      "index": 0,
       "safetyRatings": [
         { "category": "string", "probability": "string", "blocked": false }
-      ]
+      ],
+      "index": 0
     }
   ],
   "usageMetadata": {
@@ -673,11 +327,10 @@ across SDK updates.
 }
 ```
 
-### Mode priority (multi-hook aggregation)
+### Mode Priority (Multi-Hook Aggregation)
 
 When multiple hooks return different modes, they are aggregated:
 
-- `NONE` always wins (most restrictive)
+- `NONE` always takes priority (most restrictive)
 - `ANY` > `AUTO`
-- `allowedFunctionNames` are **unioned** across all hooks (sorted for
-  deterministic behavior)
+- `allowedFunctionNames` are **unioned** (sorted for determinism)
