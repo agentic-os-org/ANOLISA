@@ -213,7 +213,10 @@ enum StatsCommands {
     },
     /// List recent records
     List {
-        #[arg(short, long, default_value = "20")]
+        // Reject zero at parse time like the `summary` and `diff` limits do:
+        // a zero limit used to reach the query and report "No records found."
+        // for a database that does hold records.
+        #[arg(short, long, default_value = "20", value_parser = parse_positive_usize)]
         limit: usize,
     },
     /// Show before/after text content for a specific record

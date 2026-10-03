@@ -59,9 +59,11 @@ run_smoke() {
     fi
     # Install only the pinned AgentScope requirement plus the two wheels.
     # AgentScope 1.x imports tqdm at package import time without declaring it
-    # (openai 3.3.0 stopped providing it transitively), so the 1.x envs
-    # intentionally rely on the integration wheel's own tqdm dependency —
-    # this exercises exactly the clean end-user install path.
+    # (openai 3.3.0 stopped providing it transitively), and AgentScope 1.0.17+
+    # imports sqlalchemy.ext.asyncio while declaring only plain "sqlalchemy"
+    # (2.1.0 moved greenlet behind the "asyncio" extra). The 1.x envs therefore
+    # intentionally rely on the integration wheel's own tqdm and greenlet
+    # dependencies — this exercises exactly the clean end-user install path.
     uv pip install --python "$venv/bin/python" \
         "$agentscope_requirement" \
         "${RUNTIME_WHEELS[0]}" "${INTEGRATION_WHEELS[0]}" >/dev/null
@@ -107,6 +109,10 @@ assert any(
 # AgentScope 1.x needs tqdm at import time but does not declare it, so the
 # wheel must carry the dependency for the whole declared support range.
 assert any(requirement.startswith("tqdm") for requirement in requirements)
+# AgentScope 1.0.17+ imports the SQLAlchemy asyncio memory backend at import
+# time but declares only plain "sqlalchemy", which no longer provides greenlet
+# since 2.1.0, so the wheel must carry it for the whole declared range.
+assert any(requirement.startswith("greenlet") for requirement in requirements)
 assert package.metadata.get_all("License-File") == ["LICENSE"]
 license_paths = [
     path for path in package.files or ()

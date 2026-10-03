@@ -1103,6 +1103,34 @@ fn stats_summary_cli_rejects_zero_limit() {
 }
 
 #[test]
+fn stats_list_cli_rejects_zero_limit() {
+    let zero = match Cli::try_parse_from(["tokenless", "stats", "list", "--limit", "0"]) {
+        Err(error) => error,
+        Ok(_) => panic!("list --limit 0 must fail at parse time"),
+    };
+    assert!(zero.to_string().contains("greater than zero"));
+
+    let short_zero = match Cli::try_parse_from(["tokenless", "stats", "list", "-l", "0"]) {
+        Err(error) => error,
+        Ok(_) => panic!("list -l 0 must fail at parse time"),
+    };
+    assert!(short_zero.to_string().contains("greater than zero"));
+
+    let parsed = Cli::try_parse_from(["tokenless", "stats", "list", "--limit", "5"]).unwrap();
+    match parsed.command {
+        Commands::Stats(StatsCommands::List { limit }) => assert_eq!(limit, 5),
+        _ => panic!("expected stats list"),
+    }
+
+    // The documented default survives the stricter parser unchanged.
+    let default = Cli::try_parse_from(["tokenless", "stats", "list"]).unwrap();
+    match default.command {
+        Commands::Stats(StatsCommands::List { limit }) => assert_eq!(limit, 20),
+        _ => panic!("expected stats list"),
+    }
+}
+
+#[test]
 fn run_command_compress_response_large_with_truncation() {
     let _guard = TempDbGuard::new();
 

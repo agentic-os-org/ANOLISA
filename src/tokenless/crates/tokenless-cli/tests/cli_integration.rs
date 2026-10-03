@@ -1739,6 +1739,45 @@ fn stats_summary_compare_rejects_zero_limit() {
     assert!(!stdout.contains("saved_percent"));
 }
 
+#[test]
+fn stats_list_rejects_zero_limit() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+
+    let output = db
+        .command()
+        .args(["stats", "list", "--limit", "0"])
+        .output()
+        .unwrap();
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("greater than zero"),
+        "zero limit must fail at parse time; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("No records found"),
+        "a populated database with --limit 0 must not look empty; stdout: {stdout}"
+    );
+
+    // The same database still lists its record for a positive limit, so the
+    // rejection above is about the argument and not about the fixture.
+    let listed = db
+        .command()
+        .args(["stats", "list", "--limit", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "list --limit 1; stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("Showing 1 record(s)"));
+}
+
 // ---- Protocol v2 `compress` lifecycle transport ----
 
 fn spawn_with_stdin(
