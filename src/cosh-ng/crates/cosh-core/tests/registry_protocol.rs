@@ -1118,7 +1118,7 @@ api_key = "sk-project"
     let home_config = std::fs::read_to_string(home_config_dir.join("config.toml")).unwrap();
     let project_config = std::fs::read_to_string(project_config_path).unwrap();
 
-    assert!(home_config.contains("[ai.providers.home-provider]"));
+    assert!(home_config.contains("[ai.providers.\"home-provider\"]"));
     assert!(home_config.contains("api_key = \"sk-home\""));
     assert!(!home_config.contains("project-model"));
     assert!(!home_config.contains("project-provider"));
@@ -1355,10 +1355,10 @@ model = "remove-model"
     assert!(response["data"]["active_provider"].is_null());
 
     let persisted = std::fs::read_to_string(&config_path).unwrap();
-    assert!(!persisted.contains("[ai.providers.remove-me]"));
+    assert!(!persisted.contains("[ai.providers.\"remove-me\"]"));
     assert!(!persisted.contains("sk-remove"));
     assert!(!persisted.contains("active_model = \"delete-model\""));
-    assert!(persisted.contains("[ai.providers.keep-me]"));
+    assert!(persisted.contains("[ai.providers.\"keep-me\"]"));
     assert!(persisted.contains("sk-keep"));
 }
 

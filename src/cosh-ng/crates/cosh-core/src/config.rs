@@ -1142,7 +1142,7 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     preserved.push('\n');
 
     for (name, provider) in &config.user_ai.providers {
-        preserved.push_str(&format!("[ai.providers.{}]\n", name));
+        preserved.push_str(&format!("[ai.providers.\"{}\"]\n", escape_toml_value(name)));
         if let Some(ref t) = provider.provider_type {
             preserved.push_str(&format!("type = \"{}\"\n", escape_toml_value(t)));
         }
@@ -2110,7 +2110,7 @@ api_key = "sk-user"
 
         let content = std::fs::read_to_string(&user_path).unwrap();
         assert!(content.contains("active_provider = \"user-provider\""));
-        assert!(content.contains("[ai.providers.user-provider]"));
+        assert!(content.contains("[ai.providers.\"user-provider\"]"));
         assert!(content.contains("api_key = \"sk-user\""));
         assert!(!content.contains("system-provider"));
         assert!(!content.contains("sk-system"));
@@ -2183,9 +2183,9 @@ approval_mode = "balanced"
         // Old ai content must be gone, new content present exactly once.
         assert!(!content.contains("sk-old"));
         assert!(!content.contains("old-model"));
-        assert!(!content.contains("[ai.providers.old]"));
+        assert!(!content.contains("[ai.providers.\"old\"]"));
         assert!(content.contains("active_provider = \"new-provider\""));
-        assert!(content.contains("[ai.providers.new-provider]"));
+        assert!(content.contains("[ai.providers.\"new-provider\"]"));
         assert!(content.contains("api_key = \"sk-new\""));
         assert_eq!(content.matches("[ai]").count(), 1);
         assert_eq!(content.matches("[ai.providers.").count(), 1);
@@ -2236,9 +2236,9 @@ approval_mode = "balanced"
         // No duplicate [ai] table; old content fully replaced.
         assert_eq!(content.matches("[ai]").count(), 1);
         assert!(!content.contains("sk-old"));
-        assert!(!content.contains("[ai.providers.old]"));
+        assert!(!content.contains("[ai.providers.\"old\"]"));
         assert!(content.contains("active_provider = \"new-provider\""));
-        assert!(content.contains("[ai.providers.new-provider]"));
+        assert!(content.contains("[ai.providers.\"new-provider\"]"));
 
         // Non-ai sections survive.
         assert!(content.contains("[aider]"));
@@ -2250,5 +2250,108 @@ approval_mode = "balanced"
         assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
         assert!(parsed.ai.providers.contains_key("new-provider"));
         assert_eq!(parsed.ai.providers.len(), 1);
+    }
+
+    #[test]
+    fn persist_round_trips_provider_name_containing_a_dot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "qwen.dev"
+
+[ai.providers."qwen.dev"]
+type = "dashscope"
+api_key = "sk-dot"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let reloaded = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let provider = reloaded
+            .user_ai
+            .providers
+            .get("qwen.dev")
+            .unwrap_or_else(|| {
+                panic!(
+                    "provider 'qwen.dev' lost after persist; file now:\n{}",
+                    std::fs::read_to_string(&user_path).unwrap()
+                )
+            });
+        assert_eq!(provider.api_key.as_deref(), Some("sk-dot"));
+    }
+
+    #[test]
+    fn persist_keeps_file_parseable_for_provider_name_containing_a_space() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "my provider"
+
+[ai.providers."my provider"]
+type = "dashscope"
+api_key = "sk-space"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        toml::from_str::<toml::Value>(&content).unwrap_or_else(|e| {
+            panic!("persisted config no longer parses as TOML: {e}; file now:\n{content}")
+        });
+        let reloaded = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        assert!(
+            reloaded.user_ai.providers.contains_key("my provider"),
+            "provider 'my provider' lost after persist; file now:\n{content}"
+        );
+    }
+
+    #[test]
+    fn persist_round_trips_plain_provider_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "dashscope"
+
+[ai.providers.dashscope]
+type = "dashscope"
+api_key = "sk-plain"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let reloaded = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let provider = reloaded
+            .user_ai
+            .providers
+            .get("dashscope")
+            .expect("plain provider name must round-trip");
+        assert_eq!(provider.api_key.as_deref(), Some("sk-plain"));
     }
 }
