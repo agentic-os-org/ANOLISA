@@ -1052,6 +1052,25 @@ impl BM25Store {
         Ok(out)
     }
 
+    /// Paths present in the `files` (BM25) table whose stored vector has a
+    /// different byte length than `dim * 4` — i.e. rows embedded by a
+    /// different embedding model. `search_vec` silently skips
+    /// length-mismatched rows, so these stay invisible to vector and hybrid
+    /// search until they are re-embedded at the current dimensionality, and
+    /// `paths_without_vec` cannot surface them because the rows do exist.
+    /// Vectors are serialised as little-endian f32, hence four bytes per
+    /// dimension.
+    pub fn paths_with_stale_vec(&self, dim: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.path FROM files f \
+             JOIN files_vec v ON v.path = f.path \
+             WHERE LENGTH(v.embedding) != ?1",
+        )?;
+        let rows = stmt.query_map(params![(dim * 4) as i64], |r| r.get::<_, String>(0))?;
+        let out: Vec<String> = rows.flatten().collect();
+        Ok(out)
+    }
+
     pub fn mtime_for(&self, rel_path: &str) -> Option<i64> {
         self.conn
             .query_row(
@@ -2079,5 +2098,33 @@ mod tests {
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn paths_with_stale_vec_flags_dimension_mismatches_only() {
+        // A vector is a little-endian f32 BLOB, so "stale" means a byte
+        // length other than dim*4 — the signature of a row embedded by a
+        // different model. Rows that simply lack a vector stay
+        // paths_without_vec's business; matching rows are not reported.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("match.md", 0, 0, "body one", None).unwrap();
+        s.upsert("stale.md", 0, 0, "body two", None).unwrap();
+        s.upsert("bare.md", 0, 0, "body three", None).unwrap();
+        s.upsert_vec("match.md", &[1.0, 0.0]).unwrap();
+        s.upsert_vec("stale.md", &[1.0, 0.0, 0.0]).unwrap();
+
+        // dim=2 → 8 bytes: stale.md (3 f32 = 12 bytes) mismatches.
+        let mut stale = s.paths_with_stale_vec(2).unwrap();
+        stale.sort();
+        assert_eq!(stale, vec!["stale.md".to_string()]);
+
+        // dim=3 → 12 bytes: now match.md (2 f32 = 8 bytes) is the mismatch.
+        let mut stale = s.paths_with_stale_vec(3).unwrap();
+        stale.sort();
+        assert_eq!(stale, vec!["match.md".to_string()]);
+
+        // bare.md has no vector at all — it is `missing`, not `stale`.
+        let missing = s.paths_without_vec().unwrap();
+        assert_eq!(missing, vec!["bare.md".to_string()]);
     }
 }
