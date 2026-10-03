@@ -109,10 +109,13 @@ def post_process_markdown(content):
     import re
     
     # 1. 清理标题中的多余加粗标记：#### **标题** → #### 标题
-    content = re.sub(r'^(#{1,6}) \*{2}(.+?)\*{2}$', r'\1 \2', content, flags=re.MULTILINE)
-    
+    content = re.sub(r'^(#{1,6}) \*{2}([^\*]+)\*{2}$', r'\1 \2', content, flags=re.MULTILINE)
+
     # 2. 清理标题中分散的加粗：#### **什么** **是** → #### 什么是
-    content = re.sub(r'^(#{1,6}) (\*{2}[^\*]+\*{2}\s*)+', r'\1 ', content, flags=re.MULTILINE)
+    content = re.sub(
+        r'^(#{1,6}) (\*{2}[^\*]+\*{2}(?:\s+\*{2}[^\*]+\*{2})*)',
+        lambda m: m.group(1) + ' ' + ''.join(re.findall(r'\*{2}([^\*]+)\*{2}', m.group(2))),
+        content, flags=re.MULTILINE)
     # 更精确的处理
     lines = content.split('\n')
     processed_lines = []
