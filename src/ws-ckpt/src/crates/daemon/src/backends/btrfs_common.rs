@@ -1471,10 +1471,18 @@ fn diff_between_snapshots_blocking(snap_from: &Path, snap_to: &Path) -> Result<V
 ///
 /// Phase 1 collects: snapshot prefix, temp→real rename map, link pairs,
 /// unlinks. A `link new dest=old` paired with `unlink old` encodes an `mv`
-/// (btrfs send emits no `rename` line for cross-snapshot mv).
+/// (btrfs send emits no `rename` line for cross-snapshot mv). A rename is a
+/// kernel temp completion iff its source was introduced by an inode-creating
+/// op (`mkfile`/`mkdir`/`symlink`) on a temp-shaped name earlier in this
+/// stream; only those completions populate the rename map.
 /// Phase 2 emits entries with precedence dedup (Renamed > Added > Deleted > Modified).
 fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
     let mut snapshot_prefix = String::new();
+    // Kernel temp refs (o<id>-<gen>-<idx>) actually introduced by this
+    // stream. The name shape alone proves nothing — a real user file can be
+    // named `o7-3-1` — so only paths an inode-creating op created on a
+    // temp-shaped name are recorded here.
+    let mut observed_temp_paths: HashSet<String> = HashSet::new();
     let mut rename_map: HashMap<String, String> = HashMap::new();
     let mut link_pairs: Vec<(String, String)> = Vec::new();
     let mut unlinked: HashSet<String> = HashSet::new();
@@ -1488,9 +1496,25 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             if let Some(name) = rest.split_whitespace().next() {
                 snapshot_prefix = format!("{}/", name);
             }
+        } else if let Some(rest) = line
+            .strip_prefix("mkfile")
+            .or_else(|| line.strip_prefix("mkdir"))
+            .or_else(|| line.strip_prefix("symlink"))
+        {
+            // Inode-creating op: a temp-shaped target is an observed kernel
+            // temp ref, eligible for the temp-completion renames below.
+            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            if is_btrfs_temp_ref(&path) {
+                observed_temp_paths.insert(path);
+            }
         } else if let Some(rest) = line.strip_prefix("rename") {
             if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
-                rename_map.insert(src, dst);
+                // A temp completion rewrites later ops recorded against the
+                // temp name; every other rename is a real user rename that
+                // must not rewrite its (still valid) source path.
+                if observed_temp_paths.contains(&src) {
+                    rename_map.insert(src, dst);
+                }
             }
         } else if let Some(rest) = line.strip_prefix("link") {
             if let Some((new_real, dest_path)) = parse_dest_pair(rest, &snapshot_prefix) {
@@ -1581,9 +1605,10 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
                 Some("directory".to_string()),
             );
         } else if let Some(rest) = line.strip_prefix("rename") {
-            // temp→real renames are folded via rename_map; only emit the rest.
+            // Observed temp completions are folded via rename_map; every
+            // other rename is a real user rename and is reported.
             if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
-                if !is_btrfs_temp_ref(&src) {
+                if !rename_map.contains_key(&src) {
                     insert_dedup(
                         &mut seen,
                         &mut entries,
@@ -1598,10 +1623,10 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             let path = resolve_path(rest, &snapshot_prefix, &rename_map);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("write") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("truncate") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         }
         // Skip metadata-only ops: utimes, chown, chmod, set_xattr, remove_xattr, clone.
@@ -1681,8 +1706,11 @@ fn strip_snap_prefix(path: &str, prefix: &str) -> String {
     path.strip_prefix(prefix).unwrap_or(path).to_string()
 }
 
-/// Check whether a path's filename is a btrfs internal temporary inode
-/// reference (e.g. `o261-118-0` from the `btrfs send` stream).
+/// Check whether a path's filename matches the shape of a btrfs internal
+/// temporary inode reference (e.g. `o261-118-0` from the `btrfs send`
+/// stream). The shape alone does not prove the name IS a kernel temp ref —
+/// a user file can legitimately be named this way; callers must pair it
+/// with a creation of that path observed in the same stream.
 fn is_btrfs_temp_ref(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     if !name.starts_with('o') || name.len() < 4 {
@@ -2563,6 +2591,49 @@ Data+Metadata,single: Size: 2000, Used: 1900
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
+    }
+
+    // A file recreated at a real rename's old path is a NEW Added entry;
+    // the rename must not rewrite later ops on its source path.
+    #[test]
+    fn parse_btrfs_diff_output_keeps_recreated_source_path_of_rename() {
+        let output = "snapshot  ./msg1-step1  uuid=abc transid=42\n\
+                      rename    ./msg1-step1/a  dest=./msg1-step1/b\n\
+                      mkfile    ./msg1-step1/a\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 2, "entries: {:?}", entries);
+        assert_eq!(entries[0].change_type, ChangeType::Renamed);
+        assert_eq!(entries[0].path, "b");
+        assert_eq!(entries[0].detail.as_deref(), Some("a → b"));
+        assert_eq!(entries[1].change_type, ChangeType::Added);
+        assert_eq!(entries[1].path, "a");
+    }
+
+    // A truncate recorded against the temp inode must resolve to the real
+    // path, not leak an entry literally named after the temp ref.
+    #[test]
+    fn parse_btrfs_diff_output_resolves_truncate_through_rename_map() {
+        let output = "snapshot  ./msg1-step1  uuid=abc transid=42\n\
+                      mkfile    ./msg1-step1/o261-118-0\n\
+                      truncate  ./msg1-step1/o261-118-0\n\
+                      rename    ./msg1-step1/o261-118-0  dest=./msg1-step1/real.txt\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].path, "real.txt");
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+    }
+
+    // A rename whose source merely LOOKS like a temp ref is a real user
+    // rename and must be reported, not dropped as noise.
+    #[test]
+    fn parse_btrfs_diff_output_reports_rename_of_real_temp_pattern_file() {
+        let output = "snapshot  ./msg1-step1  uuid=abc transid=42\n\
+                      rename    ./msg1-step1/o7-3-1  dest=./msg1-step1/renamed.txt\n";
+        let entries = parse_btrfs_diff_output(output);
+        assert_eq!(entries.len(), 1, "entries: {:?}", entries);
+        assert_eq!(entries[0].change_type, ChangeType::Renamed);
+        assert_eq!(entries[0].path, "renamed.txt");
+        assert_eq!(entries[0].detail.as_deref(), Some("o7-3-1 → renamed.txt"));
     }
 
     #[test]
