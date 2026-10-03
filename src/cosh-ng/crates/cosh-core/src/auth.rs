@@ -1,5 +1,7 @@
+use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 
 use crate::config::{CoreConfig, ProviderConfig};
 use crate::protocol::{AuthField, AuthProvider};
@@ -520,9 +522,32 @@ pub(crate) fn remove_auth_provider(
     })
 }
 
+/// Matches an HTTP auth-failure status with an error/status context anchor.
+///
+/// Word boundaries alone cannot tell `status code 401` from `line 3 column
+/// 401` — both are standalone tokens — so each alternative binds the number
+/// to an HTTP/error context: `error`/`status`/`http` shortly before it, or
+/// `unauthorized`/`forbidden` as a token on either side. Transport errors
+/// that merely embed byte counts, line/column numbers, ports, and durations
+/// (`connection reset after 14032 bytes`, `expected value at line 3 column
+/// 401`) then stay classified as request failures, which is the residual
+/// cost of a false positive on current `main` since `8d024d806`: the audit
+/// log would record `auth_error`/`provider_auth_error` instead of
+/// `request_error`/`provider_request_error`.
+fn auth_error_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(
+            r"(?i)(\b(?:unauthorized|forbidden)\b|error\D{0,20}\b40[13]\b|\b40[13]\b\D{0,20}\b(?:unauthorized|forbidden)\b|status\D{0,12}\b40[13]\b|http\D{0,8}\b40[13]\b)",
+        )
+        .unwrap_or_else(|_| unreachable!("static auth error pattern must compile"))
+    })
+}
+
 /// Check if an error string indicates an auth failure (401/403).
 pub fn is_auth_error(error: &str) -> bool {
-    error.contains("401") || error.contains("403") || error.contains("Unauthorized")
+    auth_error_pattern().is_match(error)
 }
 
 #[cfg(test)]
@@ -1117,10 +1142,45 @@ mod tests {
     }
 
     #[test]
-    fn is_auth_error_detects_401() {
+    fn is_auth_error_detects_auth_failures() {
         assert!(is_auth_error("API error 401: invalid api key"));
         assert!(is_auth_error("HTTP 403 Forbidden"));
+        assert!(is_auth_error("401 Unauthorized"));
+        assert!(is_auth_error("status code 403"));
         assert!(is_auth_error("Unauthorized access"));
+        assert!(is_auth_error("request failed: UNAUTHORIZED"));
+        // The pre-existing negative: an unrelated server error is a request
+        // failure, not a credential failure.
         assert!(!is_auth_error("API error 500: internal server error"));
+    }
+
+    #[test]
+    fn is_auth_error_rejects_embedded_numbers_in_transport_errors() {
+        // Byte counts, column numbers, ports, frame sizes, durations: each
+        // contains "401"/"403" as a substring but is a transport failure,
+        // not a credential failure — a false positive mislabels the audit
+        // event as auth_error/provider_auth_error instead of
+        // request_error/provider_request_error.
+        for error in [
+            "error decoding response body: expected value at line 3 column 401",
+            "connection reset after 14032 bytes",
+            "tcp connect error: connect() to 10.0.0.7:4013 failed",
+            "stream error: frame exceeded 3401 bytes",
+            "request completed in 403ms but response body was empty",
+            "HTTP header size 8401 bytes exceeds limit",
+        ] {
+            assert!(
+                !is_auth_error(error),
+                "transport error misclassified as auth: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_auth_error_rejects_unrelated_errors_and_lookalikes() {
+        assert!(!is_auth_error("connection refused"));
+        assert!(!is_auth_error("timeout after 30s"));
+        // `authorization` must not match the `unauthorized` token.
+        assert!(!is_auth_error("missing authorization header"));
     }
 }
