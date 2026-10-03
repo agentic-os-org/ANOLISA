@@ -1161,6 +1161,10 @@ jobs:
         run: |
           bash distribution/anolisa/tests/test-install-chmod-scope.sh
 
+      - name: Validate strict install checksums
+        run: |
+          bash distribution/anolisa/tests/test-install-strict-checksums.sh
+
       - name: Check formatting
         run: |
           cd distribution/anolisa

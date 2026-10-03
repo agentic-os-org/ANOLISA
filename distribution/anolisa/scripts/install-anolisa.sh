@@ -12,7 +12,9 @@
 #      copying from --from-local / auto-checkout, OR by curl + tar from URLs
 #      into the staging root (never the final prefix).
 #   4. Verify SHAs of bin/bundle against env-provided values when set;
-#      refuse under --strict if any are unset (URL-fetch only).
+#      refuse under --strict if a fetch this run performs has no checksum
+#      (url-fetch: bin + bundle, unless --dry-run makes it plan-only;
+#      local staging with an explicit ANOLISA_BIN_URL: bin).
 #   5. If --dry-run: print "would promote $STAGING_ROOT → $PREFIX", list
 #      planned files, exit 0 WITHOUT touching $PREFIX.
 #   6. Otherwise: promote $STAGING_ROOT into $PREFIX via `cp -a` (merging
@@ -74,8 +76,10 @@
 #
 # What --strict enforces:
 #
-#   * Every `ANOLISA_*_SHA256` env above must be set in URL-fetch mode
-#     (hard error otherwise).
+#   * Every fetch this run performs must have its `ANOLISA_*_SHA256` env set
+#     (hard error otherwise): url-fetch mode fetches the manifest bundle and
+#     the binary unless --dry-run makes it plan-only; local staging fetches
+#     the binary too when ANOLISA_BIN_URL is set explicitly.
 #
 # Pipe-safe:
 #   The script never reads from stdin (no interactive prompts), so
@@ -139,9 +143,13 @@ Options:
                           * URL-fetch: PLAN-ONLY. Prints resolved URLs and the
                             planned operations, then exits 0 WITHOUT curl or
                             tar (use a local-mode dry-run for that).
-  --strict              Refuse to finish if checksums are missing: any unset
-                        ANOLISA_*_SHA256 env in URL-fetch mode is a hard
-                        error (binary / manifest bundle).
+  --strict              Refuse to finish if checksums are missing: an unset
+                        ANOLISA_*_SHA256 env for any fetch this run performs
+                        (binary / manifest bundle) is a hard error. A
+                        URL-fetch plan-only --dry-run performs no fetch, and
+                        the binary counts whenever it is fetched, including
+                        via an explicit ANOLISA_BIN_URL in local-staging
+                        modes.
   -h, --help            Show this help text and exit.
 
 Environment overrides:
@@ -293,12 +301,18 @@ ANOLISA_BIN_URL="${ANOLISA_BIN_URL:-$(default_bin_url)}"
 ANOLISA_MANIFEST_BUNDLE_URL="${ANOLISA_MANIFEST_BUNDLE_URL:-$(default_manifest_bundle_url)}"
 
 # In strict mode we require checksum envs *for whichever fetches we will
-# actually perform*. In from-local / auto-checkout modes nothing is fetched
-# so the checksum envs are not required.
-if [ "$STRICT" -eq 1 ] && [ "$MODE" = "url-fetch" ]; then
+# actually perform*. url-fetch + --dry-run is plan-only and performs no fetch
+# at all, so it needs none; url-fetch otherwise fetches the manifest bundle
+# and the binary; local staging fetches the binary only when ANOLISA_BIN_URL
+# is set explicitly (stage_bin_from_url warns "pass --strict to refuse").
+if [ "$STRICT" -eq 1 ]; then
   missing=()
-  [ -z "${ANOLISA_BIN_SHA256:-}" ] && missing+=("ANOLISA_BIN_SHA256")
-  [ -z "${ANOLISA_MANIFEST_BUNDLE_SHA256:-}" ] && missing+=("ANOLISA_MANIFEST_BUNDLE_SHA256")
+  if [ "$MODE" = "url-fetch" ] && [ "$DRY_RUN" -eq 0 ]; then
+    [ -z "${ANOLISA_BIN_SHA256:-}" ] && missing+=("ANOLISA_BIN_SHA256")
+    [ -z "${ANOLISA_MANIFEST_BUNDLE_SHA256:-}" ] && missing+=("ANOLISA_MANIFEST_BUNDLE_SHA256")
+  elif [ "$MODE" != "url-fetch" ] && [ "$ANOLISA_BIN_URL_EXPLICIT" -eq 1 ]; then
+    [ -z "${ANOLISA_BIN_SHA256:-}" ] && missing+=("ANOLISA_BIN_SHA256")
+  fi
   if [ "${#missing[@]}" -gt 0 ]; then
     err "--strict mode requires checksum envs to be set:"
     for v in "${missing[@]}"; do
