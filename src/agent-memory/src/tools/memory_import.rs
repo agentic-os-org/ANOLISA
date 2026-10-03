@@ -341,6 +341,41 @@ mod tests {
     }
 
     #[test]
+    fn export_import_roundtrip_keeps_body_verbatim() {
+        // End-to-end regression: the exported body kept the blank separator
+        // line after the fence, and import re-inserts that separator, so the
+        // imported file gained one blank line per round trip.
+        use crate::config::AppConfig;
+        use crate::tools::memory_export::{ExportFilter, memory_export};
+
+        fn setup() -> (tempfile::TempDir, MemoryService) {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = AppConfig::default();
+            config.memory.paths.base_dir = tmp.path().to_string_lossy().to_string();
+            config.memory.index.enabled = false;
+            config.memory.git.enabled = false;
+            config.memory.consolidation.enabled = false;
+            config.memory.session.base_dir =
+                tmp.path().join("sessions").to_string_lossy().to_string();
+            let svc = MemoryService::new(config).unwrap();
+            (tmp, svc)
+        }
+
+        let (_t1, svc1) = setup();
+        let original = "---\nid: n1\ncategory: note\n---\n\nThe user prefers tabs.\n";
+        std::fs::write(svc1.mount.root.join("note.md"), original).unwrap();
+
+        let json = memory_export(&svc1, &ExportFilter::default()).unwrap();
+
+        let (_t2, svc2) = setup();
+        memory_import(&svc2, &json, ImportStrategy::Merge, false).unwrap();
+
+        let imported = std::fs::read_to_string(svc2.mount.root.join("note.md")).unwrap();
+        let body = imported.split_once("---\n\n").expect("fence").1;
+        assert_eq!(body, "The user prefers tabs.\n");
+    }
+
+    #[test]
     fn import_strategy_parse() {
         assert_eq!(
             ImportStrategy::parse("merge").unwrap(),

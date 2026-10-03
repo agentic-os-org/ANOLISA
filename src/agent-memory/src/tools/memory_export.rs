@@ -87,7 +87,12 @@ fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     if let Some(rest) = content.strip_prefix("---\n") {
         if let Some(end) = rest.find("\n---\n") {
             let fm_str = &rest[..end];
-            body = rest[end + 5..].to_string();
+            // The blank line after the closing fence belongs to the
+            // delimiter; import's reconstruct_markdown re-inserts it, so
+            // keeping it in the body would grow the body on every
+            // export→import round trip.
+            let raw_body = &rest[end + 5..];
+            body = raw_body.strip_prefix('\n').unwrap_or(raw_body).to_string();
             let mut current_list_key: Option<String> = None;
             let mut current_list_items: Vec<String> = Vec::new();
             for line in fm_str.lines() {
@@ -261,5 +266,17 @@ mod tests {
         assert_eq!(fm.get("title").unwrap(), "Test");
         assert!(fm.contains_key("next_steps"));
         assert!(body.contains("Body"));
+    }
+
+    #[test]
+    fn parse_frontmatter_excludes_separator_blank_line() {
+        // The blank line after the closing fence is part of the delimiter
+        // that import's reconstruct_markdown re-inserts; leaking it into
+        // the body makes every export→import round trip grow the body by
+        // one more blank line.
+        let content = "---\nid: abc\n---\n\nThe body.\n";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc");
+        assert_eq!(body, "The body.\n");
     }
 }
