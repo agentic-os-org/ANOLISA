@@ -105,6 +105,10 @@ fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
         ("HISTSIZE", "1000"),
         ("HISTFILESIZE", "1000"),
         ("PROMPT_COMMAND", ""),
+        // glibc gettext lets LANGUAGE win over LC_ALL unless the locale is
+        // C/POSIX; an empty value is treated as unset, which keeps shell
+        // diagnostics English on hosts exporting a non-English LANGUAGE.
+        ("LANGUAGE", ""),
     ] {
         if !config
             .env_overrides
