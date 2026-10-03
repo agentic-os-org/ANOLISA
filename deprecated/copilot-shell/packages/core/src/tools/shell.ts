@@ -662,7 +662,7 @@ export class ShellTool extends BaseDeclarativeTool<
 
       const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
       const isWithinWorkspace = workspaceDirs.some((wsDir) =>
-        params.directory!.startsWith(wsDir),
+        isSubpath(wsDir, resolvedDirectoryPath),
       );
 
       if (!isWithinWorkspace) {
