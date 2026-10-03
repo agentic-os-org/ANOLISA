@@ -100,7 +100,16 @@ async fn adopt_existing_subvol(
                     ws_id
                 );
                 index = rebuilt;
-                let _ = index_store::save(&snap_dir, &index).await;
+                // A failed save leaves the recovered metadata only in
+                // memory, so the same recovery repeats on every re-adoption
+                // — surface it instead of dropping it silently.
+                if let Err(error) = index_store::save(&snap_dir, &index).await {
+                    warn!(
+                        "Failed to persist recovered index for {}: {error}; \
+                         recovery will repeat on next re-adoption",
+                        ws_id
+                    );
+                }
             }
         }
     }
