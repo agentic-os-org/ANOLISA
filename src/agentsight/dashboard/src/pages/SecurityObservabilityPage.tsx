@@ -101,7 +101,17 @@ export const SecurityObservabilityPage: React.FC = () => {
   // `loadRequestIdRef` on the agent-health and reuse-labels pages.
   const overviewRequestIdRef = useRef(0);
   const eventsRequestIdRef = useRef(0);
+  // `securitySessions` is written by BOTH loadOverview (its allSettled batch
+  // fetches sessions for the overview cards) and loadSessions, so the two
+  // writers must share one invalidation boundary: whichever of them is issued
+  // last wins, otherwise an older loadSessions response can still land after
+  // a newer overview batch has already refreshed the session list for the
+  // active time range.
   const sessionsRequestIdRef = useRef(0);
+  // Event detail is fetched per click on the events tab; rapid clicks A → B
+  // race, and if A's response resolves last the drawer shows B's header with
+  // A's body. Only the newest click may write the detail state.
+  const eventDetailRequestIdRef = useRef(0);
 
   const isAvailable = isSecurityAvailableState(status?.state);
   const rangeParams: SecurityTimeRangeParams = useMemo(() => ({
@@ -131,6 +141,10 @@ export const SecurityObservabilityPage: React.FC = () => {
 
   const loadOverview = useCallback(async () => {
     const requestId = ++overviewRequestIdRef.current;
+    // This batch includes a sessions fetch that writes `securitySessions`, so
+    // it takes the shared sessions token as well: an in-flight loadSessions
+    // from before the range change must not survive this newer request.
+    const sessionsRequestId = ++sessionsRequestIdRef.current;
     setOverviewLoading(true);
     setOverviewError(null);
     const results = await Promise.allSettled([
@@ -165,10 +179,17 @@ export const SecurityObservabilityPage: React.FC = () => {
     collect(results[5] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>>, setRecentEvents);
     const sessionResult = collect(
       results[6] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecuritySessionSummary>>>,
-      setSecuritySessions,
+      (value) => {
+        // Share the sessions invalidation boundary with loadSessions: if a
+        // newer session-writing request was issued while this batch was in
+        // flight, drop this write instead of overwriting the newer range.
+        if (sessionsRequestId === sessionsRequestIdRef.current) {
+          setSecuritySessions(value);
+        }
+      },
     );
 
-    if (sessionResult) {
+    if (sessionResult && sessionsRequestId === sessionsRequestIdRef.current) {
       const ids = new Set(sessionResult.data.items.map((session) => session.session_id));
       setSelectedSessionId((current) => current && ids.has(current)
         ? current
@@ -230,15 +251,22 @@ export const SecurityObservabilityPage: React.FC = () => {
   }, [isAvailable, rangeParams, t]);
 
   const loadEventDetail = useCallback(async (eventId: string) => {
+    const requestId = ++eventDetailRequestIdRef.current;
     setEventDetailLoading(true);
     setEventDetailError(null);
     setEventDetail(null);
     try {
-      setEventDetail(await fetchSecurityEvent(eventId));
+      const response = await fetchSecurityEvent(eventId);
+      if (requestId !== eventDetailRequestIdRef.current) return;
+      setEventDetail(response);
     } catch (error) {
-      setEventDetailError(errorMessage(error, t));
+      if (requestId === eventDetailRequestIdRef.current) {
+        setEventDetailError(errorMessage(error, t));
+      }
     } finally {
-      setEventDetailLoading(false);
+      if (requestId === eventDetailRequestIdRef.current) {
+        setEventDetailLoading(false);
+      }
     }
   }, [t]);
 

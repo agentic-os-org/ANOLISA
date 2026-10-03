@@ -68,9 +68,23 @@ export const SkillMetricsPage: React.FC = () => {
   }, [loadData]);
 
   useEffect(() => {
+    // Every time-range change re-issues this request, so responses can
+    // interleave: if the older range's response resolves last, setAgents
+    // would overwrite the newer range's list with agents that may not exist
+    // under it, and the dropdown would offer choices that return empty
+    // reports. The cleanup flag drops responses from superseded ranges —
+    // same shape as the session-events effect on the security page.
+    let cancelled = false;
     const startNs = startMs * 1_000_000;
     const endNs = endMs * 1_000_000;
-    fetchAgentNames(startNs, endNs).then(setAgents).catch(() => {});
+    fetchAgentNames(startNs, endNs)
+      .then((names) => {
+        if (!cancelled) setAgents(names);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [startMs, endMs]);
 
   return (

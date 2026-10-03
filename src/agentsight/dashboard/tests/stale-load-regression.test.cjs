@@ -45,6 +45,13 @@ test('skill-metrics: the filter-driven loader drops stale responses', () => {
   // The error banner and the loading flag belong to the newest request too.
   const gated = source.match(/requestId === loadRequestIdRef\.current/g) ?? [];
   assert.ok(gated.length >= 2, 'SkillMetricsPage: catch and finally must both be gated');
+
+  // The agent-list effect re-fires on every time-range change; its cleanup
+  // must drop responses from superseded ranges.
+  assert.match(source, /fetchAgentNames\(startNs, endNs\)[\s\S]{0,200}if \(!cancelled\) setAgents\(names\);/,
+    'SkillMetricsPage: the agent-list write must be gated on the effect cleanup flag');
+  assert.match(source, /return \(\) => \{\s*cancelled = true;\s*\};/,
+    'SkillMetricsPage: the agent-list effect must cancel in-flight responses on cleanup');
 });
 
 test('agent-sessions: the range loader and its 10 s poll drop stale responses', () => {
@@ -101,4 +108,35 @@ test('security-observability: overview, events, and sessions loaders drop stale 
     ],
     'SecurityObservabilityPage.loadSessions',
   );
+
+  // `securitySessions` is written by both loadOverview's batch and
+  // loadSessions, so the two writers must share the sessions token: the
+  // overview batch takes the shared token before its fetches and gates the
+  // sessions write (and the selectedSessionId follow-up) on it.
+  const overviewTakesSharedToken = source.indexOf('const sessionsRequestId = ++sessionsRequestIdRef.current;');
+  const overviewBatchFetch = source.indexOf('const results = await Promise.allSettled');
+  const guardedSessionsWrite = source.indexOf('if (sessionsRequestId === sessionsRequestIdRef.current)');
+  assert.ok(
+    overviewTakesSharedToken >= 0 && overviewTakesSharedToken < overviewBatchFetch,
+    'loadOverview must take the shared sessions token before issuing its batch',
+  );
+  assert.ok(
+    guardedSessionsWrite > overviewBatchFetch,
+    'loadOverview must gate its securitySessions write on the shared sessions token',
+  );
+
+  // Event detail races between rapid clicks; only the newest click may write.
+  assert.match(source, /const eventDetailRequestIdRef = useRef\(0\);/);
+  assertGuardOrdering(
+    source,
+    'eventDetailRequestIdRef',
+    [
+      'const response = await fetchSecurityEvent(eventId);',
+      'if (requestId !== eventDetailRequestIdRef.current) return;',
+      'setEventDetail(response);',
+    ],
+    'SecurityObservabilityPage.loadEventDetail',
+  );
+  const gatedDetail = source.match(/requestId === eventDetailRequestIdRef\.current/g) ?? [];
+  assert.ok(gatedDetail.length >= 2, 'SecurityObservabilityPage: detail catch and finally must both be gated');
 });
