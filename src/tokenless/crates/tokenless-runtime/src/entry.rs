@@ -220,6 +220,10 @@ pub(crate) fn before_model_with_store(
             stash_size: None,
         }
     };
+    // Stash errors are fatal for BeforeModel, but only AFTER the
+    // disposition ladder above has run: finish_schema_compression is what
+    // rolls back the rows written before the failure. Returning earlier
+    // would leak them with no marker ever emitted.
     if let Some(count) = compression.stash_errors.filter(|count| *count > 0) {
         return Err(RuntimeError::StashWrite { count });
     }
@@ -1729,6 +1733,200 @@ mod tests {
             1
         );
         assert!(!outcome.artifact_keys.is_empty());
+    }
+
+    /// Delegates to InMemoryStore but fails the SECOND stash call — the
+    /// mid-run partial-failure shape (first tool's row already written).
+    struct FailAfterFirstStore {
+        inner: InMemoryStore,
+        stashes: AtomicUsize,
+    }
+
+    impl StashStore for FailAfterFirstStore {
+        fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+            if self.stashes.fetch_add(1, Ordering::Relaxed) >= 1 {
+                return Err(StashError::Backend("second write fails".into()));
+            }
+            self.inner.stash(payload)
+        }
+
+        fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+            self.inner.retrieve(hash)
+        }
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+
+        fn evict_expired(&self) -> Result<usize, StashError> {
+            self.inner.evict_expired()
+        }
+
+        fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
+            self.inner.delete(hash, generation)
+        }
+    }
+
+    fn long_tool(name: &str) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": format!("long {name} description ").repeat(100),
+                "parameters": {"type": "object", "properties": {}}
+            }
+        })
+    }
+
+    #[test]
+    fn before_model_stash_write_failure_rolls_back_and_surfaces_the_error() {
+        // Two tools whose descriptions both truncate; the store fails the
+        // second write. The first tool's row must be rolled back (it has no
+        // marker) and the error surfaced — a refactor that returns the error
+        // before the rollback leaks one row.
+        let concrete = Arc::new(FailAfterFirstStore {
+            inner: InMemoryStore::new(),
+            stashes: AtomicUsize::new(0),
+        });
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let request = BeforeModelRequest {
+            tools: vec![long_tool("read"), long_tool("write")],
+            visible_context: json!({"messages": []}),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                recovery: RecoveryMethod::tool("tenant_retrieve").unwrap(),
+            },
+        };
+        let result = before_model_with_store(&request, &options(), Some(&store));
+        match result {
+            Err(RuntimeError::StashWrite { count }) => assert_eq!(count, 1),
+            Err(other) => panic!("expected StashWrite, got another error: {other}"),
+            Ok(_) => panic!("expected StashWrite, got Ok"),
+        }
+        assert_eq!(
+            concrete.len(),
+            0,
+            "the first tool's already-written row must be rolled back"
+        );
+    }
+
+    #[test]
+    fn before_model_without_a_store_emits_original_tools() {
+        // Tool recovery declared but no store available (the production
+        // shape when the stash DB cannot be opened): the host must receive
+        // the ORIGINAL untruncated tools, never a lossy schema.
+        let request = BeforeModelRequest {
+            tools: vec![long_tool("read"), long_tool("write")],
+            visible_context: json!({"messages": []}),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                recovery: RecoveryMethod::tool("tenant_retrieve").unwrap(),
+            },
+        };
+        let outcome = before_model_with_store(&request, &options(), None).unwrap();
+        assert_eq!(
+            outcome.stats.disposition,
+            Disposition::RecoverabilityUnavailable
+        );
+        assert_eq!(
+            serde_json::to_string(&outcome.response.tools).unwrap(),
+            serde_json::to_string(&request.tools).unwrap(),
+            "no store means never emit lossy schemas"
+        );
+        assert!(outcome.artifact_keys.is_empty());
+        assert_eq!(outcome.stats.recoverability, Recoverability::Lossless);
+    }
+
+    #[test]
+    fn before_model_dry_run_emits_original_tools_and_never_touches_the_store() {
+        // compression_enabled=false: the measured candidate is reported but
+        // the caller's store is never written.
+        let concrete = Arc::new(ReadCountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut opts = options();
+        opts.compression_enabled = false;
+        let request = BeforeModelRequest {
+            tools: vec![long_tool("read")],
+            visible_context: json!({"messages": []}),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                recovery: RecoveryMethod::tool("tenant_retrieve").unwrap(),
+            },
+        };
+        let outcome = before_model_with_store(&request, &opts, Some(&store)).unwrap();
+        assert_eq!(outcome.stats.disposition, Disposition::DryRun);
+        assert_eq!(
+            serde_json::to_string(&outcome.response.tools).unwrap(),
+            serde_json::to_string(&request.tools).unwrap()
+        );
+        assert_eq!(concrete.len(), 0, "dry run must not write the store");
+        assert!(
+            outcome.stats.measured_output.len()
+                < serde_json::to_string(&request.tools).unwrap().len(),
+            "the measured candidate must still be reported"
+        );
+    }
+
+    #[test]
+    fn before_model_applied_emitted_markers_authorize_retrieve_of_verbatim_originals() {
+        // End-to-end: every emitted marker in response.tools authorizes a
+        // retrieve of the verbatim original description, and the rows
+        // survive because the rollback session was cleared on emit. One
+        // marker is quoted back in UPPERCASE to pin case normalization.
+        let concrete = Arc::new(ReadCountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let originals: Vec<String> = ["read", "write"]
+            .iter()
+            .map(|name| {
+                serde_json::to_string(&long_tool(name))
+                    .unwrap()
+                    .parse::<Value>()
+                    .unwrap()["function"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let request = BeforeModelRequest {
+            tools: vec![long_tool("read"), long_tool("write")],
+            visible_context: json!({"messages": []}),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                recovery: RecoveryMethod::tool("tenant_retrieve").unwrap(),
+            },
+        };
+        let outcome = before_model_with_store(&request, &options(), Some(&store)).unwrap();
+        assert_eq!(outcome.stats.disposition, Disposition::Applied);
+        assert_eq!(concrete.len(), 2, "both rows survive the clear-on-emit");
+        assert_eq!(outcome.artifact_keys.len(), 2);
+        assert_eq!(outcome.stats.recoverability, Recoverability::Retrievable);
+
+        for (index, key) in outcome.artifact_keys.iter().enumerate() {
+            let quoted = if index == 0 {
+                key.to_ascii_uppercase()
+            } else {
+                key.clone()
+            };
+            let restored = retrieve_authorized_with_store(
+                &RetrieveRequest {
+                    hash_or_marker: quoted,
+                    visible_markers: outcome.response.visible_markers.clone(),
+                },
+                Some(&store),
+                None,
+                &Attribution::new("test"),
+                "test",
+            )
+            .unwrap();
+            assert_eq!(
+                restored.payload, originals[index],
+                "retrieve must return the verbatim original description"
+            );
+            assert!(
+                !restored.payload.contains("tokenless retrieve"),
+                "the payload is the original, not a retrieval instruction"
+            );
+        }
     }
 
     #[test]
