@@ -216,7 +216,17 @@ def audit_quality(sheets: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def compute_stats(sheets: dict) -> dict:
-    """Compute descriptive statistics for numeric columns per sheet."""
+    """Compute descriptive statistics for numeric columns per sheet.
+
+    Non-computable statistics (NaN, e.g. the std of a single value) are
+    mapped to None so json.dumps emits null instead of the bare NaN
+    token, which is invalid JSON per RFC 8259.
+    """
+    import math
+
+    def none_if_nan(value):
+        return None if isinstance(value, float) and math.isnan(value) else value
+
     stats = {}
     for sheet_name, df in sheets.items():
         numeric_df = df.select_dtypes(include="number")
@@ -224,7 +234,10 @@ def compute_stats(sheets: dict) -> dict:
             stats[sheet_name] = {}
             continue
         desc = numeric_df.describe().round(4)
-        stats[sheet_name] = desc.to_dict()
+        stats[sheet_name] = {
+            col: {stat: none_if_nan(value) for stat, value in col_stats.items()}
+            for col, col_stats in desc.to_dict().items()
+        }
     return stats
 
 
