@@ -276,6 +276,14 @@ fn get_sandbox(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes
 async fn create_sandbox(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
     let req: CreateInstanceReq = serde_json::from_slice(body)
         .map_err(|e| BlazeDaemonError::BadRequest(format!("invalid create body: {e}")))?;
+    // Every checkpoint and hibernation manifest requires a non-empty image
+    // identity, so a sandbox created without one could never be captured.
+    // Reject the request instead of returning a sandbox that fails later.
+    if req.image_digest.trim().is_empty() {
+        return Err(BlazeDaemonError::BadRequest(
+            "image_digest is required".to_string(),
+        ));
+    }
 
     let image = ImageMetadata {
         digest: req.image_digest.clone(),
@@ -1646,6 +1654,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(destroyed["destroyed"], true);
         assert_eq!(destroyed["instance_id"], id);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_an_empty_image_identity() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+
+        for image_digest in ["", "   "] {
+            let error = create_sandbox(
+                &state,
+                &serde_json::to_vec(&json!({
+                    "workload_class": "agent-tool",
+                    "image_digest": image_digest,
+                }))
+                .expect("create request"),
+            )
+            .await
+            .expect_err(
+                "an image identity that the checkpoint model rejects must not create a sandbox",
+            );
+
+            assert!(matches!(error, BlazeDaemonError::BadRequest(_)), "{error}");
+            assert_eq!(error.status_code(), 400);
+        }
+        assert!(state.instances.lock().expect("instances").is_empty());
     }
 
     #[tokio::test]
