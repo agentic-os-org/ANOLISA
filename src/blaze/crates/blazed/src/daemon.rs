@@ -135,6 +135,7 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
 
     let socket_path = config.daemon.socket.clone();
     let http_addr = config.listen.http_addr.clone();
+    let metrics_socket = config.metrics.prometheus_socket.clone();
     let state = Arc::new(ServerState::build_with_store(
         config,
         policy,
@@ -180,7 +181,27 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
         None
     };
 
-    serve(listener, tcp_listener, state, sync_schedule, sync_timeout).await
+    // Prometheus scrape socket ([metrics].prometheus_socket) — the option is
+    // parsed and shipped in examples/config.toml, so the daemon must actually
+    // serve it. Same stale-socket handling as the API socket above.
+    if metrics_socket.exists() {
+        std::fs::remove_file(&metrics_socket)?;
+    }
+    if let Some(parent) = metrics_socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let metrics_listener = UnixListener::bind(&metrics_socket)?;
+    tracing::info!(socket = %metrics_socket.display(), "blaze metrics socket listening");
+
+    serve(
+        listener,
+        tcp_listener,
+        metrics_listener,
+        state,
+        sync_schedule,
+        sync_timeout,
+    )
+    .await
 }
 
 fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
@@ -323,6 +344,7 @@ fn load_policy_engine(
 async fn serve(
     uds: UnixListener,
     tcp: Option<TcpListener>,
+    metrics_uds: UnixListener,
     state: Arc<ServerState>,
     sync_schedule: StorageSyncSchedule,
     sync_timeout: Duration,
@@ -361,6 +383,16 @@ async fn serve(
                     }
                 };
                 spawn_conn(TokioIo::new(stream), state.clone());
+            }
+            res = metrics_uds.accept() => {
+                let (stream, _peer) = match res {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error = %e, "metrics socket accept failed");
+                        continue;
+                    }
+                };
+                spawn_metrics_conn(TokioIo::new(stream), Arc::clone(&state.metrics));
             }
             res = async { match &tcp { Some(l) => l.accept().await, None => std::future::pending().await }}, if tcp.is_some() => {
                 let (stream, peer) = match res {
@@ -441,6 +473,25 @@ where
     });
 }
 
+/// Serve one connection on the Prometheus scrape socket: every request gets
+/// the exposition text, mirroring the `GET /v1/metrics` API route so the two
+/// surfaces can never drift apart.
+fn spawn_metrics_conn<I>(io: TokioIo<I>, metrics: Arc<crate::metrics::Metrics>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let svc = service_fn(move |_req| {
+            let metrics = metrics.clone();
+            async move { api::metrics_response(&metrics) }
+        });
+        if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
+            tracing::debug!(?err, "metrics connection closed with error");
+        }
+        let _: Option<Full<Bytes>> = None;
+    });
+}
+
 fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
     let dir = {
         let cfg = state
@@ -467,6 +518,36 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     use super::*;
+
+    #[tokio::test]
+    async fn metrics_connection_serves_the_prometheus_exposition() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("metrics.sock");
+        let listener = UnixListener::bind(&path).expect("bind metrics socket");
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+
+        let mut client = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect");
+        let (stream, _) = listener.accept().await.expect("accept");
+        spawn_metrics_conn(TokioIo::new(stream), metrics);
+
+        client
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: metrics\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .await
+            .expect("read response");
+
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("text/plain; version=0.0.4"), "{response}");
+        assert!(response.contains("# TYPE blaze_"), "{response}");
+    }
 
     #[test]
     fn policy_boundary_fallback_prevents_a_later_directory_rescan() {
