@@ -39,6 +39,10 @@ anyhow = "1.0"
 
 # Terminal UI
 console = "0.15"
+# General-category classification for terminal-safe rendering, so a value built
+# from untrusted text cannot hide or reorder what an operator reads. The same
+# crate sec-core v2 uses for its capability-view escaping.
+unicode-properties = "0.1"
 
 # Data structures
 semver = "1.0"

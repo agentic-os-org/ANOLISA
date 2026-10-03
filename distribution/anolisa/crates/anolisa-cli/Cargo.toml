@@ -29,6 +29,7 @@ ureq.workspace = true
 semver.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+unicode-properties.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true

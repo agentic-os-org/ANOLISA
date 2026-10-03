@@ -34,6 +34,7 @@
 
 use clap::{ArgAction, Parser, Subcommand};
 use serde::Serialize;
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus};
@@ -560,17 +561,32 @@ fn print_notices(notices: &[AdapterNotice], dry_run: bool, quiet: bool) {
     }
 }
 
-/// Escape control characters while preserving printable Unicode text.
+/// Escape non-printable characters while preserving printable Unicode text.
 fn escape_notice_for_terminal(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        if character.is_control() {
-            escaped.extend(character.escape_default());
-        } else {
+        if printable(character) {
             escaped.push(character);
+        } else {
+            escaped.extend(character.escape_default());
         }
     }
     escaped
+}
+
+/// Mirrors Python's `str.isprintable`: the `Other` (`Cc`, `Cf`, `Cs`, `Co`,
+/// `Cn`) and `Separator` (`Zs`, `Zl`, `Zp`) general-category groups are not
+/// printable, with ASCII space kept readable. `Cf` is why `is_control` alone is
+/// not enough: a bidirectional override (U+202A..U+202E, U+2066..U+2069) or a
+/// zero-width character (U+200B..U+200F) is neither a control nor whitespace,
+/// yet a notice carrying one could reorder or hide what an operator reads on the
+/// terminal.
+fn printable(character: char) -> bool {
+    character == ' '
+        || !matches!(
+            character.general_category_group(),
+            GeneralCategoryGroup::Other | GeneralCategoryGroup::Separator
+        )
 }
 
 /// Human-facing `component/framework` label for a disable outcome, falling

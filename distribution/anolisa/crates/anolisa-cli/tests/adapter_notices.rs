@@ -288,6 +288,65 @@ fn enable_escapes_terminal_controls_only_in_human_output() {
 }
 
 #[test]
+fn enable_escapes_bidi_and_zero_width_in_human_output() {
+    let fixture = NoticeFixture::new();
+    let manifest_path = FsLayout::user_with_overrides(
+        fixture.home.clone(),
+        Some(fixture.data_home.clone()),
+        Some(fixture.config_home.clone()),
+        Some(fixture.state_home.clone()),
+        Some(fixture.cache_home.clone()),
+        Some(fixture.runtime_dir.clone()),
+    )
+    .snapshot_path(COMPONENT);
+    let manifest = MANIFEST
+        .replace(
+            "Start a new shell to load the extension.",
+            r"Set title: \u202eelbat\u200bdexif",
+        )
+        .replace("cosh --version", r"cosh \u2066--version\u2069");
+    std::fs::write(&manifest_path, manifest).expect("unsafe notice manifest");
+
+    let human = fixture.enable(&["--dry-run"]);
+    assert_success(&human);
+    let out = stdout(&human);
+    assert!(
+        !out.contains('\u{202e}'),
+        "RLO must not reach stdout: {out:?}"
+    );
+    assert!(
+        !out.contains('\u{200b}'),
+        "zero-width space must not reach stdout: {out:?}"
+    );
+    assert!(
+        !out.contains('\u{2066}') && !out.contains('\u{2069}'),
+        "bidi isolates must not reach stdout: {out:?}"
+    );
+    assert!(
+        out.contains(r"[info] Set title: \u{202e}elbat\u{200b}dexif"),
+        "{out:?}"
+    );
+    assert!(
+        out.contains(r"command: cosh \u{2066}--version\u{2069}"),
+        "{out:?}"
+    );
+
+    // `--json` carries the contract text verbatim; only the terminal
+    // rendering of a notice escapes it.
+    let json = fixture.enable(&["--json", "--dry-run"]);
+    assert_success(&json);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(
+        envelope["data"]["notices"][0]["text"],
+        "Set title: \u{202e}elbat\u{200b}dexif"
+    );
+    assert_eq!(
+        envelope["data"]["notices"][0]["command"],
+        "cosh \u{2066}--version\u{2069}"
+    );
+}
+
+#[test]
 fn enable_quiet_suppresses_notices() {
     let fixture = NoticeFixture::new();
     let output = fixture.enable(&["--quiet"]);
