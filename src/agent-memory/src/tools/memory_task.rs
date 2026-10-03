@@ -211,6 +211,9 @@ fn parse_task(content: &str) -> Result<Task> {
                 .map(|pos| (&rest[..pos], &rest[pos + 5..]))
         })
         .ok_or_else(|| MemoryError::Other("invalid task file: missing frontmatter".into()))?;
+    // `to_markdown` writes a blank separator line after the closing fence;
+    // that blank line belongs to the delimiter, not to the context.
+    let body = body.strip_prefix('\n').unwrap_or(body);
 
     // Parse frontmatter as YAML (using serde_yaml via serde_json roundtrip).
     // We use a simple line-by-line parser for the known fields since we
@@ -764,6 +767,54 @@ mod tests {
         assert_eq!(parsed.progress, 75);
         assert_eq!(parsed.next_steps.len(), 2);
         assert_eq!(parsed.files_modified.len(), 1);
+    }
+
+    #[test]
+    fn parse_task_does_not_leak_frontmatter_separator_into_context() {
+        let task = Task {
+            id: "test-id".into(),
+            title: "Test Task".into(),
+            status: TaskStatus::InProgress,
+            progress: 0,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-06-11T10:00:00Z".into(),
+            updated_at: "2026-06-11T12:00:00Z".into(),
+            context: "Some context here.".into(),
+        };
+        let md = task.to_markdown();
+        let first = parse_task(&md).unwrap();
+        assert!(
+            !first.context.starts_with('\n'),
+            "parsed context must not include the blank separator line after the frontmatter fence: {:?}",
+            first.context
+        );
+        // Saving the parsed task and re-reading it must not grow the context.
+        let second = parse_task(&first.to_markdown()).unwrap();
+        assert_eq!(second.context, first.context);
+    }
+
+    #[test]
+    fn parse_task_empty_context_stays_empty() {
+        let task = Task {
+            id: "test-id".into(),
+            title: "Test Task".into(),
+            status: TaskStatus::InProgress,
+            progress: 0,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-06-11T10:00:00Z".into(),
+            updated_at: "2026-06-11T12:00:00Z".into(),
+            context: String::new(),
+        };
+        let parsed = parse_task(&task.to_markdown()).unwrap();
+        assert_eq!(parsed.context, "");
     }
 
     #[test]
