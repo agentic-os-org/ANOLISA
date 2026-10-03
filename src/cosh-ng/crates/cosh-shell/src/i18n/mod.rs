@@ -294,14 +294,18 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsChecking as usize,
-            MessageId::ALL.len() - 12
+            MessageId::ALL.len() - 14
         );
         assert_eq!(
             MessageId::AuthEcsCancelHint as usize,
             MessageId::AuthEcsChecking as usize + 10
         );
         assert_eq!(
-            MessageId::AuthEcsRefreshing as usize + 1,
+            MessageId::StartupUpgradeHintLine as usize,
+            MessageId::AuthEcsRefreshing as usize + 1
+        );
+        assert_eq!(
+            MessageId::StartupUpgradeNoticeTitle as usize + 1,
             MessageId::ALL.len()
         );
     }

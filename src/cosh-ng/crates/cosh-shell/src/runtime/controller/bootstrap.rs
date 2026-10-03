@@ -5,6 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::approval::handoff::trust_key_from_command;
 use crate::config::parse_recommendations_environment_override;
 use crate::diagnostics::health::{spawn_startup_health_scan, startup_health_scan_enabled_for_env};
+use crate::diagnostics::upgrade::{
+    read_cached_notice, spawn_startup_upgrade_probe, startup_upgrade_check_enabled_for_env,
+};
 use crate::hooks::{
     dirs_for_hook_loading, is_trusted_project_root, load_hook_feedback_preferences,
     project_hook_root_from_cwd,
@@ -272,6 +275,14 @@ pub(crate) fn run_raw(
                     });
             }
         }
+    }
+    if startup_upgrade_check_enabled_for_env() && crate::runtime::startup::startup_banner_enabled()
+    {
+        if let Some(notice) = read_cached_notice(env!("CARGO_PKG_VERSION")) {
+            inline_state.startup_upgrade.resolved = Some(Some(notice));
+        }
+        inline_state.startup_upgrade.pending =
+            Some(spawn_startup_upgrade_probe(env!("CARGO_PKG_VERSION")));
     }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;

@@ -130,6 +130,51 @@ fn raw_cli_startup_banner_renders_when_enabled() {
 }
 
 #[test]
+fn raw_cli_startup_banner_renders_cached_upgrade_notice() {
+    let directory = temp_shell_home("startup-upgrade-cache");
+    let cache = directory.join("upgrade-check.json");
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_cosh-shell"))
+        .expect("canonical cosh-shell executable");
+    let fixture = serde_json::json!({
+        "version": 2,
+        "checked_at": 0,
+        "executable": executable,
+        "method": "anolisa",
+        "notice": {
+            "package": "cosh-ng",
+            "current": "0.1.0",
+            "latest": "99.0.0",
+            "command": "anolisa update cosh-ng"
+        }
+    });
+    fs::write(
+        &cache,
+        serde_json::to_vec(&fixture).expect("serialize upgrade cache"),
+    )
+    .expect("write upgrade cache");
+    let cache = cache.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_UPGRADE_CHECK_CACHE", &cache),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+    );
+
+    assert!(output.contains("Update available: cosh-ng"), "{output}");
+    assert!(
+        output.contains(&format!("cosh-ng {} → 99.0.0", env!("CARGO_PKG_VERSION"))),
+        "{output}"
+    );
+    assert!(!output.contains("cosh-ng 0.1.0 → 99.0.0"), "{output}");
+    assert!(output.contains("anolisa update cosh-ng"), "{output}");
+}
+
+#[test]
 fn raw_cli_startup_banner_uses_zh_language_env() {
     let output = run_raw_cli_with_env(
         "fake",

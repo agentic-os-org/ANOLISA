@@ -1,5 +1,9 @@
 use super::*;
 
+const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
+const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
+const STARTUP_UPGRADE_HINT_WAIT: Duration = Duration::from_millis(150);
+
 pub(crate) fn render_startup_banner<W: Write>(
     events: &[ShellEvent],
     adapter: &AdapterInstance,
@@ -53,6 +57,8 @@ pub(crate) fn render_startup_banner<W: Write>(
     ];
     state.startup_auth.wait_ready(STARTUP_AUTH_HINT_WAIT);
     append_startup_auth_hint(state, &mut body);
+    state.startup_upgrade.wait_ready(STARTUP_UPGRADE_HINT_WAIT);
+    append_startup_upgrade_hint(state, &mut body);
     let recommendation_notice = append_recommendation_notice(state, &mut body);
     state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
     let suggestions = prepare_startup_suggestions(state, cwd);
@@ -100,6 +106,43 @@ pub(crate) fn render_startup_banner<W: Write>(
     output.flush()
 }
 
+pub(crate) fn render_pending_upgrade_notice<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if !state.rendered_startup_banner || state.startup_upgrade.rendered {
+        return Ok(());
+    }
+    state.startup_upgrade.poll_ready();
+    let Some(notice) = state.startup_upgrade.notice().cloned() else {
+        return Ok(());
+    };
+    let i18n = state.i18n();
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let body = vec![i18n.format(
+        MessageId::StartupUpgradeHintLine,
+        &[
+            ("current", &notice.current),
+            ("latest", &notice.latest),
+            ("command", &notice.command),
+        ],
+    )];
+    write!(output, "\r\x1b[2K")?;
+    renderer.write_notice_panel(
+        output,
+        NoticePanelModel {
+            title: i18n.t(MessageId::StartupUpgradeNoticeTitle),
+            body,
+            footer: None,
+        },
+    )?;
+    writeln!(output)?;
+    restore_startup_prompt(state, output)?;
+    output.flush()?;
+    state.startup_upgrade.rendered = true;
+    Ok(())
+}
+
 pub(crate) fn render_pending_recommendation_notice<W: Write>(
     state: &mut InlineState,
     output: &mut W,
@@ -131,6 +174,25 @@ pub(super) fn append_startup_auth_hint(state: &mut InlineState, body: &mut Vec<S
     }
     body.push(String::new());
     body.push(state.i18n().t(MessageId::StartupAuthHintLine).to_string());
+}
+
+pub(super) fn append_startup_upgrade_hint(state: &mut InlineState, body: &mut Vec<String>) {
+    if state.startup_upgrade.rendered {
+        return;
+    }
+    let Some(notice) = state.startup_upgrade.notice().cloned() else {
+        return;
+    };
+    body.push(String::new());
+    body.push(state.i18n().format(
+        MessageId::StartupUpgradeHintLine,
+        &[
+            ("current", &notice.current),
+            ("latest", &notice.latest),
+            ("command", &notice.command),
+        ],
+    ));
+    state.startup_upgrade.rendered = true;
 }
 
 fn append_recommendation_notice(state: &mut InlineState, body: &mut Vec<String>) -> bool {

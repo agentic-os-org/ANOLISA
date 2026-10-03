@@ -46,7 +46,8 @@ use crate::slash::session::poll_background_compaction;
 use super::controller::pending_card_capture;
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
 use super::startup::{
-    render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
+    render_pending_recommendation_notice, render_pending_upgrade_notice, render_startup_banner,
+    render_startup_health_banner,
 };
 
 pub(crate) enum RuntimeAction {
@@ -258,6 +259,7 @@ fn render_inline_guidance_from_batch<W: Write>(
 
     render_startup_banner(events, adapter, shell_label, state, output)?;
     render_startup_health_banner(state, output)?;
+    render_pending_upgrade_notice(state, output)?;
     render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
     update_soft_newline_tip_state(action_events, state);
@@ -448,6 +450,7 @@ fn poll_inline_runtime_without_shell_events<W: Write>(
     }
 
     render_startup_health_banner(state, output)?;
+    render_pending_upgrade_notice(state, output)?;
     render_pending_recommendation_notice(state, output)?;
     let personal_idle =
         state.agent_run.active.is_none() && !state.personalization.shell_input_active;
