@@ -1852,7 +1852,7 @@ fn plan_error_to_cli(err: PlanError, target: &str, command: &str) -> CliError {
         PlanError::UseUpdate => CliError::InvalidArgument {
             command,
             reason: format!(
-                "component '{target}' is already installed at a different version; run `anolisa update {target} --version <version>` to change versions"
+                "component '{target}' is already installed at a different version; run `anolisa install {target} --version <version>` to change versions"
             ),
         },
         PlanError::AlreadyManaged => CliError::InvalidArgument {
@@ -2003,6 +2003,45 @@ mod tests {
             &rpmdb
         ));
         assert!(missing_rpm_tooling_is_fatal(&env(None, None), &rpmdb));
+    }
+
+    #[test]
+    fn use_update_remediation_names_a_working_command() {
+        // `UpdateArgs` has no `--version` flag; with `propagate_version`
+        // clap's built-in intercepts it (DisplayVersion, exit 0), so the
+        // remediation must point at `install {target} --version`, which
+        // `InstallArgs` really accepts.
+        let err = plan_error_to_cli(PlanError::UseUpdate, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &err else {
+            panic!("UseUpdate must render InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("install cosh --version"),
+            "remediation must name the working command, got: {reason}"
+        );
+        assert!(
+            !reason.contains("update cosh --version"),
+            "`update --version` is intercepted by clap's built-in --version flag, got: {reason}"
+        );
+
+        // Other remediation messages keep their existing commands verbatim.
+        let already_present =
+            plan_error_to_cli(PlanError::AlreadyPresentOnSystem, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &already_present else {
+            panic!("AlreadyPresentOnSystem must render InvalidArgument");
+        };
+        assert!(
+            reason.contains("anolisa adopt cosh"),
+            "adopt remediation unchanged, got: {reason}"
+        );
+        let already_managed = plan_error_to_cli(PlanError::AlreadyManaged, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &already_managed else {
+            panic!("AlreadyManaged must render InvalidArgument");
+        };
+        assert!(
+            reason.contains("anolisa update cosh`"),
+            "AlreadyManaged keeps its `update` (no --version) remediation, got: {reason}"
+        );
     }
 
     #[test]
