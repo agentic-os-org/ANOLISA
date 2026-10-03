@@ -50,11 +50,14 @@ export interface SessionListItem {
  */
 export interface ListSessionsOptions {
   /**
-   * Cursor for pagination (mtime of the last item from previous page).
-   * Items with mtime < cursor will be returned.
+   * Cursor for pagination. The current format is the string
+   * `"<mtimeMs>|<fileName>"` of the last item from the previous page;
+   * items ordered after it are returned. A bare number (mtime only) is
+   * still accepted as a legacy cursor and keeps the old
+   * "items with mtime < cursor" semantics.
    * If undefined, starts from the most recent.
    */
-  cursor?: number;
+  cursor?: number | string;
   /**
    * Maximum number of items to return.
    * @default 20
@@ -69,10 +72,11 @@ export interface ListSessionsResult {
   /** Session items for this page */
   items: SessionListItem[];
   /**
-   * Cursor for next page (mtime of last item).
+   * Cursor for next page (`"<mtimeMs>|<fileName>"` of the last processed
+   * item, so sessions sharing an mtime are not skipped).
    * Undefined if no more items.
    */
-  nextCursor?: number;
+  nextCursor?: string;
   /** Whether there are more items after this page */
   hasMore: boolean;
 }
@@ -114,6 +118,37 @@ const MAX_FILES_TO_PROCESS = 10000;
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
+
+/**
+ * Parses a listSessions pagination cursor.
+ *
+ * The current format is `"<mtimeMs>|<fileName>"`, which uniquely identifies
+ * the last item of a page so sessions sharing an mtime are not skipped.
+ * A bare number (mtime only) is still accepted as a legacy cursor and keeps
+ * the old "items with mtime < cursor" semantics.
+ */
+function parseSessionListCursor(
+  cursor: number | string | undefined,
+): { mtime: number; name?: string } | undefined {
+  if (cursor === undefined) {
+    return undefined;
+  }
+  if (typeof cursor === 'number') {
+    return { mtime: cursor };
+  }
+  const separatorIndex = cursor.indexOf('|');
+  const mtime = Number(
+    separatorIndex === -1 ? cursor : cursor.slice(0, separatorIndex),
+  );
+  if (!Number.isFinite(mtime)) {
+    return undefined;
+  }
+  if (separatorIndex === -1) {
+    return { mtime };
+  }
+  const name = cursor.slice(separatorIndex + 1);
+  return name ? { mtime, name } : { mtime };
+}
 
 /**
  * Service for managing chat sessions.
@@ -223,8 +258,9 @@ export class SessionService {
   /**
    * Lists sessions for the current project with pagination.
    *
-   * Sessions are ordered by file modification time (most recent first).
-   * Uses cursor-based pagination with mtime as the cursor.
+   * Sessions are ordered by file modification time (most recent first),
+   * tie-broken by file name for a deterministic order.
+   * Uses cursor-based pagination with a "<mtimeMs>|<fileName>" cursor.
    *
    * Only reads the first line of each JSONL file for efficiency.
    * Files are filtered by UUID pattern first, then by project hash.
@@ -261,12 +297,25 @@ export class SessionService {
       throw error;
     }
 
-    // Sort by mtime descending (most recent first)
-    files.sort((a, b) => b.mtime - a.mtime);
+    // Sort by mtime descending (most recent first), then by name ascending
+    // so sessions sharing an mtime get a deterministic total order.
+    files.sort(
+      (a, b) =>
+        b.mtime - a.mtime || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    );
 
-    // Apply cursor filter (items with mtime < cursor)
-    if (cursor !== undefined) {
-      files = files.filter((f) => f.mtime < cursor);
+    // Apply cursor filter (items ordered after the cursor position).
+    // The cursor carries the last item's (mtime, name) so equal-mtime
+    // sessions are not skipped at a page boundary.
+    const parsedCursor = parseSessionListCursor(cursor);
+    if (parsedCursor) {
+      files = files.filter(
+        (f) =>
+          f.mtime < parsedCursor.mtime ||
+          (parsedCursor.name !== undefined &&
+            f.mtime === parsedCursor.mtime &&
+            f.name > parsedCursor.name),
+      );
     }
 
     // Iterate through files until we have enough matching ones.
@@ -274,7 +323,7 @@ export class SessionService {
     // so we need to filter by project hash and continue until we have enough items.
     const items: SessionListItem[] = [];
     let filesProcessed = 0;
-    let lastProcessedMtime: number | undefined;
+    let lastProcessedFile: { name: string; mtime: number } | undefined;
     let hasMoreFiles = false;
 
     for (const file of files) {
@@ -291,7 +340,7 @@ export class SessionService {
       }
 
       filesProcessed++;
-      lastProcessedMtime = file.mtime;
+      lastProcessedFile = file;
 
       const filePath = path.join(chatsDir, file.name);
       const records = await jsonl.readLines<ChatRecord>(
@@ -328,8 +377,8 @@ export class SessionService {
     // Determine next cursor (mtime of last processed file)
     // Only set if there are more files to process
     const nextCursor =
-      hasMoreFiles && lastProcessedMtime !== undefined
-        ? lastProcessedMtime
+      hasMoreFiles && lastProcessedFile !== undefined
+        ? `${lastProcessedFile.mtime}|${lastProcessedFile.name}`
         : undefined;
 
     return {

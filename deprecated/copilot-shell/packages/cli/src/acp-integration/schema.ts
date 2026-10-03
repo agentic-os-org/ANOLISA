@@ -306,11 +306,12 @@ export const sessionListItemSchema = z.object({
 export const listSessionsResponseSchema = z.object({
   hasMore: z.boolean(),
   items: z.array(sessionListItemSchema),
-  nextCursor: z.number().optional(),
+  nextCursor: z.string().optional(),
 });
 
 export const listSessionsRequestSchema = z.object({
-  cursor: z.number().optional(),
+  // Legacy numeric cursors (mtime only) are still accepted.
+  cursor: z.union([z.number(), z.string()]).optional(),
   cwd: z.string(),
   size: z.number().optional(),
 });

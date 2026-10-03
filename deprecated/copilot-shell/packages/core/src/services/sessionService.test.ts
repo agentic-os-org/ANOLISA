@@ -281,6 +281,85 @@ describe('SessionService', () => {
       expect(result.hasMore).toBe(false);
     });
 
+    it('should paginate through sessions sharing the same mtime', async () => {
+      const sharedMtime = Date.now() - 1000;
+
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+        `${sessionIdB}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+
+      statSyncSpy.mockImplementation(
+        () =>
+          ({
+            mtimeMs: sharedMtime,
+            isFile: () => true,
+          }) as fs.Stats,
+      );
+
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) {
+            return [recordA1];
+          }
+          return [recordB1];
+        },
+      );
+
+      const page1 = await sessionService.listSessions({ size: 1 });
+      const page2 = await sessionService.listSessions({
+        size: 1,
+        cursor: page1.nextCursor,
+      });
+
+      const allSessions = [...page1.items, ...page2.items];
+      expect(allSessions).toHaveLength(2);
+      expect(new Set(allSessions.map((s) => s.sessionId))).toEqual(
+        new Set([sessionIdA, sessionIdB]),
+      );
+    });
+
+    it('should paginate across distinct mtimes with the page cursor', async () => {
+      const now = Date.now();
+      const olderMtime = now - 5000;
+
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+        `${sessionIdB}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+
+      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        const path = filePath.toString();
+        let mtime = now;
+        if (path.includes(sessionIdA)) mtime = olderMtime;
+        return {
+          mtimeMs: mtime,
+          isFile: () => true,
+        } as fs.Stats;
+      });
+
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) {
+            return [recordA1];
+          }
+          return [recordB1];
+        },
+      );
+
+      const page1 = await sessionService.listSessions({ size: 1 });
+      expect(page1.items[0].sessionId).toBe(sessionIdB);
+
+      const page2 = await sessionService.listSessions({
+        size: 1,
+        cursor: page1.nextCursor,
+      });
+
+      expect(page2.items).toHaveLength(1);
+      expect(page2.items[0].sessionId).toBe(sessionIdA);
+      expect(page2.hasMore).toBe(false);
+    });
+
     it('should skip files from different projects', async () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
