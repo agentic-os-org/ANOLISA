@@ -373,13 +373,28 @@ impl GenAIBuilder {
             _ => return None,
         };
 
+        let (parts, finish_reason) = Self::merge_sse_chunks(&chunks);
+        if parts.is_empty() {
+            return Self::extract_dashscope_native_parts(&chunks);
+        }
+        Some((parts, finish_reason))
+    }
+
+    /// Merge already-parsed OpenAI-style SSE chunks into parts. Shared by the
+    /// live response path (`extract_parts_from_sse_body`) and the drain
+    /// enrichment (`GenAIBuilder::extract_sse_enrichment`) so both persist
+    /// identical, deserializable `output_messages` — content, reasoning, and
+    /// index-merged tool-call deltas alike.
+    pub(super) fn merge_sse_chunks(
+        chunks: &[serde_json::Value],
+    ) -> (Vec<MessagePart>, Option<String>) {
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
         let mut finish_reason: Option<String> = None;
         // tool_call delta merging: index -> (id, name, arguments_accumulated)
         let mut tc_map: HashMap<u32, (String, String, String)> = HashMap::new();
 
-        log::debug!("[GenAI] Parsing SSE body with {} chunks", chunks.len());
+        log::debug!("[GenAI] Merging SSE chunks ({} chunks)", chunks.len());
 
         for chunk in chunks.iter() {
             let choices = chunk.get("choices").and_then(|c| c.as_array());
@@ -469,10 +484,7 @@ impl GenAIBuilder {
             }
         }
 
-        if parts.is_empty() {
-            return Self::extract_dashscope_native_parts(&chunks);
-        }
-        Some((parts, finish_reason))
+        (parts, finish_reason)
     }
 
     /// Reconstruct assistant output from the DashScope/Bailian **native**

@@ -5,7 +5,7 @@
 
 use super::helpers::PidAgentNameCache;
 use super::id_resolver::IdResolver;
-use super::semantic::GenAISemanticEvent;
+use super::semantic::{GenAISemanticEvent, MessagePart, OutputMessage};
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::AnalysisResult;
 use crate::analyzer::token::{TokenParser, merge_usage};
@@ -501,9 +501,10 @@ impl GenAIBuilder {
         let token_parser = TokenParser::new();
         let mut model: Option<String> = None;
         let mut trace_id: Option<String> = None;
-        let mut content_buf = String::new();
+        let mut chunks: Vec<serde_json::Value> = Vec::new();
 
-        // Forward scan for model, trace_id, and content deltas
+        // Forward scan for model, trace_id; collect the JSON bodies for the
+        // shared part merger below.
         for event in sse_events {
             if let Some(json) = event.json_body() {
                 // Extract model from first chunk that has it
@@ -522,16 +523,7 @@ impl GenAIBuilder {
                         }
                     }
                 }
-                // Accumulate content deltas
-                if let Some(choices) = json.get("choices").and_then(|v| v.as_array()) {
-                    for choice in choices {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
-                                content_buf.push_str(c);
-                            }
-                        }
-                    }
-                }
+                chunks.push(json);
             }
         }
 
@@ -556,16 +548,24 @@ impl GenAIBuilder {
             }
         }
 
-        // Build output_messages JSON from accumulated content
-        let output_messages = if !content_buf.is_empty() {
-            // Format as a JSON array matching OutputMessage structure
-            serde_json::to_string(&serde_json::json!([{
-                "role": "assistant",
-                "parts": [{"Text": {"content": content_buf}}]
-            }]))
-            .ok()
-        } else {
+        // Persist the output through the SAME part merger the live response
+        // path uses, so drained rows carry the internally-tagged
+        // (`"type": "text" | …`) shape every typed consumer deserializes —
+        // and keep tool-call and reasoning deltas instead of dropping them.
+        // The old hand-built `[{"Text": …}]` externally-tagged payload failed
+        // `Vec<OutputMessage>` parsing ("missing field `type`"), silently
+        // losing the row in skill metrics and ATIF export.
+        let (parts, finish_reason) = Self::merge_sse_chunks(&chunks);
+        let output_messages = if parts.is_empty() {
             None
+        } else {
+            serde_json::to_string(&vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts,
+                name: None,
+                finish_reason,
+            }])
+            .ok()
         };
 
         let event_count = sse_events.len() as i64;
@@ -663,6 +663,135 @@ mod tests {
     /// `message_delta` carries only output_tokens. The drain path must merge
     /// both, exactly like the analyzer's SSE token extractor, instead of
     /// letting the last usage-bearing event win and recording input as 0.
+    #[test]
+    fn test_extract_sse_enrichment_output_messages_round_trips() {
+        // The persisted output_messages must deserialize as
+        // Vec<OutputMessage> — the old hand-built `[{"Text": …}]` shape
+        // failed with "missing field `type`" and silently dropped the row
+        // in every typed consumer (skill metrics, ATIF export).
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"qwen-max","id":"resp_1","choices":[{"delta":{"content":"Hel"}}]}"#,
+            ),
+            make_sse_event(
+                r#"{"choices":[{"delta":{"content":"lo world"},"finish_reason":null}]}"#,
+            ),
+            make_sse_event(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("output_messages must be set");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].role, "assistant");
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(parsed[0].parts.len(), 1);
+        match &parsed[0].parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello world"),
+            other => panic!("expected Text part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_captures_streamed_tool_calls() {
+        // A pure tool-calling turn: the old walker only read delta.content,
+        // so output_messages was None; the shared merger now keeps the
+        // index-merged tool call.
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"qwen-max","id":"resp_2","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}"#,
+            ),
+            make_sse_event(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Beijing\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("tool calls must be persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_calls"));
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments
+                        .as_ref()
+                        .and_then(|a| a.get("city"))
+                        .and_then(|v| v.as_str()),
+                    Some("Beijing")
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_captures_reasoning_deltas() {
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"deepseek-r","id":"resp_3","choices":[{"delta":{"reasoning_content":"think "}}]}"#,
+            ),
+            make_sse_event(
+                r#"{"choices":[{"delta":{"reasoning_content":"hard","content":"answer"},"finish_reason":"stop"}]}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("reasoning must be persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        // Reasoning precedes text (live-path merger ordering).
+        assert_eq!(parsed[0].parts.len(), 2);
+        assert!(
+            matches!(&parsed[0].parts[0], MessagePart::Reasoning { content } if content == "think hard")
+        );
+        assert!(
+            matches!(&parsed[0].parts[1], MessagePart::Text { content } if content == "answer")
+        );
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_matches_live_path_shape() {
+        // Guard against future shape drift: serializing the same stream
+        // through the live-path types must produce the identical JSON the
+        // enrichment persists.
+        let events = vec![make_sse_event(
+            r#"{"model":"m","id":"i","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).unwrap();
+        let drain_json = enrichment.output_messages.unwrap();
+
+        let body = r#"[{"model":"m","id":"i","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}]"#;
+        let (parts, finish_reason) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        let live_json = serde_json::to_string(&vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts,
+            name: None,
+            finish_reason,
+        }])
+        .unwrap();
+        assert_eq!(drain_json, live_json);
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_empty_stream_yields_none() {
+        // A stream with no output deltas keeps output_messages = None
+        // (existing behavior for usage-only events).
+        let events = vec![make_sse_event(
+            r#"{"model":"m","id":"i","usage":{"prompt_tokens":5,"completion_tokens":0}}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).unwrap();
+        assert!(enrichment.output_messages.is_none());
+    }
+
     #[test]
     fn test_extract_sse_enrichment_merges_anthropic_split_usage() {
         let events = vec![
