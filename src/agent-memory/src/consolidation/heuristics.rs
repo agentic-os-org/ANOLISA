@@ -289,33 +289,59 @@ fn rule_change(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
 // ── Rule 4: Lesson ──────────────────────────────────────────────
 // Trigger: Any tool call that failed (ok=false).
 // Extracts: "Error <type> in <tool> on <path>"
+// Identical failures (same tool, path and error class) collapse into a
+// single fact carrying an occurrence count — a retry loop must not flood
+// the store with byte-identical lessons that then evict every other fact
+// via the max_facts budget.
 
 fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<ConsolidatedFact> {
-    entries
-        .iter()
-        .filter(|e| !e.ok && e.error.is_some())
-        .map(|e| {
-            let error = e.error.as_deref().unwrap_or("(unknown error)");
-            let path = if e.path.is_empty() {
-                "(no path)".to_string()
-            } else {
-                e.path.clone()
-            };
+    /// One aggregated failure group: first raw error message plus how
+    /// many times it recurred.
+    struct FailureGroup<'a> {
+        error: &'a str,
+        count: usize,
+    }
 
-            // Categorize the error.
-            let error_type = classify_error(error);
+    // Key: (tool, path, error class) — mirroring rule_working_context's
+    // per-directory aggregation.
+    let mut groups: HashMap<(String, String, &'static str), FailureGroup> = HashMap::new();
+
+    for e in entries.iter().filter(|e| !e.ok && e.error.is_some()) {
+        let error = e.error.as_deref().unwrap_or("(unknown error)");
+        let path = if e.path.is_empty() {
+            "(no path)".to_string()
+        } else {
+            e.path.clone()
+        };
+        let key = (e.tool.clone(), path, classify_error(error));
+        let group = groups
+            .entry(key)
+            .or_insert(FailureGroup { error, count: 0 });
+        group.count += 1;
+    }
+
+    groups
+        .into_iter()
+        .map(|((tool, path, error_type), group)| {
             let title = format!("{error_type} 错误: {path}");
-            let content = format!(
-                "在调用 `{}` 时遇到 {} 错误（路径: `{}`）: {}。",
-                e.tool, error_type, path, error
-            );
+            let content = if group.count > 1 {
+                format!(
+                    "在调用 `{tool}` 时遇到 {error_type} 错误（路径: `{path}`）: {}。该错误重复出现了 {} 次。",
+                    group.error, group.count
+                )
+            } else {
+                format!(
+                    "在调用 `{tool}` 时遇到 {error_type} 错误（路径: `{path}`）: {}。",
+                    group.error
+                )
+            };
 
             ConsolidatedFact::new(
                 session_id,
                 FactCategory::Lesson,
                 title,
                 content,
-                e.tool.to_string(),
+                tool,
                 vec![path],
                 0.6, // Errors are always worth remembering.
             )
@@ -324,7 +350,8 @@ fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
 }
 
 /// Classify an error message into a human-readable category.
-fn classify_error(error: &str) -> &str {
+/// Always returns a `&'static str` literal so callers can key on it.
+fn classify_error(error: &str) -> &'static str {
     let lower = error.to_lowercase();
     if lower.contains("not found") || lower.contains("不存在") || lower.contains("no such") {
         "文件不存在"
@@ -529,6 +556,71 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].category, FactCategory::Lesson);
         assert!(facts[0].content.contains("文件不存在"));
+    }
+
+    #[test]
+    fn rule4_dedups_repeated_identical_failures() {
+        // A retry loop: the same tool/path/error 25 times over.
+        let mut entries: Vec<OwnedAuditEntry> = (0..25)
+            .map(|_| {
+                make_entry(
+                    "mem_read",
+                    "notes/missing.md",
+                    false,
+                    Some("file not found"),
+                )
+            })
+            .collect();
+        // ...plus one genuine interest signal.
+        entries.push(make_entry(
+            "memory_search",
+            "bm25:database indexes",
+            true,
+            None,
+        ));
+
+        // Rule level: one aggregated lesson, with the count in the text.
+        let lessons = rule_lesson(&entries, "sid");
+        assert_eq!(lessons.len(), 1, "identical failures must collapse");
+        assert!(lessons[0].content.contains("25 次"));
+
+        // Pipeline level: the budget must not be burned on duplicates, so
+        // the interest fact survives the max_facts truncation.
+        let facts = run_consolidation_owned(&entries, "retry-sid", &default_config());
+        let lesson_facts: Vec<_> = facts
+            .iter()
+            .filter(|f| f.category == FactCategory::Lesson)
+            .collect();
+        assert!(
+            lesson_facts.len() <= 1,
+            "at most one lesson for a repeated identical error, got {lesson_facts:?}"
+        );
+        assert!(
+            facts.iter().any(|f| f.category == FactCategory::Interest),
+            "the interest fact must survive: {:?}",
+            facts.iter().map(|f| f.category).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rule4_distinct_errors_yield_distinct_facts() {
+        let entries = vec![
+            make_entry(
+                "mem_read",
+                "notes/missing.md",
+                false,
+                Some("file not found"),
+            ),
+            make_entry(
+                "mem_write",
+                "notes/locked.md",
+                false,
+                Some("permission denied"),
+            ),
+            make_entry("mem_read", "notes/other.md", false, Some("file not found")),
+        ];
+        let facts = rule_lesson(&entries, "sid");
+        assert_eq!(facts.len(), 3, "distinct (tool, path, error) stay distinct");
     }
 
     #[test]
