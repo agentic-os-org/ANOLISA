@@ -142,7 +142,9 @@ def ensure_venv() -> Path | None:
             cwd=SCRIPT_DIR,
             capture_output=True,
             text=True,
-            timeout=120
+            # 必须大于 setup_env.py 内部的 pip 安装超时（120 秒），
+            # 否则慢网络下外层先杀死 setup_env，其自身的清晰失败信息永远无法输出
+            timeout=300
         )
         
         if result.returncode == 0 and check_venv():

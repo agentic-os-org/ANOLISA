@@ -32,6 +32,10 @@ VENV_DIR = USER_CACHE_DIR / ".venv"
 # 需要安装的依赖
 DEPENDENCIES = ["requests", "beautifulsoup4", "markdownify"]
 
+# pip 安装超时（秒）。注意 check_docs.py 的 ensure_venv 以更长的超时包裹本脚本，
+# 修改此值时需同步保持外层超时大于它
+PIP_TIMEOUT = 120
+
 
 def check_venv() -> bool:
     """检查虚拟环境是否存在且依赖已安装"""
@@ -58,28 +62,41 @@ def check_venv() -> bool:
 def create_venv() -> bool:
     """创建虚拟环境"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     result = subprocess.run(
         [sys.executable, "-m", "venv", str(VENV_DIR)],
         capture_output=True
     )
-    
-    return result.returncode == 0
+
+    if result.returncode != 0:
+        stderr = result.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        detail = (stderr or "").strip()
+        if detail:
+            print(f"[失败] 创建虚拟环境 stderr: {detail}")
+        return False
+
+    return True
 
 
 def install_dependencies() -> bool:
     """安装依赖"""
     venv_pip = VENV_DIR / "bin" / "pip"
-    
+
     if not venv_pip.exists():
         return False
-    
-    result = subprocess.run(
-        [str(venv_pip), "install", "--quiet", "--disable-pip-version-check"] + DEPENDENCIES,
-        capture_output=True,
-        timeout=120
-    )
-    
+
+    try:
+        result = subprocess.run(
+            [str(venv_pip), "install", "--quiet", "--disable-pip-version-check"] + DEPENDENCIES,
+            capture_output=True,
+            timeout=PIP_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[失败] 安装依赖超时（{PIP_TIMEOUT} 秒），请检查网络（或配置 pip 镜像源）后重试")
+        return False
+
     return result.returncode == 0
 
 
