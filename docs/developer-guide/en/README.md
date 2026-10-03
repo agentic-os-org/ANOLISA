@@ -8,6 +8,10 @@ Use this guide when you need to understand, extend, test, or contribute to ANOLI
 
 - [Architecture](./copilot-shell/architecture.md)
 
+## AW
+
+- [Configuration reference](./aw/configuration.md)
+
 ## Cosh-ng
 
 - [Getting started](./cosh-ng/getting-started.md)

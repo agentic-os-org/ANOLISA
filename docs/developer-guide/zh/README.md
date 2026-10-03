@@ -8,6 +8,10 @@
 
 - [架构](./copilot-shell/architecture.md)
 
+## AW
+
+- [配置参考](./aw/configuration.md)
+
 ## Cosh-ng
 
 - [开发入门](./cosh-ng/getting-started.md)
