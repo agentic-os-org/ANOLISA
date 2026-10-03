@@ -125,10 +125,28 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
     tracing::info!("Migrated Aliyun credentials from aliyun_creds.json");
 }
 
+/// Escape a value for a TOML basic string.
+///
+/// Mirrored legacy values are raw user data (JSON strings): a carriage return,
+/// a stray quote or any other control character would produce a `config.toml`
+/// that `cosh-core` itself cannot parse on the next start, silently dropping
+/// the whole migrated configuration.
 fn escape_toml_migrate(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn upsert_provider_section(content: &mut String, header: &str, section: &str) {
@@ -318,28 +336,49 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
     out.push_str("# Original: ~/.copilot-shell/settings.json\n\n");
 
     out.push_str("[ai]\n");
-    out.push_str(&format!("active_provider = \"{active_provider}\"\n"));
+    out.push_str(&format!(
+        "active_provider = \"{}\"\n",
+        escape_toml_migrate(active_provider)
+    ));
     if !active_model.is_empty() {
-        out.push_str(&format!("active_model = \"{active_model}\"\n"));
+        out.push_str(&format!(
+            "active_model = \"{}\"\n",
+            escape_toml_migrate(active_model)
+        ));
     }
     if let Some(lang) = output_language {
-        out.push_str(&format!("output_language = \"{lang}\"\n"));
+        out.push_str(&format!(
+            "output_language = \"{}\"\n",
+            escape_toml_migrate(lang)
+        ));
     }
     out.push('\n');
 
     out.push_str(&format!("[ai.providers.{provider_id}]\n"));
-    out.push_str(&format!("type = \"{provider_type}\"\n"));
+    out.push_str(&format!(
+        "type = \"{}\"\n",
+        escape_toml_migrate(provider_type)
+    ));
     if let Some(source) = auth_source {
-        out.push_str(&format!("auth_source = \"{source}\"\n"));
+        out.push_str(&format!(
+            "auth_source = \"{}\"\n",
+            escape_toml_migrate(source)
+        ));
     }
     if !base_url.is_empty() {
-        out.push_str(&format!("base_url = \"{base_url}\"\n"));
+        out.push_str(&format!(
+            "base_url = \"{}\"\n",
+            escape_toml_migrate(base_url)
+        ));
     }
     if !api_key.is_empty() {
-        out.push_str(&format!("api_key = \"{api_key}\"\n"));
+        out.push_str(&format!("api_key = \"{}\"\n", escape_toml_migrate(api_key)));
     }
     if !provider_model.is_empty() {
-        out.push_str(&format!("model = \"{provider_model}\"\n"));
+        out.push_str(&format!(
+            "model = \"{}\"\n",
+            escape_toml_migrate(provider_model)
+        ));
     }
     out.push('\n');
 
@@ -349,7 +388,10 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
     if has_agent_section {
         out.push_str("[agent]\n");
         if let Some(mode) = approval_mode {
-            out.push_str(&format!("approval_mode = \"{mode}\"\n"));
+            out.push_str(&format!(
+                "approval_mode = \"{}\"\n",
+                escape_toml_migrate(mode)
+            ));
         }
         if let Some(turns) = max_turns {
             out.push_str(&format!("max_turns = {turns}\n"));
@@ -447,6 +489,54 @@ mod tests {
         );
         assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
         assert_eq!(provider.provider_type.as_deref(), Some("dashscope"));
+    }
+
+    #[test]
+    fn build_toml_escapes_control_characters_and_quotes() {
+        let api_key = "sk-a\rb\tc\"d\\e\u{7f}f";
+        let toml_str = build_toml(&MigratedFields {
+            active_provider: "default",
+            provider_id: "default",
+            provider_type: "dashscope",
+            auth_source: None,
+            base_url: "https://example.com/v1",
+            api_key,
+            provider_model: "qwen\"plus",
+            active_model: "qwen\"plus",
+            session_token_limit: None,
+            max_turns: None,
+            approval_mode: None,
+            output_language: Some("zh\rCN"),
+        });
+
+        let config: crate::config::CoreConfig = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("migrated config must parse: {e}\n{toml_str}"));
+        let provider = config.ai.providers.get("default").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some(api_key));
+        assert_eq!(config.ai.active_model.as_deref(), Some("qwen\"plus"));
+        assert_eq!(config.ai.output_language.as_deref(), Some("zh\rCN"));
+    }
+
+    #[test]
+    fn migration_survives_control_char_in_api_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let config_path = tmp.path().join("config.toml");
+        // JSON `\r` inside the apiKey: valid JSON, invalid raw TOML.
+        std::fs::write(
+            &settings_path,
+            "{\"security\":{\"auth\":{\"selectedType\":\"openai\",\"apiKey\":\"sk-copied\\rkey\",\"openaiModel\":\"qwen-plus\"}},\"model\":{\"name\":\"qwen-plus\"}}",
+        )
+        .unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap_or_else(|e| {
+            panic!("config written by the migration must parse: {e}\n{content}")
+        });
+        let provider = config.ai.providers.get("default").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("sk-copied\rkey"));
     }
 
     #[test]
