@@ -691,6 +691,44 @@ mod tests {
     }
 
     #[test]
+    fn close_task_without_context_does_not_add_blank_lines() {
+        // The leaked separator newline made an empty context look non-empty,
+        // so memory_task_close stacked "\n" + "\n" before the Closed marker.
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Context-free task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = result
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(" ")
+            .next()
+            .unwrap();
+
+        memory_task_close(&svc, id, Some("All done")).unwrap();
+
+        let path = svc
+            .mount
+            .root
+            .join(TASKS_DIR)
+            .join(format!("{id}.md"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let body = content.split_once("---\n\n").expect("fence").1;
+        assert_eq!(body, "**Closed**: All done\n");
+    }
+
+    #[test]
     fn update_existing_task() {
         let (_tmp, svc) = setup();
         let result = memory_task_save(
