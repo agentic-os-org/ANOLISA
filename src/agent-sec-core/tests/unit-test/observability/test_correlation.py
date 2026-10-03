@@ -10,7 +10,6 @@ from agent_sec_cli.observability.correlation import (
     ObservabilityRecordFields,
     SecurityCorrelationService,
 )
-from agent_sec_cli.security_events.repositories import CORRELATION_CANDIDATE_LIMIT
 from agent_sec_cli.security_events.schema import SecurityEvent
 
 
@@ -1001,6 +1000,12 @@ def test_fallback_mode_skips_skill_ledger_even_when_basename_would_match() -> No
     assert result == []
 
 
+# Mirrors SecurityEventRepository's candidate page cap. Hardcoded so this
+# regression test runs (and fails) against an unmodified main, where the
+# constant is not importable.
+_REPOSITORY_PAGE_CAP = 1000
+
+
 class _CappedReader:
     """Models SecurityEventRepository.query_correlation_candidates.
 
@@ -1039,7 +1044,7 @@ class _CappedReader:
         selected.sort(
             key=lambda candidate: (candidate.timestamp_epoch, candidate.event.event_id)
         )
-        return selected[:CORRELATION_CANDIDATE_LIMIT]
+        return selected[:_REPOSITORY_PAGE_CAP]
 
 
 def _truncation_fixture() -> tuple[list[_Candidate], list[ObservabilityRecordFields]]:
@@ -1052,7 +1057,7 @@ def _truncation_fixture() -> tuple[list[_Candidate], list[ObservabilityRecordFie
             ),
             timestamp_epoch=float(index),
         )
-        for index in range(CORRELATION_CANDIDATE_LIMIT)
+        for index in range(_REPOSITORY_PAGE_CAP)
     ]
     late = _Candidate(
         _event(event_id="late", category="skill_ledger", tool_call_id="tool-late"),
