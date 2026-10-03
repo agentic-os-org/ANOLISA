@@ -7,6 +7,9 @@ Wants=network.target
 [Service]
 Type=simple
 ExecStart=/usr/libexec/anolisa/blazed daemon start --config /etc/anolisa/blaze/config.toml
+# /run is a tmpfs: recreate /run/blaze (UDS socket dir) at every start
+# instead of relying on a directory that only exists until first reboot.
+RuntimeDirectory=blaze
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
