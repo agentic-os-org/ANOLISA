@@ -35,4 +35,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-exec python3 "$SCRIPT_DIR/install_openclaw.py" "${args[@]}"
+# ${args[@]+...} guard: "${args[@]}" on an empty array is an unbound-variable
+# error under `set -u` on bash < 4.4 (e.g. macOS /bin/bash 3.2, Alinux 3's 4.2).
+exec python3 "$SCRIPT_DIR/install_openclaw.py" ${args[@]+"${args[@]}"}
