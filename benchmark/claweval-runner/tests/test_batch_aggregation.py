@@ -54,3 +54,75 @@ class TestPassAtK:
         from ce_runner.batch_runner import pass_at_k
         # n=5, c=4, k=2 -> n-c=1 < k -> returns 1.0
         assert pass_at_k(5, 4, 2) == 1.0
+
+class TestErroredTrialExclusion:
+    """pass@k / pass^k must exclude infra-errored trials (audit p3 scenario).
+
+    avg_score already divides over valid trials only (and the fixture-skip
+    policy documents errored trials as excluded); the pass metrics must use
+    the same denominator or a 1-valid-pass + 1-infra-error task reports
+    pass@1=0.5 next to avg_score=0.9.
+    """
+
+    @staticmethod
+    def _trial(passed, score, error=None):
+        return {
+            "trial": 1,
+            "task_score": score,
+            "passed": passed,
+            "completion": score,
+            "robustness": score,
+            "communication": score,
+            "safety": score,
+            "error": error,
+            "wall_time_s": 1.0,
+        }
+
+    def test_mixed_pass_and_error_excludes_errored(self):
+        """1 valid PASS (0.9) + 1 infra error: pass@1 == 1.0 over valid."""
+        from ce_runner.batch_runner import aggregate_task_pass_metrics
+
+        trials = [
+            self._trial(True, 0.9),
+            self._trial(False, 0.0, error="judge API 429 (infra)"),
+        ]
+        m = aggregate_task_pass_metrics(trials)
+        assert m["pass_at_1"] == 1.0
+        assert m["pass_hat_k"] == 1.0
+        # avg over valid trials is unchanged (0.9), not dragged to 0.45
+        valid = [t for t in trials if not t.get("error")]
+        assert sum(t["task_score"] for t in valid) / len(valid) == 0.9
+        # raw reporting counts still cover every executed trial
+        assert (m["n"], m["c"]) == (2, 1)
+
+    def test_all_valid_mixed_outcome_unchanged(self):
+        """All-valid control: metrics identical to the old all-trials math."""
+        from ce_runner.batch_runner import aggregate_task_pass_metrics, pass_at_k
+
+        trials = [self._trial(True, 0.9), self._trial(False, 0.2)]
+        m = aggregate_task_pass_metrics(trials)
+        assert m["pass_at_1"] == pass_at_k(2, 1, 1)
+        assert m["pass_hat_k"] == 0.25
+        assert (m["n_valid"], m["c_valid"]) == (2, 1)
+
+    def test_all_valid_all_pass_unchanged(self):
+        """All-valid all-pass control."""
+        from ce_runner.batch_runner import aggregate_task_pass_metrics
+
+        trials = [self._trial(True, 0.9), self._trial(True, 0.95)]
+        m = aggregate_task_pass_metrics(trials)
+        assert m["pass_at_1"] == 1.0
+        assert m["pass_hat_k"] == 1.0
+
+    def test_all_error_reports_zero_not_one(self):
+        """All-errored control: 0.0, never pass_at_k(0, 0, 1)'s degenerate 1.0."""
+        from ce_runner.batch_runner import aggregate_task_pass_metrics
+
+        trials = [
+            self._trial(False, 0.0, error="sandbox crash"),
+            self._trial(False, 0.0, error="judge API 429 (infra)"),
+        ]
+        m = aggregate_task_pass_metrics(trials)
+        assert m["pass_at_1"] == 0.0
+        assert m["pass_hat_k"] == 0.0
+        assert (m["n"], m["c"]) == (2, 0)

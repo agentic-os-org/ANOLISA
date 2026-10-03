@@ -55,6 +55,30 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.comb(n - c, k) / math.comb(n, k)
 
 
+def aggregate_task_pass_metrics(trials_list: list) -> dict:
+    """Compute per-task pass metrics, excluding infra-errored trials.
+
+    avg_score and the fixture-skip policy already treat errored trials as
+    "not information about the task"; pass@k / pass^k must use the same
+    denominator or a 1-valid-pass + 1-infra-error task reports pass@1=0.5
+    next to avg_score=0.9. Raw all-trial counts (n, c) are returned too so
+    reporting fields keep covering every executed trial.
+    """
+    n = len(trials_list)
+    c = sum(1 for t in trials_list if t["passed"])
+    valid = [t for t in trials_list if not t.get("error")]
+    n_valid = len(valid)
+    c_valid = sum(1 for t in valid if t["passed"])
+    return {
+        "n": n,
+        "c": c,
+        "n_valid": n_valid,
+        "c_valid": c_valid,
+        "pass_at_1": pass_at_k(n_valid, c_valid, 1) if n_valid else 0.0,
+        "pass_hat_k": (c_valid / n_valid) ** n_valid if n_valid else 0.0,
+    }
+
+
 def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
               discover_tasks):
     """Execute batch of tasks with chunked parallel agent execution.
@@ -750,8 +774,15 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
 
     for tid, tr in task_results.items():
         trials_list = tr["trials"]
-        n = len(trials_list)
-        c = sum(1 for t in trials_list if t["passed"])
+
+        # pass@k / pass^k exclude infra-errored trials — the same policy
+        # avg_score applies below (and that the fixture-skip path documents
+        # above): an infra error proves nothing about the task, so a
+        # 1-valid-pass + 1-infra-error task reports pass@1 == 1.0 over its
+        # valid trials. Raw n / c (all trials) stay available for reporting.
+        metrics = aggregate_task_pass_metrics(trials_list)
+        n = metrics["n"]
+        c = metrics["c"]
         errors = [t for t in trials_list if t.get("error")]
 
         for t in trials_list:
@@ -766,14 +797,14 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
             score_sum += avg_score
             finished_tasks += 1
 
-        if c > 0:
+        if metrics["c_valid"] > 0:
             n_pass_at_1 += 1
-        if c == n and n > 0:
+        if metrics["c_valid"] == metrics["n_valid"] and metrics["n_valid"] > 0:
             n_pass_hat_1 += 1
 
         tr["avg_score"] = round(avg_score, 4)
-        tr["pass_at_1"] = pass_at_k(n, c, 1)
-        tr["pass_hat_k"] = (c / n) ** n if n > 0 else 0.0
+        tr["pass_at_1"] = metrics["pass_at_1"]
+        tr["pass_hat_k"] = metrics["pass_hat_k"]
         tr["avg_passed"] = avg_score >= 0.75
         tr["error"] = errors[0].get("error", "all trials errored") if (errors and not valid) else None
         tr["n"] = n
