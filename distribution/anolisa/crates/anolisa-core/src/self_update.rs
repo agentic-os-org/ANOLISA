@@ -59,7 +59,9 @@ pub struct ReleaseArtifact {
     /// Expected SHA256 digest of the tar.gz archive.
     pub sha256: String,
 
-    /// Size of the tar.gz archive; used as progress-total hint and download cap.
+    /// Size of the tar.gz archive; used as progress-total hint and download
+    /// cap. A non-positive value carries no information and is treated as
+    /// absent (the default cap applies).
     pub size: Option<u64>,
 }
 
@@ -273,7 +275,9 @@ impl ReleaseManifest {
     ///
     /// # Errors
     ///
-    /// Returns [`SelfUpdateError::ParseManifest`] for invalid TOML and
+    /// Returns [`SelfUpdateError::ParseManifest`] for invalid TOML (including
+    /// a duplicate platform tuple, which would otherwise resolve first-wins
+    /// and silently ship a stale artifact) and
     /// [`SelfUpdateError::UnsupportedSchema`] for unknown schema versions.
     pub fn from_toml_str(s: &str) -> Result<Self, SelfUpdateError> {
         let manifest: Self =
@@ -283,6 +287,18 @@ impl ReleaseManifest {
                 version: manifest.schema_version,
                 expected: MANIFEST_SCHEMA_VERSION,
             });
+        }
+        // `artifact_for` resolves first-wins, so a duplicate (os, arch)
+        // tuple (e.g. a stale entry left above the corrected one) would
+        // silently shadow the fresh artifact. Fail at parse time instead.
+        let mut seen = std::collections::HashSet::new();
+        for artifact in &manifest.artifacts {
+            if !seen.insert((&artifact.os, &artifact.arch)) {
+                return Err(SelfUpdateError::ParseManifest(format!(
+                    "duplicate artifact for platform {}/{}",
+                    artifact.os, artifact.arch
+                )));
+            }
         }
         Ok(manifest)
     }
@@ -477,15 +493,17 @@ pub fn perform_update(
     let _ = fs::remove_file(&archive);
     let _ = fs::remove_file(&backup);
 
-    // Download the tar.gz archive with SHA256 verification.
-    let max_bytes = artifact
-        .size
-        .map_or(MAX_DOWNLOAD_BYTES, |s| s.min(MAX_DOWNLOAD_BYTES));
+    // Download the tar.gz archive with SHA256 verification. A size of 0 is
+    // "key present, no hint", not a real cap: taking it at face value would
+    // collapse the cap to 0 and abort every download after the first byte,
+    // so non-positive sizes are dropped and the default cap applies.
+    let size_hint = artifact.size.filter(|s| *s > 0);
+    let max_bytes = size_hint.map_or(MAX_DOWNLOAD_BYTES, |s| s.min(MAX_DOWNLOAD_BYTES));
     download_with_progress(
         &artifact.url,
         &archive,
         &artifact.sha256,
-        artifact.size,
+        size_hint,
         Some(max_bytes),
         on_progress,
     )?;
@@ -829,6 +847,76 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_platform_tuples() {
+        // A stale entry above a corrected one must fail at parse time; a
+        // silent first-wins resolution would keep shipping the stale URL.
+        let toml = r#"
+            schema_version = 1
+            version = "0.2.0"
+
+            [[artifacts]]
+            os = "linux"
+            arch = "x86_64"
+            url = "https://example.invalid/stale"
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            [[artifacts]]
+            os = "linux"
+            arch = "x86_64"
+            url = "https://example.invalid/fresh"
+            sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "#;
+        let err =
+            ReleaseManifest::from_toml_str(toml).expect_err("duplicate tuple must be rejected");
+        assert!(
+            matches!(err, SelfUpdateError::ParseManifest(_)),
+            "got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("linux/x86_64"),
+            "error names the duplicated tuple: {err}"
+        );
+    }
+
+    #[test]
+    fn distinct_platforms_parse_and_resolve() {
+        let toml = r#"
+            schema_version = 1
+            version = "0.2.0"
+
+            [[artifacts]]
+            os = "linux"
+            arch = "x86_64"
+            url = "https://example.invalid/linux-x86_64"
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            size = 100
+
+            [[artifacts]]
+            os = "linux"
+            arch = "aarch64"
+            url = "https://example.invalid/linux-aarch64"
+            sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            size = 200
+
+            [[artifacts]]
+            os = "darwin"
+            arch = "arm64"
+            url = "https://example.invalid/darwin-arm64"
+            sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        "#;
+        let m = ReleaseManifest::from_toml_str(toml).expect("distinct platforms parse");
+        for (os, arch, marker) in [
+            ("linux", "x86_64", "linux-x86_64"),
+            ("linux", "aarch64", "linux-aarch64"),
+            ("darwin", "arm64", "darwin-arm64"),
+        ] {
+            let a = m.artifact_for(os, arch).expect("resolves");
+            assert!(a.url.contains(marker), "{}", a.url);
+        }
+        assert!(m.artifact_for("darwin", "x86_64").is_none());
+    }
+
+    #[test]
     fn check_update_detects_newer_version() {
         let manifest = r#"
             schema_version = 1
@@ -946,6 +1034,57 @@ mod tests {
         assert!(!staging_path(&current).exists(), "staging cleaned up");
         assert!(!archive_path(&current).exists(), "archive cleaned up");
         assert!(!backup_path(&current).exists(), "backup cleaned up");
+    }
+
+    #[test]
+    fn perform_update_treats_zero_size_as_no_hint() {
+        // A manifest may carry `size = 0` (key present, no useful hint).
+        // It must not collapse the download cap to 0 — that aborts every
+        // self-update with DownloadTooLarge after the first byte. The cap
+        // falls back to MAX_DOWNLOAD_BYTES and the update completes.
+        let dir = tempdir().unwrap();
+        let binary_content = b"new-binary-bytes";
+        let archive = make_tar_gz(binary_content);
+        let sha = sha256_of(&archive);
+
+        let url = {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let archive_clone = archive.clone();
+            thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    archive_clone.len()
+                );
+                std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write head");
+                std::io::Write::write_all(&mut stream, &archive_clone).expect("write body");
+            });
+            format!("http://{addr}/anolisa.tar.gz")
+        };
+
+        let current = dir.path().join("anolisa");
+        fs::write(&current, b"old-binary-bytes").unwrap();
+
+        let manifest = r#"
+            schema_version = 1
+            version = "0.2.0"
+            [[artifacts]]
+            os = "linux"
+            arch = "x86_64"
+            url = "https://example.invalid/bin"
+            sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+            size = 0
+        "#;
+        let parsed = ReleaseManifest::from_toml_str(manifest).expect("size = 0 parses");
+        let mut artifact = parsed.artifacts[0].clone();
+        artifact.url = url;
+        artifact.sha256 = sha;
+
+        perform_update(&artifact, &current, None).expect("update ok with zero-size hint");
+        assert_eq!(fs::read(&current).unwrap(), binary_content);
     }
 
     #[test]
