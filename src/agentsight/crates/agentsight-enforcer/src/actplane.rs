@@ -274,6 +274,27 @@ impl ActPlaneBackend {
             .seed_label_in_domain(request.root_pid, id, label)
             .map_err(|error| kernel_error("seed target process domain", error))?;
 
+        // Rebind coverage: detaching a binding clears cap_task but leaves the
+        // tree's per-domain state behind, so processes that joined the session
+        // under the previous binding silently fall out of every policy when
+        // the binding is recreated. Move the surviving tree into the fresh
+        // domain and keep the outcome visible through the binding message.
+        let migration = self
+            .engine
+            .migrate_session_tree(request.root_pid, id)
+            .map_err(|error| {
+                let cleanup = self.cleanup_binding(&request, id, None);
+                kernel_error_with_cleanup("migrate prior session tree", error, cleanup)
+            })?;
+        if !migration.failed_pids.is_empty() {
+            log::warn!(
+                "binding {} domain {}: {}",
+                request.binding_id,
+                id,
+                migration.summary()
+            );
+        }
+
         let control_pid = std::process::id() as i32;
         let control_state = CapState {
             scope_id: 1,
@@ -327,7 +348,11 @@ impl ActPlaneBackend {
         let binding = Binding {
             request,
             state: BindingState::Enforced,
-            message: None,
+            message: if migration.is_empty() {
+                None
+            } else {
+                Some(migration.summary())
+            },
             domain_id: Some(id),
         };
         bindings.insert(
