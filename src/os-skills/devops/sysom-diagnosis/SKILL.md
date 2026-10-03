@@ -61,7 +61,7 @@ command -v sysom-osops
 If it is missing, install it:
 
 ```bash
-curl -fsSL --connect-timeout 1000 https://sysom-prd-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/sysom_prd/skill_cli/install.sh | sudo bash
+curl -fsSL --connect-timeout 1 https://sysom-prd-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/sysom_prd/skill_cli/install.sh | sudo bash
 ```
 
 Then verify only the binary:
