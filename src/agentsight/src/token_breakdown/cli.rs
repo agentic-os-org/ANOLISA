@@ -181,8 +181,21 @@ impl AnalyzeChatmlCommand {
 
     /// Parse Chrome Trace file with relaxed format (handle trailing commas)
     fn parse_trace_relaxed(content: &str) -> anyhow::Result<Vec<ChromeTraceEvent>> {
-        // Remove trailing commas before ] to handle non-standard JSON
-        let cleaned = content
+        // Trailing commas before a closing bracket are the one deviation
+        // serde_json cannot read (several trace exporters emit them). Strip
+        // them and parse the array as a whole: that also covers
+        // pretty-printed (multi-line) traces, which the previous line-by-line
+        // fallback could not read at all — every line of a multi-line event
+        // failed to parse on its own, so a pretty-printed trace answered
+        // "no valid events found" even though every event was present.
+        let cleaned = strip_trailing_commas(content);
+        if let Ok(events) = serde_json::from_str::<Vec<ChromeTraceEvent>>(&cleaned) {
+            return Ok(events);
+        }
+
+        // Last resort: one event per line, for traces that are neither a
+        // valid array nor multi-line pretty-printed.
+        let cleaned = cleaned
             .trim()
             .trim_start_matches('[')
             .trim_end_matches(']')
@@ -346,6 +359,64 @@ impl AnalyzeChatmlCommand {
             tool_calls,
         }
     }
+}
+
+/// Remove commas that precede only whitespace and a closing bracket, so a
+/// trace with trailing commas becomes valid JSON serde can parse. String
+/// literals (and escaped characters inside them) are respected, so a comma
+/// inside a quoted value survives.
+fn strip_trailing_commas(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut out = String::with_capacity(content.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            let ch = content[i..].chars().next().expect("char boundary");
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                out.push(b as char);
+                i += 1;
+            }
+            b',' => {
+                // Drop the comma when only whitespace separates it from a
+                // closing bracket (an object or array close).
+                let mut j = i + 1;
+                while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
+                    i += 1; // skip the comma
+                } else {
+                    out.push(',');
+                    i += 1;
+                }
+            }
+            _ => {
+                // Copy the (possibly multi-byte) character verbatim.
+                let ch = content[i..].chars().next().expect("char boundary");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -524,5 +595,55 @@ mod tests {
         assert_eq!(msgs.len(), 1, "no synthetic system message");
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(tools, None);
+    }
+
+    /// A pretty-printed trace (one event spread over multiple lines) with a
+    /// trailing comma: the relaxed parser used to split by lines, so every
+    /// line of a multi-line event failed to parse on its own and the command
+    /// answered "no valid events found" even though every event was present.
+    #[test]
+    fn parse_trace_relaxed_reads_pretty_printed_traces() {
+        let content = "[\n{\n  \"ph\": \"X\",\n  \"name\": \"POST /v1/messages\",\n  \"cat\": \"http.request\",\n  \"ts\": 100,\n  \"dur\": 50,\n  \"pid\": 1,\n  \"tid\": 2,\n  \"args\": {\"body\": \"{\\\"messages\\\":[]}\"}\n},\n{\n  \"ph\": \"X\",\n  \"name\": \"200 OK\",\n  \"cat\": \"http.response\",\n  \"ts\": 200,\n  \"dur\": 50,\n  \"pid\": 1,\n  \"tid\": 2\n},\n]\n";
+        let events = AnalyzeChatmlCommand::parse_trace_relaxed(content)
+            .expect("pretty-printed trace with trailing comma parses");
+        assert_eq!(events.len(), 2, "both events must survive");
+        assert_eq!(events[0].cat, "http.request");
+        assert_eq!(
+            events[0].args.as_ref().unwrap()["body"],
+            "{\"messages\":[]}"
+        );
+        assert_eq!(events[1].cat, "http.response");
+    }
+
+    /// The single-line-per-event shape with trailing commas (the case the
+    /// line fallback was built for) keeps working, and commas inside string
+    /// values survive the strip.
+    #[test]
+    fn parse_trace_relaxed_keeps_single_line_and_string_commas() {
+        let content = concat!(
+            "[\n",
+            "{\"ph\":\"i\",\"name\":\"a, b\",\"cat\":\"c\",\"ts\":1,\"pid\":1,\"tid\":1},\n",
+            "{\"ph\":\"i\",\"name\":\"second\",\"cat\":\"c\",\"ts\":2,\"pid\":1,\"tid\":1},\n",
+            "]\n"
+        );
+        let events = AnalyzeChatmlCommand::parse_trace_relaxed(content)
+            .expect("single-line trace with trailing commas parses");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].name, "a, b",
+            "commas inside string values survive"
+        );
+        assert_eq!(events[1].name, "second");
+    }
+
+    /// An empty array (with or without a trailing comma) still yields no
+    /// events rather than an error.
+    #[test]
+    fn parse_trace_relaxed_empty_array_yields_no_events() {
+        let empty = AnalyzeChatmlCommand::parse_trace_relaxed("[]\n").expect("empty array");
+        assert!(empty.is_empty());
+        let empty_pretty =
+            AnalyzeChatmlCommand::parse_trace_relaxed("[\n]\n").expect("empty pretty array");
+        assert!(empty_pretty.is_empty());
     }
 }
