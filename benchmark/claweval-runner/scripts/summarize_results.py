@@ -321,8 +321,10 @@ def main():
             sum(1 for tr in t.get("trials", []) if tr.get("passed"))
             for t in data
         )
-        output += f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/total_tasks*100:.1f}%)\n"
-        output += f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
+        # `(x or 1)` guards: an empty batch_results.json (e.g. a filter that
+        # matched nothing) must print a 0-task summary, not a ZeroDivisionError.
+        output += f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/(total_tasks or 1)*100:.1f}%)\n"
+        output += f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/(total_trials or 1)*100:.1f}%)\n"
 
     if args.output:
         with open(args.output, "w") as f:
