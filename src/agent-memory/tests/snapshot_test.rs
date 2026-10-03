@@ -147,3 +147,50 @@ fn snapshot_excludes_meta_directory() {
         );
     }
 }
+
+// ---------- hostile archive ----------
+
+#[test]
+fn restore_rejects_tarball_with_escaping_entry() {
+    let (tmp, svc) = setup();
+    svc.write("doc.md", "v1 contents", false).unwrap();
+    let snap = svc.mem_snapshot(None).unwrap();
+
+    let snap_dir = svc.mount.meta_dir.join("snapshots");
+    let archive = snap_dir.join(format!("{}.tar.gz", snap.id));
+
+    // Craft a tarball with one good entry and one whose raw header path
+    // is `../escape.txt`. Header::set_path rejects `..` — which is exactly
+    // why the name has to be written at the byte level, as a hostile
+    // archiver would.
+    let f = std::fs::File::create(&archive).unwrap();
+    let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+    let mut builder = tar::Builder::new(enc);
+
+    let mut good = tar::Header::new_gnu();
+    good.set_size(6);
+    good.set_mode(0o644);
+    good.set_cksum();
+    builder
+        .append_data(&mut good, "good.txt", b"good!\n".as_ref())
+        .unwrap();
+
+    let mut evil = tar::Header::new_gnu();
+    evil.set_size(5);
+    evil.set_mode(0o644);
+    evil.as_old_mut().name = [0u8; 100];
+    evil.as_old_mut().name[..13].copy_from_slice(b"../escape.txt");
+    evil.set_cksum();
+    builder.append(&evil, b"evil!".as_ref()).unwrap();
+
+    builder.into_inner().unwrap().finish().unwrap();
+
+    let res = svc.mem_snapshot_restore(&snap.id);
+    assert!(
+        res.is_err(),
+        "restore of an archive with an escaping entry must be rejected, got Ok(())"
+    );
+    // No escape actually occurred: the skipped entry left nothing behind.
+    assert!(!snap_dir.join("escape.txt").exists());
+    assert!(!tmp.path().join("escape.txt").exists());
+}

@@ -223,12 +223,23 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                     // old tar.unpack() used; Directory and Regular share
                     // one branch because both go through the same
                     // validation before filesystem dispatch.
-                    entry.unpack_in(&staging).map_err(|e| {
+                    // It reports a refused entry as Ok(false), not an
+                    // error — treating that as success would apply an
+                    // incomplete (possibly tampered) archive through the
+                    // rename swap, so a skipped entry must fail the
+                    // restore.
+                    let unpacked = entry.unpack_in(&staging).map_err(|e| {
                         MemoryError::Other(format!(
                             "tar unpack {}: {e}",
                             entry.path().unwrap_or_default().display()
                         ))
                     })?;
+                    if !unpacked {
+                        return Err(MemoryError::InvalidArgument(format!(
+                            "snapshot entry '{}' was skipped: path escapes the staging directory",
+                            entry.path().unwrap_or_default().display()
+                        )));
+                    }
                 }
                 other => {
                     return Err(MemoryError::InvalidArgument(format!(
