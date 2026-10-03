@@ -57,6 +57,32 @@ def test_get_instance_ids_empty_patch_skipped(tmp_path: Path) -> None:
     assert result == ["i1"]
 
 
+def test_get_instance_ids_list_format(tmp_path: Path) -> None:
+    """swebench 上游明确接受 list[record] 形态的 predictions 文件
+    （get_predictions_from_file 同时支持 list 与 dict）——本函数此前对
+    list 直接 data.items() 裸崩 AttributeError。
+    """
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(
+        json.dumps(
+            [
+                {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff --git"},
+                {"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": ""},
+            ]
+        )
+    )
+    result = _get_instance_ids(preds_file)
+    assert result == ["i1"]
+
+
+def test_get_instance_ids_skips_null_prediction(tmp_path: Path) -> None:
+    """dict 形态里值为 null 的条目按既有空补丁语义跳过，不裸崩。"""
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps({"i1": None, "i2": {"model_patch": "diff"}}))
+    result = _get_instance_ids(preds_file)
+    assert result == ["i2"]
+
+
 def test_get_instance_ids_missing_file(tmp_path: Path) -> None:
     import pytest
 
@@ -216,6 +242,36 @@ def test_run_evaluation_accepts_multilingual_subset(tmp_path: Path, mocker: Mock
     assert call_kwargs["dataset_name"] == "SWE-bench/SWE-bench_Multilingual"
     assert call_kwargs["split"] == "test"
     assert call_kwargs["instance_ids"] == ["apache__druid-13704"]
+
+
+def test_run_evaluation_accepts_custom_dataset_path(tmp_path: Path, mocker: MockerFixture) -> None:
+    """run 命令允许 subset 传自定义数据集路径（dataset.py:31 原样透传
+    HuggingFace），evaluate 必须同样接受——修复前 get_dataset_name 对
+    任何非内置键抛 ValueError，自定义数据集跑完却无法评估。
+    """
+    import sys
+    import types
+
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(
+        json.dumps({"i1": {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff"}})
+    )
+    output_dir = tmp_path / "output"
+
+    # swebench 本体在测试环境缺失时以桩模块顶替（与既有用例的 mock 等价）
+    if "swebench" not in sys.modules:
+        stub = types.ModuleType("swebench")
+        stub.run_evaluation = lambda **kwargs: None
+        sys.modules["swebench"] = stub
+
+    mock_run = mocker.patch("swebench.run_evaluation", return_value=None)
+    mocker.patch("swe_runner.evaluation.service._ensure_docker_host_for_rootless_context")
+    mocker.patch("swe_runner.evaluation.service._install_swebench_rootless_copy_patch")
+
+    run_evaluation(preds_file, output_dir, subset="my-org/SWE-bench_Custom", run_id="t")
+
+    call_kwargs = mock_run.call_args[1]
+    assert call_kwargs["dataset_name"] == "my-org/SWE-bench_Custom"
 
 
 def test_run_evaluation_skips_empty_patches(tmp_path: Path, mocker: MockerFixture) -> None:
