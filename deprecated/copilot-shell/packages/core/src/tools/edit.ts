@@ -64,6 +64,66 @@ export function applyReplacement(
 }
 
 /**
+ * Restores the original (possibly CRLF) line endings after an edit was
+ * computed against the LF-normalized copy of a file. The untouched prefix
+ * and suffix are copied verbatim from the raw bytes so mixed CRLF/LF files
+ * keep their per-line endings; only the edited segment adopts the ending
+ * style of the content it replaced.
+ */
+function restoreRawLineEndings(
+  raw: string,
+  normalizedBefore: string,
+  normalizedAfter: string,
+): string {
+  const maxCommon = Math.min(normalizedBefore.length, normalizedAfter.length);
+  let prefix = 0;
+  while (
+    prefix < maxCommon &&
+    normalizedBefore[prefix] === normalizedAfter[prefix]
+  ) {
+    prefix++;
+  }
+  let suffix = 0;
+  while (
+    suffix < maxCommon - prefix &&
+    normalizedBefore[normalizedBefore.length - 1 - suffix] ===
+      normalizedAfter[normalizedAfter.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+
+  // Map normalized offsets back to raw offsets. Only \r\n pairs collapse
+  // during normalization, so every other character maps one-to-one.
+  const offsets: number[] = new Array<number>(normalizedBefore.length + 1);
+  offsets[0] = 0;
+  let rawIndex = 0;
+  let normalizedIndex = 0;
+  while (rawIndex < raw.length && normalizedIndex < normalizedBefore.length) {
+    rawIndex += raw[rawIndex] === '\r' && raw[rawIndex + 1] === '\n' ? 2 : 1;
+    normalizedIndex++;
+    offsets[normalizedIndex] = rawIndex;
+  }
+
+  const rawStart = offsets[prefix];
+  const rawEnd = offsets[normalizedBefore.length - suffix];
+  const replacedSegment = raw.slice(rawStart, rawEnd);
+  const insertedSegment = normalizedAfter.slice(
+    prefix,
+    normalizedAfter.length - suffix,
+  );
+
+  // The edited segment keeps the ending style of what it replaced; a pure
+  // insertion into an all-CRLF file also uses CRLF.
+  const fileIsCrlfOnly = raw.includes('\r\n') && !/(?<!\r)\n/.test(raw);
+  const useCrlf = replacedSegment.includes('\r\n') || fileIsCrlfOnly;
+  const styledInsert = useCrlf
+    ? insertedSegment.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n')
+    : insertedSegment;
+
+  return raw.slice(0, rawStart) + styledInsert + raw.slice(rawEnd);
+}
+
+/**
  * Parameters for the Edit tool
  */
 export interface EditToolParams {
@@ -125,6 +185,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
     const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
+    let rawFileContent: string | null = null;
     let fileExists = false;
     let isNewFile = false;
     let finalNewString = params.new_string;
@@ -135,11 +196,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       | undefined = undefined;
 
     try {
-      currentContent = await this.config
+      const rawContent = await this.config
         .getFileSystemService()
         .readTextFile(params.file_path);
-      // Normalize line endings to LF for consistent processing.
-      currentContent = currentContent.replace(/\r\n/g, '\n');
+      // Keep the raw bytes for the write-back; match against an
+      // LF-normalized copy for consistent processing.
+      rawFileContent = rawContent;
+      currentContent = rawContent.replace(/\r\n/g, '\n');
       fileExists = true;
     } catch (err: unknown) {
       if (!isNodeError(err) || err.code !== 'ENOENT') {
@@ -210,7 +273,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
-    const newContent = !error
+    let newContent = !error
       ? applyReplacement(
           currentContent,
           finalOldString,
@@ -228,8 +291,24 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
+    // When the file used CRLF endings, map the normalized edit result back
+    // onto the raw bytes so untouched lines keep their original endings.
+    // LF-only files are unaffected: raw equals the normalized copy.
+    if (
+      !error &&
+      rawFileContent !== null &&
+      currentContent !== null &&
+      rawFileContent !== currentContent
+    ) {
+      newContent = restoreRawLineEndings(
+        rawFileContent,
+        currentContent,
+        newContent,
+      );
+    }
+
     return {
-      currentContent,
+      currentContent: rawFileContent ?? currentContent,
       newContent,
       occurrences,
       error,
@@ -561,14 +640,26 @@ Expectation for required parameters:
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
         try {
-          const currentContent = await this.config
+          const rawContent = await this.config
             .getFileSystemService()
             .readTextFile(params.file_path);
-          return applyReplacement(
-            currentContent,
+          // Match against the LF-normalized copy (models typically send LF
+          // old_string), then restore the file's own line endings so the
+          // proposed content is a real change, not the current content.
+          const normalizedContent = rawContent.replace(/\r\n/g, '\n');
+          const normalizedResult = applyReplacement(
+            normalizedContent,
             params.old_string,
             params.new_string,
-            params.old_string === '' && currentContent === '',
+            params.old_string === '' && normalizedContent === '',
+          );
+          if (rawContent === normalizedContent) {
+            return normalizedResult;
+          }
+          return restoreRawLineEndings(
+            rawContent,
+            normalizedContent,
+            normalizedResult,
           );
         } catch (err) {
           if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
