@@ -191,7 +191,7 @@ fn publication_matches_real_xattr_and_hides_blocked_skills() {
 }
 
 #[test]
-fn rollback_retains_backup_and_restores_selected_snapshot() {
+fn rollback_consumes_backup_and_restores_selected_snapshot() {
     let f = Fixture::new();
     f.certify("fixture", &json!([]));
     fs::write(f.root.io_dir.join("main.sh"), "echo changed\n").unwrap();
@@ -206,10 +206,13 @@ fn rollback_retains_backup_and_restores_selected_snapshot() {
         fs::read_to_string(f.root.io_dir.join("main.sh")).unwrap(),
         "echo safe\n"
     );
+    // rollbackBackup documents which recovery copy the rollback ran with;
+    // once the call returns, no intent references it any more and the copy
+    // must be gone so repeated rollbacks cannot accumulate dead trees.
     let backup = Path::new(result["rollbackBackup"].as_str().unwrap());
-    assert_eq!(
-        fs::read_to_string(backup.join("main.sh")).unwrap(),
-        "echo changed\n"
+    assert!(
+        !backup.exists(),
+        "a successful rollback must consume its recovery backup"
     );
     assert_eq!(
         f.manifest()
