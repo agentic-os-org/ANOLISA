@@ -248,3 +248,31 @@ fn cancellation_during_final_host_call_cannot_return_proceed() {
         .get("candidate")
         .is_some());
 }
+
+#[test]
+fn command_deny_overlapped_by_cancellation_stays_terminal() {
+    // The Host raises cancellation immediately after the command gate answered
+    // `deny`; the executor must record the observed denial instead of
+    // laundering it into a cancellation because the two overlapped.
+    let core = Core::new().unwrap();
+    let mut host = Host::new();
+    let flag = Rc::new(Cell::new(false));
+    host.replies = vec![Reply::Deny];
+    host.cancel_after_call = Some(flag.clone());
+    let prepared = core.prepare(request(true), &host, 1000).unwrap();
+    let result = core
+        .execute(
+            prepared,
+            &mut host,
+            &mut MemoryJournal::default(),
+            &FixedClock(1100),
+            &CancelFlag(flag),
+        )
+        .unwrap();
+    assert_eq!(
+        result.calls()[0].result().output.as_ref().unwrap()["decision"]["verdict"],
+        "deny"
+    );
+    assert_eq!(result.record()["decision"], "deny");
+    assert_eq!(result.record()["steps"][0]["outcome"], "cancelled");
+}

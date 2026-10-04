@@ -319,3 +319,26 @@ fn different_call_ids_cannot_reuse_a_provider_idempotency_key() {
         .dispatch_current(&s.intent, &Value::Null, "fixture-os-authority", 1500)
         .is_err());
 }
+
+#[test]
+fn denial_relabelled_as_cancellation_cannot_validate() {
+    // A denial that overlapped cancellation used to be written as a plain
+    // cancellation, and the checker mirrored the same reduction, so the
+    // relabelled record validated. The observed command-gate verdict must be
+    // terminal on the checking side too.
+    let mut s = Scenario::pre_tool();
+    deny(s.records[0].output.as_mut().unwrap());
+    s.execution["steps"][0]["outcome"] = json!("cancelled");
+    s.execution["steps"][0]["reason"] = json!("cancellation_requested");
+    s.execution["decision"] = json!("cancelled");
+    s.skip_after_first();
+    assert!(
+        s.check().is_err(),
+        "a denial relabelled as cancellation must not validate"
+    );
+
+    // The record the executor now writes keeps the cancellation outcome and
+    // reduces the decision to `deny`.
+    s.execution["decision"] = json!("deny");
+    s.check().unwrap();
+}

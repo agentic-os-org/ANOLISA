@@ -295,7 +295,9 @@ impl Registry {
                 }
             }
             if entry["outcome"] == "cancelled" {
-                decision = "cancelled";
+                // Keep the same reduction as the executor: a rejected command
+                // gate stays a denial, so a relabelled record is rejected here.
+                decision = if rejected { "deny" } else { "cancelled" };
                 continue;
             }
             let selected = array(&step["providers"])?;
