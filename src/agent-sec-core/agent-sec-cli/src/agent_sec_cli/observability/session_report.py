@@ -51,6 +51,23 @@ def _parse_metrics(metrics_json: str | None) -> dict[str, Any]:
         return {}
 
 
+def _metric_int(value: Any) -> int:
+    """Return a byte-count metric as an int, or 0 for malformed values.
+
+    Metric fields are typed ``Any`` in the public observability schema, so a
+    stored value may be a string, list, dict, or null. One malformed event must
+    not abort the whole session report.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def _tool_name(value: Any) -> str:
+    """Return a hashable tool-name key for the breakdown map."""
+    return value if isinstance(value, str) and value else "unknown"
+
+
 def build_session_report(
     session_id: str,
     obs_reader: ObservabilityReader,
@@ -75,10 +92,10 @@ def build_session_report(
         metrics = _parse_metrics(ev.metrics_json)
         if ev.hook == "after_llm_call":
             llm_calls += 1
-            req_bytes += int(metrics.get("request_payload_bytes", 0))
-            resp_bytes += int(metrics.get("response_stream_bytes", 0))
+            req_bytes += _metric_int(metrics.get("request_payload_bytes"))
+            resp_bytes += _metric_int(metrics.get("response_stream_bytes"))
         elif ev.hook == "before_tool_call":
-            name = metrics.get("tool_name", "unknown")
+            name = _tool_name(metrics.get("tool_name"))
             tool_counts[name] = tool_counts.get(name, 0) + 1
 
     _ALL_CATEGORIES = [
