@@ -191,7 +191,9 @@ export const RiskEnforcementPage: React.FC = () => {
     : violations;
 
   const activeBindings = bindings.filter((binding) => binding.state === 'enforced');
-  const displayedViolations = enforcementViolationTotal(violations, health);
+  // The table below shows `filteredViolations`; the summary card must count
+  // the same set or it disagrees with the visible rows and the filter banner.
+  const displayedViolations = enforcementViolationTotal(filteredViolations, health);
   const supportsMode = (candidate: EnforcementPolicyMode): boolean => (
     enforcementSupportsMode(health, candidate)
   );
