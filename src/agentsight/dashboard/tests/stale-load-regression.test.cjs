@@ -231,3 +231,24 @@ test('optimization: a dimension result must not land in another session', () => 
   const guarded = body.match(/forSession<[A-Za-z]+>\(/g) ?? [];
   assert.equal(guarded.length, 6, 'all six dimensions must use the gated setter');
 });
+
+test('system-audit: load-more must not append a page from a superseded list', () => {
+  const source = readSource('src/pages/SystemAuditPage.tsx');
+  const loadMore = source.indexOf('const loadMoreEvents = async () => {');
+  assert.ok(loadMore >= 0, 'the load-more handler must exist');
+  const body = source.slice(loadMore, source.indexOf('\n  };', loadMore));
+
+  const versionTaken = body.indexOf('const version = loadRequestVersion.current;');
+  const fetchAt = body.indexOf('await fetchAuditEvents(');
+  const check = body.indexOf('if (loadRequestVersion.current !== version) return;');
+  const append = body.indexOf('setEvents((prev) => [...prev, ...result.data.items]);');
+
+  assert.ok(
+    versionTaken >= 0 && versionTaken < fetchAt,
+    'SystemAuditPage.loadMoreEvents: the page must be bound to the current list version',
+  );
+  assert.ok(
+    check > fetchAt && check < append,
+    'SystemAuditPage.loadMoreEvents: the version must be re-checked between the await and the append',
+  );
+});
