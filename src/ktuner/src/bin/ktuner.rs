@@ -91,21 +91,7 @@ fn cmd_check(cat: Option<String>, conservative: bool) -> Result<i32> {
     // `--conservative` promised 72 while applying it lands on the floor, 30).
     let predicted_score = eval.score_after_applying(&recs);
 
-    let recs_json: Vec<serde_json::Value> = recs
-        .iter()
-        .map(|r| {
-            json!({
-                "param": r.param,
-                "current": r.current_value,
-                "recommended": r.recommended_value,
-                "reason": r.reason,
-                "confidence": format!("{:?}", r.confidence).to_lowercase(),
-                "category": format!("{:?}", r.category).to_lowercase(),
-                "subcategory": category::param_subcategory(&r.param),
-                "writable": r.writable,
-            })
-        })
-        .collect();
+    let recs_json: Vec<serde_json::Value> = recs.iter().map(rec_json).collect();
 
     let output = json!({
         "score": score,
@@ -403,6 +389,12 @@ fn gather() -> Result<(detect::SystemInfo, rules::EvalResult)> {
     Ok((info, eval))
 }
 
+/// One builder for every agent-facing recommendation entry: `check`'s
+/// `recommendations` and `tune --dry-run`'s `would_apply` serialize the same
+/// object, so a consumer can reconcile the plan against the diagnosis. This
+/// used to exist in two shapes — rec_json dropped `subcategory` and
+/// `writable`, leaving dry-run entries with 6 keys where check emits 8 — so
+/// an agent diffing the two views saw the same `param` under two schemas.
 fn rec_json(r: &Recommendation) -> serde_json::Value {
     json!({
         "param": r.param,
@@ -411,6 +403,8 @@ fn rec_json(r: &Recommendation) -> serde_json::Value {
         "reason": r.reason,
         "confidence": format!("{:?}", r.confidence).to_lowercase(),
         "category": format!("{:?}", r.category).to_lowercase(),
+        "subcategory": category::param_subcategory(&r.param),
+        "writable": r.writable,
     })
 }
 
@@ -525,6 +519,50 @@ mod tests {
         let full = dry_run_output(&recs, 2);
         assert_eq!(full["status"], json!("planned"));
         assert_eq!(full["blocked"], json!(0));
+    }
+
+    #[test]
+    fn dry_run_entries_carry_the_check_recommendation_shape() {
+        // would_apply and check's recommendations are the same object and
+        // must serialize identically: rec_json used to drop subcategory and
+        // writable from the preview, so an agent reconciling the plan
+        // against the diagnosis saw the same param under two schemas
+        // (6 keys vs the documented 8).
+        let output = dry_run_output(
+            &[rec("vm.swappiness", true), rec("net.core.somaxconn", false)],
+            2,
+        );
+        let entries = output["would_apply"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        // The recovered fields carry real values, not nulls.
+        assert_eq!(entries[0].get("subcategory"), Some(&json!("memory")));
+        assert_eq!(entries[0].get("writable"), Some(&json!(true)));
+        assert_eq!(entries[1].get("subcategory"), Some(&json!("network")));
+        assert_eq!(entries[1].get("writable"), Some(&json!(false)));
+        // cmd_check builds its recommendations array with the same rec_json,
+        // so the key set below is exactly check's entry shape, not a subset.
+        for entry in entries {
+            let mut keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "category",
+                    "confidence",
+                    "current",
+                    "param",
+                    "reason",
+                    "recommended",
+                    "subcategory",
+                    "writable",
+                ]
+            );
+        }
     }
 
     #[test]
