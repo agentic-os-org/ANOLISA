@@ -40,8 +40,13 @@ CANDIDATES=(
     "${SCRIPT_DIR}/../../common/hooks/${SCRIPT}"
     "/usr/local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "/usr/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
-    "${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
 )
+
+# Minimal runners may omit HOME. Keep the user-local fallback conditional so
+# an environment omission cannot bypass the fail-open contract below.
+if [ -n "${HOME:-}" ]; then
+    CANDIDATES+=("${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}")
+fi
 
 for candidate in "${CANDIDATES[@]}"; do
     [ -f "$candidate" ] || continue

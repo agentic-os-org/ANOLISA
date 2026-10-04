@@ -54,4 +54,19 @@ output=$(
 )
 [ "$output" = "current" ]
 
+# Minimal runners may omit HOME entirely. The dispatcher must still honour its
+# fail-open contract: emit an empty JSON object and exit 0 instead of aborting
+# on an unbound variable (which would surface as a hook error on every call).
+output=$(
+    env -u HOME \
+        bash "$CURRENT_ROOT/common/hooks/run-hook.sh" "missing-hook.py"
+)
+[ "$output" = "{}" ]
+
+output=$(
+    HOME= \
+        bash "$CURRENT_ROOT/common/hooks/run-hook.sh" "$HOOK_NAME"
+)
+[ "$output" = "current" ]
+
 echo "run-hook install scope test passed"
