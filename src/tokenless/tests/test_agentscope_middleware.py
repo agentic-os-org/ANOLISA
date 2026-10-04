@@ -501,5 +501,23 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
             )
 
 
+    async def test_core_error_fails_open(self) -> None:
+        async def post_tool(_request):
+            raise core.TokenlessError("2 stash write operation(s) failed")
+
+        self.middleware.sdk.post_tool = post_tool
+        response = _ToolResponse([_TextBlock("payload")])
+
+        async def next_handler(**_kwargs):
+            yield response
+
+        output = await _collect(
+            self.middleware.on_acting(
+                self.agent, {"tool_call": _Call("call-1", "api", "{}")}, next_handler
+            )
+        )
+        self.assertIs(output[0], response)
+
+
 if __name__ == "__main__":
     unittest.main()

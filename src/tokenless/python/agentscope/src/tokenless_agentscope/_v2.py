@@ -329,28 +329,33 @@ class TokenlessMiddleware(MiddlewareBase):
         for index, block in enumerate(response.content):
             if not isinstance(block, TextBlock):
                 continue
-            transformed = await self.sdk.post_tool(
-                PostToolRequest(
-                    result_kind=ResultKind.TOOL,
-                    tool_name=tool_name,
-                    content=block.text,
-                    status=self._status(response.state),
-                    content_origin=contract.content_origin,
-                    output_optimization=optimization,
-                    capabilities=PostToolCapabilities(
-                        replace_output=True,
-                        recovery=(
-                            RecoveryMethod.tool(self.retrieve_tool_name)
-                            if self._status(response.state) == ToolResultStatus.SUCCESS
-                            and optimization == OutputOptimization.NONE
-                            else RecoveryMethod()
+            try:
+                transformed = await self.sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name=tool_name,
+                        content=block.text,
+                        status=self._status(response.state),
+                        content_origin=contract.content_origin,
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            replace_output=True,
+                            recovery=(
+                                RecoveryMethod.tool(self.retrieve_tool_name)
+                                if self._status(response.state) == ToolResultStatus.SUCCESS
+                                and optimization == OutputOptimization.NONE
+                                else RecoveryMethod()
+                            ),
+                            replace_with_text=True,
                         ),
-                        replace_with_text=True,
-                    ),
-                    attribution=attribution,
-                    command=command,
+                        attribution=attribution,
+                        command=command,
+                    )
                 )
-            )
+            except TokenlessError:
+                # Fail open: a Core-side failure (stash backend, pipeline)
+                # must not abort the host's tool-result handling.
+                continue
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.text:
                 replacements[index] = block.model_copy(update={"text": transformed.output})

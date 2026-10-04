@@ -516,5 +516,42 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunk.state, _ResultState.ERROR)
 
 
+    async def test_core_error_fails_open(self) -> None:
+        async def post_tool(_request):
+            raise core.TokenlessError("2 stash write operation(s) failed")
+
+        self.sdk.post_tool = post_tool
+        call = _Call(id="call-1", name="web_fetch", input="{}")
+        original = _ToolResponse(content=[_TextBlock(text="payload")])
+
+        async def next_handler(**_kwargs):
+            yield original
+
+        items = await _collect(
+            self.middleware.on_acting(self.agent, {"tool_call": call}, next_handler)
+        )
+        self.assertIs(items[0], original)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoreErrorFailOpenTest(PluginTest):
+    """A Core failure must not abort the host's tool-result handling."""
+
+    async def test_core_error_fails_open(self) -> None:
+        async def post_tool(_request):
+            raise core.TokenlessError("2 stash write operation(s) failed")
+
+        self.sdk.post_tool = post_tool
+        call = _Call(id="call-1", name="web_fetch", input="{}")
+        original = _ToolResponse(content=[_TextBlock(text="payload")])
+
+        async def next_handler(**_kwargs):
+            yield original
+
+        items = await _collect(
+            self.middleware.on_acting(self.agent, {"tool_call": call}, next_handler)
+        )
+        self.assertIs(items[0], original)

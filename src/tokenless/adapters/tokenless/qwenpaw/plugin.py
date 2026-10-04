@@ -267,6 +267,7 @@ class TokenlessMiddleware(MiddlewareBase):
             PostToolRequest,
             RecoveryMethod,
             ResultKind,
+            TokenlessError,
             ToolResultStatus,
         )
 
@@ -289,23 +290,28 @@ class TokenlessMiddleware(MiddlewareBase):
         for index, block in enumerate(content):
             if not isinstance(block, TextBlock):
                 continue
-            transformed = await self.sdk.post_tool(
-                PostToolRequest(
-                    result_kind=ResultKind.TOOL,
-                    tool_name=tool_name,
-                    content=block.text,
-                    status=status,
-                    content_origin=ContentOrigin(origin),
-                    output_optimization=optimization,
-                    capabilities=PostToolCapabilities(
-                        replace_output=True,
-                        recovery=recovery,
-                        replace_with_text=True,
-                    ),
-                    attribution=attribution,
-                    command=command,
+            try:
+                transformed = await self.sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name=tool_name,
+                        content=block.text,
+                        status=status,
+                        content_origin=ContentOrigin(origin),
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            replace_output=True,
+                            recovery=recovery,
+                            replace_with_text=True,
+                        ),
+                        attribution=attribution,
+                        command=command,
+                    )
                 )
-            )
+            except TokenlessError:
+                # Fail open: a Core-side failure (stash backend, pipeline)
+                # must not abort the host's tool-result handling.
+                continue
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.text:
                 content[index] = block.model_copy(update={"text": transformed.output})

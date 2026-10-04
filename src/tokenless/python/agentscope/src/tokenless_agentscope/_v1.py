@@ -244,28 +244,33 @@ class TokenlessAgentScope:
         for index, block in enumerate(response.content):
             if block.get("type") != "text":
                 continue
-            transformed = await self.sdk.post_tool(
-                PostToolRequest(
-                    result_kind=ResultKind.TOOL,
-                    tool_name=tool_call["name"],
-                    content=block.get("text", ""),
-                    status=self._status(response),
-                    content_origin=contract.content_origin,
-                    output_optimization=optimization,
-                    capabilities=PostToolCapabilities(
-                        replace_output=True,
-                        recovery=(
-                            RecoveryMethod.tool(self.config.retrieve_tool_name)
-                            if self._status(response) == ToolResultStatus.SUCCESS
-                            and optimization == OutputOptimization.NONE
-                            else RecoveryMethod()
+            try:
+                transformed = await self.sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name=tool_call["name"],
+                        content=block.get("text", ""),
+                        status=self._status(response),
+                        content_origin=contract.content_origin,
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            replace_output=True,
+                            recovery=(
+                                RecoveryMethod.tool(self.config.retrieve_tool_name)
+                                if self._status(response) == ToolResultStatus.SUCCESS
+                                and optimization == OutputOptimization.NONE
+                                else RecoveryMethod()
+                            ),
+                            replace_with_text=True,
                         ),
-                        replace_with_text=True,
-                    ),
-                    attribution=self._attribution(tool_call["id"]),
-                    command=command if isinstance(command, str) else None,
+                        attribution=self._attribution(tool_call["id"]),
+                        command=command if isinstance(command, str) else None,
+                    )
                 )
-            )
+            except TokenlessError:
+                # Fail open: a Core-side failure (stash backend, pipeline)
+                # must not abort the host's tool-result handling.
+                continue
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.get("text", ""):
                 replacements[index] = TextBlock(type="text", text=transformed.output)
