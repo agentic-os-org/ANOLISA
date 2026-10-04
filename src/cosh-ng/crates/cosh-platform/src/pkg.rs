@@ -596,8 +596,12 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
             PKG_TIMEOUT,
             "pkg",
         ),
+        // dpkg-query -W enumerates every status-database row, including
+        // removed-but-not-purged (`rc`) packages; request the status
+        // abbreviation and filter to `ii` rows, mirroring the `pkg_list`
+        // apt invocation so search and list agree on what "installed" is.
         PkgManager::Apt => run_command(
-            Command::new("dpkg-query").args(["-W", "-f", "${Package}\n"]),
+            Command::new("dpkg-query").args(["-W", "-f", "${db:Status-Abbrev}\t${Package}\n"]),
             PKG_TIMEOUT,
             "pkg",
         ),
@@ -612,7 +616,11 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
     match result {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            parse_installed_names(&stdout)
+            if mgr == PkgManager::Apt {
+                parse_installed_names_with_status(&stdout)
+            } else {
+                parse_installed_names(&stdout)
+            }
         }
         _ => HashSet::new(),
     }
@@ -625,6 +633,29 @@ fn parse_installed_names(output: &str) -> HashSet<String> {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())
+        .collect()
+}
+
+/// Parse `dpkg-query -W -f '${db:Status-Abbrev}\t${Package}\n'` output.
+///
+/// dpkg-query enumerates every status-database row, including
+/// removed-but-not-purged (`rc`) packages; only rows whose status starts
+/// with "ii" are installed — the same rule `parse_apt_list_output`
+/// applies for `pkg list --installed`. Package names cannot contain tabs
+/// (dpkg name charset), so the split is unambiguous; hold-state (`hi`)
+/// semantics deliberately match `parse_apt_list_output` (excluded there
+/// too).
+fn parse_installed_names_with_status(output: &str) -> HashSet<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (status, name) = line.split_once('\t')?;
+            status
+                .trim()
+                .starts_with("ii")
+                .then(|| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty())
         .collect()
 }
 
@@ -1616,6 +1647,101 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains("bash"));
         assert!(names.contains("nginx"));
+    }
+
+    // --- parse_installed_names_with_status tests (apt search gate) ---
+
+    #[test]
+    fn parse_installed_names_with_status_keeps_only_installed_rows() {
+        // dpkg-query -W enumerates every status row: `rc` is
+        // removed-but-not-purged, `un` is unknown/not-installed, `hi` is a
+        // held package that is not currently installed — none of them may
+        // cross-reference as installed in `pkg search`.
+        let output = "ii \tnginx\nrc\texim4-config\nun\tghost-pkg\nhi \theld-pkg\n";
+        let names = parse_installed_names_with_status(output);
+        assert_eq!(names.len(), 1, "only the ii row is installed: {names:?}");
+        assert!(names.contains("nginx"));
+        assert!(!names.contains("exim4-config"));
+        assert!(!names.contains("ghost-pkg"));
+        assert!(!names.contains("held-pkg"));
+    }
+
+    #[test]
+    fn parse_installed_names_with_status_ignores_malformed_lines() {
+        // Blank lines and a line without a tab are skipped without panicking
+        // — the graceful-degradation contract of the surrounding helper.
+        let output = "\nii \tnginx\nno-tab-here\n\nrc\tleftover\n";
+        let names = parse_installed_names_with_status(output);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("nginx"));
+    }
+
+    /// Re-exec stub test: a fake `dpkg-query` on PATH inspects its own `-f`
+    /// argument and serves the status-tagged format only when asked for it.
+    /// RED before the fix (the plain `${Package}` format makes the set
+    /// contain the rc package); GREEN after. Also pins the argument shape:
+    /// reverting the `-f` format fails the same test.
+    #[test]
+    #[cfg(unix)]
+    fn get_installed_names_apt_reports_only_currently_installed_packages() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const MARKER: &str = "COSH_PKG_TEST_DPKG_INNER";
+        if std::env::var_os(MARKER).is_some() {
+            // Inner half: run against the stub on PATH.
+            let names = get_installed_names(PkgManager::Apt);
+            assert!(
+                names.contains("nginx"),
+                "installed (ii) package must be in the set: {names:?}"
+            );
+            assert!(
+                !names.contains("exim4-config"),
+                "removed-but-not-purged (rc) package must NOT be in the set: {names:?}"
+            );
+            return;
+        }
+
+        // Outer half: build the stub and re-exec this test.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("dpkg-query");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh
+# Fake dpkg-query: answer from the -f format we are given.
+case \"$*\" in
+  *Status-Abbrev*)
+    printf 'ii \\tnginx\\nrc\\texim4-config\\n'
+    ;;
+  *)
+    printf 'nginx\\nexim4-config\\n'
+    ;;
+esac
+",
+        )
+        .expect("write stub");
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&stub, perms).unwrap();
+
+        let exe = std::env::current_exe().expect("current exe");
+        let output = std::process::Command::new(exe)
+            .args([
+                std::env::args().next().unwrap_or_default().as_str(),
+                "--exact",
+                "pkg::tests::get_installed_names_apt_reports_only_currently_installed_packages",
+                "--nocapture",
+            ])
+            .env("PATH", dir.path())
+            .env(MARKER, "1")
+            .output()
+            .expect("re-exec");
+
+        assert!(
+            output.status.success(),
+            "inner half failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
