@@ -10,10 +10,10 @@ use anyhow::Result;
 
 use crate::atif::AtifTrajectory;
 use crate::cost::prompts::cost_identification::{
-    CostStrategyDef, STRATEGIES, build_strategy_prompt, strategy_for,
+    build_strategy_prompt, strategy_for, CostStrategyDef, STRATEGIES,
 };
 use crate::cost::prompts::detour::{build_detour_prompt, is_detour};
-use crate::cost::{CACHED_PRICE_RATIO, MIN_DETOUR_TURNS, NOISE_LINE, ledger_tokens_for};
+use crate::cost::{ledger_tokens_for, CACHED_PRICE_RATIO, MIN_DETOUR_TURNS, NOISE_LINE};
 use crate::llm::{ChatMessage, LlmClient};
 use crate::types::{
     DetourVerdict, TurnLedgerRow, WasteCandidate, WasteExperience, WasteItem, WasteReport,
