@@ -608,20 +608,24 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
     // position check: `npm install && pnpm install` now rewrites only the npm
     // side instead of leaving the whole line alone. The subcommand must also
     // end where the token ends: `npm installable` and `npm testing` are not
-    // npm commands and keep their text.
+    // npm commands and keep their text. Like the pip and venv forms above,
+    // the rewrite runs behind the `Run: ` documentation label, which stays
+    // transparent.
     if !node_pm.is_empty() && node_pm != "npm" {
         let install = format!("{node_pm} install");
         let run = format!("{node_pm} run");
         let test = format!("{node_pm} test");
-        result = rewrite_invocation_tokens(
-            &result,
-            "npm",
-            &[
-                ("npm install", install.as_str()),
-                ("npm run", run.as_str()),
-                ("npm test", test.as_str()),
-            ],
-        );
+        result = rewrite_after_doc_label(&result, |commands| {
+            rewrite_invocation_tokens(
+                commands,
+                "npm",
+                &[
+                    ("npm install", install.as_str()),
+                    ("npm run", run.as_str()),
+                    ("npm test", test.as_str()),
+                ],
+            )
+        });
     }
 
     result
@@ -687,6 +691,20 @@ mod tests {
         let mut cmds = HashSet::new();
         cmds.insert("yarn".to_string());
         cmds.insert("node".to_string());
+        EnvironmentProfile {
+            os: OsKind::Linux,
+            available_commands: cmds,
+            env_vars: HashMap::new(),
+        }
+    }
+
+    /// A host with both uv and a non-npm Node package manager, so the pip
+    /// and npm rewrites are active on the same line set.
+    fn env_uv_pnpm() -> EnvironmentProfile {
+        let mut cmds = HashSet::new();
+        cmds.insert("uv".to_string());
+        cmds.insert("python3".to_string());
+        cmds.insert("pnpm".to_string());
         EnvironmentProfile {
             os: OsKind::Linux,
             available_commands: cmds,
@@ -1148,6 +1166,46 @@ mod tests {
         assert!(result.contains("pnpm install"));
         assert!(result.contains("pnpm run build"));
         assert!(result.contains("pnpm test"));
+    }
+
+    /// The `Run: ` documentation label is transparent for the npm form as
+    /// well: a labeled npm invocation is rewritten on a host whose package
+    /// manager is pnpm or yarn, exactly like the labeled pip and venv forms.
+    #[test]
+    fn test_heuristic_npm_rewrites_after_run_label() {
+        let env = env_uv_pnpm();
+        assert_eq!(
+            compile("Run: npm install\n", &env),
+            "Run: pnpm install\n",
+            "the label must not hide the npm invocation"
+        );
+        assert_eq!(
+            compile("Run: npm run build\n", &env),
+            "Run: pnpm run build\n",
+            "npm run behind the label is still an invocation"
+        );
+        assert_eq!(
+            compile("Run: npm test\n", &env),
+            "Run: pnpm test\n",
+            "npm test behind the label is still an invocation"
+        );
+        assert_eq!(
+            compile("  Run: npm install\n", &env),
+            "  Run: pnpm install\n",
+            "indented labels are transparent too"
+        );
+        // Sibling control: the pip form already rewrites behind the label.
+        assert_eq!(
+            compile("Run: pip install requests\n", &env),
+            "Run: uv pip install requests\n",
+            "the pip control keeps its labeled rewrite"
+        );
+        // The label is still only a label: an argument mention stays put.
+        assert_eq!(
+            compile("echo Run: npm install\n", &env),
+            "echo Run: npm install\n",
+            "the label in argument position hides nothing"
+        );
     }
 
     /// A package-manager name that merely contains `npm` is not the npm
