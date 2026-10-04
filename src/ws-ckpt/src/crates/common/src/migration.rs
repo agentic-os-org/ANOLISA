@@ -68,6 +68,16 @@ pub fn migrate_legacy_indexes(backend: &dyn StorageBackend, state_dir: &Path) ->
             continue;
         }
 
+        // Guarded APIs validate ids with `validate_workspace_id_v2`; a
+        // directory that happens to contain an index.json but is not a
+        // canonical ws id would register as a half-supported workspace.
+        // Skip it (leave its files untouched) rather than aborting the
+        // migration of the legitimate workspaces.
+        if let Err(reason) = crate::validate_workspace_id_v2(&ws_id) {
+            warn!("Migration: skipping workspace id {:?}: {}", ws_id, reason);
+            continue;
+        }
+
         // Log migration start on first workspace that needs migration
         if !logged_migration_start {
             info!(
@@ -267,7 +277,7 @@ mod tests {
         let snap_dir = tempfile::tempdir().unwrap();
         let state_dir = tempfile::tempdir().unwrap();
         let index = make_index("/home/user/project");
-        write_old_index(snap_dir.path(), "ws-abc", &index);
+        write_old_index(snap_dir.path(), "ws-a3f2b1", &index);
 
         let backend = MockBackend {
             data_root: snap_dir.path().to_path_buf(),
@@ -279,7 +289,7 @@ mod tests {
         let new_path = state_dir
             .path()
             .join(crate::INDEXES_DIR)
-            .join("ws-abc")
+            .join("ws-a3f2b1")
             .join(crate::INDEX_FILE);
         assert!(new_path.exists());
         let loaded: SnapshotIndex =
@@ -289,22 +299,22 @@ mod tests {
         // Old index removed
         assert!(!snap_dir
             .path()
-            .join("ws-abc")
+            .join("ws-a3f2b1")
             .join(crate::INDEX_FILE)
             .exists());
 
         // state.json written
         let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
         assert_eq!(sf.workspaces.len(), 1);
-        assert_eq!(sf.workspaces[0].ws_id, "ws-abc");
+        assert_eq!(sf.workspaces[0].ws_id, "ws-a3f2b1");
     }
 
     #[test]
     fn migrate_multiple_workspaces() {
         let snap_dir = tempfile::tempdir().unwrap();
         let state_dir = tempfile::tempdir().unwrap();
-        write_old_index(snap_dir.path(), "ws-a", &make_index("/a"));
-        write_old_index(snap_dir.path(), "ws-b", &make_index("/b"));
+        write_old_index(snap_dir.path(), "ws-a1b2c3", &make_index("/a"));
+        write_old_index(snap_dir.path(), "ws-d4e5f6", &make_index("/b"));
 
         let backend = MockBackend {
             data_root: snap_dir.path().to_path_buf(),
@@ -348,12 +358,12 @@ mod tests {
         let state_dir = tempfile::tempdir().unwrap();
 
         // Bad JSON workspace
-        let bad_dir = snap_dir.path().join("ws-bad");
+        let bad_dir = snap_dir.path().join("ws-bad12a");
         fs::create_dir_all(&bad_dir).unwrap();
         fs::write(bad_dir.join(crate::INDEX_FILE), "not json {{{").unwrap();
 
         // Good workspace
-        write_old_index(snap_dir.path(), "ws-good", &make_index("/good"));
+        write_old_index(snap_dir.path(), "ws-900d42", &make_index("/good"));
 
         let backend = MockBackend {
             data_root: snap_dir.path().to_path_buf(),
@@ -363,7 +373,46 @@ mod tests {
 
         let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
         assert_eq!(sf.workspaces.len(), 1);
-        assert_eq!(sf.workspaces[0].ws_id, "ws-good");
+        assert_eq!(sf.workspaces[0].ws_id, "ws-900d42");
+    }
+
+    #[test]
+    fn migrate_skips_dirs_with_invalid_workspace_ids() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+
+        // A foreign directory that happens to contain an index.json: its
+        // name is not a canonical ws-xxxxxx id, so guarded APIs would
+        // reject any registration under it.
+        write_old_index(snap_dir.path(), "misc-cache", &make_index("/misc"));
+        // Canonical ids still migrate.
+        write_old_index(snap_dir.path(), "ws-a3f2b1", &make_index("/good"));
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+
+        let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
+        assert_eq!(
+            sf.workspaces.len(),
+            1,
+            "dirs whose names are not canonical workspace ids must not register"
+        );
+        assert_eq!(sf.workspaces[0].ws_id, "ws-a3f2b1");
+        // The foreign dir's index stays where it was (not consumed), and no
+        // index directory is created for it under state_dir.
+        assert!(snap_dir
+            .path()
+            .join("misc-cache")
+            .join(crate::INDEX_FILE)
+            .exists());
+        assert!(!state_dir
+            .path()
+            .join(crate::INDEXES_DIR)
+            .join("misc-cache")
+            .exists());
     }
 
     #[test]
