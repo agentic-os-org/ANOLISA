@@ -24,7 +24,8 @@ sudo ktuner fix <param>        # e.g. sudo ktuner fix vm.swappiness
 ktuner why <param>             # e.g. ktuner why net.core.somaxconn
 
 # Undo all changes (requires root)
-sudo ktuner rollback
+sudo ktuner rollback          # destructive + terminal (deletes the ledger)
+sudo ktuner rollback --list   # read-only preview of what rollback would restore
 ```
 
 ## JSON output
@@ -91,6 +92,18 @@ environment filtered out (unwritable or runtime-dangerous):
 ```json
 { "restored": 5, "failed": 0, "skipped": 0, "status": "Full" }
 ```
+
+### rollback --list output
+
+`sudo ktuner rollback --list` previews what a rollback would restore — read-only, nothing is
+written or deleted (the ledger is 0600 under a 0700 root-owned dir, so it shares rollback's
+root gate; a corrupt ledger surfaces as an error rather than an empty list):
+
+```json
+{ "count": 2, "pending": [ { "param": "vm.swappiness", "applied": "1", "previous": "60" } ] }
+```
+
+Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and cleans up.
 
 ### error output (stderr)
 

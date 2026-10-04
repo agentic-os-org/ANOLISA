@@ -69,7 +69,8 @@ sudo ktuner fix vm.swappiness
 ktuner why net.core.somaxconn
 
 # Undo all changes ktuner made
-sudo ktuner rollback
+sudo ktuner rollback          # destructive + terminal: restores and deletes the ledger
+sudo ktuner rollback --list   # read-only preview of what rollback would restore
 ```
 
 All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success,
@@ -86,7 +87,7 @@ is a successful no-op (`0`); an unreadable or missing ledger is a command error 
 |---------|------|--------|
 | `check`, `why` | No | Read-only diagnosis; never writes the kernel |
 | `tune --dry-run` | No | Previews changes, writes nothing |
-| `tune`, `fix`, `rollback` | Yes (`sudo`) | Writes `/proc/sys`; refuses to run if not root |
+| `tune`, `fix`, `rollback` | Yes (`sudo`) | Writes `/proc/sys`; refuses to run if not root. `rollback --list` is read-only but shares the root gate (the ledger is 0600 under a 0700 root-owned dir) |
 
 Safety guarantees:
 

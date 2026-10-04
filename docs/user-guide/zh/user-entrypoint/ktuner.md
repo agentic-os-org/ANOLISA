@@ -67,7 +67,8 @@ sudo ktuner fix vm.swappiness
 ktuner why net.core.somaxconn
 
 # 撤销 ktuner 做的所有改动
-sudo ktuner rollback
+sudo ktuner rollback          # 破坏性且终结：恢复并删除 ledger
+sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ```
 
 所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、
@@ -83,7 +84,7 @@ sudo ktuner rollback
 |------|------|------|
 | `check`、`why` | 否 | 只读诊断；绝不写内核 |
 | `tune --dry-run` | 否 | 预览改动，不写入 |
-| `tune`、`fix`、`rollback` | 是（`sudo`） | 写 `/proc/sys`；非 root 直接报错 |
+| `tune`、`fix`、`rollback` | 是（`sudo`） | 写 `/proc/sys`；非 root 直接报错。`rollback --list` 只读但同样需要 root（ledger 是 0700 root 目录下的 0600 文件） |
 
 安全保证：
 

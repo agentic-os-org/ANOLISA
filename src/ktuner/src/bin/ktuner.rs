@@ -35,7 +35,11 @@ enum Commands {
     /// Explain why a parameter should be changed
     Why { param: String },
     /// Roll back all applied changes
-    Rollback,
+    Rollback {
+        /// Show what a rollback would restore, without changing anything
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 fn main() {
@@ -52,7 +56,7 @@ fn main() {
         } => cmd_tune(dry_run, conservative, cat),
         Commands::Fix { param } => cmd_fix(&param),
         Commands::Why { param } => cmd_why(&param),
-        Commands::Rollback => cmd_rollback(),
+        Commands::Rollback { list } => cmd_rollback(list),
     };
     match result {
         Ok(code) => std::process::exit(code),
@@ -366,10 +370,36 @@ fn why_with(
     }
 }
 
-fn cmd_rollback() -> Result<i32> {
+/// JSON shape of `ktuner rollback --list`. Pure so the agent-facing contract
+/// (key names, count, entry fields, ordering) is unit-testable without a
+/// ledger on disk. Entries arrive as `rollback_preview` returns them:
+/// (param, applied, previous), sorted by param (BTreeMap order).
+fn rollback_list_output(entries: &[(String, String, String)]) -> serde_json::Value {
+    json!({
+        "count": entries.len(),
+        "pending": entries
+            .iter()
+            .map(|(param, applied, previous)| {
+                json!({ "param": param, "applied": applied, "previous": previous })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn cmd_rollback(list: bool) -> Result<i32> {
     let is_root = unsafe { libc::geteuid() } == 0;
     if !is_root {
         anyhow::bail!("rollback requires root (sudo ktuner rollback)");
+    }
+    if list {
+        // Read-only: no writes, no ledger deletion, no systemd changes. The
+        // ledger is 0600 in a 0700 root-owned dir, so --list shares
+        // rollback's root requirement; a corrupt ledger surfaces as an error
+        // here WITHOUT the destructive path having run first.
+        let entries = tuner::rollback_preview()?;
+        let output = rollback_list_output(&entries);
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(0);
     }
     let outcome = tuner::rollback_quiet()?;
     let status = tuner::classify_rollback(&outcome);
@@ -411,6 +441,55 @@ fn rec_json(r: &Recommendation) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_list_output_empty() {
+        // Empty ledger: count 0, empty pending — still a valid listing.
+        assert_eq!(
+            rollback_list_output(&[]),
+            json!({ "count": 0, "pending": [] })
+        );
+    }
+
+    #[test]
+    fn rollback_list_output_maps_every_field() {
+        let entries = vec![
+            (
+                "vm.swappiness".to_string(),
+                "1".to_string(),
+                "60".to_string(),
+            ),
+            (
+                "block/sda/scheduler".to_string(),
+                "none".to_string(),
+                "mq-deadline".to_string(),
+            ),
+        ];
+        assert_eq!(
+            rollback_list_output(&entries),
+            json!({
+                "count": 2,
+                "pending": [
+                    { "param": "vm.swappiness", "applied": "1", "previous": "60" },
+                    { "param": "block/sda/scheduler", "applied": "none", "previous": "mq-deadline" },
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn rollback_list_output_preserves_entry_order() {
+        // The shaper must not re-sort: rollback_preview's BTreeMap order is
+        // the contract.
+        let entries = vec![
+            ("zzz".to_string(), "1".to_string(), "2".to_string()),
+            ("aaa".to_string(), "3".to_string(), "4".to_string()),
+        ];
+        let out = rollback_list_output(&entries);
+        assert_eq!(out["pending"][0]["param"], json!("zzz"));
+        assert_eq!(out["pending"][1]["param"], json!("aaa"));
+    }
+
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
