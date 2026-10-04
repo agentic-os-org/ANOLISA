@@ -14,6 +14,7 @@ import {
   type EnforcementViolation,
   type EnforcementPolicyMode,
 } from '../utils/apiClient';
+import { effectiveBindingMode } from '../utils/enforcementMode';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 
@@ -24,12 +25,6 @@ function policyFilePath(policyDsl: string): string {
       ?? line.match(/^\s*block open file "([^"]+)" if AGENT\s*$/))
     .filter((match): match is RegExpMatchArray => match !== null);
   return matches.length === 1 ? matches[0][1] : '—';
-}
-
-function legacyBindingMode(policyDsl: string): EnforcementPolicyMode {
-  if (/\bblock connect endpoint\b/.test(policyDsl) || /\bblock open file\b/.test(policyDsl)) return 'enforce';
-  if (/\bnotify connect endpoint\b/.test(policyDsl)) return 'audit';
-  return 'observe';
 }
 
 const modeLabels: Record<EnforcementPolicyMode, MessageKey> = {
@@ -399,7 +394,7 @@ export const RiskEnforcementPage: React.FC = () => {
                     </td>
                     <td className="px-4 py-3 text-gray-700">
                       {(() => {
-                        const bindingMode = binding.request.policy_mode ?? legacyBindingMode(binding.request.policy_dsl);
+                        const bindingMode = effectiveBindingMode(binding.request);
                         return (
                           <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${modeBadgeClass[bindingMode]}`}>
                             {t(modeLabels[bindingMode])}

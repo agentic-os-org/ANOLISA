@@ -5,6 +5,7 @@ import type { MessageKey } from '../i18n';
 import { ContainmentDialog } from '../components/ContainmentDialog';
 import { ContainmentLifecycleCard } from '../components/ContainmentLifecycleCard';
 import { Pagination as PaginationNew } from '../components/Pagination';
+import { effectiveBindingMode } from '../utils/enforcementMode';
 import {
   fetchSecurityCase,
   fetchSecurityCases,
@@ -443,7 +444,9 @@ export const SystemAuditPage: React.FC = () => {
       && (binding.state === 'enforced' || binding.state === 'pending' || binding.state === 'degraded')
     ));
     if (active.length === 0) return 'none';
-    if (active.some((binding) => binding.request.policy_mode === 'enforce')) return 'enforce';
+    // A binding stored before `policy_mode` existed carries its mode in the
+    // DSL; reading the field alone reported an enforcing binding as audit-only.
+    if (active.some((binding) => effectiveBindingMode(binding.request) === 'enforce')) return 'enforce';
     return 'audit';
   }, [bindings, selectedCase]);
   const displayedCases = useMemo(() => {
