@@ -177,7 +177,7 @@ function baseStubs(overrides = {}) {
       ApiRequestError: class ApiRequestError extends Error {},
       ...overrides.apiClient,
     },
-    '../components/CopyButton': { copyText: async () => {} },
+    '../utils/clipboard': { copyText: () => {} },
     '../utils/formatDuration': { formatDurationSecs: (seconds) => String(seconds) },
     '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
     '../utils/accuracyAttribution': { fixLocusDiverges: () => false, fixLocusLabel: (value) => value },
