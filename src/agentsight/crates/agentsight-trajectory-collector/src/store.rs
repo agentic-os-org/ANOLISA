@@ -509,7 +509,12 @@ impl TrajectoryStore {
     ///
     /// Read-only, built for preference analysis: subagent rows are excluded
     /// because their "user" steps are the parent agent's instructions, not
-    /// genuine user input. The window filter uses `collected_at_ns` (always
+    /// genuine user input. The optimizer's synthetic run roots
+    /// (`opt:<session>`, source [`SYNTHETIC_RUN_SOURCE`]) are excluded for
+    /// the same reason with an added cost: they carry only agent dispatch
+    /// steps, so they flatten to zero preference rows while still displacing
+    /// real sessions from the `limit` window every time an analysis runs.
+    /// The window filter uses `collected_at_ns` (always
     /// present, monotonic i64) rather than the optional ISO `start_time` /
     /// `end_time` strings.
     ///
@@ -528,12 +533,13 @@ impl TrajectoryStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT session_id, atif_json FROM collected_trajectories
-             WHERE collected_at_ns >= ?1 AND is_subagent = 0
-             ORDER BY collected_at_ns DESC LIMIT ?2",
+             WHERE collected_at_ns >= ?1 AND is_subagent = 0 AND source != ?2
+             ORDER BY collected_at_ns DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![since_collected_at_ns, limit], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![since_collected_at_ns, SYNTHETIC_RUN_SOURCE, limit],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1002,6 +1008,12 @@ fn now_ns() -> i64 {
 /// stripping (see [`extract_user_message_previews`]).
 const SCHEMA_USER_VERSION: i32 = 2;
 
+/// Source label the optimizer stamps on its synthetic run rows
+/// (`opt:<session>` roots and their dimension subagents, written by the
+/// server crate). Those rows are bookkeeping about analyses, not observed
+/// agent sessions, so the preference-analysis window must not count them.
+const SYNTHETIC_RUN_SOURCE: &str = "agentsight-opt";
+
 /// Max characters kept per user-message preview column.
 const MESSAGE_PREVIEW_CHARS: usize = 200;
 
@@ -1347,6 +1359,31 @@ mod tests {
             .list_recent_atif_jsons(i64::MAX, 100)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_list_recent_atif_jsons_excludes_opt_run_rows() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("recent-opt")).unwrap();
+        // A real user session plus a synthetic optimization run root, both
+        // main-agent rows.
+        let mut real = sample_record();
+        real.session_id = "real-1".into();
+        store.upsert_trajectory(&real).unwrap();
+        let mut opt = sample_record();
+        opt.session_id = "opt:real-1".into();
+        opt.source = "agentsight-opt".into();
+        opt.file_path = String::new();
+        store.upsert_trajectory(&opt).unwrap();
+
+        let rows = store.list_recent_atif_jsons(0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "the run root must not surface: {rows:?}");
+        assert_eq!(rows[0].0, "real-1");
+
+        // A window of one must still surface the real session even though the
+        // synthetic row is the newest main-agent row in the table.
+        let one = store.list_recent_atif_jsons(0, 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].0, "real-1");
     }
 
     #[test]
