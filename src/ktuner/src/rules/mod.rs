@@ -5740,7 +5740,10 @@ mod tests {
         // rather than an unsatisfiable one that fires on every check.
         let mut recs = Vec::new();
         port_range_recommendation(50_000, 60_000, &mut recs);
-        assert!(recs.is_empty(), "hardened range must not be lowered or nagged");
+        assert!(
+            recs.is_empty(),
+            "hardened range must not be lowered or nagged"
+        );
 
         // A low-but-recoverable range widens upward only: the low endpoint
         // survives verbatim, the high endpoint extends to 65535.
