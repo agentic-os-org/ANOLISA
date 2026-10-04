@@ -162,7 +162,19 @@ pub fn memory_auto_created(svc: &MemoryService, limit: usize) -> Result<String> 
             continue;
         }
 
-        let content = match fs::read_to_string(path) {
+        let rel_path = path
+            .strip_prefix(&svc.mount.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        // Read through safe_fs anchored on the mount root (same symlink /
+        // TOCTOU invariant as memory_get_context), not the absolute walk
+        // path via std::fs.
+        let content = match crate::safe_fs::read_to_string(
+            svc.mount.root_fd.as_fd(),
+            std::path::Path::new(&rel_path),
+        ) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -174,12 +186,6 @@ pub fn memory_auto_created(svc: &MemoryService, limit: usize) -> Result<String> 
         if !source.starts_with("auto-") {
             continue;
         }
-
-        let rel_path = path
-            .strip_prefix(&svc.mount.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
 
         let created_at = fm.get("created_at").cloned().unwrap_or_default();
         let title = fm.get("title").cloned().unwrap_or_else(|| rel_path.clone());

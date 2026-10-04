@@ -5,12 +5,15 @@
 //! and which topics/categories dominate.
 
 use std::collections::HashMap;
+use std::os::fd::AsFd;
+use std::path::Path;
 
 use serde::Serialize;
 use walkdir::WalkDir;
 
 use crate::audit::AuditEntry;
 use crate::error::Result;
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 /// One entry in the recent memories list.
@@ -130,7 +133,11 @@ pub fn memory_summary(svc: &MemoryService, recent_limit: usize) -> Result<Memory
             continue;
         }
 
-        let content = match std::fs::read_to_string(path) {
+        // Read through safe_fs anchored on the mount root (same symlink /
+        // TOCTOU invariant as memory_get_context), not the absolute walk
+        // path via std::fs.
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), Path::new(&rel_path))
+        {
             Ok(c) => c,
             Err(_) => continue,
         };

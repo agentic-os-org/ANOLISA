@@ -16,6 +16,8 @@
 //! ```
 
 use std::collections::HashMap;
+use std::os::fd::AsFd;
+use std::path::Path;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,7 @@ use walkdir::WalkDir;
 
 use crate::audit::AuditEntry;
 use crate::error::Result;
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 /// One exported memory entry.
@@ -157,7 +160,13 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             .to_string_lossy()
             .to_string();
 
-        let content = match std::fs::read_to_string(path) {
+        // Route the read through safe_fs (openat2 RESOLVE_BENEATH|
+        // RESOLVE_NO_SYMLINKS) anchored on the mount root, closing the
+        // symlink-swap TOCTOU window that std::fs::read_to_string on the
+        // absolute walk path would leave open (same invariant as
+        // memory_get_context).
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), Path::new(&rel_path))
+        {
             Ok(c) => c,
             Err(_) => continue,
         };

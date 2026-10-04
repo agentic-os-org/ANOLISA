@@ -10,6 +10,7 @@
 //! can be queried via the `mem_dream` MCP tool.
 
 use std::collections::HashMap;
+use std::os::fd::AsFd;
 use std::path::Path;
 
 use chrono::Utc;
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditEntry;
 use crate::error::Result;
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 /// Synthesized user profile.
@@ -56,19 +58,19 @@ pub fn synthesize_profile(svc: &MemoryService) -> Result<UserProfile> {
     // Phase 1: Analyze session logs from .anolisa/session-logs/
     let session_logs_dir = svc.mount.meta_dir.join("session-logs");
     if session_logs_dir.exists() {
-        analyze_session_logs(&session_logs_dir, &mut profile)?;
+        analyze_session_logs(svc, ".anolisa/session-logs", &mut profile)?;
     }
 
     // Phase 2: Analyze consolidated facts
     let facts_dir = svc.mount.root.join("facts");
     if facts_dir.exists() {
-        analyze_facts(&facts_dir, &mut profile)?;
+        analyze_facts(svc, "facts", &mut profile)?;
     }
 
     // Phase 3: Analyze observed notes
     let notes_dir = svc.mount.root.join("notes").join("observed");
     if notes_dir.exists() {
-        analyze_notes(&notes_dir, &mut profile)?;
+        analyze_notes(svc, "notes/observed", &mut profile)?;
     }
 
     // Sort each dimension by evidence_count descending
@@ -108,12 +110,22 @@ pub fn synthesize_profile(svc: &MemoryService) -> Result<UserProfile> {
 }
 
 /// Analyze session log files for behavioral patterns.
-fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
+///
+/// `rel_dir` is the mount-relative directory (e.g. `.anolisa/session-logs`):
+/// enumeration uses the absolute path, but every file body is read through
+/// `safe_fs` anchored on the mount root, so a symlink planted among the
+/// entries cannot point the read outside the mount.
+fn analyze_session_logs(
+    svc: &MemoryService,
+    rel_dir: &str,
+    profile: &mut UserProfile,
+) -> Result<()> {
     let mut tool_frequency: HashMap<String, usize> = HashMap::new();
     let mut search_topics: HashMap<String, usize> = HashMap::new();
     let mut edited_files: HashMap<String, usize> = HashMap::new();
 
-    for entry in std::fs::read_dir(dir)? {
+    let dir = svc.mount.root.join(rel_dir);
+    for entry in std::fs::read_dir(&dir)? {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -124,7 +136,8 @@ fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
         }
         profile.sessions_analyzed += 1;
 
-        let content = match std::fs::read_to_string(&path) {
+        let rel = Path::new(rel_dir).join(entry.file_name());
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -199,8 +212,12 @@ fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
 }
 
 /// Analyze consolidated facts for profile dimensions.
-fn analyze_facts(dir: &Path, profile: &mut UserProfile) -> Result<()> {
-    for category_entry in std::fs::read_dir(dir)? {
+///
+/// `rel_dir` is the mount-relative `facts` root; file bodies are read
+/// through `safe_fs` anchored on the mount root (symlinks rejected).
+fn analyze_facts(svc: &MemoryService, rel_dir: &str, profile: &mut UserProfile) -> Result<()> {
+    let dir = svc.mount.root.join(rel_dir);
+    for category_entry in std::fs::read_dir(&dir)? {
         let category_entry = match category_entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -214,7 +231,8 @@ fn analyze_facts(dir: &Path, profile: &mut UserProfile) -> Result<()> {
         }
         let category = category_entry.file_name().to_string_lossy().to_string();
 
-        let dir_entries = match std::fs::read_dir(category_entry.path()) {
+        let category_rel = Path::new(rel_dir).join(category_entry.file_name());
+        let dir_entries = match std::fs::read_dir(svc.mount.root.join(&category_rel)) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -227,7 +245,8 @@ fn analyze_facts(dir: &Path, profile: &mut UserProfile) -> Result<()> {
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
-            let content = match std::fs::read_to_string(&path) {
+            let rel = category_rel.join(file_entry.file_name());
+            let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -283,8 +302,12 @@ fn analyze_facts(dir: &Path, profile: &mut UserProfile) -> Result<()> {
 }
 
 /// Analyze observed notes for additional context.
-fn analyze_notes(dir: &Path, profile: &mut UserProfile) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+///
+/// `rel_dir` is the mount-relative `notes/observed` root; file bodies are
+/// read through `safe_fs` anchored on the mount root (symlinks rejected).
+fn analyze_notes(svc: &MemoryService, rel_dir: &str, profile: &mut UserProfile) -> Result<()> {
+    let dir = svc.mount.root.join(rel_dir);
+    for entry in std::fs::read_dir(&dir)? {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -293,7 +316,8 @@ fn analyze_notes(dir: &Path, profile: &mut UserProfile) -> Result<()> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
+        let rel = Path::new(rel_dir).join(entry.file_name());
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
             Ok(c) => c,
             Err(_) => continue,
         };

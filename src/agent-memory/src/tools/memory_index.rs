@@ -15,10 +15,14 @@
 //! and truncated when limits are reached. Run `mem_index_refresh` after
 //! bulk writes to rebuild the index.
 
+use std::os::fd::AsFd;
+use std::path::Path;
+
 use walkdir::WalkDir;
 
 use crate::audit::AuditEntry;
 use crate::error::Result;
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 const INDEX_FILE: &str = "MEMORY.md";
@@ -112,7 +116,11 @@ pub fn build_index(svc: &MemoryService) -> Result<Vec<IndexEntry>> {
             continue;
         }
 
-        let content = match std::fs::read_to_string(path) {
+        // Read through safe_fs anchored on the mount root (same symlink /
+        // TOCTOU invariant as memory_get_context), not the absolute walk
+        // path via std::fs.
+        let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), Path::new(&rel_path))
+        {
             Ok(c) => c,
             Err(_) => continue,
         };

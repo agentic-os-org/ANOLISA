@@ -4,10 +4,14 @@
 //! - `memory_sessions`: list historical session summaries from facts/summary/
 //! - `memory_timeline`: show tool call log from a specific session
 
+use std::os::fd::AsFd;
+use std::path::Path;
+
 use serde::Serialize;
 
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
+use crate::safe_fs;
 use crate::service::MemoryService;
 
 /// Summary of a historical session.
@@ -134,7 +138,21 @@ pub fn memory_timeline(svc: &MemoryService, session_id: &str, limit: usize) -> R
         )));
     }
 
-    let content = std::fs::read_to_string(&log_path)?;
+    // Read through safe_fs anchored on the mount root instead of following
+    // the absolute path: session_id validation blocks traversal characters,
+    // but a symlink planted at session-logs/<id>.jsonl would make
+    // std::fs::read_to_string exfiltrate an out-of-mount file line by line
+    // into the timeline output.
+    let rel = Path::new(".anolisa/session-logs").join(format!("{session_id}.jsonl"));
+    let content = match safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
+        Ok(c) => c,
+        Err(MemoryError::NotFound(_)) => {
+            return Err(MemoryError::NotFound(format!(
+                "session log for '{session_id}' not found"
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     let mut entries: Vec<TimelineEntry> = Vec::new();
 
     for line in content.lines() {
