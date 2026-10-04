@@ -321,8 +321,12 @@ def main():
             sum(1 for tr in t.get("trials", []) if tr.get("passed"))
             for t in data
         )
-        output += f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({passed_tasks/total_tasks*100:.1f}%)\n"
-        output += f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
+        # 空/零试次批次不得在输出后以 ZeroDivisionError 崩溃——守卫与
+        # batch_runner 的既有写法一致
+        task_pct = passed_tasks / total_tasks * 100 if total_tasks else 0.0
+        trial_pct = passed_trials / total_trials * 100 if total_trials else 0.0
+        output += f"\n\nSummary: {total_tasks} tasks, {passed_tasks} passed ({task_pct:.1f}%)\n"
+        output += f"Trials: {total_trials} total, {passed_trials} passed ({trial_pct:.1f}%)\n"
 
     if args.output:
         with open(args.output, "w") as f:
