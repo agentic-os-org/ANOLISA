@@ -377,6 +377,14 @@ impl OpenAIParser {
                     }
                 }
                 "response.function_call_arguments.done" => {
+                    // The done event carries the complete arguments; the
+                    // deltas are a stream that may be missing (capture
+                    // started mid-stream, events dropped). Prefer the
+                    // authoritative value when it is there.
+                    if let Some(arguments) = chunk.get("arguments").and_then(|a| a.as_str()) {
+                        tc_args.clear();
+                        tc_args.push_str(arguments);
+                    }
                     push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
                     tc_name.clear();
                     tc_id.clear();
@@ -1326,6 +1334,34 @@ mod tests {
         assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_weather");
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_tool_call_from_done_event() {
+        // The done event carries the complete arguments. A capture that
+        // missed the deltas (stream joined late, events dropped) must not
+        // record an empty argument list.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_d01", "model": "qwen-plus"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_d01"}}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "arguments": "{\"city\":\"Beijing\"}"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d01", "model": "qwen-plus", "status": "completed", "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response parses");
+        let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "{\"city\":\"Beijing\"}"
         );
     }
