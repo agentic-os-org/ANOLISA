@@ -373,7 +373,14 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            AND g2.start_timestamp_ns BETWEEN ?2 AND ?3
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -396,7 +403,14 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            AND g2.start_timestamp_ns >= ?2
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -419,7 +433,14 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            AND g2.start_timestamp_ns <= ?2
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -442,7 +463,13 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1

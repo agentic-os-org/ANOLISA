@@ -986,14 +986,79 @@ fn test_list_traces_by_session() {
 }
 
 #[test]
+fn test_list_traces_by_session_user_query_is_the_earliest() {
+    // MIN(user_query) is a lexicographic aggregate: with the conversation
+    // opening on "zebra" and a later turn asking "apple" it reported "apple"
+    // as the conversation's first query.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_trace_first_query_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+               ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18)";
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, offset, query) in [
+            ("call-zebra", 0_i64, "zebra"),
+            ("call-apple", STEP_NS, "apple"),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    BASE_NS + offset,
+                    BASE_NS + offset + STEP_NS,
+                    STEP_NS,
+                    "openai",
+                    "gpt-4",
+                    1_i64,
+                    1_i64,
+                    2_i64,
+                    "sess-q",
+                    "trace-q",
+                    "conv-q",
+                    "agent-a",
+                    100_i64,
+                    "complete",
+                    "[]",
+                    "proc",
+                    query
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let r = store
+        .list_traces_by_session("sess-q", None, None, true)
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        r[0].user_query.as_deref(),
+        Some("zebra"),
+        "the first query is the earliest in time, not the smallest string"
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_list_traces_by_session_with_time_range() {
     let (store, path) = create_populated_store("traces_range");
     let r = store
         .list_traces_by_session("sess-1", Some(BASE_NS), Some(BASE_NS + STEP_NS), true)
         .unwrap();
     assert_eq!(r.len(), 1); // only conv-1
-    assert_eq!(r[0].call_count, 2); // call-1, call-2
-    cleanup_db(&path);
+    assert_eq!(r[0].call_count, 2); // call-1, call-2    cleanup_db(&path);
 }
 
 #[test]
