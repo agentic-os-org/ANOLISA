@@ -157,9 +157,9 @@ pub use event::{
     InMemoryEventSink, NoopEventSink, SkillEvent, SkillEventAction, SkillEventKind, SkillEventSink,
 };
 pub use event_stream::{
-    DEFAULT_EVENT_QUEUE_CAPACITY, InMemorySecurityEventWriter, JsonlSecurityEventWriter,
-    NoopSecurityEventWriter, SecurityEvent, SecurityEventSink, SecurityEventWriter,
-    resolve_events_path,
+    DEFAULT_EVENT_QUEUE_CAPACITY, EventsPathError, InMemorySecurityEventWriter,
+    JsonlSecurityEventWriter, NoopSecurityEventWriter, SecurityEvent, SecurityEventSink,
+    SecurityEventWriter, resolve_events_path, resolve_events_path_outside_source,
 };
 pub use inbox::{
     INBOX_DIR_NAME, INBOX_SKILL_NAME_MAX_LEN, INSTALL_COMPLETE_SENTINEL, is_inbox_dir_name,

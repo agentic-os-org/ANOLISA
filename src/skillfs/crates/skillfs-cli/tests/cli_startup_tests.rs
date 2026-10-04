@@ -311,6 +311,154 @@ fn activation_mode_file_with_events_log_fails_startup() {
 }
 
 #[test]
+fn events_log_inside_source_fails_startup() {
+    // Sibling of the --audit-log / --activation-events-log gates: a security
+    // event log inside the source tree makes every write observable by the
+    // drift watcher and can overwrite a SKILL.md.
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let inside = source.path().join("events.jsonl");
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--decision-command",
+            "/bin/true",
+            "--events-log",
+            inside.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    // The gate rejects during validation, before the FUSE session starts, so
+    // the child must exit promptly. If it is still alive the guard did not
+    // fire (a regression would leave a live mount behind): tear it down and
+    // fail.
+    let mut status = None;
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("wait for skillfs: {e}"),
+        }
+    }
+    let status = match status {
+        Some(s) => s,
+        None => {
+            stop_mount_child(&mut child, mount.path());
+            panic!("mount with an in-source --events-log must not start");
+        }
+    };
+    assert!(
+        !status.success(),
+        "expected non-zero exit for an in-source log"
+    );
+
+    use std::io::Read;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("lies inside the SkillFS source root"),
+        "expected the events-log source-tree rejection, got: {combined}"
+    );
+    assert!(
+        !inside.exists(),
+        "rejected startup must not create the log file"
+    );
+}
+
+#[test]
+fn events_log_dangling_symlink_into_source_fails_startup() {
+    // Sibling of `events_log_inside_source_fails_startup`: an EXTERNAL
+    // symlink whose target does not exist yet must not be validated by its
+    // own (external) location. The later open(O_CREAT) would follow the
+    // link and create the log inside the source tree, so
+    // resolve_events_path follows the dangling link and the inside-source
+    // guard must abort startup before any file is created.
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let link_parent = tempfile::tempdir().expect("link parent tempdir");
+    let link = link_parent.path().join("events-dangling.jsonl");
+    let planted = source.path().join("planted-events.jsonl");
+    std::os::unix::fs::symlink(&planted, &link).expect("create dangling symlink");
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--decision-command",
+            "/bin/true",
+            "--events-log",
+            link.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    // The gate rejects during validation, before the FUSE session starts, so
+    // the child must exit promptly. If it is still alive the guard did not
+    // fire (a regression would leave a live mount behind): tear it down and
+    // fail.
+    let mut status = None;
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("wait for skillfs: {e}"),
+        }
+    }
+    let status = match status {
+        Some(s) => s,
+        None => {
+            stop_mount_child(&mut child, mount.path());
+            panic!("mount with a symlinked in-source --events-log must not start");
+        }
+    };
+    assert!(
+        !status.success(),
+        "expected non-zero exit for a dangling symlink into the source"
+    );
+
+    use std::io::Read;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("lies inside the SkillFS source root"),
+        "expected the events-log source-tree rejection for the link target, got: {combined}"
+    );
+    assert!(
+        !planted.exists(),
+        "rejected startup must not create the link's target file"
+    );
+}
+
+#[test]
 fn invalid_activation_mode_value_fails_startup() {
     let source = empty_source();
     let mount = tempfile::tempdir().expect("mount tempdir");
