@@ -2633,11 +2633,8 @@ mod tests {
             "/sessions/any/traces?start_ns=2000&end_ns=1000",
             "/skill-metrics?start_ns=2000&end_ns=1000",
         ] {
-            let rejected = awtest::call_service(
-                &app,
-                awtest::TestRequest::get().uri(uri).to_request(),
-            )
-            .await;
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
@@ -2650,7 +2647,8 @@ mod tests {
             "/sessions?start_ns=1000&end_ns=2000",
             "/timeseries?start_ns=1000&end_ns=2000&buckets=1",
         ] {
-            let ok = awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            let ok =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(ok.status(), StatusCode::OK, "{uri}");
         }
 
@@ -2681,11 +2679,8 @@ mod tests {
             "/interruptions/session-counts?start_ns=2000&end_ns=1000",
             "/interruptions/conversation-counts?start_ns=2000&end_ns=1000",
         ] {
-            let rejected = awtest::call_service(
-                &app,
-                awtest::TestRequest::get().uri(uri).to_request(),
-            )
-            .await;
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
@@ -2973,6 +2968,73 @@ mod tests {
 
         cleanup_db(&db_path);
         cleanup_db(&interruption_path);
+    }
+
+    #[test]
+    fn live_process_matches_checks_the_live_executable() {
+        let self_pid = std::process::id();
+        let self_exe = std::fs::read_link(format!("/proc/{self_pid}/exe")).unwrap();
+        let self_exe = self_exe.to_string_lossy();
+        let self_exe = self_exe.strip_suffix(" (deleted)").unwrap_or(&self_exe);
+
+        assert!(live_process_matches(self_pid, self_exe));
+        // A recycled PID runs a different binary: refuse to signal it.
+        assert!(!live_process_matches(self_pid, "/nonexistent/other-agent"));
+        // A dead PID and an empty recorded path cannot be verified. Use a
+        // value above pid_max rather than u32::MAX (which kill(2) would
+        // read as -1).
+        assert!(!live_process_matches(i32::MAX as u32, self_exe));
+        assert!(!live_process_matches(self_pid, ""));
+    }
+
+    #[actix_web::test]
+    async fn agent_health_restart_refuses_a_vanished_or_recycled_pid() {
+        // The store keeps offline entries until acknowledged, so a restart
+        // request can name a PID whose process is gone (or recycled by an
+        // unrelated process). The handler must refuse instead of signalling
+        // it and re-execing the stored command anyway.
+        let state = test_app_state(0);
+        // Above /proc/sys/kernel/pid_max (4194304 on Linux), so no such
+        // process can exist. Deliberately NOT u32::MAX: `kill -9 4294967295`
+        // truncates the argument to -1 before the kill(2) syscall, i.e.
+        // "signal every process the caller may signal".
+        let vanished_pid = i32::MAX as u32;
+        {
+            let mut store = state.health_store.write().unwrap();
+            store.update(
+                vanished_pid,
+                crate::health::AgentHealthStatus {
+                    pid: vanished_pid,
+                    agent_name: "Vanished".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: "/bin/vanished-agent".to_string(),
+                    workspace_path: None,
+                    ports: vec![],
+                    status: crate::health::store::AgentHealthState::Offline,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd: Some(vec!["/bin/true".to_string()]),
+                    offline_since: Some(1),
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+        }
+
+        let app =
+            awtest::init_service(App::new().app_data(state).service(restart_agent_health)).await;
+        let req = awtest::TestRequest::post()
+            .uri(&format!("/agent-health/{vanished_pid}/restart"))
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        let status = resp.status();
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a restart for a non-live pid must be refused"
+        );
     }
 
     #[actix_web::test]
@@ -3844,6 +3906,33 @@ pub async fn get_agent_process_health(
     })
 }
 
+/// Whether the live process at `pid` still looks like the agent the health
+/// store recorded. `kill -9` on a recycled PID would hit an unrelated
+/// process, so an unverifiable identity (dead process, empty recorded path,
+/// different executable) must refuse the restart.
+fn live_process_matches(pid: u32, recorded_exe: &str) -> bool {
+    if recorded_exe.is_empty() {
+        return false;
+    }
+    let Ok(live) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let live = live.to_string_lossy();
+    let live = live.strip_suffix(" (deleted)").unwrap_or(&live);
+    if live == recorded_exe {
+        return true;
+    }
+    // Compare canonical spellings when both sides resolve (symlinked
+    // interpreters, /usr/bin aliases).
+    match (
+        std::fs::canonicalize(recorded_exe),
+        std::fs::canonicalize(live),
+    ) {
+        (Ok(recorded), Ok(live)) => recorded == live,
+        _ => false,
+    }
+}
+
 /// DELETE /api/agent-health/{pid}
 ///
 /// User-acknowledges an offline agent and removes it from the store.
@@ -3870,13 +3959,12 @@ pub async fn restart_agent_health(
 ) -> impl Responder {
     let pid = path.into_inner();
 
-    let restart_cmd = {
+    let (restart_cmd, recorded_exe) = {
         let store = data.health_store.read().unwrap();
-        store
-            .all_agents()
-            .into_iter()
-            .find(|a| a.pid == pid)
-            .and_then(|a| a.restart_cmd)
+        match store.all_agents().into_iter().find(|a| a.pid == pid) {
+            Some(agent) => (agent.restart_cmd.clone(), agent.exe_path.clone()),
+            None => (None, String::new()),
+        }
     };
 
     let cmd = match restart_cmd {
@@ -3887,13 +3975,35 @@ pub async fn restart_agent_health(
         }
     };
 
+    // A health entry outlives its process (offline entries stay until
+    // acknowledged) and PID reuse is normal, so the live process must still
+    // match the recorded executable before it is signalled — otherwise a
+    // restart would `kill -9` an unrelated process.
+    if !live_process_matches(pid, &recorded_exe) {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "pid {pid} no longer matches the recorded agent ({recorded_exe}); refusing to kill"
+            ),
+        }));
+    }
+
     // Step 1: kill -9
     use std::process::Command;
     let kill_result = Command::new("kill").args(["-9", &pid.to_string()]).output();
 
-    if let Err(e) = kill_result {
-        return HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+    match kill_result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            // A failed kill means the process is already gone (or cannot be
+            // killed); re-execing anyway would start a duplicate agent.
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("kill exited with {}", output.status),
+            }));
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+        }
     }
 
     // Step 2: short wait for process to exit
