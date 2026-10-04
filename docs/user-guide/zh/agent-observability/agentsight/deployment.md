@@ -185,9 +185,9 @@ agentsight --version
 ```
 
 RPM 会保留你的 `/etc/agentsight/config.json`（`%config(noreplace)`）。如果新版本提升了
-`schema_version`，AgentSight 会在下次启动时把你的文件复制为 `config.json.bak.<unix秒>`，并写入合并后的
-配置：以当前默认配置为底、叠加你设置过的顶层键，因此自定义 Agent 规则能在升级后保留。数据库可直接沿用，
-无需迁移步骤。
+`schema_version`，AgentSight 会在下次启动时把你的文件复制为 `config.json.bak.<unix秒>`，再替换为
+当前默认配置。旧 schema 中的自定义项不会自动合并。请从备份文件把需要的 Agent 规则重新应用到新文件，
+然后 reload 服务。数据库可直接沿用，无需迁移步骤。
 
 ## 卸载
 

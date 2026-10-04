@@ -196,8 +196,9 @@ agentsight --version
 
 RPM keeps your `/etc/agentsight/config.json` (`%config(noreplace)`). If the new release bumps
 `schema_version`, AgentSight copies your file to `config.json.bak.<unix-seconds>` on the next start
-and writes a merged one: current defaults with your top-level customisations overlaid, so your Agent
-rules survive the upgrade. Databases carry over; no migration step is needed.
+and replaces it with the current default file. Custom settings from an older schema are not merged.
+Reapply required Agent rules from the backup to the new file, then reload the service. Databases
+carry over; no migration step is needed.
 
 ## Uninstall
 
