@@ -321,6 +321,25 @@ impl SkillFs {
                     return;
                 }
             }
+            // A top-level name is a directory slot: a flat `<skill>` is a
+            // skill directory and a Hermes `<category>` is a category
+            // directory. CREATE here can only target a new (negative) name;
+            // letting it through wrote a stray regular file into the source
+            // root that never appears in listings, serves no skill, and makes
+            // the later `mkdir` fail with EEXIST. Refuse with EISDIR exactly
+            // like the inbox candidate slot above.
+            PathType::SkillDir { .. } | PathType::CategoryDir { .. } => {
+                self.emit_op_event(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::EISDIR),
+                    None,
+                );
+                reply.error(libc::EISDIR);
+                return;
+            }
             _ => {}
         }
 

@@ -216,3 +216,39 @@ fn test_passthrough_getattr_ino_matches_lookup() {
         "sibling passthrough entries must have distinct inodes"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level name slots are directories
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_create_at_skill_slot_is_rejected_with_eisdir() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+    });
+    let path = fx.skill_path("brand-new");
+
+    // `<mount>/skills/<name>` is a skill-directory slot. Creating a regular
+    // file there used to write `source/brand-new`, which never shows up in
+    // the listing (the store has no such skill) and makes the later mkdir
+    // fail with EEXIST.
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&path);
+    assert_eq!(
+        result.as_ref().err().and_then(|e| e.raw_os_error()),
+        Some(libc::EISDIR),
+        "create at a skill slot must be EISDIR, got {result:?}"
+    );
+    assert!(
+        !fx.source().join("brand-new").exists(),
+        "no stray file may be left in the source root"
+    );
+
+    // The slot is still usable as a directory afterwards.
+    std::fs::create_dir(&path).expect("mkdir after the rejected create");
+    assert!(fx.source().join("brand-new").is_dir());
+}
