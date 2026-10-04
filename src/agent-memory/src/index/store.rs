@@ -271,10 +271,16 @@ impl BM25Store {
     /// consistent on partial failure.
     pub fn remove(&mut self, rel_path: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
-        let prefix = format!("{rel_path}/");
+        // Escape the cascade prefix: `_` / `%` in a removed path are
+        // literals, not wildcards. Unescaped, remove("notes_v2") cascaded
+        // to "notesXv2/…" (and "%" matched any sequence), silently
+        // deleting sibling trees' rows from files, files_fts and files_vec.
+        let prefix = escape_like(&format!("{rel_path}/"));
         let rowids: Vec<i64> = {
-            let mut stmt =
-                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+            let mut stmt = tx.prepare(
+                "SELECT rowid FROM files WHERE path = ?1 \
+                 OR path LIKE ?2 || '%' ESCAPE '\\'",
+            )?;
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
@@ -285,7 +291,7 @@ impl BM25Store {
         }
         // Cascade: remove corresponding vector embeddings.
         tx.execute(
-            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'",
+            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%' ESCAPE '\\'",
             params![rel_path, prefix],
         )?;
         tx.commit()?;
@@ -1150,24 +1156,30 @@ fn agent_scope_sql_like(scope: &AgentScope) -> (String, Option<String>) {
     }
 }
 
+/// Escape the LIKE wildcards (`%`, `_`) and the escape character itself in
+/// `s` so it matches literally under `LIKE … ESCAPE '\'`. Adds no
+/// surrounding `%` — callers compose their own substring/prefix patterns
+/// (see [`like_pattern`] and `BM25Store::remove`).
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '_' | '%' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Build a `LIKE` pattern matching `token` as a substring, backslash-escaping
 /// the `%` / `_` / `\` wildcards so they match literally. `sanitize_fts_query`
 /// keeps `_` (and drops `%`), but escaping all three is defensive against
 /// future sanitisation changes.
 fn like_pattern(token: &str) -> String {
-    let mut s = String::with_capacity(token.len() + 4);
-    s.push('%');
-    for c in token.chars() {
-        match c {
-            '_' | '%' | '\\' => {
-                s.push('\\');
-                s.push(c);
-            }
-            other => s.push(other),
-        }
-    }
-    s.push('%');
-    s
+    format!("%{}%", escape_like(token))
 }
 
 /// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
@@ -1477,6 +1489,97 @@ mod tests {
         // FTS row for the cascaded body is also gone.
         let hits = s.search("alpha", 5, true).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn remove_escapes_underscore_in_prefix() {
+        // Regression: the cascade prefix was bound into a raw LIKE pattern,
+        // so `_` in the removed path acted as a single-char wildcard:
+        // remove("notes_v2") also deleted "notesXv2/…" rows — a tree the
+        // caller never named. The prefix must be escaped (like the search
+        // paths already do via like_pattern) so only the exact row and its
+        // real descendants go.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes_v2/a.md", 0, 0, "alpha", None).unwrap();
+        s.upsert("notesXv2/b.md", 0, 0, "beta", None).unwrap();
+        s.upsert("other/c.md", 0, 0, "gamma", None).unwrap();
+        // Seed vector rows for both the real descendant and the sibling so
+        // the files_vec cascade is exercised with the same prefix.
+        let emb: Vec<u8> = [0.25f32, 0.5f32]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        s.conn
+            .execute(
+                "INSERT INTO files_vec (path, embedding) VALUES (?1, ?2)",
+                params!["notes_v2/a.md", emb],
+            )
+            .unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO files_vec (path, embedding) VALUES (?1, ?2)",
+                params!["notesXv2/b.md", emb],
+            )
+            .unwrap();
+
+        let existed = s.remove("notes_v2").unwrap();
+        assert!(existed, "removing a populated prefix must report true");
+
+        let mut paths = s.known_paths().unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["notesXv2/b.md".to_string(), "other/c.md".to_string()],
+            "`_` must match literally: notesXv2 must survive remove(notes_v2)"
+        );
+        // The surviving sibling's FTS row must still answer queries.
+        let hits = s.search("beta", 5, true).unwrap();
+        assert_eq!(hits.len(), 1, "notesXv2/b.md must still be searchable");
+        assert_eq!(hits[0].path, "notesXv2/b.md");
+        // And its vector row must have survived the files_vec cascade.
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files_vec WHERE path = 'notesXv2/b.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "files_vec cascade must not eat the sibling embedding");
+        // While the real descendant's vector row is gone.
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files_vec WHERE path = 'notes_v2/a.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "descendant embedding must be cascaded away");
+    }
+
+    #[test]
+    fn remove_escapes_percent_in_prefix() {
+        // A removed path containing `%` must not widen the cascade either:
+        // the raw pattern "r%2/%" treats % as "any sequence", deleting rows
+        // the caller never named.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("r%2/own.md", 0, 0, "alpha", None).unwrap();
+        s.upsert("rAB2/victim.md", 0, 0, "beta", None).unwrap();
+
+        let existed = s.remove("r%2").unwrap();
+        assert!(
+            existed,
+            "the named tree had rows, so remove must report true"
+        );
+
+        let mut paths = s.known_paths().unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["rAB2/victim.md".to_string()],
+            "% must match literally: rAB2 must survive remove(r%2)"
+        );
     }
 
     #[test]
