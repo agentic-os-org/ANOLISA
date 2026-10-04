@@ -242,6 +242,7 @@ impl OpenAIParser {
         let output = body.get("output")?.as_array()?;
 
         let mut content_parts: Vec<String> = Vec::new();
+        let mut reasoning_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut finish_reason = Some("stop".to_string());
         // A capped response ends with status="incomplete" and the cap reason
@@ -285,6 +286,22 @@ impl OpenAIParser {
                     });
                     tool_calls.push(tc);
                 }
+                // Reasoning items carry their text as `content` blocks
+                // (dashscope reasoning_text) and/or `summary` blocks (the
+                // o-series default when the thinking itself is not returned).
+                // Accept blocks with a "text" field regardless of type, like
+                // the request-side content reader.
+                "reasoning" => {
+                    for key in ["content", "summary"] {
+                        if let Some(blocks) = item.get(key).and_then(|c| c.as_array()) {
+                            for part in blocks {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    reasoning_parts.push(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -294,6 +311,10 @@ impl OpenAIParser {
             "role": "assistant",
             "content": if message_content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(message_content) },
         });
+        let reasoning_content = reasoning_parts.join("");
+        if !reasoning_content.is_empty() {
+            message["reasoning_content"] = serde_json::Value::String(reasoning_content);
+        }
         if !tool_calls.is_empty() {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
             finish_reason = Some("tool_calls".to_string());
@@ -329,6 +350,7 @@ impl OpenAIParser {
 
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
+        let mut reasoning_buf = String::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut tc_name = String::new();
         let mut tc_id = String::new();
@@ -346,6 +368,16 @@ impl OpenAIParser {
                 "response.output_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         content_buf.push_str(delta);
+                    }
+                }
+                // Reasoning models stream their thinking as text deltas on
+                // the same event channel (qwen3-coder via dashscope sends
+                // reasoning_text, the o-series summary_text); both belong in
+                // the chat view's reasoning_content like the chat-completions
+                // reasoning_content delta.
+                "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        reasoning_buf.push_str(delta);
                     }
                 }
                 "response.output_item.added" => {
@@ -459,6 +491,9 @@ impl OpenAIParser {
             "role": "assistant",
             "content": if content_buf.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(content_buf) },
         });
+        if !reasoning_buf.is_empty() {
+            message["reasoning_content"] = serde_json::Value::String(reasoning_buf);
+        }
         let finish_reason = if output_capped {
             // The cap ended the stream: report the truncation even when a
             // tool call was in flight (its arguments may be cut mid-JSON,
@@ -1016,6 +1051,100 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 2);
+    }
+
+    /// Reasoning models stream their thinking as `response.reasoning_text.delta`
+    /// / `response.reasoning_summary_text.delta` events (qwen3-coder via
+    /// dashscope `/v1/responses`, o-series via OpenAI). The aggregator matched
+    /// neither, so a reasoning Responses stream kept only its final text — the
+    /// chat-completions and Anthropic paths both carry reasoning, and the
+    /// token extractor and the latency marker already count these deltas.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_r001", "model": "qwen3-coder-plus", "status": "queued"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "reasoning", "id": "rs_001"}}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Think "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "step by step"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "message", "id": "msg_001", "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "The answer"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r001", "model": "qwen3-coder-plus", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 8, "total_tokens": 18}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let response = OpenAIParser::parse_response(&body);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think step by step"),
+            "reasoning deltas must concatenate into reasoning_content"
+        );
+        let content = resp.choices[0].message.content.as_ref().unwrap();
+        match content {
+            OpenAIContent::Text(t) => assert_eq!(t, "The answer"),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    /// A summary-only reasoning stream (o-series default: the thinking itself
+    /// is not returned, only its summary) must reach the same field.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning_summary() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "delta": "concise plan"}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "done"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r002", "model": "o-series", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("concise plan")
+        );
+    }
+
+    #[test]
+    fn test_parse_response_responses_reasoning_item() {
+        // Non-streaming counterpart: the reasoning arrives as an output item
+        // with summary (OpenAI) or content (dashscope) text blocks, which the
+        // normalizer skipped while it copied message and function_call items.
+        let json = serde_json::json!({
+            "id": "resp_r101",
+            "object": "response",
+            "status": "completed",
+            "model": "qwen3-coder-plus",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_101",
+                    "summary": [{"type": "summary_text", "text": "pondered"}],
+                    "content": [{"type": "reasoning_text", "text": "Think "}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_101",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "42"}]
+                }
+            ],
+            "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("response");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think pondered"),
+            "content reasoning text comes first, then the summary"
+        );
+        let content = resp.choices[0].message.content.as_ref().unwrap();
+        match content {
+            OpenAIContent::Text(t) => assert_eq!(t, "42"),
+            _ => panic!("expected text content"),
+        }
     }
 
     #[test]
