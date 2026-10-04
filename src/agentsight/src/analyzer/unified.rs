@@ -105,8 +105,11 @@ pub fn count_request_tokens(
         .and_then(|t| t.as_array())
         .map(|arr| arr.to_vec());
 
-    // Count tools tokens separately (for informational breakdown)
-    let mut tools_tokens: usize = tools_json
+    // Count tool definitions separately (for informational breakdown). The
+    // count is also folded into the first tool-role message below so the
+    // per-message distribution covers it; the reported field keeps the
+    // definition count itself.
+    let tool_definition_tokens: usize = tools_json
         .as_ref()
         .map(|arr| {
             arr.iter()
@@ -115,6 +118,7 @@ pub fn count_request_tokens(
                 .sum()
         })
         .unwrap_or(0);
+    let mut fold_into_tool_message = tool_definition_tokens;
 
     // Use apply_chat_template_with_tools to format all messages WITH tools
     // This ensures the tools instruction text is included in the total count
@@ -144,8 +148,8 @@ pub fn count_request_tokens(
             .unwrap_or("unknown")
             .to_string();
         if role == "tool" {
-            tokens += tools_tokens;
-            tools_tokens = 0;
+            tokens += fold_into_tool_message;
+            fold_into_tool_message = 0;
         }
         raw_per_message.push((role, tokens));
     }
@@ -174,12 +178,11 @@ pub fn count_request_tokens(
         }
     }
     let system_prompt_tokens = by_role.get("system").cloned().unwrap_or(0);
-    let tools_tokens = by_role.get("tool").cloned().unwrap_or(0);
     Some(RequestTokenCount {
         total_tokens,
         by_role,
         per_message,
-        tools_tokens,
+        tools_tokens: tool_definition_tokens,
         system_prompt_tokens,
     })
 }

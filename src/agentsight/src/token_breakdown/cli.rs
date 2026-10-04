@@ -596,6 +596,45 @@ mod tests {
         assert_eq!(rendered, "<|im_start|>user\nhello<|im_end|>\n");
     }
 
+    #[test]
+    fn tool_definition_tokens_are_counted_without_tool_messages() {
+        // The first request of a tool-using agent carries `tools` but no
+        // `role: "tool"` message yet. `tools_tokens` is documented as the
+        // tool *definition* count, so it must not read 0 here.
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "messages": [{"role": "user", "content": "list the files"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": "List the entries of a directory",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                }
+            }]
+        });
+
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("request is counted");
+        assert!(
+            count.tools_tokens > 0,
+            "tool definitions must be reported, got {count:?}"
+        );
+
+        // A tool-role message must not be reported as tool definitions: the
+        // field keeps the definition count, not the tool-message share.
+        let with_tool_message = json!({
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "tool", "tool_call_id": "tc1", "content": "a.txt b.txt"}
+            ],
+            "tools": request["tools"].clone()
+        });
+        let other = crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
+            .expect("request is counted");
+        assert_eq!(other.tools_tokens, count.tools_tokens);
+    }
+
     fn request_event(body: serde_json::Value, ts: u64) -> ChromeTraceEvent {
         let mut event = ChromeTraceEvent::instant("http.request", "http.request", 1, 1, ts);
         event.args = Some(json!({ "body": body }));
