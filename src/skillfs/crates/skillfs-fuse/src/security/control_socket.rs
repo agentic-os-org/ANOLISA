@@ -1926,7 +1926,16 @@ fn handle_connection(
         let mut line = String::new();
         match limited.read_line(&mut line) {
             Ok(0) => return,
-            Ok(n) if n as u64 > MAX_CONTROL_REQUEST_BYTES => {
+            Ok(n)
+                if {
+                    // read_line counts the trailing newline; the limit is on the
+                    // request body, so exactly MAX bytes + '\n' (n = MAX+1) is
+                    // legal. take() caps the read at MAX+1, so this only rejects
+                    // an over-long body.
+                    let body_len = n - usize::from(line.ends_with('\n'));
+                    body_len as u64 > MAX_CONTROL_REQUEST_BYTES
+                } =>
+            {
                 warn!(
                     pid = credentials.pid,
                     "control socket request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"
@@ -4125,6 +4134,40 @@ mod tests {
             assert!(
                 response.contains("\"ok\":true"),
                 "normal request must be accepted: {response}"
+            );
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn request_at_the_byte_limit_accepted() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let config = ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            };
+            let handle = ControlSocketServer::new(config).start().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            let stream = UnixStream::connect(&socket_path).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            // Exactly 64 KiB of body plus the framing newline: the limit is on
+            // the body, so this request must be dispatched (and answered ok).
+            let mut req = r#"{"schemaVersion":"1","method":"ping"}"#.to_string();
+            req.push_str(&" ".repeat(MAX_CONTROL_REQUEST_BYTES as usize - req.len()));
+            assert_eq!(req.len() as u64, MAX_CONTROL_REQUEST_BYTES);
+            writeln!(&stream, "{req}").unwrap();
+            (&stream).flush().unwrap();
+
+            let mut reader = BufReader::new(&stream);
+            let mut response = String::new();
+            reader.read_line(&mut response).unwrap();
+            assert!(
+                response.contains("\"ok\":true"),
+                "request at the limit must be accepted: {response}"
             );
 
             handle.shutdown();
