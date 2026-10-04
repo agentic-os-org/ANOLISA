@@ -104,6 +104,25 @@ fn detects_html_documents_but_not_fragments() {
 }
 
 #[test]
+fn a_leading_mark_does_not_hide_the_other_domains() {
+    // The mark is format, not content, for every domain's reader — the
+    // HTML tokenizer just already had it fixed. Each of these is the
+    // twin of the same document without the mark.
+    assert_eq!(detect("\u{feff}diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n+y\n"), ContentType::Diff);
+    assert_eq!(detect("\u{feff}Traceback (most recent call last):\n  File \"t.py\", line 1\nValueError: boom\n"), ContentType::StackTrace);
+    assert_eq!(
+        detect("\u{feff}{\"items\": [{\"name\": \"a\", \"description\": \"ddd\"}]}\n"),
+        ContentType::Json
+    );
+    assert_eq!(
+        detect("\u{feff}| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n"),
+        ContentType::Tabular
+    );
+    // A second mark is content: still nothing detectable.
+    assert_eq!(detect("\u{feff}\u{feff}plain words"), ContentType::PlainText);
+}
+
+#[test]
 fn detects_a_page_opened_by_a_byte_order_mark() {
     // The tokenizer ignores one leading BOM, so the page behind it is the same
     // document the renderer reads. U+FEFF is not whitespace, so trimming alone
