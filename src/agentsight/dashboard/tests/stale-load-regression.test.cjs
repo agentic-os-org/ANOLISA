@@ -309,3 +309,14 @@ test('reuse-labels: a refetch after a long action honours the active filter', ()
     'ReuseLabelsPage: the effect must re-run on a filter change now that load is stable',
   );
 });
+
+test('reuse-labels: toggling a criterion compares the selected rows', () => {
+  const source = readSource('src/pages/ReuseLabelsPage.tsx');
+  assert.match(source, /import \{ sameMembers \} from '\.\.\/utils\/setSelection';/);
+  // Comparing sizes cleared a hand-picked selection that merely had as many
+  // rows as the criterion.
+  assert.doesNotMatch(source, /current\.size === pending\.length/);
+  assert.doesNotMatch(source, /ids\.size === current\.size/);
+  assert.match(source, /sameMembers\(current, pending\) \? new Set\(\) : pending/);
+  assert.match(source, /sameMembers\(current, ids\) \? new Set\(\) : ids/);
+});
