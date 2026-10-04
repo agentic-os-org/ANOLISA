@@ -236,22 +236,41 @@ fn validate_name(name: &str, issues: &mut Vec<String>) {
     }
 }
 
+/// CommonMark ATX heading: at most three spaces of indentation, then
+/// 1–6 `#`s, followed by a space/tab or the end of the line. Anything
+/// else that merely starts with `#` — `#hashtag`, seven or more `#`s, or
+/// a deeper-indented line — is ordinary content, not a heading.
+fn is_atx_heading(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let hashes = rest.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+    match rest[hashes..].chars().next() {
+        None => true,
+        Some(c) => c == ' ' || c == '\t',
+    }
+}
+
 fn extract_first_paragraph(body: &str) -> String {
-    let trimmed = body.trim_start();
-    // Skip leading heading
-    let content = if trimmed.starts_with('#') {
-        trimmed
-            .find('\n')
-            .map(|pos| trimmed[pos + 1..].trim_start())
-            .unwrap_or("")
-    } else {
-        trimmed
-    };
     // Take the first non-empty paragraph. A paragraph ends at a blank
     // line; `lines()` strips the terminator of either convention, so a
-    // CRLF file yields the same paragraph as an LF one.
+    // CRLF file yields the same paragraph as an LF one. Leading heading
+    // lines are not paragraphs: skip every one of them before the
+    // paragraph starts, otherwise a document whose body begins with a
+    // title plus a subtitle reports the subtitle's markup ("## Subtitle")
+    // as the description. The heading check runs on the raw line, before
+    // any trim discards indentation, so `#`-led ordinary text keeps its
+    // place as the description.
     let mut paragraph = String::new();
-    for line in content.lines() {
+    for line in body.lines() {
+        if paragraph.is_empty() && is_atx_heading(line) {
+            continue;
+        }
         let line = line.trim();
         if line.is_empty() {
             if !paragraph.is_empty() {
