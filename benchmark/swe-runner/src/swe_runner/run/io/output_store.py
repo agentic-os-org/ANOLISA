@@ -117,7 +117,7 @@ class RunOutputStore:
         return ids
 
     def save_instance_result(self, result: InstanceResult) -> None:
-        """Persist one instance result and its prediction when present."""
+        """Persist the latest attempt, replacing or invalidating its prediction."""
         logger.info(
             "OUTPUT_SAVE_START instance=%s success=%s has_prediction=%s output_dir=%s",
             result.instance.instance_id,
@@ -128,7 +128,21 @@ class RunOutputStore:
         self.write_instance_result_file(result)
         if result.prediction:
             self.write_prediction(result.prediction)
+        else:
+            self._remove_prediction(result.instance.instance_id)
         logger.info("OUTPUT_SAVE_END instance=%s", result.instance.instance_id)
+
+    def _remove_prediction(self, instance_id: str) -> None:
+        # A failed redo must not leave the earlier successful patch eligible
+        # for evaluation. Share the writers' lock so other instances survive.
+        with _predictions_lock:
+            if not self.predictions_path.exists():
+                return
+            predictions = json.loads(self.predictions_path.read_text(encoding="utf-8"))
+            if instance_id not in predictions:
+                return
+            del predictions[instance_id]
+            self.predictions_path.write_text(json.dumps(predictions, indent=2), encoding="utf-8")
 
     def _load_existing_run_metadata(self) -> dict[str, Any] | None:
         if not self.run_metadata_path.exists():
