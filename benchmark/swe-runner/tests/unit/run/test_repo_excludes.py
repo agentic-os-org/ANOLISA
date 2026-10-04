@@ -54,3 +54,16 @@ def test_skips_silently_when_not_a_git_repo(tmp_path: Path) -> None:
     install_repo_exclude_rules(repo, instance_id="inst")
 
     assert not (repo / ".git").exists()
+
+
+def test_skips_when_git_is_a_file(tmp_path: Path) -> None:
+    """.git 为文件（git worktree / submodule 布局）时按非标准仓库跳过，
+    不在文件下创建 info 目录而崩溃（FileExistsError/NotADirectoryError）。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: ../.git/worktrees/foo" + chr(10), encoding="utf-8")
+
+    # 修复前：info_dir.mkdir(parents=True) 在 .git 文件下抛 FileExistsError
+    install_repo_exclude_rules(repo, instance_id="worktree-inst")
+
+    assert not (repo / ".git" / "info").exists()
