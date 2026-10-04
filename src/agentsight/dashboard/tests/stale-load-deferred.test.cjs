@@ -140,6 +140,7 @@ function loadPageModule(relativePath, moduleStubs, driver) {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
     if (name === '../utils/text') return loadPageModule('src/utils/text.ts', moduleStubs, driver);
+    if (name === '../utils/clipboard') return loadPageModule('src/utils/clipboard.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
@@ -288,7 +289,6 @@ function renderOptimizationPage() {
       },
       recharts: {},
       '../utils/apiClient': { ...stubs, ApiRequestError },
-      '../components/CopyButton': {},
       '../utils/formatDuration': {},
       '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en' },
       '../utils/accuracyAttribution': {},
@@ -1354,6 +1354,7 @@ test('conversation list: the Query button must use the selected end time, not no
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
     '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../components/CopyButton': componentStub('CopyButton'),
     '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
     '../utils/datetime': { formatNsPadded: (ns) => String(ns) },
     '../utils/timeseriesBuckets': {
@@ -1714,7 +1715,6 @@ test('optimization history: one previous click moves back from the displayed pag
     'react-router-dom': { useParams: () => ({}), useNavigate: () => () => {} },
     recharts: {},
     '../utils/apiClient': { ...stubs, ApiRequestError: class ApiRequestError extends Error {} },
-    '../components/CopyButton': { copyText: () => {} },
     '../utils/formatDuration': { formatDurationSecs: (value) => String(value) },
     '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en' },
     '../utils/accuracyAttribution': {

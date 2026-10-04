@@ -151,7 +151,7 @@ for (const [label, model, tools, idle, expected] of [
       'react-router-dom': { useNavigate: () => () => {}, useParams: () => ({}) },
       '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
       '../utils/apiClient': {},
-      '../components/CopyButton': {},
+      '../utils/clipboard': { copyText: () => {} },
       '../utils/formatDuration': duration,
       '../utils/accuracyAttribution': {},
       '../utils/richText': {},
@@ -227,6 +227,7 @@ test('conversation-list: model names cannot overwrite the time-axis label', () =
     '../components/EvaluationBadge': {}, '../components/EvaluationPanel': {},
     '../components/DateTimePicker': {}, '../components/SessionIdHelp': {},
     '../components/SessionResourceChart': {},
+    '../components/CopyButton': componentStub('CopyButton'),
   }, driver, '\nexports.ModelTimeseriesChart = ModelTimeseriesChart;');
   const startNs = Date.UTC(2026, 9, 1) * 1_000_000;
   const sourceData = [
@@ -558,6 +559,7 @@ test('conversation-list: case variants across buckets form one model series', ()
     '../components/EvaluationBadge': {}, '../components/EvaluationPanel': {},
     '../components/DateTimePicker': {}, '../components/SessionIdHelp': {},
     '../components/SessionResourceChart': {},
+    '../components/CopyButton': componentStub('CopyButton'),
   }, driver, '\nexports.ModelTimeseriesChart = ModelTimeseriesChart;');
   const startNs = Date.UTC(2026, 9, 1) * 1_000_000;
   const sourceData = [
@@ -654,6 +656,7 @@ test('conversation-list: session disclosure and time presets expose accessible s
     '../components/DateTimePicker': { DateTimePicker },
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
     '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../components/CopyButton': componentStub('CopyButton'),
   }, driver);
 
   let rendered = driver.render(page.ConversationList);
