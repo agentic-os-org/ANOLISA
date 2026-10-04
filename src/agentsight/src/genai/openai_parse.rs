@@ -265,22 +265,13 @@ impl GenAIBuilder {
         parsed_message: &Option<ParsedApiMessage>,
         http: &HttpRecord,
     ) -> Option<String> {
-        // 1. Try parsed message response.id
+        // 1. Try parsed message response.id. `ParsedApiMessage::response_id`
+        // covers every protocol the parser knows; matching the variants by hand
+        // missed SysOM, whose call then carried the generated call id instead of
+        // the provider's response id.
         if let Some(msg) = parsed_message {
-            match msg {
-                ParsedApiMessage::OpenAICompletion {
-                    response: Some(resp),
-                    ..
-                } if !resp.id.is_empty() => {
-                    return Some(resp.id.clone());
-                }
-                ParsedApiMessage::AnthropicMessage {
-                    response: Some(resp),
-                    ..
-                } if !resp.id.is_empty() => {
-                    return Some(resp.id.clone());
-                }
-                _ => {}
+            if let Some(id) = msg.response_id().filter(|id| !id.is_empty()) {
+                return Some(id.to_string());
             }
         }
 
@@ -1169,6 +1160,41 @@ mod tests {
         assert_eq!(req.messages[0].role, "system");
         assert_eq!(req.messages[1].role, "user");
         assert!(req.stream);
+    }
+
+    /// The SysOM (Aliyun Copilot) response carries its id inside `response.id`;
+    /// ignoring it made the row fall back to the generated call id, breaking
+    /// correlation with the provider's identifier.
+    #[test]
+    fn sysom_responses_keep_their_id() {
+        let parsed = Some(ParsedApiMessage::SysomMessage {
+            request: None,
+            response: Some(crate::analyzer::message::sysom::SysomResponse {
+                id: Some("chatcmpl-sysom-1".to_string()),
+                choices: Vec::new(),
+            }),
+        });
+        let http = HttpRecord {
+            timestamp_ns: 0,
+            pid: 1,
+            comm: "t".to_string(),
+            method: "POST".to_string(),
+            path: "/api/v1/copilot/generate_copilot".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: None,
+            response_headers: "{}".to_string(),
+            response_body: None,
+            duration_ns: 0,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        };
+
+        assert_eq!(
+            GenAIBuilder::extract_response_id(&parsed, &http).as_deref(),
+            Some("chatcmpl-sysom-1")
+        );
     }
 
     #[test]
