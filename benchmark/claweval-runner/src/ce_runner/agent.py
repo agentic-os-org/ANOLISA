@@ -58,6 +58,18 @@ def _clear_agent_error() -> None:
     _tls.reason = ""
 
 
+class _UserAgentUnavailable:
+    """Sentinel: the UserAgent LLM itself is unreachable.
+
+    Distinct from ``None``, which means the simulated user answered
+    ``[DONE]``: an infrastructure outage must not be recorded as user
+    satisfaction.
+    """
+
+
+_UA_UNAVAILABLE = _UserAgentUnavailable()
+
+
 # ── HTTP API (multimodal) ────────────────────────────────────────────────────
 
 def _run_first_turn_via_api(text: str,
@@ -586,11 +598,13 @@ def _build_conversation_for_user_agent(session_file: str) -> list:
 
 
 def _call_user_agent_llm(ua_config: dict, persona: str,
-                          conversation: list) -> str | None:
+                          conversation: list) -> str | None | _UserAgentUnavailable:
     """Call the UserAgent LLM to generate a simulated user response.
 
     Uses the same prompt format as claw-eval's UserAgent class.
-    Returns the response text, or None if user is satisfied ([DONE]).
+    Returns the response text, or None if user is satisfied ([DONE]),
+    or ``_UA_UNAVAILABLE`` if the LLM itself could not be reached
+    (openai missing, or every retry attempt failed).
     """
     import random
 
@@ -629,7 +643,7 @@ def _call_user_agent_llm(ua_config: dict, persona: str,
         from openai import OpenAI
     except ImportError:
         log("[WARNING] openai package not available for UserAgent")
-        return None
+        return _UA_UNAVAILABLE
 
     client = OpenAI(
         api_key=ua_config["api_key"],
@@ -660,7 +674,7 @@ def _call_user_agent_llm(ua_config: dict, persona: str,
                 f"attempt {attempt + 1}/{max_retries}, waiting {delay:.1f}s ...")
             time.sleep(delay)
 
-    return None
+    return _UA_UNAVAILABLE
 
 
 def _run_agent_continue(session_id: str, message: str, timeout: int,
@@ -796,6 +810,12 @@ def run_agent_with_user_agent(session_id: str, task_yaml: str, timeout: int,
         log(f"  [user-agent] Round {round_num}/{max_rounds}: calling UserAgent LLM...")
 
         ua_reply = _call_user_agent_llm(ua_config, persona, conversation)
+
+        if ua_reply is _UA_UNAVAILABLE:
+            log(f"  [user-agent] UserAgent LLM unavailable at round {round_num} "
+                f"— ending dialogue (not user satisfaction)")
+            _set_agent_error("user_agent_llm_unavailable")
+            return ""
 
         if ua_reply is None:
             log(f"  [user-agent] User satisfied ([DONE]) at round {round_num}")
