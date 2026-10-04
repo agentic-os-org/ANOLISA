@@ -403,8 +403,59 @@ async fn serve(
         "runtime template import shutdown",
         state.manager.wait_for_template_imports().await,
     );
+    service_result = merge_stage_result(
+        service_result,
+        "sandbox backend owner shutdown",
+        shutdown_owned_instances(&state, SHUTDOWN_CLEANUP_TIMEOUT).await,
+    );
     tracing::info!("blaze daemon stopped");
     service_result
+}
+
+/// Deadline for releasing owned sandbox backends during daemon shutdown.
+///
+/// Startup reconciliation takes each per-sandbox operation lock without a
+/// timeout (its own doc: "startup reconciliation has no external
+/// deadline"), which is acceptable at boot but not at exit: an in-flight
+/// request holding an operation lock must not hang daemon shutdown. The
+/// bound is sized for backend kills (Firecracker VM teardown), and when it
+/// expires the leftovers are left for the next startup reconcile — the same
+/// recovery path a crash mid-destroy already takes.
+const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Release every backend owner the daemon still holds at shutdown.
+///
+/// Without this stage, SIGTERM leaves running backend owners (Firecracker
+/// VMs, network-namespace slots) alive until the next startup's
+/// `reconcile_startup` — the window `owned_instance_ids`' doc describes
+/// ("Shutdown uses this snapshot to start cleanup concurrently") although
+/// no shutdown caller existed. Per-instance failures are logged and the
+/// remaining stages still complete; only a missed deadline fails the
+/// shutdown result.
+async fn shutdown_owned_instances(state: &Arc<ServerState>, timeout: Duration) -> Result<()> {
+    match tokio::time::timeout(timeout, state.manager.cleanup_owned_instances()).await {
+        Ok(report) => {
+            tracing::info!(
+                attempted = report.attempted,
+                completed = report.completed,
+                failed = report.failures.len(),
+                "shutdown sandbox cleanup completed"
+            );
+            for failure in report.failures {
+                tracing::warn!(
+                    instance = %failure.instance_id,
+                    error = %failure.error,
+                    "sandbox remains recovery-required after shutdown cleanup"
+                );
+            }
+            Ok(())
+        }
+        Err(_) => Err(BlazeDaemonError::Internal(format!(
+            "sandbox cleanup did not finish within {}s; remaining instances were \
+             left for startup reconciliation",
+            timeout.as_secs()
+        ))),
+    }
 }
 
 async fn observe_storage_sync_exit(sync_loop: &mut Option<StorageSyncLoop>) -> Result<()> {
@@ -1196,5 +1247,240 @@ backend_priority = ["bubblewrap"]
         );
         assert!(!config.storage.images_dir.exists());
         assert!(!config.daemon.state_dir.exists());
+    }
+
+    // ---- shutdown teardown of owned sandbox backends -----------------------
+
+    mod shutdown_fixtures {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use blaze_core::backend::BackendKind;
+        use blaze_core::config::DaemonConfig;
+        use blaze_core::kernel::HookRegistry;
+        use blaze_core::lifecycle::SandboxState;
+        use blaze_core::policy::{
+            BackendConfigs, FallbackOnMissingHook, ImageMetadata, PolicyEngine, PolicyFile,
+            PolicyHooks, PolicyMatch, PolicySelect, WorkloadClass,
+        };
+        use blaze_core::storage::StorageProvider;
+        use uuid::Uuid;
+
+        use crate::file_provider::FileStorageProvider;
+        use crate::sandbox::CreateSandbox;
+        use crate::spawner::{MockSpawner, SpawnerRegistry};
+        use crate::state::ServerState;
+
+        pub(super) struct ShutdownFixture {
+            pub config: DaemonConfig,
+            pub state: Arc<ServerState>,
+        }
+
+        pub(super) fn fixture(temp: &tempfile::TempDir) -> ShutdownFixture {
+            let mut config = DaemonConfig::default();
+            config.daemon.state_dir = temp.path().join("state");
+            config.storage.images_dir = temp.path().join("images");
+            config.storage.instances_dir = temp.path().join("instances");
+            config.template.dir = temp.path().join("templates");
+            std::fs::create_dir_all(&config.daemon.state_dir).expect("state dir");
+            std::fs::create_dir_all(&config.storage.images_dir).expect("images dir");
+            std::fs::create_dir_all(&config.storage.instances_dir).expect("instances dir");
+            let policy = PolicyFile {
+                manifest_version: 1,
+                policy_name: "shutdown-test".into(),
+                priority: 100,
+                match_: PolicyMatch {
+                    workload_class: WorkloadClass::AgentTool,
+                    image_labels: HashMap::new(),
+                },
+                select: PolicySelect {
+                    backend_priority: vec![BackendKind::Mock],
+                    kernel_hooks: vec![],
+                    templates: vec![],
+                    fallback_on_missing_hook: FallbackOnMissingHook::default(),
+                },
+                pool: None,
+                checkpoint: None,
+                quota: None,
+                hooks: PolicyHooks::default(),
+                backend: BackendConfigs::default(),
+                vm: None,
+            };
+            let mut registry = SpawnerRegistry::new();
+            registry.insert(BackendKind::Mock, Arc::new(MockSpawner));
+            let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+                config.storage.images_dir.clone(),
+                config.storage.instances_dir.clone(),
+            ));
+            let state = Arc::new(
+                ServerState::build(
+                    config.clone(),
+                    PolicyEngine::with_policies(vec![policy]),
+                    HookRegistry::new(),
+                    registry,
+                    BackendKind::Mock,
+                    storage,
+                )
+                .expect("server state"),
+            );
+            ShutdownFixture { config, state }
+        }
+
+        pub(super) async fn create_running_sandbox(state: &Arc<ServerState>) -> Uuid {
+            let image = ImageMetadata {
+                digest: "sha256:shutdown-test".into(),
+                workload_class: Some(WorkloadClass::AgentTool),
+                kernel_version: None,
+            };
+            let decision = {
+                let engine = state
+                    .policy
+                    .lock()
+                    .map_err(|_| "policy lock poisoned")
+                    .expect("policy lock");
+                engine
+                    .evaluate(&HashMap::new(), &image)
+                    .expect("policy decision")
+            };
+            let created = state
+                .manager
+                .create(CreateSandbox {
+                    decision,
+                    image_digest: image.digest,
+                    runtime_backend: BackendKind::Mock,
+                    binary_path: std::path::PathBuf::new(),
+                    template: None,
+                })
+                .await
+                .expect("create sandbox");
+            let uuid = created.instance.id;
+            assert_eq!(
+                state.manager.get(uuid).expect("instance").state,
+                SandboxState::Running
+            );
+            assert!(
+                state.manager.backend_owner(uuid).is_some(),
+                "a running sandbox must have a backend owner"
+            );
+            uuid
+        }
+    }
+
+    #[tokio::test]
+    async fn sigterm_shutdown_releases_running_backend_owners() {
+        use std::time::Duration;
+
+        use blaze_core::config::StorageSyncSchedule;
+        use blaze_core::lifecycle::SandboxState;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = shutdown_fixtures::fixture(&temp);
+        let uuid = shutdown_fixtures::create_running_sandbox(&fixture.state).await;
+
+        let socket = temp.path().join("shutdown.sock");
+        let uds = UnixListener::bind(&socket).expect("bind uds");
+        let serve_state = fixture.state.clone();
+        let serve_task = tokio::spawn(async move {
+            serve(
+                uds,
+                None,
+                serve_state,
+                StorageSyncSchedule::Disabled,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        // serve installs its signal handlers before the accept loop; wait
+        // for it to actually accept before raising SIGTERM so the signal
+        // can never hit the default disposition.
+        let mut accepting = false;
+        for _ in 0..500 {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                accepting = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(accepting, "serve never started accepting");
+
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+
+        tokio::time::timeout(Duration::from_secs(30), serve_task)
+            .await
+            .expect("serve returns after SIGTERM")
+            .expect("serve task join")
+            .expect("clean shutdown");
+
+        assert!(
+            fixture.state.manager.backend_owner(uuid).is_none(),
+            "shutdown must terminate the sandbox backend owner"
+        );
+        assert!(
+            fixture
+                .state
+                .manager
+                .owned_instance_ids()
+                .expect("owned ids")
+                .is_empty(),
+            "shutdown must leave no instances requiring automatic cleanup"
+        );
+        assert_eq!(
+            fixture.state.manager.get(uuid).expect("record").state,
+            SandboxState::Destroyed
+        );
+        assert!(
+            !fixture
+                .config
+                .storage
+                .instances_dir
+                .join(uuid.to_string())
+                .exists(),
+            "shutdown must release the storage slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_cleanup_is_bounded_by_a_deadline() {
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = shutdown_fixtures::fixture(&temp);
+        let uuid = shutdown_fixtures::create_running_sandbox(&fixture.state).await;
+
+        // Hold the per-sandbox operation lock the way an in-flight API
+        // request would; cleanup must not hang daemon shutdown on it.
+        let _held = fixture
+            .state
+            .manager
+            .operation_lock(uuid)
+            .lock_owned()
+            .await;
+        let error = shutdown_owned_instances(&fixture.state, Duration::from_millis(100))
+            .await
+            .expect_err("cleanup must respect the shutdown deadline");
+        assert!(
+            error.to_string().contains("did not finish within"),
+            "unexpected deadline error: {error}"
+        );
+        assert!(
+            fixture.state.manager.backend_owner(uuid).is_some(),
+            "the deadline expiry must leave the owner for startup reconciliation"
+        );
+        drop(_held);
+
+        // Once the lock is released the same shutdown stage completes.
+        shutdown_owned_instances(&fixture.state, Duration::from_secs(30))
+            .await
+            .expect("cleanup completes after the lock is released");
+        assert!(fixture.state.manager.backend_owner(uuid).is_none());
+        assert!(
+            fixture
+                .state
+                .manager
+                .owned_instance_ids()
+                .expect("owned ids")
+                .is_empty()
+        );
     }
 }
