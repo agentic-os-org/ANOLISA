@@ -1476,3 +1476,97 @@ fn set_user_xattr(path: &Path, name: &str, value: &[u8]) {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// 12. Top-level Hermes listing hides staging roots and resolver-hidden skills
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_top_level_listing_hides_staging_and_hidden_skills() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{
+        ActiveSkillResolver, ActiveTarget, StagingConfig, StagingMatcher, StagingPattern,
+    };
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    // A top-level skill the ledger hides, and an installer staging root.
+    // Neither may appear in the hub listing while lookup answers ENOENT for
+    // them (the flat branch and CategoryDir already filter both).
+    std::fs::create_dir_all(source.path().join("hidden-skill")).unwrap();
+    std::fs::write(
+        source.path().join("hidden-skill/SKILL.md"),
+        "---\nname: hidden-skill\ndescription: hidden\n---\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(source.path().join(".openclaw-install-stage-abc")).unwrap();
+    std::fs::write(
+        source.path().join(".openclaw-install-stage-abc/SKILL.md"),
+        "---\nname: staged\ndescription: staging\n---\n",
+    )
+    .unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+    resolver.set(
+        "hidden-skill",
+        ActiveTarget::Hidden {
+            reason: "ledger-hidden".to_string(),
+        },
+    );
+
+    let matcher = Arc::new(StagingMatcher::new(StagingConfig {
+        patterns: vec![StagingPattern::PrefixStar(
+            ".openclaw-install-stage-".to_string(),
+        )],
+        ..StagingConfig::default()
+    }));
+
+    let config = MountConfig {
+        staging_matcher: Some(matcher),
+        active_resolver: Some(resolver),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let names = list_dir_names(mountpoint.path());
+    assert!(
+        names.iter().any(|n| n == "apple"),
+        "ordinary categories stay listed, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "hidden-skill"),
+        "a resolver-hidden skill must not be listed, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == ".openclaw-install-stage-abc"),
+        "installer staging roots must not be listed, got {names:?}"
+    );
+}

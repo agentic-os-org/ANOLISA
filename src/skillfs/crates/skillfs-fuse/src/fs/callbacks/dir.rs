@@ -73,6 +73,26 @@ impl SkillFs {
                         if is_reserved_lifecycle_name(&name) {
                             continue;
                         }
+                        // H3/I2/D1.1 parity with the flat branch and with the
+                        // CategoryDir listing: installer-private staging roots
+                        // and pending installs are not hub content, and a skill
+                        // the resolver hides must not be listed while lookup
+                        // answers ENOENT for it. Categories (no SKILL.md of
+                        // their own) stay listed.
+                        if entry.path().is_dir() {
+                            if self.is_staging_skill_root(&name) {
+                                continue;
+                            }
+                            if self.is_pending_install(&name) {
+                                continue;
+                            }
+                            if self.active_resolver.is_some()
+                                && skillfs_core::store::has_regular_skill_md(&entry.path())
+                                && matches!(self.resolve_skill_read(&name), ReadResolution::Hidden)
+                            {
+                                continue;
+                            }
+                        }
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = self.skill_inode_path(&name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -714,6 +734,28 @@ impl SkillFs {
                             // hub content, whatever their physical shape.
                             if is_reserved_lifecycle_name(&name) {
                                 continue;
+                            }
+                            // H3/I2/D1.1 parity with the flat branch and with the
+                            // CategoryDir listing: installer-private staging roots and
+                            // pending installs are not hub content, and a skill the resolver
+                            // hides must not be listed while lookup answers ENOENT for it.
+                            // Categories (no SKILL.md of their own) stay listed.
+                            if entry.path().is_dir() {
+                                if self.is_staging_skill_root(&name) {
+                                    continue;
+                                }
+                                if self.is_pending_install(&name) {
+                                    continue;
+                                }
+                                if self.active_resolver.is_some()
+                                    && skillfs_core::store::has_regular_skill_md(&entry.path())
+                                    && matches!(
+                                        self.resolve_skill_read(&name),
+                                        ReadResolution::Hidden
+                                    )
+                                {
+                                    continue;
+                                }
                             }
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = self.skill_inode_path(&name);
