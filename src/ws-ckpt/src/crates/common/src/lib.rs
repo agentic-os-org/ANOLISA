@@ -1235,7 +1235,13 @@ impl Default for BackendConfig {
 }
 
 /// On-disk config file structure (all fields optional; missing = use defaults).
+///
+/// Unknown top-level keys are rejected (`deny_unknown_fields`): a typo'd
+/// option must fail the reload with the key named, not silently run with
+/// defaults. Nested `BackendConfig` stays forward-tolerant so the shipped
+/// sample's reserved `[backend.btrfs-base]` section header keeps parsing.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub auto_cleanup: Option<bool>,
     pub auto_cleanup_keep: Option<CleanupRetention>,
@@ -1351,7 +1357,14 @@ pub fn decode_payload<T: DeserializeOwned>(data: &[u8]) -> Result<T, WsCkptError
 /// `Some(_)` overrides the global field; `None`/missing file ⇒ inherit global.
 /// Daemon-wide fields (intervals, health, image sizing) are excluded and
 /// rejected at the CLI/IPC boundary.
+///
+/// Unknown keys are rejected (`deny_unknown_fields`): a typo'd policy key
+/// parsing to `default()` would silently inherit-global — the exact misread
+/// the register-time fail-safe exists to prevent. A typo now surfaces as a
+/// parse `Err`, engaging that fail-safe (cleanup disabled, PATCH refused)
+/// instead of quietly widening policy.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePolicy {
     pub auto_cleanup: Option<bool>,
     pub auto_cleanup_keep: Option<CleanupRetention>,
@@ -2768,6 +2781,30 @@ mod tests {
     }
 
     #[test]
+    fn file_config_rejects_unknown_top_level_field() {
+        // A typo'd key must be a parse error naming the key, not silently
+        // ignored: `auto_cleanup_intervl_secs` parsing to defaults means the
+        // daemon runs with an interval the operator never chose.
+        let err =
+            toml::from_str::<FileConfig>("auto_cleanup = true\nauto_cleanup_intervl_secs = 10\n")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("auto_cleanup_intervl_secs"),
+            "expected the unknown key to be named in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn file_config_parses_shipped_sample() {
+        // The packaged config.toml.sample must keep parsing. Its active
+        // `[backend.btrfs-base]` section header (reserved fields commented
+        // out) is nested inside `backend`, which stays forward-tolerant —
+        // only top-level `FileConfig` keys are strictly checked.
+        let sample = include_str!("../../../config.toml.sample");
+        toml::from_str::<FileConfig>(sample).expect("shipped config.toml.sample must still parse");
+    }
+
+    #[test]
     fn parse_duration_accepts_units() {
         assert_eq!(parse_duration_secs("30s").unwrap(), 30);
         assert_eq!(parse_duration_secs("5m").unwrap(), 300);
@@ -2999,6 +3036,37 @@ mod tests {
         save_workspace_policy(dir.path(), &p).unwrap();
         let loaded = load_workspace_policy_or_default(dir.path()).unwrap();
         assert_eq!(loaded, p);
+    }
+
+    #[test]
+    fn workspace_policy_rejects_unknown_field() {
+        // A typo'd policy key must be a parse error naming the key. Today it
+        // silently parses to `WorkspacePolicy::default()`, which the daemon
+        // treats as "inherit global" — the exact misread the register-time
+        // fail-safe exists to prevent, here reaching it silently instead of
+        // via the Err path that disables cleanup and flags the workspace.
+        let err = toml::from_str::<WorkspacePolicy>("auto_clenup = false\n").unwrap_err();
+        assert!(
+            err.to_string().contains("auto_clenup"),
+            "expected the unknown key to be named in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_workspace_policy_unknown_field_is_an_error() {
+        // The daemon-facing loader must surface the typo as Err so the
+        // register-time fail-safe (`load_workspace_policy_with_failsafe`)
+        // engages (auto_cleanup=false + PATCH refused) instead of silently
+        // inheriting the global policy.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(POLICY_FILE), "auto_clenup = false\n").unwrap();
+        match load_workspace_policy(dir.path()) {
+            Err(e) => assert!(
+                e.to_string().contains("auto_clenup"),
+                "expected the unknown key to be named in the error, got: {e}"
+            ),
+            other => panic!("expected Err for unknown policy key, got: {other:?}"),
+        }
     }
 
     #[test]
