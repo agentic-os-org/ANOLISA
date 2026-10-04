@@ -1211,19 +1211,20 @@ mod tests {
         }
 
         // The typed response converter does the same.
-        let output = serde_json::from_value::<crate::analyzer::message::OpenAIResponse>(serde_json::json!({
-            "id": "chatcmpl-legacy",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "gpt-3.5-turbo",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": null,
-                            "function_call": {"name": "get_weather", "arguments": "{}"}},
-                "finish_reason": "function_call"
-            }]
-        }))
-        .expect("response parses");
+        let output =
+            serde_json::from_value::<crate::analyzer::message::OpenAIResponse>(serde_json::json!({
+                "id": "chatcmpl-legacy",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-3.5-turbo",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": null,
+                                "function_call": {"name": "get_weather", "arguments": "{}"}},
+                    "finish_reason": "function_call"
+                }]
+            }))
+            .expect("response parses");
         let msg = &output.choices[0].message;
         let parts =
             GenAIBuilder::openai_msg_to_output(msg, output.choices[0].finish_reason.as_deref());
