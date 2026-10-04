@@ -129,11 +129,16 @@ impl GenAISqliteStore {
                 };
                 if let [id] = candidates.as_slice() {
                     // Keep request evidence and row identity; RequestCapture also
-                    // keeps deferred calls visible to crash recovery.
+                    // keeps deferred calls visible to crash recovery, which only
+                    // looks at pending rows. The stale sweep may have flipped the
+                    // snapshot to interrupted while the call was still in flight,
+                    // so the adopted row returns to pending and drops the stale
+                    // interruption type.
                     tx.execute(
                         "UPDATE genai_events SET
                             call_id = ?1, trace_id = ?2, conversation_id = ?3,
-                            session_id = ?4, pending_origin = 'request_capture'
+                            session_id = ?4, pending_origin = 'request_capture',
+                            status = 'pending', interruption_type = NULL
                          WHERE id = ?5",
                         params![
                             info.call_id,

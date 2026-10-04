@@ -1366,6 +1366,72 @@ fn test_insert_pending() {
 }
 
 #[test]
+fn adopting_an_interrupted_idle_snapshot_restores_pending() {
+    // The stale sweep flips idle snapshots to interrupted after the timeout,
+    // even while their request is still in flight. When the live capture then
+    // adopts the snapshot, crash correlation must see the row again: it only
+    // lists pending rows for the pid.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_adopt_interrupted_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let pending_info = |call_id: &str, origin: PendingOrigin| PendingCallInfo {
+        call_id: call_id.to_string(),
+        trace_id: Some("t-idle".to_string()),
+        conversation_id: None,
+        session_id: None,
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "test-proc".to_string(),
+        agent_name: None,
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/chat".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: None,
+        is_sse: true,
+        model: None,
+        provider: None,
+        call_kind: "main".to_string(),
+        pending_origin: origin,
+        pending_match_key: Some("match-1".to_string()),
+    };
+
+    store
+        .insert_pending(&pending_info("idle-1", PendingOrigin::IdleDrain))
+        .unwrap();
+    assert_eq!(store.mark_interrupted_stale(0).unwrap(), 1);
+
+    store
+        .insert_pending(&pending_info("live-1", PendingOrigin::RequestCapture))
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let (status, itype): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, interruption_type FROM genai_events WHERE call_id = 'live-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "the adopted row is in flight again");
+        assert_eq!(itype, None, "the stale interruption type must be dropped");
+    }
+
+    let pending = store.list_pending_for_pid(42).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, "live-1");
+
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_insert_pending_records_idle_origin_and_match_key() {
     let path =
         std::env::temp_dir().join(format!("test_genai_idle_origin_{}.db", std::process::id()));
