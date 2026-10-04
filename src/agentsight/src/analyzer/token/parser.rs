@@ -564,7 +564,9 @@ mod tests {
         // Deliberately not valid JSON: the last TLS record was cut.
         let data = r#"{"id":"chatcmpl-ds-003","model":"qwen3.6-plus","usage":{"prompt_tokens":29719,"completion_tokens":435,"total_tokens":30154,"prompt_tokens_details":{"cache_creation_input_tokens":29713,"cached_tokens":0}"#;
 
-        let usage = parser.parse_data(data).expect("partial usage must be recovered");
+        let usage = parser
+            .parse_data(data)
+            .expect("partial usage must be recovered");
         assert_eq!(usage.provider, LLMProvider::OpenAI);
         assert_eq!(usage.input_tokens, 29719);
         assert_eq!(usage.cache_creation_input_tokens, Some(29713));

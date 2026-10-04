@@ -1187,7 +1187,10 @@ pub(crate) mod tests {
             .expect("raw-shaped columns must still produce an observation")
             .results;
         assert_eq!(results[0].source_call_id.as_deref(), Some("tc-raw"));
-        assert_eq!(results[0].content.as_ref().and_then(|c| c.as_str()), Some("raw-a.txt"));
+        assert_eq!(
+            results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("raw-a.txt")
+        );
     }
 
     #[test]

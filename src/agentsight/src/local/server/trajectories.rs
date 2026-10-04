@@ -489,17 +489,15 @@ mod tests {
         // Same contract as the Linux endpoint: an unknown token is the
         // caller's mistake, not an empty result set.
         let state = make_state(None);
-        let app = test::init_service(
-            App::new().app_data(state).service(list_trajectories),
-        )
-        .await;
+        let app = test::init_service(App::new().app_data(state).service(list_trajectories)).await;
 
         for uri in [
             "/api/trajectories?label=goodd",
             "/api/trajectories?exclude_label=nope",
             "/api/trajectories?label=good&exclude_label=nope",
         ] {
-            let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            let resp =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(resp.status().as_u16(), 400, "{uri} must be rejected");
             let body: serde_json::Value = test::read_body_json(resp).await;
             assert_eq!(body["error"]["code"], "bad_request");
