@@ -105,6 +105,10 @@ def main() -> None:
     #    Codex normalizes all shell tools to tool_name="Bash",
     #    tool_input={"command": "..."}
     tool_input = input_data.get("tool_input", {})
+    # Codex 的 tool_input 是 serde_json::Value——可以是 string/object/array
+    # （同插件 pii_checker_hook 已文档化并全处理）：非对象按 fail-open 放行
+    if not isinstance(tool_input, dict):
+        return
     command = tool_input.get("command", "")
 
     if not command or not isinstance(command, str) or not command.strip():
@@ -159,6 +163,8 @@ def main() -> None:
     #     return
 
     # 6. Mode-based output
+    if not isinstance(scan_result, dict):
+        return  # fail-open on non-object CLI JSON
     findings = scan_result.get("findings", [])
     verdict = scan_result.get("verdict", "pass")
 
