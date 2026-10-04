@@ -116,11 +116,17 @@ impl TokenParser {
         let anthropic_cache_read = find_u64(data, "cache_read_input_tokens");
         let cache_read_input_tokens =
             anthropic_cache_read.or_else(|| find_u64(data, "cached_tokens"));
-        // `cache_creation_input_tokens` / `cache_read_input_tokens` field names
-        // only occur in Anthropic's schema, where cache tokens are billed on
-        // top of input_tokens; OpenAI-compatible providers keep cache inside
-        // the input count (`cached_tokens`).
-        let provider = if cache_creation_input_tokens.is_some() || anthropic_cache_read.is_some() {
+        // Provider decides whether the cache counters are billed on top of the
+        // input count (Anthropic) or sit inside it (OpenAI-compatible). The
+        // cache field names alone are not enough: DashScope's compatible mode
+        // nests `cache_creation_input_tokens` under `prompt_tokens_details`,
+        // where `prompt_tokens` already includes it, so inferring Anthropic
+        // from the name alone roughly doubles the billed input. Anthropic
+        // spells the input count `input_tokens`; `prompt_tokens` is the
+        // OpenAI-compatible spelling.
+        let provider = if find_u64(data, "prompt_tokens").is_none()
+            && (cache_creation_input_tokens.is_some() || anthropic_cache_read.is_some())
+        {
             LLMProvider::Anthropic
         } else {
             LLMProvider::OpenAI
@@ -537,6 +543,39 @@ mod tests {
         assert_eq!(usage.output_tokens, 435);
         assert_eq!(usage.cache_creation_input_tokens, Some(29713));
         assert_eq!(usage.cache_read_input_tokens, Some(0));
+    }
+
+    /// A truncated DashScope-compatible body (the continuation buffer left by
+    /// a process that died mid-stream) must keep the OpenAI-compatible billing
+    /// rule: `prompt_tokens` already contains the cache counters nested under
+    /// `prompt_tokens_details`, so adding them again doubles the input.
+    #[test]
+    fn test_partial_dashscope_usage_keeps_openai_billing() {
+        let parser = TokenParser::new();
+        // Deliberately not valid JSON: the last TLS record was cut.
+        let data = r#"{"id":"chatcmpl-ds-003","model":"qwen3.6-plus","usage":{"prompt_tokens":29719,"completion_tokens":435,"total_tokens":30154,"prompt_tokens_details":{"cache_creation_input_tokens":29713,"cached_tokens":0}"#;
+
+        let usage = parser.parse_data(data).expect("partial usage must be recovered");
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+        assert_eq!(usage.input_tokens, 29719);
+        assert_eq!(usage.cache_creation_input_tokens, Some(29713));
+
+        let record = crate::analyzer::token::record::TokenRecord::new(
+            1,
+            "qwen".to_string(),
+            usage.provider.to_string(),
+            usage.input_tokens,
+            0,
+        )
+        .with_cache_tokens(
+            usage.cache_creation_input_tokens.unwrap_or(0),
+            usage.cache_read_input_tokens.unwrap_or(0),
+        );
+        assert_eq!(
+            record.billed_input_tokens(),
+            29719,
+            "nested cache counters are already part of prompt_tokens"
+        );
     }
 
     #[test]
