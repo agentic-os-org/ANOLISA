@@ -272,6 +272,24 @@ impl DaemonConfig {
         validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)?;
         self.storage.sync_schedule()?;
         self.storage.sync_timeout_duration()?;
+        // A zero fallback size is not a usable slot image: `acquire` creates an
+        // empty file, so a sandbox created without a base image is reported
+        // `Running` with a rootfs the guest can never boot from. Every other
+        // numeric limit in this configuration rejects zero explicitly.
+        if self.storage.rootfs_size == 0 {
+            return Err(BlazeError::ConfigError {
+                source: ConfigErrorSource::InvalidValue(
+                    "storage.rootfs_size must be greater than zero".to_string(),
+                ),
+            });
+        }
+        if self.storage.mem_size == 0 {
+            return Err(BlazeError::ConfigError {
+                source: ConfigErrorSource::InvalidValue(
+                    "storage.mem_size must be greater than zero".to_string(),
+                ),
+            });
+        }
         let template_boundaries = [
             ("storage.images_dir", self.storage.images_dir.as_path()),
             (
@@ -658,6 +676,32 @@ mod tests {
 
         assert!(cfg.pool.is_some());
         assert_eq!(cfg.daemon.log_level, "debug");
+    }
+
+    #[test]
+    fn rejects_zero_storage_fallback_sizes() {
+        // `acquire` materializes these sizes into the sandbox slot whenever the
+        // base image is unavailable, so zero yields an empty rootfs/memory file
+        // that no backend can use instead of a clear configuration error.
+        let mut rootfs = DaemonConfig::default();
+        rootfs.storage.rootfs_size = 0;
+        let error = rootfs
+            .validate()
+            .expect_err("a zero rootfs_size must be rejected");
+        assert!(error.to_string().contains("storage.rootfs_size"), "{error}");
+
+        let mut mem = DaemonConfig::default();
+        mem.storage.mem_size = 0;
+        let error = mem
+            .validate()
+            .expect_err("a zero mem_size must be rejected");
+        assert!(error.to_string().contains("storage.mem_size"), "{error}");
+
+        // Explicitly sized slots stay valid.
+        let mut sized = DaemonConfig::default();
+        sized.storage.rootfs_size = 1;
+        sized.storage.mem_size = 1;
+        sized.validate().expect("positive sizes remain valid");
     }
 
     #[test]
