@@ -214,7 +214,16 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         });
     }
 
-    let content = fs::read_to_string(path).ok()?;
+    // Session files are scanned while another process may still be writing
+    // them: an agent killed mid-write can leave a partial record whose cut
+    // lands inside a multi-byte character, so the file is not valid UTF-8
+    // and `read_to_string` would drop the whole session from the listing.
+    // Decode lossily instead — the torn tail becomes a malformed line the
+    // fast scan simply skips, so only the incomplete record is lost
+    // (mirrors the collector crate's torn-tail handling).
+    let content = fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
     let mut session_id = String::new();
     let mut message_count = 0u32;
@@ -542,6 +551,32 @@ mod tests {
         let sessions = discover_local_sessions();
         assert!(sessions.iter().any(|s| s.agent_id == "codex"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn parse_session_file_keeps_a_torn_utf8_tail() {
+        let dir = std::env::temp_dir().join("agentsight_disc_torn_home");
+        let proj = dir.join(".qoder/projects/-data-myapp");
+        std::fs::create_dir_all(&proj).unwrap();
+        let session_file = proj.join("be0aa488-4e56-4604-bdf0-e12cc387392d.jsonl");
+        let mut bytes = br#"{"type":"user","message":{"content":[{"type":"text","text":"fix the login bug"}]}}"#
+            .to_vec();
+        bytes.push(b'\n');
+        // An agent killed mid-write leaves a partial record whose cut lands
+        // in the middle of a multi-byte character.
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"content\":\"\xe4\xb8");
+        std::fs::write(&session_file, bytes).unwrap();
+
+        let source = SESSION_SOURCES
+            .iter()
+            .find(|s| s.agent_id == "qoder")
+            .expect("qoder source registered");
+        let session = parse_session_file(&session_file, source, "data-myapp");
+        let session =
+            session.expect("complete records before the torn tail must still list the session");
+        assert_eq!(session.first_message, "fix the login bug");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

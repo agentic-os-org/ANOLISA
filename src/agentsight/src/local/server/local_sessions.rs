@@ -94,9 +94,17 @@ pub async fn read_local_session_file(query: web::Query<FileQuery>) -> impl Respo
         );
     }
 
-    // Block on file I/O to avoid blocking the async runtime.
+    // Block on file I/O to avoid blocking the async runtime. Lossy decode:
+    // a session file torn mid-write by a killed agent can end in the middle
+    // of a multi-byte character, and a strict `read_to_string` would answer
+    // 404 for a file that exists, hiding the complete records before the
+    // tail from the raw viewer.
     let path_owned = path.to_string();
-    match web::block(move || std::fs::read_to_string(&path_owned)).await {
+    match web::block(move || {
+        std::fs::read(&path_owned).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    })
+    .await
+    {
         Ok(Ok(content)) => HttpResponse::Ok()
             .content_type("application/jsonl; charset=utf-8")
             .body(content),

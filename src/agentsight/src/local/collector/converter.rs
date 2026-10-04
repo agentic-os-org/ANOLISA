@@ -16,8 +16,13 @@ use serde_json::Value;
 use std::path::Path;
 
 pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    // Lossy decode: a session file torn mid-write by a killed agent can end
+    // in the middle of a multi-byte character, and a strict `read_to_string`
+    // would fail the whole conversion, dropping every complete record before
+    // the tail. The torn tail becomes a malformed line the parser skips.
+    let content = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
     convert_jsonl_content_to_atif(&content)
 }
@@ -455,6 +460,23 @@ mod tests {
         std::fs::write(&dir, content).unwrap();
         let traj = convert_jsonl_to_atif(&dir).unwrap();
         assert_eq!(traj.steps.len(), 1);
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn test_convert_jsonl_file_with_torn_utf8_tail() {
+        let dir = std::env::temp_dir().join("agentsight_converter_torn_test.jsonl");
+        let mut bytes = br#"{"type":"user","message":{"content":"hello"}}"#.to_vec();
+        bytes.push(b'\n');
+        // A killed agent's last write cut a multi-byte character in half.
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"content\":\"\xe4\xb8");
+        std::fs::write(&dir, bytes).unwrap();
+        let traj = convert_jsonl_to_atif(&dir).unwrap();
+        assert_eq!(
+            traj.steps.len(),
+            1,
+            "the complete record before the tail survives"
+        );
         let _ = std::fs::remove_file(&dir);
     }
 
