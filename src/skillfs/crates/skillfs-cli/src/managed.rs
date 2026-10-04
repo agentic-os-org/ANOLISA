@@ -381,6 +381,19 @@ fn clear_mount(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
 // Client: `skillfs mount --managed ...`
 // ---------------------------------------------------------------------------
 
+/// Whether the recorded state of a live managed instance matches the
+/// requested source and mountpoint pair.
+///
+/// Pure so the refusal can be tested without a live supervisor.
+fn active_instance_matches(
+    state: &ManagedState,
+    source_norm: &Path,
+    mountpoint_norm: &Path,
+) -> bool {
+    state.source == source_norm.to_string_lossy()
+        && state.mountpoint == mountpoint_norm.to_string_lossy()
+}
+
 /// Entry point for a managed mount request. Validates the source, writes the
 /// managed state, spawns a detached supervisor, and waits for readiness.
 pub fn run_client(
@@ -424,6 +437,35 @@ pub fn run_client(
     // incumbent over the mountpoint.
     if let Some(pid) = read_pid(&paths.supervisor_pid) {
         if pid_alive(pid) {
+            // The instance id is derived from the mountpoint, so a second
+            // `--managed` request for the same mountpoint but a different
+            // source resolves to this instance. Reporting it as "already
+            // active" would leave the caller believing the new source is
+            // served; refuse instead.
+            //
+            // The recorded state is the only proof of what the incumbent
+            // serves, so a missing or corrupt state file must not be
+            // skipped either: fail explicitly and leave the incumbent
+            // running rather than vouching for an unverified source.
+            let active = ManagedState::load(&paths.state).map_err(|e| {
+                format!(
+                    "managed supervisor (pid {pid}) is active for {} but its state \
+                     cannot be read ({e}); run `skillfs stop {}` first",
+                    normalized.display(),
+                    normalized.display()
+                )
+            })?;
+            if !active_instance_matches(&active, &source_norm, &normalized) {
+                return Err(format!(
+                    "managed mount '{}' is already active from source '{}' (requested '{}'); \
+                     run `skillfs stop {}` first",
+                    active.mountpoint,
+                    active.source,
+                    source_norm.display(),
+                    normalized.display()
+                )
+                .into());
+            }
             if is_mount_ready(&normalized) {
                 info!(
                     mountpoint = %normalized.display(),
@@ -974,6 +1016,45 @@ mod tests {
         assert_eq!(a, b, "instance id must be deterministic");
     }
 
+    /// A live supervisor pid with a missing or corrupt state file must
+    /// fail the request with the explicit state error instead of falling
+    /// through to an "already active" success: the state is the only
+    /// proof of which source the incumbent serves. (Previously a ready
+    /// mount with unreadable state reported success.)
+    #[test]
+    fn unreadable_incumbent_state_fails_instead_of_already_active() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let normalized = normalize_mountpoint(mountpoint.path());
+        let paths = ManagedPaths::new(&instance_id_for(&normalized));
+        secure_runtime_dir().expect("runtime dir");
+        // The test process itself plays the live supervisor: its pid is
+        // alive by definition.
+        std::fs::write(&paths.supervisor_pid, std::process::id().to_string())
+            .expect("write supervisor pid");
+
+        let err = run_client(&[], source.path(), mountpoint.path())
+            .expect_err("a missing state file must fail the request");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("state cannot be read") && msg.contains("skillfs stop"),
+            "expected the explicit state-read failure, got: {msg}"
+        );
+
+        // Corrupt state fails the same way, without touching the
+        // incumbent.
+        std::fs::write(&paths.state, "{not json").expect("write corrupt state");
+        let err = run_client(&[], source.path(), mountpoint.path())
+            .expect_err("a corrupt state file must fail the request");
+        assert!(
+            err.to_string().contains("state cannot be read"),
+            "expected the explicit state-read failure, got: {err}"
+        );
+
+        std::fs::remove_file(&paths.supervisor_pid).ok();
+        std::fs::remove_file(&paths.state).ok();
+    }
+
     #[test]
     fn instance_id_differs_for_different_paths() {
         let a = instance_id_for(Path::new("/tmp/mount-a"));
@@ -1159,6 +1240,37 @@ mod tests {
             err.to_string().contains("symlink"),
             "expected symlink rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn active_instance_matches_only_the_recorded_source_and_mountpoint() {
+        let state = ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            instance_id: "abc".to_string(),
+            mountpoint: "/mnt/skills".to_string(),
+            source: "/srv/src-a".to_string(),
+            worker_program: "/usr/bin/skillfs".to_string(),
+            worker_args: vec![],
+            desired_state: DesiredState::Mounted,
+        };
+        let mnt = Path::new("/mnt/skills");
+        assert!(active_instance_matches(
+            &state,
+            Path::new("/srv/src-a"),
+            mnt
+        ));
+        // Same mountpoint, different source: the instance id collides, so the
+        // request must be refused rather than reported as already active.
+        assert!(!active_instance_matches(
+            &state,
+            Path::new("/srv/src-b"),
+            mnt
+        ));
+        assert!(!active_instance_matches(
+            &state,
+            Path::new("/srv/src-a"),
+            Path::new("/mnt/other")
+        ));
     }
 
     #[test]
