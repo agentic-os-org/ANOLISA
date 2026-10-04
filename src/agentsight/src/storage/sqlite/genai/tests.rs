@@ -1232,7 +1232,9 @@ fn test_list_agent_names_falls_back_to_process_name() {
         .unwrap();
     }
 
-    let names = store.list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS).unwrap();
+    let names = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .unwrap();
     assert_eq!(names, vec!["fallback-agent"]);
     cleanup_db(&path);
 }
