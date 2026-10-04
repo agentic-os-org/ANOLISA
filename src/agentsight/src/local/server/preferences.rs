@@ -13,8 +13,8 @@ use agentsight_trajectory_collector::TrajectoryStore;
 use super::optimize::OptimizeAppState;
 use crate::preferences::api::{
     AutoResolution, PreferenceSourceParam, PreferencesQuery, TurnsQuery, cache_get, cache_put,
-    clamp_window_days, merge_llm_preferences, render_markdown, resolve_auto, select_unique_turns,
-    window_start_ns,
+    clamp_window_days, llm_input_turns, merge_llm_preferences, render_markdown, resolve_auto,
+    select_unique_turns, window_start_ns,
 };
 use crate::preferences::{aggregator, analyze_rows, detector, trajectory_source};
 
@@ -151,7 +151,10 @@ async fn llm_findings(
         .optimize
         .build_client()
         .map_err(|_| "LLM not configured".to_string())?;
-    let turns: Vec<String> = rows.iter().filter_map(|r| r.user_text.clone()).collect();
+    // The trajectory source is natively newest-first — the same order the
+    // turns handler passes through to select_unique_turns — and the
+    // shared selection answers in prompt order: most recent last.
+    let turns = llm_input_turns(rows.iter());
     analyze_user_turns(&client, &turns)
         .await
         .map_err(|e| e.to_string())

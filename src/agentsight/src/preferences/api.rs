@@ -116,18 +116,34 @@ pub const DEFAULT_TURNS_LIMIT: usize = 200;
 /// unbounded blob of raw conversation text out of the API.
 pub const MAX_TURNS_LIMIT: usize = 1000;
 
+/// Core turn selection shared by the turns endpoint and the LLM input
+/// path: the deduped, trimmed, non-empty user turns of the window,
+/// NEWEST-first, so a turn repeated across the window dedupes at its
+/// newest position.
+///
+/// `rows` must already arrive newest-first — the same normalization both
+/// turns handlers apply: the genai store returns chronological rows and
+/// the Linux handler reverses (`.rev()`) them; the trajectory source
+/// (`list_recent_atif_jsons`) is natively DESC and the macOS handler
+/// passes it straight through.
+fn select_newest_unique_turns<'a>(
+    rows: impl Iterator<Item = &'a PreferenceEventRow>,
+) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    rows.filter_map(|r| r.user_text.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
 /// Select the turns-endpoint response list: the deduped, trimmed, non-empty
 /// user turns of the window, at most `requested_limit` of them (default
 /// [`DEFAULT_TURNS_LIMIT`], capped at [`MAX_TURNS_LIMIT`]).
 ///
-/// `rows` must already arrive newest-first: iteration order is the response
-/// order, so `take(limit)` keeps the NEWEST slice of an over-limit window
-/// and a turn repeated across the window dedupes at its newest position,
-/// per the endpoint's documented "newest unique turns first" contract. The
-/// trajectory source (`list_recent_atif_jsons`) is natively newest-first;
-/// the genai store returns chronological rows, so the Linux handler
-/// reverses (`.rev()`) before calling — the one intentional difference
-/// between the twin handlers.
+/// Iteration order is the response order, so `take(limit)` keeps the
+/// NEWEST slice of an over-limit window, per the endpoint's documented
+/// "newest unique turns first" contract.
 pub fn select_unique_turns<'a>(
     rows: impl Iterator<Item = &'a PreferenceEventRow>,
     requested_limit: Option<usize>,
@@ -135,13 +151,24 @@ pub fn select_unique_turns<'a>(
     let limit = requested_limit
         .unwrap_or(DEFAULT_TURNS_LIMIT)
         .clamp(1, MAX_TURNS_LIMIT);
-    let mut seen: HashSet<String> = HashSet::new();
-    rows.filter_map(|r| r.user_text.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|s| seen.insert(s.clone()))
+    select_newest_unique_turns(rows)
+        .into_iter()
         .take(limit)
         .collect()
+}
+
+/// Select the LLM layer's input turns: the same deduped, trimmed selection
+/// the turns endpoint reports (the endpoint documents handing back "the
+/// same text the `llm=true` path feeds to the server-side LLM"), reversed
+/// into chronological order so the analysis prompt's "most recent last"
+/// label is true. Unlike the endpoint there is no count limit — the
+/// prompt's own compaction budget (per-turn and total character caps in
+/// `agentsight_opt::preference::build_analysis_input`) bounds how much of
+/// the window survives, dropping the OLDEST turns when it does not fit.
+pub fn llm_input_turns<'a>(rows: impl Iterator<Item = &'a PreferenceEventRow>) -> Vec<String> {
+    let mut turns = select_newest_unique_turns(rows);
+    turns.reverse();
+    turns
 }
 
 /// Clamp the requested window into `1..=MAX_WINDOW_DAYS`, defaulting to
@@ -688,5 +715,72 @@ mod tests {
             "genai (reversed chronological) and trajectory (native DESC) \
              inputs must answer identically"
         );
+    }
+
+    // ─── LLM input selection ────────────────────────────────────────────────
+
+    #[test]
+    fn llm_input_turns_are_chronological_most_recent_last() {
+        // Newest-first rows (the order both llm handlers pass) come back
+        // in prompt order: the analysis prompt labels the list "most
+        // recent last", so the newest turn must be the LAST entry.
+        let chronological: Vec<PreferenceEventRow> =
+            (1..=5).map(|i| turn_row(i, &format!("turn {i}"))).collect();
+        let mut newest_first = chronological.clone();
+        newest_first.reverse();
+        assert_eq!(
+            llm_input_turns(newest_first.iter()),
+            vec!["turn 1", "turn 2", "turn 3", "turn 4", "turn 5"]
+        );
+    }
+
+    #[test]
+    fn llm_input_turns_share_the_endpoint_selection_rules() {
+        // Same dedupe/trim/skip rules as the turns endpoint, answered in
+        // the opposite order: the scenario of
+        // turns_selection_dedupes_at_the_newest_position_and_trims, with
+        // the duplicate collapsing onto its newest (later) slot.
+        let rows = [
+            turn_row(1, "always run tests"),
+            turn_row(2, "  always run tests  "),
+            turn_row(3, "prefer concise replies"),
+        ];
+        let newest_first: Vec<PreferenceEventRow> = rows.into_iter().rev().collect();
+        assert_eq!(
+            llm_input_turns(newest_first.iter()),
+            vec!["always run tests", "prefer concise replies"]
+        );
+    }
+
+    #[test]
+    fn llm_input_turns_are_identical_for_both_source_row_orders() {
+        // Twin consistency at the shared level: the genai store yields
+        // chronological rows (the Linux llm_findings reverses them before
+        // calling) while the trajectory source yields newest-first rows
+        // (the macOS llm_findings passes them through) — both must feed
+        // the model the same chronological list. The macOS twin is
+        // cfg-gated off Linux, so its handler cannot run there; this pins
+        // the shared contract both handlers call.
+        let texts = [
+            "plan first",
+            "write tests",
+            "keep it short",
+            "use rust",
+            "be concise",
+        ];
+        let chronological: Vec<PreferenceEventRow> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| turn_row(i as i64 + 1, t))
+            .collect();
+        let mut newest_first = chronological.clone();
+        newest_first.reverse();
+        assert_eq!(
+            llm_input_turns(chronological.iter().rev()),
+            llm_input_turns(newest_first.iter()),
+            "genai (reversed chronological) and trajectory (native DESC) \
+             inputs must answer identically"
+        );
+        assert_eq!(llm_input_turns(newest_first.iter()), texts);
     }
 }
