@@ -241,7 +241,24 @@ pub fn count_response_tokens(
     let mut all_reasoning = String::new();
     let mut all_tool_calls = Vec::new();
 
+    // The Responses API closes a stream with `response.output_text.done` and
+    // `response.output_item.done` events that repeat the *whole* text the
+    // deltas already delivered. Counting both counts the answer two or three
+    // times, so the closing events are only read when no delta carried text.
+    let saw_text_delta = response_jsons.iter().any(|chunk| {
+        chunk.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta")
+    });
+    let repeats_full_text = |chunk: &serde_json::Value| {
+        matches!(
+            chunk.get("type").and_then(|t| t.as_str()),
+            Some("response.output_text.done") | Some("response.output_item.done")
+        )
+    };
+
     for chunk in response_jsons {
+        if saw_text_delta && repeats_full_text(chunk) {
+            continue;
+        }
         if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(chunk)) {
             if !content.is_empty() {
                 all_content.push_str(&content);

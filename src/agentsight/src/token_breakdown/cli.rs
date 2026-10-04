@@ -705,6 +705,35 @@ mod tests {
             crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
                 .expect("request is counted");
         assert_eq!(other.tools_tokens, count.tools_tokens);
+
+    /// The Responses API repeats the whole answer in `*.done` events; adding
+    /// them to the deltas counts it once per event.
+    #[test]
+    fn responses_done_events_do_not_double_count_the_answer() {
+        // The fixture tokenizer is WordLevel with a whitespace pre-tokenizer,
+        // so its vocabulary words are what make duplicates observable.
+        let tokenizer = fixture_tokenizer();
+        let chunks = vec![
+            json!({"type": "response.output_text.delta", "delta": "hello "}),
+            json!({"type": "response.output_text.delta", "delta": "there"}),
+            json!({"type": "response.output_text.done", "text": "hello there"}),
+            json!({"type": "response.output_item.done", "item": {"content": [{"text": "hello there"}]}}),
+        ];
+
+        let count =
+            crate::analyzer::count_response_tokens(&chunks, &tokenizer).expect("response counts");
+        let once = tokenizer.count("hello there").expect("fixture counts");
+        assert_eq!(
+            count.total_tokens, once,
+            "the answer must be counted once: {:?}",
+            count.by_type
+        );
+
+        // A capture that only got the closing event still counts it.
+        let only_done = vec![json!({"type": "response.output_text.done", "text": "hello there"})];
+        let count =
+            crate::analyzer::count_response_tokens(&only_done, &tokenizer).expect("response counts");
+        assert_eq!(count.total_tokens, once);
     }
 
     #[test]
