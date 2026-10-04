@@ -705,6 +705,7 @@ mod tests {
             crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
                 .expect("request is counted");
         assert_eq!(other.tools_tokens, count.tools_tokens);
+    }
 
     /// The Responses API repeats the whole answer in `*.done` events; adding
     /// them to the deltas counts it once per event.
@@ -731,8 +732,8 @@ mod tests {
 
         // A capture that only got the closing event still counts it.
         let only_done = vec![json!({"type": "response.output_text.done", "text": "hello there"})];
-        let count =
-            crate::analyzer::count_response_tokens(&only_done, &tokenizer).expect("response counts");
+        let count = crate::analyzer::count_response_tokens(&only_done, &tokenizer)
+            .expect("response counts");
         assert_eq!(count.total_tokens, once);
     }
 
