@@ -203,6 +203,42 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         )
         self.agent = _Agent("agent-2", _State("session-2"))
 
+    async def test_malformed_tool_input_fails_open_instead_of_killing_the_reply(self) -> None:
+        """A repairable-but-invalid tool input must not crash on_acting.
+
+        AgentScope 2.x repairs malformed tool arguments upstream, but the
+        raw string still reaches the middleware; an unguarded json.loads
+        raised JSONDecodeError out of agent.reply(), killing the whole
+        reply. Fail open: forward the call untransformed, keep lossless
+        output handling.
+        """
+        chunk = _ToolChunk([_TextBlock("stream")])
+        response = _ToolResponse([_TextBlock("long " * 100)])
+        observed = []
+
+        async def post_tool(request):
+            observed.append(request)
+            return _post_response("short")
+
+        self.middleware.sdk.post_tool = post_tool
+
+        async def next_handler(**kwargs):
+            yield chunk
+            yield response
+
+        output = await _collect(
+            self.middleware.on_acting(
+                self.agent,
+                {"tool_call": _Call("call-2", "api", "{'command': 'echo hi'}")},
+                next_handler,
+            )
+        )
+        self.assertIs(output[0], chunk)
+        self.assertEqual(output[1].content[0].text, "short")
+        self.assertEqual(response.content[0].text, "long " * 100)
+        self.assertEqual(observed[0].attribution.tool_use_id, "call-2")
+        self.assertIsNone(observed[0].command)
+
     async def test_model_call_keeps_tools_static_while_markers_change(self) -> None:
         marker = "0123456789abcdef01234567"
         marker_sets = iter((frozenset(), frozenset({marker})))

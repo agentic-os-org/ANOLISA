@@ -267,10 +267,31 @@ class TokenlessMiddleware(MiddlewareBase):
             return
 
         contract = self.contract_for(source.name)
-        arguments = json.loads(source.input)
-        if not isinstance(arguments, dict):
-            raise TypeError("AgentScope tool input must decode to a JSON object")
         attribution = Attribution(str(agent.name), agent.state.session_id, source.id)
+        try:
+            arguments = json.loads(source.input)
+            if not isinstance(arguments, dict):
+                raise TypeError(
+                    "AgentScope tool input must decode to a JSON object"
+                )
+        except (json.JSONDecodeError, TypeError):
+            # AgentScope repairs malformed tool arguments upstream, but the
+            # raw string still reaches the middleware. Raising here kills
+            # the whole agent reply; instead fail open: forward the call
+            # untransformed and keep lossless-only output handling.
+            async for item in next_handler(**input_kwargs):
+                if isinstance(item, ToolResponse):
+                    yield await self._after_response(
+                        item,
+                        source.name,
+                        contract,
+                        OutputOptimization.NONE,
+                        attribution,
+                        None,
+                    )
+                else:
+                    yield item
+            return
         optimization = OutputOptimization.NONE
         forwarded = source
         if contract.command_field is not None and self.config.rtk_enabled:
