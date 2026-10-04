@@ -343,7 +343,9 @@ impl BM25Store {
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
         if needs_like_fallback {
-            return self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope);
+            let hits = self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope)?;
+            self.record_access(&hits);
+            return Ok(hits);
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
@@ -494,7 +496,38 @@ impl BM25Store {
         // Best match first — `score` is "higher is better" on every path.
         out.sort_by(|a, b| b.score.total_cmp(&a.score));
 
+        // Record the access before returning: `compact()` archives files with
+        // `access_count == 0`, so without this bookkeeping the warm
+        // protection is inert and a memory that is searched every day is
+        // archived (and hidden from normal search) once its mtime ages past
+        // `cold_after_days`.
+        self.record_access(&out);
+
         Ok(out)
+    }
+
+    /// Record that these files were surfaced to the agent.
+    ///
+    /// Bumps `access_count` / `last_accessed_ms` and re-warms the row, so
+    /// `compact()`'s documented criterion (only files with
+    /// `access_count == 0` older than `cold_after_days` go cold) actually
+    /// holds. Best-effort: a failed bookkeeping write must never fail the
+    /// search that produced the hits.
+    fn record_access(&self, hits: &[SearchHit]) {
+        if hits.is_empty() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        for hit in hits {
+            let _ = self.conn.execute(
+                "UPDATE files SET access_count = access_count + 1, \
+                 last_accessed_ms = ?1, is_cold = 0 WHERE path = ?2",
+                params![now_ms, hit.path],
+            );
+        }
     }
 
     /// LIKE-based substring fallback for queries that the trigram tokenizer
@@ -1731,6 +1764,51 @@ mod tests {
     }
 
     #[test]
+    fn compact_keeps_searched_files_warm() {
+        // Regression: no search path ever recorded an access, so
+        // `access_count` stayed 0 for every row and `compact()`'s warm
+        // protection ("files with access_count > 0 are never compacted",
+        // also documented in config.rs / default.toml / the mem_compact tool
+        // description) was inert. A memory the agent searched every day was
+        // archived as soon as its mtime was older than cold_after_days, and
+        // normal search (and auto-recall) silently stopped returning it.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let old_ms = now_ms - 100 * 86_400_000;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("searched.md", old_ms, 24, "walrus unique knowledge", None)
+            .unwrap();
+        s.upsert("untouched.md", old_ms, 24, "other unique knowledge", None)
+            .unwrap();
+
+        // The agent searches `searched.md` and gets it back — once through
+        // the MATCH path (3+ char term) and once through the LIKE fallback
+        // (2-char term).
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+        let hits = s.search("wa", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+
+        // Only the file that was never returned may be archived.
+        let compacted = s.compact(30).unwrap();
+        assert_eq!(compacted, 1, "only the never-searched file may go cold");
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a searched memory must stay searchable after compact"
+        );
+        let hits = s.search("other", 5, true).unwrap();
+        assert!(hits.is_empty(), "the untouched file is cold");
+    }
+
+    #[test]
     fn compact_marks_old_files_cold() {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1821,9 +1899,10 @@ mod tests {
         )
         .unwrap();
 
-        // Before compact: visible in search.
-        let hits = s.search("unique", 5, true).unwrap();
-        assert_eq!(hits.len(), 1);
+        // Before compact: present and warm. Probe the counts rather than
+        // searching, because a search is itself an access and would protect
+        // the file from compaction (see compact_keeps_searched_files_warm).
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
 
         // Compact.
         s.compact(30).unwrap();
