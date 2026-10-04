@@ -74,10 +74,18 @@ def ensure_pending_decision_stub(skill_dir: str | Path) -> Path:
         shutil.rmtree(stub_dir)
     stub_dir.mkdir(parents=True, exist_ok=True)
     skill_name = skill_path.name
+    # Quote the name as a YAML double-quoted scalar: a bare directory
+    # name like "1.5"/"no"/"null" would parse as float/bool/None, and a
+    # name containing a newline (legal on Linux) could terminate the
+    # frontmatter and inject a body into the "safe placeholder" SkillFS
+    # exposes while the real untrusted skill is hidden.
+    import json as _json
+
+    quoted_name = _json.dumps(skill_name, ensure_ascii=False)
     (stub_dir / "SKILL.md").write_text(
         (
             "---\n"
-            f"name: {skill_name}\n"
+            f"name: {quoted_name}\n"
             "description: Skill requires manual review before use\n"
             "---\n"
             "# Pending Skill Ledger Review\n\n"
