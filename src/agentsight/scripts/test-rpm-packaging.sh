@@ -158,6 +158,15 @@ require_literal src/agentsight/agentsight.spec.in "%{_unitdir}/agentsight-enforc
 require_literal src/agentsight/agentsight.spec.in "%systemd_post agentsight-enforcer.service"
 require_literal src/agentsight/agentsight.spec.in "%systemd_preun agentsight-enforcer.service"
 require_literal src/agentsight/agentsight.spec.in "%systemd_postun agentsight-enforcer.service"
+# rpm expands macros in comments too, and with systemd-rpm-macros installed a
+# bare %systemd_post (zero arguments) is fatal: "The %systemd_post macro
+# requires some arguments". Any comment that names the scriptlet macros must
+# escape them, or rpmbuild aborts before it produces a package.
+require_count src/agentsight/agentsight.spec.in \
+    "%systemd_post/%systemd_preun/%systemd_postun" 0
+require_literal src/agentsight/agentsight.spec.in \
+    "%%systemd_post/%%systemd_preun/%%systemd_postun"
+require_literal src/agentsight/agentsight.spec.in "%%systemd_* scriptlet macros"
 require_literal src/agentsight/scripts/agentsight.service "Wants=agentsight-enforcer.service"
 require_literal src/agentsight/scripts/agentsight-enforcer.service "PartOf=agentsight.service"
 require_literal src/agentsight/scripts/agentsight.service "UMask=0077"
