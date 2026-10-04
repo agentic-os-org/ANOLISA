@@ -9,7 +9,7 @@ use skillfs_core::{parser, store::adopt_directory_name};
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::PathType;
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{
@@ -75,6 +75,15 @@ impl SkillFs {
                 reply.error(libc::ENOENT);
                 return;
             }
+        }
+
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) so `mkdir`
+        // cannot create (or inject a store placeholder for) the reserved
+        // virtual name or mutate its physical backing tree.
+        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+            reply.error(errno);
+            return;
         }
 
         // S3: refuse to mkdir on a reserved lifecycle namespace name. The
@@ -300,6 +309,15 @@ impl SkillFs {
             _ => (None, None),
         };
 
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) so `unlink`
+        // cannot delete the physical backing tree through the virtual
+        // view.
+        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+            reply.error(errno);
+            return;
+        }
+
         // S3: refuse to unlink under a reserved lifecycle namespace.
         if let Some(errno) =
             self.enforce_lifecycle_reservation(&path_type, SkillEventKind::Delete, req, None)
@@ -485,6 +503,15 @@ impl SkillFs {
             }
         };
         let path_type = self.parse_fuse_path(Path::new(&path_str));
+
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) so `rmdir`
+        // cannot delete the physical backing tree through the virtual
+        // view.
+        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+            reply.error(errno);
+            return;
+        }
 
         // S3: refuse to rmdir a reserved lifecycle namespace or any
         // directory beneath one. The gate fires before any physical
@@ -695,6 +722,25 @@ impl SkillFs {
             PathType::SkillDir { skill_name } => (Some(skill_name.clone()), None),
             _ => (None, None),
         };
+
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) for both
+        // sides of the rename so the physical backing tree can neither
+        // be moved out from under the virtual view nor be replaced by a
+        // rename onto the reserved name. This gate must fire before the
+        // cross-namespace EXDEV short-circuit below: a skill-discover
+        // path renamed to or from the inbox is still a mutation of the
+        // read-only namespace, and answering it with EXDEV would make
+        // `mv` fall back to copy+unlink against the read-only side,
+        // leaving a partial target behind.
+        if let Some(errno) = enforce_skill_discover_readonly(&old_path_type) {
+            reply.error(errno);
+            return;
+        }
+        if let Some(errno) = enforce_skill_discover_readonly(&new_path_type) {
+            reply.error(errno);
+            return;
+        }
 
         // L1: cross-namespace renames between `/skills` and the
         // inbox would either silently rebind the same physical inode
@@ -1505,6 +1551,26 @@ impl SkillFs {
                 })
                 .unwrap_or(false)
         })
+    }
+}
+
+/// `EROFS` gate for the always-read-only `skill-discover` virtual
+/// namespace on the namespace-mutation callbacks, mirroring the guard
+/// `write.rs` already applies to `write`/`create`/`setattr` and
+/// `link.rs` to `symlink`/`link`. `resolve_physical_path` maps every
+/// skill-discover FUSE path onto `source/skill-discover/...`, so an
+/// unguarded mkdir/unlink/rmdir/rename would mutate that physical tree
+/// through the read-only virtual view.
+fn enforce_skill_discover_readonly(path_type: &PathType) -> Option<i32> {
+    match path_type {
+        PathType::SkillMd { skill_name }
+        | PathType::SkillDir { skill_name }
+        | PathType::Passthrough { skill_name, .. }
+            if is_skill_discover_path(skill_name) =>
+        {
+            Some(libc::EROFS)
+        }
+        _ => None,
     }
 }
 
