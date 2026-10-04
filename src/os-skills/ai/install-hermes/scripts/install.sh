@@ -18,6 +18,7 @@ REPO_URL_SSH="git@gitcode.com:GitHub_Trending/he/hermes-agent.git"
 REPO_URL_HTTPS="https://gitcode.com/GitHub_Trending/he/hermes-agent.git"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
+INSTALL_DIR_FROM_OPTION=false
 PYTHON_VERSION="3.11"
 NODE_VERSION="22"
 NPM_REGISTRY="https://registry.npmmirror.com"
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dir)
             INSTALL_DIR="$2"
+            INSTALL_DIR_FROM_OPTION=true
             shift 2
             ;;
         --hermes-home)
@@ -86,7 +88,7 @@ while [[ $# -gt 0 ]]; do
             echo "                 Default: minimal install for faster setup"
             echo "  --skip-tokenless  Skip tokenless plugin auto-installation"
             echo "  --branch NAME  Git branch to install (default: main)"
-            echo "  --dir PATH     Installation directory (default: ~/.hermes/hermes-agent)"
+            echo "  --dir PATH     Installation directory (default: HERMES_HOME/hermes-agent)"
             echo "  --hermes-home PATH  Data directory (default: ~/.hermes, or \$HERMES_HOME)"
             echo "  -h, --help     Show this help"
             exit 0
@@ -97,6 +99,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --hermes-home may change the default checkout location after it was first
+# computed above. Keep an explicit --dir or HERMES_INSTALL_DIR unchanged.
+if [ "$INSTALL_DIR_FROM_OPTION" = false ] && [ -z "${HERMES_INSTALL_DIR:-}" ]; then
+    INSTALL_DIR="$HERMES_HOME/hermes-agent"
+fi
 
 # ============================================================================
 # Helper functions
