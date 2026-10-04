@@ -88,9 +88,51 @@ const BLOCKED_GIT_BRANCH_FLAGS = new Set([
   '--delete',
   '--move',
   '-m',
+  '-M',
+  '-c',
+  '-C',
+  '-u',
+  '--set-upstream-to',
+  '--edit-description',
 ]);
 
+// `git log`/`diff`/`show` accept `--output=<file>`, which writes to disk.
+const GIT_OUTPUT_FLAGS = ['--output'];
+
 const BLOCKED_SED_PREFIXES = ['-i'];
+
+// GNU sed also accepts the long form, with or without a backup suffix.
+const BLOCKED_SED_LONG_IN_PLACE_PREFIX = '--in-place';
+
+// `env` executes its operand once one is supplied; only pure environment
+// printing/adjustment stays read-only.
+const ENV_VALUE_OPTIONS = new Set([
+  '-u',
+  '--unset',
+  '-C',
+  '--chdir',
+  '-S',
+  '--split-string',
+]);
+
+const ENV_VALUE_OPTION_PREFIXES = ['--unset=', '--chdir=', '--split-string='];
+
+// `sort -o <file>` / `sort --output=<file>` writes to disk.
+const SORT_OUTPUT_PREFIXES = ['--output'];
+
+// `uniq` treats a second file operand as the output file.
+const UNIQ_VALUE_OPTIONS = new Set([
+  '-f',
+  '--skip-fields',
+  '-s',
+  '--skip-chars',
+  '-w',
+  '--check-chars',
+]);
+
+// ripgrep runs an external program when these options are present.
+const RIPGREP_EXEC_PREFIXES = ['--pre=', '--hostname-bin='];
+const RIPGREP_EXEC_OPTIONS = new Set(['--pre', '--hostname-bin']);
 
 // AWK side-effect patterns that can execute commands or write files
 const AWK_SIDE_EFFECT_PATTERNS = [
@@ -201,7 +243,8 @@ function evaluateSedCommand(tokens: string[]): boolean {
   for (const token of rest) {
     if (
       BLOCKED_SED_PREFIXES.some((prefix) => token.startsWith(prefix)) ||
-      token === '--in-place'
+      token === BLOCKED_SED_LONG_IN_PLACE_PREFIX ||
+      token.startsWith(`${BLOCKED_SED_LONG_IN_PLACE_PREFIX}=`)
     ) {
       return false;
     }
@@ -245,7 +288,10 @@ function evaluateGitRemoteArgs(args: string[]): boolean {
 
 function evaluateGitBranchArgs(args: string[]): boolean {
   for (const arg of args) {
-    if (BLOCKED_GIT_BRANCH_FLAGS.has(arg)) {
+    if (
+      BLOCKED_GIT_BRANCH_FLAGS.has(arg) ||
+      arg.startsWith('--set-upstream-to=')
+    ) {
       return false;
     }
   }
@@ -273,6 +319,17 @@ function evaluateGitCommand(tokens: string[]): boolean {
 
   const args = tokens.slice(index + 1);
 
+  if (
+    args.some(
+      (arg) =>
+        GIT_OUTPUT_FLAGS.includes(arg) ||
+        GIT_OUTPUT_FLAGS.some((flag) => arg.startsWith(`${flag}=`)),
+    )
+  ) {
+    // Read-only subcommands can still be asked to write their output to a file.
+    return false;
+  }
+
   if (subcommand === 'remote') {
     return evaluateGitRemoteArgs(args);
   }
@@ -281,6 +338,94 @@ function evaluateGitCommand(tokens: string[]): boolean {
     return evaluateGitBranchArgs(args);
   }
 
+  return true;
+}
+
+/**
+ * `env` prints or adjusts the environment only when it has no command operand.
+ * Once a non-option operand (the command to run) is present, the invocation can
+ * execute arbitrary programs and must not be auto-approved as read-only.
+ */
+function evaluateEnvCommand(args: string[]): boolean {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index]!;
+    if (ENV_ASSIGNMENT_REGEX.test(arg)) {
+      index++;
+      continue;
+    }
+    if (arg === '--') {
+      // Everything after `--` is the command to execute.
+      index++;
+      break;
+    }
+    if (
+      arg === '-i' ||
+      arg === '--ignore-environment' ||
+      arg === '-0' ||
+      arg === '--null'
+    ) {
+      index++;
+      continue;
+    }
+    if (ENV_VALUE_OPTIONS.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (ENV_VALUE_OPTION_PREFIXES.some((prefix) => arg.startsWith(prefix))) {
+      index++;
+      continue;
+    }
+    break;
+  }
+  return index >= args.length;
+}
+
+function evaluateSortCommand(args: string[]): boolean {
+  for (const arg of args) {
+    if (
+      arg === '-o' ||
+      (arg.startsWith('-o') && arg.length > 2) ||
+      SORT_OUTPUT_PREFIXES.includes(arg) ||
+      SORT_OUTPUT_PREFIXES.some((flag) => arg.startsWith(`${flag}=`))
+    ) {
+      // `sort -o <file>` writes to the given file.
+      return false;
+    }
+  }
+  return true;
+}
+
+function evaluateUniqCommand(args: string[]): boolean {
+  let operands = 0;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === '--') {
+      operands += args.length - index - 1;
+      break;
+    }
+    if (arg.startsWith('-')) {
+      if (UNIQ_VALUE_OPTIONS.has(arg)) {
+        index++; // Skip the option's value.
+      }
+      continue;
+    }
+    operands++;
+  }
+  // `uniq [INPUT [OUTPUT]]` writes to OUTPUT when two operands are supplied.
+  return operands < 2;
+}
+
+function evaluateRipgrepCommand(args: string[]): boolean {
+  for (const arg of args) {
+    if (
+      RIPGREP_EXEC_OPTIONS.has(arg) ||
+      RIPGREP_EXEC_PREFIXES.some((prefix) => arg.startsWith(prefix))
+    ) {
+      // `--pre`/`--hostname-bin` execute an external program.
+      return false;
+    }
+  }
   return true;
 }
 
@@ -331,6 +476,22 @@ function evaluateShellSegment(segment: string): boolean {
 
   if (normalizedRoot === 'git') {
     return evaluateGitCommand([normalizedRoot, ...args]);
+  }
+
+  if (normalizedRoot === 'env') {
+    return evaluateEnvCommand(args);
+  }
+
+  if (normalizedRoot === 'sort') {
+    return evaluateSortCommand(args);
+  }
+
+  if (normalizedRoot === 'uniq') {
+    return evaluateUniqCommand(args);
+  }
+
+  if (normalizedRoot === 'rg' || normalizedRoot === 'ripgrep') {
+    return evaluateRipgrepCommand(args);
   }
 
   return true;
