@@ -159,9 +159,14 @@ impl ScenarioConfig {
     /// Parse the `requires_kernel` field (e.g. `">=5.10"`) and compare
     /// against the running kernel version.  Returns `Ok(())` if the
     /// requirement is satisfied, `Err(reason)` otherwise.
+    ///
+    /// Only an explicit "any kernel" requirement (empty, `">=0"`) skips the
+    /// comparison; every real floor — including the compiled-in default
+    /// `">=4.0"` — is enforced, so a scenario that relied on the default
+    /// cannot install on a host below it.
     pub fn check_kernel(&self, running_kernel: Option<&str>) -> Result<(), String> {
         let requirement = &self.requires_kernel;
-        if requirement.is_empty() || requirement == ">=0" || requirement == ">=4.0" {
+        if requirement.is_empty() || requirement == ">=0" {
             return Ok(());
         }
 
@@ -303,6 +308,40 @@ mod tests {
             vec!["firecracker-kernel", "firecracker-rootfs"]
         );
         assert!(s.requires_kvm);
+    }
+
+    fn scenario_with_kernel(requirement: &str) -> ScenarioConfig {
+        ScenarioConfig {
+            name: "test".to_string(),
+            packages: vec![],
+            packages_optional: vec![],
+            services: vec![],
+            verify_commands: vec![],
+            requires_kvm: false,
+            requires_kernel: requirement.to_string(),
+        }
+    }
+
+    /// The compiled-in default requirement (`>=4.0`) is a real floor, not a
+    /// no-op: a host on a 3.x kernel must not pass the preflight just because
+    /// the scenario relied on the default. Only an explicitly empty or
+    /// `>=0` requirement disables the check.
+    #[test]
+    fn default_kernel_requirement_is_enforced() {
+        let defaulted = scenario_with_kernel(&default_kernel_requirement());
+        assert_eq!(defaulted.requires_kernel, ">=4.0");
+        assert!(
+            defaulted.check_kernel(Some("3.10.0")).is_err(),
+            "a 3.x kernel must not satisfy the default >=4.0 requirement"
+        );
+        assert!(defaulted.check_kernel(Some("4.0")).is_ok());
+        assert!(defaulted.check_kernel(Some("5.10.134-007.ali5000")).is_ok());
+        // An unset kernel version cannot prove the floor either.
+        assert!(defaulted.check_kernel(None).is_err());
+
+        // Explicit opt-outs keep working.
+        assert!(scenario_with_kernel("").check_kernel(None).is_ok());
+        assert!(scenario_with_kernel(">=0").check_kernel(None).is_ok());
     }
 
     #[test]
