@@ -125,7 +125,7 @@ and unreadable or invalid task YAMLs produce an error before gateway or worker s
 Use `--trials` to execute a task repeatedly.
 
 ```
-claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
+claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>-<unique-suffix>/
 ├── <task_id>_xxxx.jsonl   # Converted trace
 ├── batch_results.json     # Per-trial results
 └── batch_summary.json     # Aggregate summary

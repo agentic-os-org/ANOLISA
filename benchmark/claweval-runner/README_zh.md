@@ -123,7 +123,7 @@ ce-runner 支持三种任务前缀,对应不同执行模式:
 gateway 或 worker 配置前报错。重复执行同一任务请使用 `--trials`。
 
 ```
-claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
+claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>-<unique-suffix>/
 ├── <task_id>_xxxx.jsonl   # 转换后的 trace
 ├── batch_results.json     # 每次试验结果
 └── batch_summary.json     # 聚合汇总
