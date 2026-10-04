@@ -532,7 +532,7 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
         // command being invoked: mkvirtualenv, pyenv virtualenv, and
         // `pip install virtualenv` are different words or argument positions
         // and must pass through untouched.
-        if result.contains("virtualenv ") && !result.contains("uv venv") {
+        if result.contains("virtualenv ") {
             result = rewrite_command_invocations(&result, "virtualenv ", "uv venv ");
         }
     }
@@ -821,6 +821,45 @@ mod tests {
             "uv pip install requests; uv pip install pandas\n",
         );
         assert_eq!(compile(input, &env), expected);
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_beside_venv() {
+        let env = env_darwin_uv();
+        // The venv rewrite above runs first and puts `uv venv` on the line;
+        // the line-wide guard then hid every `virtualenv` call beside it.
+        let input = concat!(
+            "python -m venv .venv && virtualenv proj\n",
+            "uv venv x && virtualenv y\n",
+            "virtualenv a && virtualenv b\n",
+        );
+        let expected = concat!(
+            "uv venv .venv && uv venv proj\n",
+            "uv venv x && uv venv y\n",
+            "uv venv a && uv venv b\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+        assert_eq!(compile(input, &env_linux_no_uv()), input);
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_arguments_untouched() {
+        let env = env_darwin_uv();
+        // `virtualenv` in argument or word-interior position stays; the pip
+        // rewrite of a `pip install virtualenv` line keeps the argument too.
+        let unchanged = concat!(
+            "echo virtualenv proj\n",
+            "mkvirtualenv proj\n",
+            "pyenv virtualenv proj\n",
+            "uv venv virtualenv x\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+        assert_eq!(
+            compile("pip install virtualenv\n", &env),
+            "uv pip install virtualenv\n"
+        );
     }
 
     #[test]
