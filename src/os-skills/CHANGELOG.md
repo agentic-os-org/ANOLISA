@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `install-qoder` skill for installing the Qoder CLI (qodercli) via
+  the official installer and wiring the Tokenless plugin into it:
+  preflight checks (curl/python3), versioned qodercli lookup, plugin
+  lifecycle capability probe, `anolisa adapter enable tokenless qoder`
+  registration with npm-fallback to the adapter's own install script, and
+  `tokenless@local` verification. (#1293)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

@@ -9,6 +9,13 @@
 
 ## [未发布]
 
+### 新增
+
+- 新增 `install-qoder` 技能，覆盖 Qoder CLI（qodercli）安装与 Tokenless 插件
+  接入：官方安装脚本预检（curl/python3）、按版本目录探测 qodercli、插件生命
+  周期能力检查、`anolisa adapter enable tokenless qoder` 注册（npm 直装时回退
+  到适配器自带安装脚本）以及 `tokenless@local` 验证。（#1293）
+
 ## [0.6.3] - 2026-08-21
 
 ### 修复
