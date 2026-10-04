@@ -273,6 +273,9 @@ impl GenAIBuilder {
     /// - OpenAI chat completions: top-level `"messages"` array.
     /// - OpenAI Responses API (codex 0.137+ via dashscope `/v1/responses`):
     ///   top-level `"input"` array with sibling `"instructions"` string.
+    /// - OpenAI Responses API string shorthand: top-level `"input"` as a
+    ///   plain non-empty string, equivalent to a single-user-message
+    ///   request.
     /// - DashScope/Bailian native protocol: top-level `"input"` **object**
     ///   wrapping a `"messages"` array.
     ///
@@ -300,6 +303,21 @@ impl GenAIBuilder {
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
                 return Some((arr.clone(), instructions));
+            }
+            // OpenAI Responses API string shorthand: `"input": "<text>"` is
+            // defined as a request with exactly one user message carrying
+            // that text. Map it onto that message so the request event is
+            // not silently skipped from the breakdown. An empty string
+            // carries no message: fall through to `None` as before.
+            if let Some(s) = input.as_str().filter(|s| !s.is_empty()) {
+                let instructions = body
+                    .get("instructions")
+                    .and_then(|i| i.as_str())
+                    .map(|i| i.to_string());
+                return Some((
+                    vec![serde_json::json!({"role": "user", "content": s})],
+                    instructions,
+                ));
             }
             if let Some(arr) = input.get("messages").and_then(|m| m.as_array()) {
                 return Some((arr.clone(), None));
@@ -1582,6 +1600,50 @@ mod tests {
         let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(instructions.is_none());
+    }
+
+    /// OpenAI Responses API string shorthand: `"input": "<string>"`
+    /// (e.g. codex CLI one-shot requests) is equivalent to a single
+    /// user message and must yield a one-message view, not `None`.
+    #[test]
+    fn test_extract_messages_view_responses_api_string_input() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "input": "write a haiku",
+            "instructions": "sys prompt"
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("user"));
+        assert_eq!(
+            msgs[0].get("content").and_then(|c| c.as_str()),
+            Some("write a haiku")
+        );
+        // Instructions prepending is unchanged for the string shape.
+        assert_eq!(instructions.as_deref(), Some("sys prompt"));
+    }
+
+    #[test]
+    fn test_extract_messages_view_responses_api_string_input_without_instructions() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "input": "write a haiku"
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("user"));
+        assert!(instructions.is_none());
+    }
+
+    /// An empty string is the only falsy shape of the string shorthand:
+    /// it carries no message, so the view stays `None` as before.
+    #[test]
+    fn test_extract_messages_view_responses_api_empty_string_input() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "input": ""
+        });
+        assert!(GenAIBuilder::extract_messages_view(&body).is_none());
     }
 
     #[test]
