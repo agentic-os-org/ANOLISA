@@ -508,3 +508,31 @@ def test_model_input_source_preserves_detection_and_masks_evidence() -> None:
     assert "api_key" in _types(result)
     assert secret not in str(result)
     assert "redacted_text" not in result
+
+
+class TestNegativeContextWordBoundary:
+    """Negative-context markers must match whole words, not substrings.
+
+    A substring match on "test" also hits ordinary English like
+    "latest"/"greatest"/"contest"/"protest" and silently suppresses real
+    findings below the confidence threshold (phone_cn 0.78 -> 0.43 < 0.5,
+    verdict pass). Only genuine fixture words should penalize.
+    """
+
+    @pytest.mark.parametrize("word", ["latest", "greatest", "contest", "protest"])
+    def test_words_containing_test_do_not_suppress(self, word):
+        from agent_sec_cli.pii_checker.scanner import scan_text
+
+        result = scan_text(f"{word} contact: 13812345678")
+        types = {f.type for f in result.findings}
+        assert "phone_cn" in types, (
+            f"'{word}' must not suppress the phone number: "
+            "only genuine fixture words like 'test' should penalize"
+        )
+
+    def test_genuine_fixture_word_still_penalizes(self):
+        from agent_sec_cli.pii_checker.scanner import scan_text
+
+        result = scan_text("real test data: 13812345678")
+        types = {f.type for f in result.findings}
+        assert "phone_cn" not in types

@@ -85,6 +85,10 @@ _POSITIVE_CONTEXT = (
     "访问密钥",
 )
 _NEGATIVE_CONTEXT = ("example", "dummy", "test", "sample", ".invalid")
+# ASCII fixture words must match as whole words: a substring match also
+# hits ordinary English like "latest"/"greatest"/"contest"/"protest" and
+# silently suppresses real findings below the confidence threshold.
+_NEGATIVE_WORD_RE = re.compile(r"(?<!\w)(?:example|dummy|test|sample)(?!\w)")
 _RESERVED_EMAIL_DOMAINS = frozenset(
     {
         "example",
@@ -219,7 +223,7 @@ def _score_with_context(text: str, start: int, end: int, base: float) -> float:
     compact_context = context.replace("-", "_")
     if any(marker in compact_context for marker in _POSITIVE_CONTEXT):
         score += _CONTEXT_POSITIVE_DELTA
-    if any(marker in compact_context for marker in _NEGATIVE_CONTEXT):
+    if _NEGATIVE_WORD_RE.search(compact_context) or ".invalid" in compact_context:
         score += _CONTEXT_NEGATIVE_DELTA
     return max(0.0, min(1.0, score))
 
