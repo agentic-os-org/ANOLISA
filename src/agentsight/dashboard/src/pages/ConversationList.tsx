@@ -798,18 +798,28 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setSearchParams(p, { replace: true });
   }, [setSearchParams]);
 
+  // A newer request must invalidate an older in-flight one: the time range
+  // and agent filter are read from state when the request is issued, so a
+  // late response would otherwise render data for the previous filters.
+  const loadRequestIdRef = useRef(0);
+  const agentNamesRequestIdRef = useRef(0);
+
   // Load agent names whenever time range changes (for dropdown options)
   const loadAgentNames = useCallback(async (sMs: number, eMs: number) => {
+    const requestId = ++agentNamesRequestIdRef.current;
     setAgentNamesLoading(true);
     try {
       const names = await fetchAgentNames(sMs * 1_000_000, eMs * 1_000_000);
+      if (requestId !== agentNamesRequestIdRef.current) return;
       setAgentNames(names);
       // If currently selected agent is no longer in list, reset
       setSelectedAgent((prev) => (names.includes(prev) ? prev : ''));
     } catch {
       // silently ignore — agent name list is best-effort
     } finally {
-      setAgentNamesLoading(false);
+      if (requestId === agentNamesRequestIdRef.current) {
+        setAgentNamesLoading(false);
+      }
     }
   }, []);
 
@@ -819,8 +829,18 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   }, [startMs, endMs, loadAgentNames]);
 
   // Shared data-fetch helper: runs all 7 parallel queries and updates state.
-  const runQuery = useCallback(async (startNs: number, endNs: number, agent?: string) => {
-    const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
+  // Returns the request id so callers can report errors only for the newest
+  // request; a superseded response never writes state.
+  const runQuery = useCallback(async (
+    startNs: number,
+    endNs: number,
+    agent?: string,
+  ): Promise<{ ok: boolean; error?: unknown; requestId: number }> => {
+    const requestId = ++loadRequestIdRef.current;
+    setLoading(true);
+    setTimeseriesLoading(true);
+    try {
+      const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
       fetchSessions(startNs, endNs).then((data) =>
         agent ? data.filter((s) => s.agent_name === agent) : data
       ),
@@ -831,25 +851,33 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       fetchInterruptionConversationCounts(startNs, endNs, agent).catch(() => [] as ConversationInterruptionCount[]),
       fetchTokenSavings(startNs, endNs, agent).catch(() => null),
     ]);
-    setSessions(sessData);
-    setTokenSeries(tsData.token_series);
-    setModelSeries(tsData.model_series);
-    setInterruptionCount(intData);
-    setInterruptionStats(iStats);
-    setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
-    setConversationInterruptionCounts(new Map(
-      iConvCounts.map((c) => [conversationInterruptionKey(c.session_id, c.conversation_id), c])
-    ));
-    setSavingsMap(new Map(
-      savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved ?? s.saved_tokens]) ?? []
-    ));
+      if (requestId !== loadRequestIdRef.current) return { ok: true, requestId };
+      setSessions(sessData);
+      setTokenSeries(tsData.token_series);
+      setModelSeries(tsData.model_series);
+      setInterruptionCount(intData);
+      setInterruptionStats(iStats);
+      setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
+      setConversationInterruptionCounts(new Map(
+        iConvCounts.map((c) => [conversationInterruptionKey(c.session_id, c.conversation_id), c])
+      ));
+      setSavingsMap(new Map(
+        savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved ?? s.saved_tokens]) ?? []
+      ));
+      return { ok: true, requestId };
+    } catch (error) {
+      return { ok: false, error, requestId };
+    } finally {
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+        setTimeseriesLoading(false);
+      }
+    }
   }, []);
 
   const handleQuery = useCallback(async () => {
     const effectiveEnd = Date.now();
     setEndMs(effectiveEnd);
-    setLoading(true);
-    setTimeseriesLoading(true);
     setError(null);
     setHasQueried(true);
     setSessionPage(0); // reset to first page on new query
@@ -860,13 +888,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setQueryRangeNs([startNs, endNs]);
     syncParams(startMs, effectiveEnd, selectedAgent);
 
-    try {
-      await runQuery(startNs, endNs, agent);
-    } catch (e: any) {
-      setError(e.message ?? t('cl.queryFailed'));
-    } finally {
-      setLoading(false);
-      setTimeseriesLoading(false);
+    const { ok, error, requestId } = await runQuery(startNs, endNs, agent);
+    if (!ok && requestId === loadRequestIdRef.current) {
+      setError((error as Error)?.message ?? t('cl.queryFailed'));
     }
   }, [startMs, selectedAgent, syncParams, runQuery, t]);
 
@@ -879,14 +903,11 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       const endNs = initEnd * 1_000_000;
       const agent = initAgent || undefined;
       setHasQueried(true);
-      setLoading(true);
-      setTimeseriesLoading(true);
       setQueryRangeNs([startNs, endNs]);
-      runQuery(startNs, endNs, agent).catch((e: any) => {
-        setError(e.message ?? t('cl.queryFailed'));
-      }).finally(() => {
-        setLoading(false);
-        setTimeseriesLoading(false);
+      void runQuery(startNs, endNs, agent).then(({ ok, error, requestId }) => {
+        if (!ok && requestId === loadRequestIdRef.current) {
+          setError((error as Error)?.message ?? t('cl.queryFailed'));
+        }
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

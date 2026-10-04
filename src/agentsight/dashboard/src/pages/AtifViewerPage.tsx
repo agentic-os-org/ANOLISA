@@ -737,11 +737,17 @@ export const AtifViewerPage: React.FC = () => {
     });
   }, []);
 
+  // A newer load must invalidate an older in-flight one: an auto-load on
+  // mount can race an explicit load, and the late response would otherwise
+  // replace the document (and attach the wrong savings card).
+  const loadRequestIdRef = useRef(0);
+
   // Load data
   const handleLoad = useCallback(async (type?: 'session' | 'conversation', id?: string) => {
     const qt = type ?? queryType;
     const i = id ?? queryId;
     if (!i.trim()) return;
+    const requestId = ++loadRequestIdRef.current;
 
     const nextParams: Record<string, string> = { type: qt, id: i.trim() };
     const currentSearchParams = searchParamsRef.current;
@@ -774,6 +780,7 @@ export const AtifViewerPage: React.FC = () => {
       } else {
         data = await loadSessionDoc(i.trim(), t);
       }
+      if (requestId !== loadRequestIdRef.current) return;
       setDoc(data);
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
@@ -786,13 +793,21 @@ export const AtifViewerPage: React.FC = () => {
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
-          .then(setSavingsDetail)
-          .catch(() => setSavingsDetail(null));
+          .then((detail) => {
+            if (requestId === loadRequestIdRef.current) setSavingsDetail(detail);
+          })
+          .catch(() => {
+            if (requestId === loadRequestIdRef.current) setSavingsDetail(null);
+          });
       }
     } catch (e: any) {
-      setError(e.message ?? t('atif.loadFailed'));
+      if (requestId === loadRequestIdRef.current) {
+        setError(e.message ?? t('atif.loadFailed'));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [queryType, queryId, setSearchParams, t]);
 

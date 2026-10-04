@@ -140,3 +140,51 @@ test('security-observability: overview, events, and sessions loaders drop stale 
   const gatedDetail = source.match(/requestId === eventDetailRequestIdRef\.current/g) ?? [];
   assert.ok(gatedDetail.length >= 2, 'SecurityObservabilityPage: detail catch and finally must both be gated');
 });
+
+test('conversation-list: query and agent-name loaders drop stale responses', () => {
+  const source = readSource('src/pages/ConversationList.tsx');
+  assert.match(source, /const loadRequestIdRef = useRef\(0\);/);
+  assertGuardOrdering(
+    source,
+    'loadRequestIdRef',
+    [
+      'const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all',
+      'if (requestId !== loadRequestIdRef.current) return { ok: true, requestId };',
+      'setSessions(sessData);',
+    ],
+    'ConversationList.runQuery',
+  );
+
+  assert.match(source, /const agentNamesRequestIdRef = useRef\(0\);/);
+  assertGuardOrdering(
+    source,
+    'agentNamesRequestIdRef',
+    [
+      'const names = await fetchAgentNames',
+      'if (requestId !== agentNamesRequestIdRef.current) return;',
+      'setAgentNames(names);',
+    ],
+    'ConversationList.loadAgentNames',
+  );
+});
+
+test('atif-viewer: the document loader drops stale responses', () => {
+  const source = readSource('src/pages/AtifViewerPage.tsx');
+  assert.match(source, /const loadRequestIdRef = useRef\(0\);/);
+  assertGuardOrdering(
+    source,
+    'loadRequestIdRef',
+    [
+      'data = await loadSessionDoc(i.trim(), t);',
+      'if (requestId !== loadRequestIdRef.current) return;',
+      'setDoc(data);',
+    ],
+    'AtifViewerPage.handleLoad',
+  );
+  // The savings fetch resolves after the load; its write must be gated too.
+  assert.match(
+    source,
+    /if \(requestId === loadRequestIdRef\.current\) setSavingsDetail\(detail\);/,
+    'AtifViewerPage: the savings write must be gated on the load request id',
+  );
+});
