@@ -409,6 +409,21 @@ fn default_base_dir() -> String {
     "~/.anolisa/memory".to_string()
 }
 
+/// Reads a path-valued env override, rejecting empty values with a `warn!`
+/// the caller can see instead of silently degrading: an empty string would
+/// make `resolved_base_dir()` return `""` and every derived path
+/// (namespaces, audit log, index) would silently become cwd-relative.
+fn read_nonempty_path_env(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(v) if v.is_empty() => {
+            tracing::warn!("env {name} must not be empty; ignoring");
+            None
+        }
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
 impl AppConfig {
     pub fn load(config_path: Option<&Path>) -> Result<Self> {
         let path = match config_path {
@@ -436,7 +451,7 @@ impl AppConfig {
         if let Some(user_id) = read_validated_user_id_env("USER_ID") {
             self.global.user_id = user_id;
         }
-        if let Ok(base) = std::env::var("MEMORY_BASE_DIR") {
+        if let Some(base) = read_nonempty_path_env("MEMORY_BASE_DIR") {
             self.memory.paths.base_dir = base;
         }
         if let Ok(p) = std::env::var("MEMORY_PROFILE") {
@@ -444,10 +459,13 @@ impl AppConfig {
                 "basic" => Profile::Basic,
                 "advanced" => Profile::Advanced,
                 "expert" => Profile::Expert,
-                _ => self.memory.profile,
+                _ => {
+                    tracing::warn!("unknown MEMORY_PROFILE={p:?}; keeping config");
+                    self.memory.profile
+                }
             };
         }
-        if let Ok(s) = std::env::var("MEMORY_SESSION_DIR") {
+        if let Some(s) = read_nonempty_path_env("MEMORY_SESSION_DIR") {
             self.memory.session.base_dir = s;
         }
         if let Ok(e) = std::env::var("MEMORY_SESSION_END") {
@@ -697,5 +715,114 @@ mod tests {
         let cfg: AppConfig = toml::from_str(toml_src).expect("shipped default.toml must parse");
         assert!(cfg.memory.consolidation.enabled);
         assert!(cfg.memory.consolidation.max_facts > 0);
+    }
+
+    /// Serializes tests that mutate the process environment: cargo runs
+    /// tests in parallel threads and `std::env` is process-global.
+    /// Poison-tolerant: one panicking test must not cascade onto the rest.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Removes the env var when dropped so later tests see a clean slate.
+    struct EnvReset(&'static str);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            // SAFETY: only mutated while ENV_LOCK is held.
+            unsafe { std::env::remove_var(self.0) };
+        }
+    }
+
+    fn set_var(name: &'static str, value: &str) -> EnvReset {
+        // SAFETY: only mutated while ENV_LOCK is held, and no other test
+        // reads `name` concurrently because they also need ENV_LOCK.
+        unsafe { std::env::set_var(name, value) };
+        EnvReset(name)
+    }
+
+    /// Captures formatted tracing output in memory so tests can assert on
+    /// warnings emitted by `apply_env_overrides`.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn empty_memory_base_dir_env_is_ignored() {
+        let _env = env_lock();
+        let _reset = set_var("MEMORY_BASE_DIR", "");
+        let mut cfg = AppConfig::default();
+        let before = cfg.memory.paths.base_dir.clone();
+        cfg.apply_env_overrides();
+        assert_eq!(
+            cfg.memory.paths.base_dir, before,
+            "an empty MEMORY_BASE_DIR must not override the configured base dir"
+        );
+    }
+
+    #[test]
+    fn memory_base_dir_env_override_applies() {
+        let _env = env_lock();
+        let _reset = set_var("MEMORY_BASE_DIR", "/tmp/anolisa-memory-override");
+        let mut cfg = AppConfig::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.memory.paths.base_dir, "/tmp/anolisa-memory-override");
+    }
+
+    #[test]
+    fn empty_memory_session_dir_env_is_ignored() {
+        let _env = env_lock();
+        let _reset = set_var("MEMORY_SESSION_DIR", "");
+        let mut cfg = AppConfig::default();
+        let before = cfg.memory.session.base_dir.clone();
+        cfg.apply_env_overrides();
+        assert_eq!(
+            cfg.memory.session.base_dir, before,
+            "an empty MEMORY_SESSION_DIR must not override the session base dir"
+        );
+    }
+
+    #[test]
+    fn unknown_memory_profile_env_warns_and_is_ignored() {
+        let _env = env_lock();
+        let _reset = set_var("MEMORY_PROFILE", "bogus");
+        let mut cfg = AppConfig::default();
+        let before = cfg.memory.profile;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.memory.profile, before);
+
+        let logs = CapturedLogs::default();
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        let _subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .set_default();
+        cfg.apply_env_overrides();
+        let buf = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            buf.contains("MEMORY_PROFILE"),
+            "expected a warning about the rejected MEMORY_PROFILE value, got: {buf}"
+        );
     }
 }
