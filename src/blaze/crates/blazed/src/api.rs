@@ -32,7 +32,10 @@ use crate::sandbox::{
 use crate::state::ServerState;
 
 const MAX_EXEC_TIMEOUT_SECS: u32 = 20;
-const MAX_GUEST_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
+/// Cap on the buffered HTTP request body, applied to every routed request.
+/// Guest file payloads (exec/read/write) are additionally bounded by
+/// [`MAX_GUEST_FILE_BYTES`] after base64 decoding.
+const MAX_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
 
 /// Top-level request handler. Always returns `Ok(Response)`; internal
 /// errors are turned into JSON error bodies so hyper never sees a panic.
@@ -64,8 +67,11 @@ where
         drop(req);
         dispatch(&method, &path, &query, Vec::new(), &state).await
     } else {
-        let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
-        match collect_body(req, limit).await {
+        // Every routed body is capped: the daemon optionally listens on
+        // plain TCP with no authentication, and an unbounded stream to any
+        // route (not just the guest file routes) would grow the daemon
+        // without bound.
+        match collect_body(req, Some(MAX_HTTP_BODY_BYTES)).await {
             Ok(body) => dispatch(&method, &path, &query, body, &state).await,
             Err(e) => Err(e),
         }
@@ -76,21 +82,6 @@ where
         Err(e) => error_response(&e),
     };
     Ok(resp)
-}
-
-fn guest_body_route(method: &Method, path: &str) -> bool {
-    if method != Method::POST {
-        return false;
-    }
-    let parts = path
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    matches!(
-        parts.as_slice(),
-        ["v1", "sandboxes", _, "exec" | "read" | "write"]
-    )
 }
 
 fn ignored_body_route(method: &Method, path: &str) -> bool {
@@ -5479,7 +5470,7 @@ mod tests {
             "data_b64": BASE64.encode(&envelope_payload),
         }))
         .expect("write request above the guest HTTP limit");
-        assert!(envelope_body.len() > MAX_GUEST_HTTP_BODY_BYTES);
+        assert!(envelope_body.len() > MAX_HTTP_BODY_BYTES);
         let (status, error) = handled_json(&state, Method::POST, &path, envelope_body).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error["status"], 413);
@@ -5490,7 +5481,7 @@ mod tests {
             "data_b64": BASE64.encode(&payload),
         }))
         .expect("write request");
-        assert!(body.len() <= MAX_GUEST_HTTP_BODY_BYTES);
+        assert!(body.len() <= MAX_HTTP_BODY_BYTES);
 
         let (status, written) = handled_json(&state, Method::POST, &path, body).await;
         assert_eq!(status, StatusCode::OK);
@@ -5509,10 +5500,44 @@ mod tests {
             "data_b64": BASE64.encode(&payload),
         }))
         .expect("oversized write request");
-        assert!(oversized.len() <= MAX_GUEST_HTTP_BODY_BYTES);
+        assert!(oversized.len() <= MAX_HTTP_BODY_BYTES);
         let (status, error) = handled_json(&state, Method::POST, &path, oversized).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error["status"], 413);
+    }
+
+    #[tokio::test]
+    async fn every_body_route_enforces_the_http_body_cap() {
+        // Only the guest file routes (exec/read/write) used to cap the
+        // buffered request body; every other route with a body (create,
+        // template import, ...) read the stream to EOF. A client streaming
+        // an endless body at any of those routes could grow the daemon
+        // without bound — the daemon optionally serves plain TCP with no
+        // authentication, so the cap must apply to every routed body.
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        let oversized = vec![b'x'; MAX_HTTP_BODY_BYTES + 1];
+        for path in ["/v1/sandboxes", "/v1/templates/import"] {
+            let (status, error) = handled_json(&state, Method::POST, path, oversized.clone()).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "route {path}");
+            assert_eq!(error["status"], 413, "route {path}");
+        }
+
+        // The daemon keeps serving after rejecting the oversized bodies.
+        let (status, _) = handled_json(&state, Method::GET, "/v1/health", Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
