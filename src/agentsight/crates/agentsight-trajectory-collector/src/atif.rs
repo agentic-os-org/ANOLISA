@@ -62,50 +62,30 @@ pub fn convert_qoder_events(
 
             let tool_results = extract_tool_results(&content);
 
-            // If this user event only has tool_results, attach to previous step
-            if !tool_results.is_empty() && !has_text_block(&content) {
-                if let Some(prev) = steps.last_mut() {
-                    let result_ts = e.get("timestamp").and_then(|v| v.as_str());
-                    let mut obs_results = Vec::new();
-                    for tr in &tool_results {
-                        let extra = if tr.is_error {
-                            let mut m = HashMap::new();
-                            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                            Some(m)
-                        } else {
-                            None
-                        };
-                        obs_results.push(ObservationResult {
-                            source_call_id: Some(tr.tool_use_id.clone()),
-                            content: Some(serde_json::Value::String(tr.content.clone())),
-                            subagent_trajectory_ref: None,
-                            extra,
-                        });
-                        // Write result_timestamp into matching ToolCall.extra
-                        if let (Some(ts), Some(tcs)) = (result_ts, prev.tool_calls.as_mut()) {
-                            for tc in tcs.iter_mut() {
-                                if tc.tool_call_id == tr.tool_use_id {
-                                    let mut extra = tc.extra.take().unwrap_or_default();
-                                    extra.insert(
-                                        "result_timestamp".into(),
-                                        serde_json::Value::String(ts.to_string()),
-                                    );
-                                    tc.extra = Some(extra);
-                                }
-                            }
-                        }
-                    }
-                    if !obs_results.is_empty() {
-                        prev.observation = Some(Observation {
-                            results: obs_results,
-                        });
-                    }
+            // Tool results always attach to the previous (assistant) step —
+            // whether or not the event also carries user text. A mixed event
+            // (results + text, e.g. a user interrupt arriving with a tool
+            // reply) must keep BOTH halves; with no previous step the
+            // observation rides on the user step emitted below (ATIF allows
+            // a user step to carry an observation).
+            let mut observation = None;
+            if !tool_results.is_empty() {
+                let result_ts = e.get("timestamp").and_then(|v| v.as_str());
+                let obs = build_observation(steps.last_mut(), &tool_results, result_ts);
+                match steps.last_mut() {
+                    Some(prev) => prev.observation = obs,
+                    None => observation = obs,
                 }
+            }
+
+            // Pure result carriers stay observation-only (no user step);
+            // events without any tool results still yield their user step.
+            if !tool_results.is_empty() && !has_text_block(&content) {
                 i += 1;
                 continue;
             }
 
-            // Regular user message
+            // Regular user message (possibly alongside tool results).
             step_id += 1;
             let text = extract_text_from_content(&content);
             steps.push(Step {
@@ -120,7 +100,7 @@ pub fn convert_qoder_events(
                 reasoning_effort: None,
                 reasoning_content: None,
                 tool_calls: None,
-                observation: None,
+                observation,
                 metrics: None,
                 extra: None,
                 llm_call_count: None,
@@ -517,6 +497,52 @@ struct ExtractedToolResult {
     is_error: bool,
 }
 
+/// Build the observation for extracted tool-result blocks, enriching the
+/// matching tool calls of `prev` (the assistant step that issued them, when
+/// it exists) with their result timestamp.
+///
+/// Returns `None` when there is nothing to observe.
+fn build_observation(
+    mut prev: Option<&mut Step>,
+    tool_results: &[ExtractedToolResult],
+    result_ts: Option<&str>,
+) -> Option<Observation> {
+    let mut obs_results = Vec::new();
+    for tr in tool_results {
+        let extra = if tr.is_error {
+            let mut m = HashMap::new();
+            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
+            Some(m)
+        } else {
+            None
+        };
+        obs_results.push(ObservationResult {
+            source_call_id: Some(tr.tool_use_id.clone()),
+            content: Some(serde_json::Value::String(tr.content.clone())),
+            subagent_trajectory_ref: None,
+            extra,
+        });
+        // Write result_timestamp into matching ToolCall.extra
+        if let (Some(ts), Some(step)) = (result_ts, prev.as_mut()) {
+            if let Some(tcs) = step.tool_calls.as_mut() {
+                for tc in tcs.iter_mut() {
+                    if tc.tool_call_id == tr.tool_use_id {
+                        let mut extra = tc.extra.take().unwrap_or_default();
+                        extra.insert(
+                            "result_timestamp".into(),
+                            serde_json::Value::String(ts.to_string()),
+                        );
+                        tc.extra = Some(extra);
+                    }
+                }
+            }
+        }
+    }
+    (!obs_results.is_empty()).then_some(Observation {
+        results: obs_results,
+    })
+}
+
 /// Extract `tool_result` blocks from a user-message `content` array.
 fn extract_tool_results(content: &serde_json::Value) -> Vec<ExtractedToolResult> {
     let blocks = match content.as_array() {
@@ -692,6 +718,73 @@ mod tests {
             user_step.message.contains("also update the docs"),
             "user text must be preserved, got {:?}",
             user_step.message
+        );
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_after_assistant_keeps_observation_and_text() {
+        // The complementary half of the mixed-event fix: after an assistant
+        // turn, a mixed tool_result + text user event must keep the text as a
+        // user step AND attach the tool results as the assistant step's
+        // observation (the pre-fix main loop emitted the user step but
+        // dropped the results).
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        let agent_step = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::Agent)
+            .expect("assistant step");
+        let obs = agent_step
+            .observation
+            .as_ref()
+            .expect("mixed event results must attach to the assistant step");
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            obs.results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("a.txt")
+        );
+
+        let user_step = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::User)
+            .expect("mixed event must still yield a user step");
+        assert!(user_step.message.contains("also update the docs"));
+        // The observation lives on the assistant step, not the user step.
+        assert!(user_step.observation.is_none());
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_without_assistant_keeps_observation_and_text() {
+        // Before any assistant turn the same mixed shape lost the structured
+        // observation. With no previous step to attach to, the observation
+        // must ride on the user step itself.
+        let content = "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n";
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        assert_eq!(traj.steps.len(), 1);
+        let step = &traj.steps[0];
+        assert_eq!(step.source, StepSource::User);
+        assert!(step.message.contains("also update the docs"));
+        let obs = step
+            .observation
+            .as_ref()
+            .expect("mixed event without a previous step keeps its observation");
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            obs.results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("a.txt")
         );
     }
 
