@@ -179,6 +179,33 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
         }
         serde_json::Value::Array(items) => items.iter().find_map(tool_response_failure_text),
         serde_json::Value::Object(map) => {
+            let status_is_error = map
+                .get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+
+            // An explicit success flag settles the question. The content of a
+            // successful result is free-form output that may legitimately
+            // mention an exit code, a traceback or a missing path, so it must
+            // not be read as a failure. Only an error status can contradict
+            // the flag.
+            let explicit_success = map
+                .get("is_error")
+                .or_else(|| map.get("isError"))
+                .and_then(|value| value.as_bool())
+                .is_some_and(|is_error| !is_error)
+                || map
+                    .get("success")
+                    .and_then(|value| value.as_bool())
+                    .is_some_and(|success| success);
+            if explicit_success {
+                return if status_is_error {
+                    Some(value.to_string())
+                } else {
+                    None
+                };
+            }
+
             let explicit_error = map
                 .get("is_error")
                 .or_else(|| map.get("isError"))
@@ -188,10 +215,7 @@ fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
                     .get("success")
                     .and_then(|value| value.as_bool())
                     .is_some_and(|success| !success)
-                || map
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+                || status_is_error;
 
             let nested_error = ["error", "message", "content", "response", "details"]
                 .iter()
@@ -1800,6 +1824,50 @@ mod tests {
             events[0].interruption_type,
             InterruptionType::UnauthorizedAction
         );
+    }
+
+    #[test]
+    fn test_successful_tool_result_is_not_a_failure() {
+        // A result that declares success keeps its content, and command
+        // output legitimately mentions an exit code.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-bash".to_string()),
+                response: serde_json::json!({
+                    "type": "tool_result",
+                    "is_error": false,
+                    "content": "command finished with exit code 0"
+                }),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "done".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert!(events.is_empty(), "unexpected events: {events:?}");
+
+        // The failure flag still wins over the same content.
+        call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+            id: Some("toolu-bash".to_string()),
+            response: serde_json::json!({
+                "type": "tool_result",
+                "is_error": true,
+                "content": "command finished with exit code 1"
+            }),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
     }
 
     // ── Rule 11: EmptyResponse ─────────────────────────────────────────────────
