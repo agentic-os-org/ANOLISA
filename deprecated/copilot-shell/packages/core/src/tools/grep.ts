@@ -331,7 +331,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       const { available: grepAvailable } = isCommandAvailable('grep');
       if (grepAvailable) {
         strategyUsed = 'system grep';
-        const grepArgs = ['-r', '-n', '-H', '-E'];
+        // The tool is documented and implemented as case-insensitive by default
+        // (git grep, ripgrep and the JavaScript fallback all pass -i), so the
+        // system grep fallback must request it too.
+        const grepArgs = ['-r', '-n', '-H', '-E', '-i'];
         // Extract directory names from exclusion patterns for grep --exclude-dir
         const globExcludes = this.fileExclusions.getGlobExcludes();
         const commonExcludes = globExcludes
