@@ -51,7 +51,7 @@ impl GenAIBuilder {
         );
 
         // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
-        let path_match = self.is_llm_api_path(&http.path);
+        let path_match = Self::is_llm_api_path(&http.path);
         let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
         let is_llm = path_match || body_match;
         if !is_llm && !http.is_sse {

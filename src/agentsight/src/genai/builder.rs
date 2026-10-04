@@ -249,7 +249,7 @@ impl GenAIBuilder {
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
-        let path_match = self.is_llm_api_path(&request.path);
+        let path_match = Self::is_llm_api_path(&request.path);
         let body_str = if request.body_len > 0 {
             Some(request.body_str().to_string())
         } else {

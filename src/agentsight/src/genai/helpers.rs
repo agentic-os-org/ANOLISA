@@ -246,8 +246,12 @@ impl GenAIBuilder {
             .any(|p| path.contains(p))
     }
 
-    /// Check if the path indicates an LLM API call
-    pub(super) fn is_llm_api_path(&self, path: &str) -> bool {
+    /// Check if the path indicates an LLM API call.
+    ///
+    /// Shared with the audit gate (`analyzer::audit::analyze_http`) so the
+    /// set of paths that create a row and the set that is audited cannot
+    /// drift apart again.
+    pub(crate) fn is_llm_api_path(path: &str) -> bool {
         path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
             // Anthropic's /v1/messages/count_tokens (token counting) and
@@ -878,14 +882,13 @@ mod tests {
 
     #[test]
     fn test_is_llm_api_path() {
-        let builder = GenAIBuilder::new();
-        assert!(builder.is_llm_api_path("/v1/chat/completions"));
-        assert!(builder.is_llm_api_path("/v1/completions"));
-        assert!(builder.is_llm_api_path("/v1/messages"));
-        assert!(builder.is_llm_api_path("/api/v1/copilot/generate_copilot"));
-        assert!(builder.is_llm_api_path("/proxy/v1/chat/completions"));
-        assert!(!builder.is_llm_api_path("/api/health"));
-        assert!(!builder.is_llm_api_path("/v1/models"));
+        assert!(GenAIBuilder::is_llm_api_path("/v1/chat/completions"));
+        assert!(GenAIBuilder::is_llm_api_path("/v1/completions"));
+        assert!(GenAIBuilder::is_llm_api_path("/v1/messages"));
+        assert!(GenAIBuilder::is_llm_api_path("/api/v1/copilot/generate_copilot"));
+        assert!(GenAIBuilder::is_llm_api_path("/proxy/v1/chat/completions"));
+        assert!(!GenAIBuilder::is_llm_api_path("/api/health"));
+        assert!(!GenAIBuilder::is_llm_api_path("/v1/models"));
     }
 
     /// Anthropic's count-tokens and Batch sub-endpoints share the inference
@@ -895,14 +898,13 @@ mod tests {
     /// preference-window slots.
     #[test]
     fn test_is_llm_api_path_rejects_anthropic_sub_endpoints() {
-        let builder = GenAIBuilder::new();
-        assert!(!builder.is_llm_api_path("/v1/messages/count_tokens"));
-        assert!(!builder.is_llm_api_path("https://api.anthropic.com/v1/messages/count_tokens"));
-        assert!(!builder.is_llm_api_path("/v1/messages/batches"));
-        assert!(!builder.is_llm_api_path("/v1/messages/batches/msgbatch_01ABC"));
+        assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/count_tokens"));
+        assert!(!GenAIBuilder::is_llm_api_path("https://api.anthropic.com/v1/messages/count_tokens"));
+        assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/batches"));
+        assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/batches/msgbatch_01ABC"));
         // The real endpoint still passes the gate.
-        assert!(builder.is_llm_api_path("/v1/messages"));
-        assert!(builder.is_llm_api_path("https://api.anthropic.com/v1/messages"));
+        assert!(GenAIBuilder::is_llm_api_path("/v1/messages"));
+        assert!(GenAIBuilder::is_llm_api_path("https://api.anthropic.com/v1/messages"));
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which
@@ -910,11 +912,10 @@ mod tests {
     /// non-streaming call was dropped at the `build_llm_call` gate.
     #[test]
     fn test_is_llm_api_path_dashscope_native() {
-        let builder = GenAIBuilder::new();
-        assert!(builder.is_llm_api_path("/api/v1/services/aigc/text-generation/generation"));
-        assert!(builder.is_llm_api_path("/api/v1/services/aigc/multimodal-generation/generation"));
+        assert!(GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/text-generation/generation"));
+        assert!(GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/multimodal-generation/generation"));
         // Other aigc services (image synthesis, embeddings) stay out.
-        assert!(!builder.is_llm_api_path("/api/v1/services/aigc/text2image/image-synthesis"));
+        assert!(!GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/text2image/image-synthesis"));
     }
 
     #[test]
