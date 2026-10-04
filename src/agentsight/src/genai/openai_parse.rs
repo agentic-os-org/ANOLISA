@@ -1145,10 +1145,17 @@ mod tests {
         assert_eq!(req.messages.len(), 3);
 
         match &req.messages[1].parts[0] {
-            MessagePart::ToolCall { id, name, arguments } => {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 assert_eq!(id.as_deref(), Some("call_1"));
                 assert_eq!(name, "list_dir");
-                assert_eq!(arguments.as_ref().unwrap().as_str(), Some(r#"{"path":"/tmp"}"#));
+                assert_eq!(
+                    arguments.as_ref().unwrap().as_str(),
+                    Some(r#"{"path":"/tmp"}"#)
+                );
             }
             other => panic!("expected a tool call, got {other:?}"),
         }

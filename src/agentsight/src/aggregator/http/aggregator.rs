@@ -3117,8 +3117,7 @@ mod tests {
         let conn_b = ConnectionId { pid: 1, ssl_ptr: 2 };
 
         agg.insert(conn_a, ConnectionState::Idle);
-        agg.sse_continuation_buffers
-            .push(conn_a, vec![0u8; 1024]);
+        agg.sse_continuation_buffers.push(conn_a, vec![0u8; 1024]);
         agg.last_appended_src_ptr.push(conn_a, 7);
 
         // A second connection evicts the first by capacity.

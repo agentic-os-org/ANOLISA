@@ -9,7 +9,9 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::genai::semantic::{InputMessage, MessagePart, OutputMessage};
+#[cfg(test)]
+use crate::genai::semantic::InputMessage;
+use crate::genai::semantic::{MessagePart, OutputMessage};
 use crate::storage::sqlite::genai::TraceEventDetail;
 
 use super::types::{SkillDownloadRecord, SkillLoadRecord};

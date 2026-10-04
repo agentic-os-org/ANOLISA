@@ -248,34 +248,11 @@ impl GenAIBuilder {
 
     /// Check if the path indicates an LLM API call.
     ///
-    /// Shared with the audit gate (`analyzer::audit::analyze_http`) so the
-    /// set of paths that create a row and the set that is audited cannot
-    /// drift apart again.
+    /// One list, owned by the analyzer layer: the row-creation gate, the audit
+    /// gate and provider attribution all read it, so a shape one of them
+    /// understands is never dropped by another.
     pub(crate) fn is_llm_api_path(path: &str) -> bool {
-        path.contains("/v1/chat/completions")
-            || path.contains("/v1/completions")
-            // Anthropic's /v1/messages/count_tokens (token counting) and
-            // /v1/messages/batches* (Batch API) share the inference prefix
-            // but are not inference calls. Must stay in lockstep with
-            // AnthropicParser::matches_path so a count-tokens call neither
-            // creates a row (this gate) nor gets deep-parsed (that gate).
-            || (path.contains("/v1/messages")
-                && !path.contains("/v1/messages/count_tokens")
-                && !path.contains("/v1/messages/batches"))
-            // The Responses API's per-id sub-endpoints (GET retrieve,
-            // POST cancel, DELETE) share the /v1/responses prefix but are
-            // not inference calls: the retrieval response IS the stored
-            // response object, so admitting a poll re-records the create
-            // call's output and re-counts its usage tokens. Must stay in
-            // lockstep with OpenAIParser::matches_path so a retrieval
-            // neither creates a row (this gate) nor gets deep-parsed
-            // (that gate).
-            || (path.contains("/v1/responses")
-                && !path.contains("/v1/responses/"))
-            || path.contains("/chat/completions")
-            || path.contains("/completions")
-            || path.contains("/api/v1/copilot/generate_copilot")
-            || Self::is_dashscope_native_path(path)
+        crate::analyzer::message::MessageParser::is_llm_api_path(path)
     }
 
     /// Check if request body contains SysOM POP API markers
@@ -312,64 +289,7 @@ impl GenAIBuilder {
     pub(crate) fn extract_messages_view(
         body: &serde_json::Value,
     ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
-        if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
-            let system_text = body.get("system").and_then(Self::extract_system_text);
-            return Some((arr.clone(), system_text));
-        }
-        if let Some(input) = body.get("input") {
-            if let Some(arr) = input.as_array() {
-                let instructions = body
-                    .get("instructions")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                return Some((arr.clone(), instructions));
-            }
-            // OpenAI Responses API string shorthand: `"input": "<text>"` is
-            // defined as a request with exactly one user message carrying
-            // that text. Map it onto that message so the request event is
-            // not silently skipped from the breakdown. An empty string
-            // carries no message: fall through to `None` as before.
-            if let Some(s) = input.as_str().filter(|s| !s.is_empty()) {
-                let instructions = body
-                    .get("instructions")
-                    .and_then(|i| i.as_str())
-                    .map(|i| i.to_string());
-                return Some((
-                    vec![serde_json::json!({"role": "user", "content": s})],
-                    instructions,
-                ));
-            }
-            if let Some(arr) = input.get("messages").and_then(|m| m.as_array()) {
-                return Some((arr.clone(), None));
-            }
-        }
-        None
-    }
-
-    /// Extract text from Anthropic's top-level `system` field.
-    ///
-    /// The field is either a plain string or an array of content blocks
-    /// (`{"type":"text","text":"..."}`). Returns `None` when empty so the
-    /// caller's "no system role in messages" fallback stays inactive.
-    fn extract_system_text(system: &serde_json::Value) -> Option<String> {
-        match system {
-            serde_json::Value::String(s) => {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            }
-            serde_json::Value::Array(blocks) => {
-                let text: String = blocks
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if text.is_empty() { None } else { Some(text) }
-            }
-            _ => None,
-        }
+        crate::analyzer::message::MessageParser::extract_messages_view(body)
     }
 
     /// Extract human-readable text from a message's `content` field.
@@ -893,7 +813,9 @@ mod tests {
         assert!(GenAIBuilder::is_llm_api_path("/v1/chat/completions"));
         assert!(GenAIBuilder::is_llm_api_path("/v1/completions"));
         assert!(GenAIBuilder::is_llm_api_path("/v1/messages"));
-        assert!(GenAIBuilder::is_llm_api_path("/api/v1/copilot/generate_copilot"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "/api/v1/copilot/generate_copilot"
+        ));
         assert!(GenAIBuilder::is_llm_api_path("/proxy/v1/chat/completions"));
         assert!(!GenAIBuilder::is_llm_api_path("/api/health"));
         assert!(!GenAIBuilder::is_llm_api_path("/v1/models"));
@@ -907,12 +829,18 @@ mod tests {
     #[test]
     fn test_is_llm_api_path_rejects_anthropic_sub_endpoints() {
         assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/count_tokens"));
-        assert!(!GenAIBuilder::is_llm_api_path("https://api.anthropic.com/v1/messages/count_tokens"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        ));
         assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/batches"));
-        assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/batches/msgbatch_01ABC"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/v1/messages/batches/msgbatch_01ABC"
+        ));
         // The real endpoint still passes the gate.
         assert!(GenAIBuilder::is_llm_api_path("/v1/messages"));
-        assert!(GenAIBuilder::is_llm_api_path("https://api.anthropic.com/v1/messages"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "https://api.anthropic.com/v1/messages"
+        ));
     }
 
     /// The Responses API's per-id sub-endpoints (GET retrieve, POST cancel,
@@ -922,18 +850,25 @@ mod tests {
     /// re-records the create call's output and re-counts its usage tokens.
     #[test]
     fn test_is_llm_api_path_rejects_responses_sub_endpoints() {
-        let builder = GenAIBuilder::new();
-        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123"));
-        assert!(!builder.is_llm_api_path("https://api.openai.com/v1/responses/resp_abc123"));
-        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/cancel"));
-        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/input_items"));
+        assert!(!GenAIBuilder::is_llm_api_path("/v1/responses/resp_abc123"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "https://api.openai.com/v1/responses/resp_abc123"
+        ));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/v1/responses/resp_abc123/cancel"
+        ));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/v1/responses/resp_abc123/input_items"
+        ));
         // The create endpoint still passes the gate, in bare-path,
         // full-URL and compatible-mode shapes.
-        assert!(builder.is_llm_api_path("/v1/responses"));
-        assert!(builder.is_llm_api_path("https://api.openai.com/v1/responses"));
-        assert!(
-            builder.is_llm_api_path("https://dashscope.aliyuncs.com/compatible-mode/v1/responses")
-        );
+        assert!(GenAIBuilder::is_llm_api_path("/v1/responses"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "https://api.openai.com/v1/responses"
+        ));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+        ));
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which
@@ -941,10 +876,16 @@ mod tests {
     /// non-streaming call was dropped at the `build_llm_call` gate.
     #[test]
     fn test_is_llm_api_path_dashscope_native() {
-        assert!(GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/text-generation/generation"));
-        assert!(GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/multimodal-generation/generation"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "/api/v1/services/aigc/text-generation/generation"
+        ));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "/api/v1/services/aigc/multimodal-generation/generation"
+        ));
         // Other aigc services (image synthesis, embeddings) stay out.
-        assert!(!GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/text2image/image-synthesis"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/api/v1/services/aigc/text2image/image-synthesis"
+        ));
     }
 
     #[test]
@@ -1705,7 +1646,7 @@ mod tests {
     fn test_extract_system_text_string() {
         let system = serde_json::json!("You are helpful");
         assert_eq!(
-            GenAIBuilder::extract_system_text(&system),
+            crate::analyzer::message::MessageParser::extract_system_text(&system),
             Some("You are helpful".to_string())
         );
     }
@@ -1713,7 +1654,10 @@ mod tests {
     #[test]
     fn test_extract_system_text_empty_string() {
         let system = serde_json::json!("");
-        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
+        assert_eq!(
+            crate::analyzer::message::MessageParser::extract_system_text(&system),
+            None
+        );
     }
 
     #[test]
@@ -1723,7 +1667,7 @@ mod tests {
             {"type": "text", "text": "Part 2"}
         ]);
         assert_eq!(
-            GenAIBuilder::extract_system_text(&system),
+            crate::analyzer::message::MessageParser::extract_system_text(&system),
             Some("Part 1\nPart 2".to_string())
         );
     }
@@ -1731,17 +1675,20 @@ mod tests {
     #[test]
     fn test_extract_system_text_empty_array() {
         let system = serde_json::json!([]);
-        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
+        assert_eq!(
+            crate::analyzer::message::MessageParser::extract_system_text(&system),
+            None
+        );
     }
 
     #[test]
     fn test_extract_system_text_non_text() {
         assert_eq!(
-            GenAIBuilder::extract_system_text(&serde_json::json!(123)),
+            crate::analyzer::message::MessageParser::extract_system_text(&serde_json::json!(123)),
             None
         );
         assert_eq!(
-            GenAIBuilder::extract_system_text(&serde_json::Value::Null),
+            crate::analyzer::message::MessageParser::extract_system_text(&serde_json::Value::Null),
             None
         );
     }

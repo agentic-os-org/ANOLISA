@@ -334,8 +334,7 @@ impl ParsedHttp2Frame {
         // exceed any payload anyway.
         if length == 0x7F && pos < payload.len() {
             let mut shift = 0u32;
-            loop {
-                let Some(&b) = payload.get(pos) else { break };
+            while let Some(&b) = payload.get(pos) {
                 pos += 1;
                 if shift < usize::BITS {
                     length = length.saturating_add(((b & 0x7F) as usize) << shift);

@@ -218,11 +218,104 @@ impl MessageParser {
         }
     }
 
-    /// Check if a path matches any known LLM API endpoint
+    /// Path suffixes of the DashScope/Bailian **native** protocol.
+    ///
+    /// Full form: `POST https://{WorkspaceId}.{region}.maas.aliyuncs.com
+    /// /api/v1/services/aigc/{text,multimodal}-generation/generation`.
+    /// Distinct from the OpenAI-compatible mode
+    /// (`/compatible-mode/v1/chat/completions`), which already matches the
+    /// `/v1/chat/completions` pattern.
+    pub const DASHSCOPE_NATIVE_PATHS: [&'static str; 2] = [
+        "/aigc/text-generation/generation",
+        "/aigc/multimodal-generation/generation",
+    ];
+
+    /// Whether the path belongs to the DashScope/Bailian native protocol.
+    pub fn is_dashscope_native_path(path: &str) -> bool {
+        Self::DASHSCOPE_NATIVE_PATHS
+            .iter()
+            .any(|p| path.contains(p))
+    }
+
+    /// Check if a path matches any known LLM API endpoint.
+    ///
+    /// This is the single list every gate uses — row creation in the GenAI
+    /// pipeline, the audit record gate and provider attribution — so a shape
+    /// understood by one is never dropped by another.
     pub fn is_llm_api_path(path: &str) -> bool {
         AnthropicParser::matches_path(path)
             || OpenAIParser::matches_path(path)
             || SysomParser::matches_path(path)
+            // Proxy spellings that omit the `/v1` prefix.
+            || path.contains("/chat/completions")
+            || path.contains("/completions")
+            || Self::is_dashscope_native_path(path)
+    }
+
+    /// Normalized request view: the `messages` array (chat completions) or the
+    /// Responses API `input` plus `instructions`.
+    ///
+    /// Lives here rather than in the GenAI layer so the analyzer can read the
+    /// same view without importing a higher layer; the GenAI builder delegates
+    /// to it.
+    pub fn extract_messages_view(
+        body: &serde_json::Value,
+    ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
+        if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
+            let system_text = body.get("system").and_then(Self::extract_system_text);
+            return Some((arr.clone(), system_text));
+        }
+        if let Some(input) = body.get("input") {
+            if let Some(arr) = input.as_array() {
+                let instructions = body
+                    .get("instructions")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                return Some((arr.clone(), instructions));
+            }
+            // OpenAI Responses API string shorthand: `"input": "<text>"` is
+            // defined as a request with exactly one user message carrying
+            // that text. Map it onto that message so the request event is
+            // not silently skipped from the breakdown. An empty string
+            // carries no message: fall through to `None` as before.
+            if let Some(s) = input.as_str().filter(|s| !s.is_empty()) {
+                let instructions = body
+                    .get("instructions")
+                    .and_then(|i| i.as_str())
+                    .map(|i| i.to_string());
+                return Some((
+                    vec![serde_json::json!({"role": "user", "content": s})],
+                    instructions,
+                ));
+            }
+            if let Some(arr) = input.get("messages").and_then(|m| m.as_array()) {
+                return Some((arr.clone(), None));
+            }
+        }
+        None
+    }
+
+    /// Extract text from Anthropic's top-level `system` field, which is either
+    /// a plain string or an array of content blocks.
+    pub fn extract_system_text(system: &serde_json::Value) -> Option<String> {
+        match system {
+            serde_json::Value::String(s) => {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            }
+            serde_json::Value::Array(blocks) => {
+                let text: String = blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.is_empty() { None } else { Some(text) }
+            }
+            _ => None,
+        }
     }
 }
 

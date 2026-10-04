@@ -140,7 +140,8 @@ impl OpenAIParser {
         }
         if let Some(text) = input.as_str() {
             messages.push(serde_json::json!({"role": "user", "content": text}));
-        } else if let Some(arr) = input.as_array() {
+        } else {
+            let arr = input.as_array()?;
             for item in arr {
                 if item.get("role").is_some() {
                     let mut msg = item.clone();
@@ -168,8 +169,6 @@ impl OpenAIParser {
                     messages.push(item.clone());
                 }
             }
-        } else {
-            return None;
         }
 
         normalized["messages"] = serde_json::Value::Array(messages);

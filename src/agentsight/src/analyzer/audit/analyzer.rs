@@ -55,7 +55,8 @@ impl AuditAnalyzer {
         // creates a row at all: a private copy here drifted from it, and
         // /v1/responses (plus the DashScope native endpoints) were parsed
         // into trajectories yet never audited.
-        let is_llm_path = crate::genai::GenAIBuilder::is_llm_api_path(&http_record.path);
+        let is_llm_path =
+            crate::analyzer::message::MessageParser::is_llm_api_path(&http_record.path);
         if !http_record.is_sse && !is_llm_path {
             return None;
         }

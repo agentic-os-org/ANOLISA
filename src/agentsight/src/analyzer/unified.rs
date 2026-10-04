@@ -69,7 +69,8 @@ pub struct ResponseTokenCount {
 /// `input.messages`, and an Anthropic top-level `system`, which is prepended as
 /// a system message because the template expects it inside the array.
 fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
-    let (mut messages, instructions) = crate::genai::GenAIBuilder::extract_messages_view(body)?;
+    let (mut messages, instructions) =
+        crate::analyzer::message::MessageParser::extract_messages_view(body)?;
     if let Some(system) = instructions.filter(|text| !text.is_empty()) {
         messages.insert(0, serde_json::json!({"role": "system", "content": system}));
     }

@@ -62,7 +62,10 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
 
 /// The character starting at byte offset `i` of `src`.
 fn char_at(src: &str, i: usize) -> char {
-    src[i..].chars().next().unwrap_or(char::REPLACEMENT_CHARACTER)
+    src[i..]
+        .chars()
+        .next()
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
 struct P {
@@ -383,7 +386,10 @@ mod tests {
     /// `src[start..i]` across a character boundary.
     #[test]
     fn lexer_handles_non_ascii_words() {
-        assert_eq!(lex("caf\u{e9}").unwrap(), vec![Tok::Word("caf\u{e9}".into())]);
+        assert_eq!(
+            lex("caf\u{e9}").unwrap(),
+            vec![Tok::Word("caf\u{e9}".into())]
+        );
         assert_eq!(
             lex("a\u{a0}b").unwrap(),
             vec![Tok::Word("a".into()), Tok::Word("b".into())]
