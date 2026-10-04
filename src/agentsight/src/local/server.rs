@@ -800,9 +800,54 @@ mod tests {
             .service(skill_metrics)
             .service(agent_health)
             .service(agent_process_health)
+            // Reuse labels are mounted under /api/reuse, like every other API route.
+            .service(reuse::run_judgements)
+            .service(reuse::apply_label)
+            .service(reuse::confirm_labels)
+            .service(reuse::label_stats)
+            .service(reuse::list_sessions)
+            .service(reuse::run_triage)
             .service(export_atif_unavailable)
             .service(api_fallback)
             .service(serve_frontend)
+    }
+
+    #[actix_web::test]
+    async fn test_local_reuse_endpoints_are_mounted_under_api() {
+        let app = actix_web::test::init_service(build_stub_app()).await;
+
+        // The dashboard calls every reuse endpoint under /api. Mounted
+        // without the prefix the POSTs 404 and the GETs are swallowed by
+        // api_fallback, which answers 200 with an empty list.
+        for path in &[
+            "/api/reuse/triage",
+            "/api/reuse/judge",
+            "/api/reuse/sessions/abc/label",
+            "/api/reuse/sessions/labels:batch-confirm",
+        ] {
+            let req = actix_web::test::TestRequest::post()
+                .uri(path)
+                .set_json(serde_json::json!({}))
+                .to_request();
+            let resp = actix_web::test::call_service(&app, req).await;
+            assert_ne!(
+                resp.status(),
+                actix_web::http::StatusCode::NOT_FOUND,
+                "POST {path} is not mounted"
+            );
+        }
+
+        // Without a reuse store the handlers must answer "unavailable", not
+        // the api_fallback empty list that hides the miss.
+        for path in &["/api/reuse/label-stats", "/api/reuse/sessions"] {
+            let req = actix_web::test::TestRequest::get().uri(path).to_request();
+            let resp = actix_web::test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{path} did not reach the reuse handler"
+            );
+        }
     }
 
     #[actix_web::test]
