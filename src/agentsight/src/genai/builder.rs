@@ -3,6 +3,7 @@
 //! This module builds GenAI semantic events from AnalysisResult.
 //! It reuses already-extracted data to avoid redundant parsing.
 
+use super::anthropic_parse;
 use super::helpers::PidAgentNameCache;
 use super::id_resolver::IdResolver;
 use super::semantic::{GenAISemanticEvent, MessagePart, OutputMessage};
@@ -507,17 +508,28 @@ impl GenAIBuilder {
         // shared part merger below.
         for event in sse_events {
             if let Some(json) = event.json_body() {
-                // Extract model from first chunk that has it
+                // Extract model from first chunk that has it. OpenAI carries
+                // it flat on every chunk; Anthropic nests it inside
+                // `message_start.message.model`.
                 if model.is_none() {
-                    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
+                    if let Some(m) = json
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| json.pointer("/message/model").and_then(|v| v.as_str()))
+                    {
                         if !m.is_empty() {
                             model = Some(m.to_string());
                         }
                     }
                 }
-                // Extract response id (trace_id) from first chunk that has it
+                // Extract response id (trace_id) from first chunk that has
+                // it; Anthropic nests it in `message_start.message.id`.
                 if trace_id.is_none() {
-                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                    if let Some(id) = json
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| json.pointer("/message/id").and_then(|v| v.as_str()))
+                    {
                         if !id.is_empty() {
                             trace_id = Some(id.to_string());
                         }
@@ -556,6 +568,16 @@ impl GenAIBuilder {
         // `Vec<OutputMessage>` parsing ("missing field `type`"), silently
         // losing the row in skill metrics and ATIF export.
         let (parts, finish_reason) = Self::merge_sse_chunks(&chunks);
+        // Anthropic Messages streams carry no `choices[]`, so the OpenAI
+        // merger yields nothing; fall through to the Anthropic block merger
+        // — the same "try the next wire shape" structure the live parse path
+        // uses for the DashScope envelope.
+        let (parts, finish_reason) = if parts.is_empty() {
+            let (aparts, afinish) = anthropic_parse::merge_anthropic_sse_chunks(&chunks);
+            (aparts, finish_reason.or(afinish))
+        } else {
+            (parts, finish_reason)
+        };
         let output_messages = if parts.is_empty() {
             None
         } else {
@@ -814,6 +836,162 @@ mod tests {
             "input_tokens from message_start must survive the message_delta"
         );
         assert_eq!(enrichment.output_tokens, Some(42));
+    }
+
+    /// The common prefix of a drained Anthropic stream: message_start (with
+    /// the nested model/id), then blocks. No `message_delta` — an
+    /// interrupted turn never reaches it.
+    fn anthropic_text_events() -> Vec<ParsedSseEvent> {
+        vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_01ABC","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":25,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo world"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+        ]
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_output_round_trips() {
+        // Interrupted mid-turn (no message_delta): the OpenAI merger finds
+        // no choices[], so the Anthropic block merger must rebuild the text.
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&anthropic_text_events()).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("drained Anthropic text must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].role, "assistant");
+        assert!(
+            parsed[0].finish_reason.is_none(),
+            "no message_delta arrived: no finish reason"
+        );
+        assert_eq!(parsed[0].parts.len(), 1);
+        match &parsed[0].parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello world"),
+            other => panic!("expected Text part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_model_and_trace_id_from_message_start() {
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&anthropic_text_events()).expect("enrichment");
+        assert_eq!(enrichment.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(enrichment.trace_id.as_deref(), Some("msg_01ABC"));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_finish_reason_from_message_delta() {
+        let mut events = anthropic_text_events();
+        events.push(make_sse_event(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}"#,
+        ));
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment.output_messages.expect("output persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_tool_use_blocks() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_tool","model":"claude-sonnet-4-5","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"Beijing\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment.output_messages.expect("tool use persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0].parts.len(), 1);
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_01"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments.as_ref(),
+                    Some(&serde_json::json!({"city": "Beijing"})),
+                    "streamed JSON fragments must concatenate and parse"
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_thinking_blocks() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_think","model":"claude-sonnet-4-5","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pondering"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment.output_messages.expect("output persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0].parts.len(), 2);
+        match (&parsed[0].parts[0], &parsed[0].parts[1]) {
+            (MessagePart::Reasoning { content: thinking }, MessagePart::Text { content: text }) => {
+                assert_eq!(thinking, "pondering");
+                assert_eq!(text, "answer");
+            }
+            other => panic!("expected Reasoning then Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_openai_stream_still_wins() {
+        // An OpenAI-shaped stream must keep using the choices[] merger; the
+        // Anthropic fallback only engages when that finds nothing.
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"qwen-max","id":"resp_9","choices":[{"delta":{"content":"hi"}}]}"#,
+            ),
+            make_sse_event(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment.output_messages.expect("output persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("stop"));
+        match &parsed[0].parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "hi"),
+            other => panic!("expected Text part, got {other:?}"),
+        }
     }
 
     #[test]

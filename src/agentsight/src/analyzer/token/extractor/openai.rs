@@ -171,6 +171,35 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // Anthropic Messages SSE: text_delta / thinking_delta ride in a
+            // `delta` object tagged by `type`. input_json_delta fragments are
+            // deliberately skipped: they belong to a tool_use block whose
+            // name is not repeated per fragment, so counting each fragment
+            // as content would overestimate the output tokens.
+            "content_block_delta" => {
+                let delta = resp.get("delta");
+                match delta.and_then(|d| d.get("type")).and_then(|v| v.as_str()) {
+                    Some("text_delta") => {
+                        if let Some(d) = delta.and_then(|d| d.get("text")).and_then(|v| v.as_str())
+                        {
+                            if !d.is_empty() {
+                                return Some((d.to_string(), None, Vec::new()));
+                            }
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(d) = delta
+                            .and_then(|d| d.get("thinking"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if !d.is_empty() {
+                                return Some((String::new(), Some(d.to_string()), Vec::new()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -222,6 +251,39 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_response_content_anthropic_deltas() {
+        // text_delta contributes to content …
+        let text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "partial answer"}
+        });
+        assert_eq!(
+            extract_response_content(Some(&text)),
+            Some(("partial answer".to_string(), None, Vec::new()))
+        );
+        // … thinking_delta to reasoning …
+        let thinking = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "hmm"}
+        });
+        assert_eq!(
+            extract_response_content(Some(&thinking)),
+            Some((String::new(), Some("hmm".to_string()), Vec::new()))
+        );
+        // … and input_json_delta fragments are skipped: they belong to a
+        // tool_use block whose name is not repeated per fragment, so
+        // counting each one would overestimate output tokens.
+        let tool_fragment = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"city\":"}
+        });
+        assert_eq!(extract_response_content(Some(&tool_fragment)), None);
+    }
 
     #[test]
     fn test_extract_openai_request() {

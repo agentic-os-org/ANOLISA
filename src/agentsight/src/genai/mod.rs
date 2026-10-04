@@ -4,6 +4,7 @@
 //! for LLM API calls, tool uses, and agent interactions.
 
 pub mod anolisa_release;
+mod anthropic_parse;
 pub mod builder;
 mod call_builder;
 pub mod encrypt;
