@@ -57,9 +57,18 @@ pub fn compile(content: &str, env: &EnvironmentProfile) -> String {
 // Conditional block compiler
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if `content` contains at least one `<!-- @if` directive.
+/// Returns `true` if `content` contains any conditional directive
+/// (`<!-- @if ... -->`, `<!-- @else -->`, or `<!-- @endif -->`).
+///
+/// Any of the three routes the document into structural validation: a
+/// document whose only directive is a stray `@else`/`@endif` with no
+/// enclosing `@if` must reach the original-content anomaly fallback, not
+/// fall through to heuristic normalization, which would rewrite a
+/// structurally broken document instead of returning it verbatim.
 fn has_conditional_blocks(content: &str) -> bool {
     content.contains("<!-- @if ")
+        || content.contains("<!-- @else -->")
+        || content.contains("<!-- @endif -->")
 }
 
 /// Compile content that contains `<!-- @if -->` / `<!-- @else -->` / `<!-- @endif -->` blocks.
@@ -70,10 +79,22 @@ fn has_conditional_blocks(content: &str) -> bool {
 /// - On `@else`: toggle the top entry **only** when all parent entries are `true`.
 /// - On `@endif`: pop the top entry.
 /// - Emit a line only when all stack entries are `true`.
+///
+/// If the directive structure does not balance — an `@if` left open at
+/// end-of-input, or a stray `@else`/`@endif` with no enclosing `@if` — the
+/// input is an unexpected state under `compile`'s contract ("Never fails;
+/// returns original content on any unexpected state") and the original
+/// content is returned unchanged. Suppressing to end-of-file on an unclosed
+/// `@if` would silently delete the remainder; stripping a stray directive
+/// would silently rewrite structure the author did not balance.
 fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
     let mut output = String::with_capacity(content.len());
     // Depth 0 = root level, always emit.
     let mut emit_at_depth: Vec<bool> = vec![true];
+    // Set when the directive structure is unbalanced; checked at the end so
+    // the fallback decision covers both stray directives seen mid-input and
+    // a depth stack that never returned to 1.
+    let mut structural_anomaly = false;
 
     for line in content.split_inclusive('\n') {
         let (body, terminator) = split_line_terminator(line);
@@ -96,6 +117,9 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
                     let last = emit_at_depth.last_mut().unwrap();
                     *last = !*last;
                 }
+            } else {
+                // @else with no enclosing @if.
+                structural_anomaly = true;
             }
             continue;
         }
@@ -103,6 +127,9 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
         if is_endif_directive(trimmed) {
             if emit_at_depth.len() > 1 {
                 emit_at_depth.pop();
+            } else {
+                // @endif with no enclosing @if.
+                structural_anomaly = true;
             }
             continue;
         }
@@ -114,6 +141,16 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
             output.push_str(body);
             output.push_str(terminator);
         }
+    }
+
+    if emit_at_depth.len() != 1 {
+        // An @if was never closed: emit-suppression would otherwise stay on
+        // for the entire remainder of the file.
+        structural_anomaly = true;
+    }
+
+    if structural_anomaly {
+        return content.to_string();
     }
 
     output
@@ -780,6 +817,71 @@ mod tests {
         let content = "<!-- @if os == darwin -->\n<!-- @if has_command(\"uv\") -->\nA\n<!-- @endif -->\n<!-- @endif -->\n";
         let result = compile(content, &env);
         assert!(result.contains('A'));
+    }
+
+    #[test]
+    fn test_unclosed_if_returns_original_content() {
+        // An unclosed <!-- @if ... --> leaves emit-suppression on for the
+        // whole remainder: a false condition silently drops every line
+        // after it ("A\n@if(false)\nB\nC" compiled to just "A"). The
+        // documented contract is "Never fails; returns original content
+        // on any unexpected state" — an unbalanced directive structure is
+        // exactly that.
+        let env = env_linux_no_uv();
+        let content = "A\n<!-- @if os == darwin -->\nB\nC\n";
+        assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_unclosed_nested_if_returns_original_content() {
+        let env = env_darwin_uv();
+        let content = "<!-- @if os == darwin -->\nA\n<!-- @if has_command(\"uv\") -->\nB\n<!-- @endif -->\nC\n";
+        // Inner block closed, outer one not: still unbalanced.
+        assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_stray_endif_returns_original_content() {
+        // One @if, two @endif: the extra pop is currently swallowed and
+        // the stray directive line silently stripped. Per the same
+        // "original content on any unexpected state" contract, an
+        // @endif with no enclosing @if falls back instead.
+        let env = env_linux_no_uv();
+        let content = "A\n<!-- @if os == darwin -->\nB\n<!-- @endif -->\n<!-- @endif -->\nC\n";
+        assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_stray_only_endif_returns_original_content() {
+        // A document whose ONLY conditional directive is a stray @endif
+        // (no @if anywhere) must take the original-content fallback too:
+        // routing it through heuristic normalization would rewrite a
+        // structurally broken document (uv present -> pip install becomes
+        // uv pip install) instead of returning it verbatim.
+        let env = env_darwin_uv();
+        let content = "<!-- @endif -->
+Run: pip install requests
+";
+        assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_stray_only_else_returns_original_content() {
+        // Same class of stray-only structural anomaly for @else.
+        let env = env_darwin_uv();
+        let content = "<!-- @else -->
+Run: pip install requests
+";
+        assert_eq!(compile(content, &env), content);
+    }
+
+    #[test]
+    fn test_stray_else_returns_original_content() {
+        // An @else with no enclosing @if is the same class of structural
+        // anomaly as a stray @endif.
+        let env = env_linux_no_uv();
+        let content = "A\n<!-- @if os == darwin -->\nB\n<!-- @endif -->\nC\n<!-- @else -->\nD\n";
+        assert_eq!(compile(content, &env), content);
     }
 
     #[test]
