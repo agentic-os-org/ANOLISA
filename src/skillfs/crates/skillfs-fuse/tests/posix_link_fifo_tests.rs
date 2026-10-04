@@ -606,3 +606,76 @@ fn test_fifo_under_skill_discover_rejected() {
         "skill-discover mkfifo must be denied (EROFS or EACCES), got {err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Symbolic-link metadata (no-follow setattr)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_lutimes_on_symlink_does_not_touch_target() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+    });
+    let skill = fx.skill_path("alpha");
+    std::fs::create_dir(skill.join("sub")).expect("mkdir sub");
+    let target = skill.join("sub").join("target.txt");
+    std::fs::write(&target, b"hello").expect("seed target");
+    let link = skill.join("sub").join("link");
+    std::os::unix::fs::symlink("target.txt", &link).expect("symlink same-skill relative");
+
+    // Assert on the backing files, not the mount: FUSE caches attributes for
+    // a second, so a mount-side stat can read a stale value inside the window.
+    let backing = fx.source_skill_path("alpha").join("sub");
+    let backing_target = backing.join("target.txt");
+    let backing_link = backing.join("link");
+    let target_before = std::fs::metadata(&backing_target).expect("stat backing target");
+
+    // A no-follow timestamp update on the link inode must change the LINK's
+    // mtime only: the daemon used utimensat(..., 0), which followed the link
+    // and stamped the target instead, then failed the request with EIO.
+    let c_link = CString::new(link.as_os_str().as_bytes()).expect("CString");
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: 1_000_000,
+            tv_nsec: 0,
+        },
+    ];
+    let rc = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c_link.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "lutimes on the link must succeed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let link_after = std::fs::symlink_metadata(&backing_link).expect("lstat backing link");
+    assert_eq!(
+        link_after.mtime(),
+        1_000_000,
+        "the link's own mtime must be updated"
+    );
+    let target_after = std::fs::metadata(&backing_target).expect("stat backing target");
+    assert_eq!(
+        target_after.mtime(),
+        target_before.mtime(),
+        "the symlink target's mtime must be untouched"
+    );
+    assert_eq!(
+        target_after.mtime_nsec(),
+        target_before.mtime_nsec(),
+        "the symlink target's mtime nanoseconds must be untouched"
+    );
+}

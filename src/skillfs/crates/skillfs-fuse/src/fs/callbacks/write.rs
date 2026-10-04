@@ -13,7 +13,7 @@ use crate::handles::open_options_from_flags;
 use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
-use crate::sys::{errno, fstatat_leaf, openat_leaf};
+use crate::sys::{errno, fchownat_leaf, fstatat_leaf, openat_leaf, utimensat_leaf};
 
 impl SkillFs {
     pub(in crate::fs) fn write_impl(
@@ -1044,6 +1044,46 @@ impl SkillFs {
 
         debug!(ino, ?size, ?mode, ?uid, ?gid, ?physical, "setattr");
 
+        // A setattr delivered on a symlink inode comes from a no-follow
+        // syscall (lchown / lutimes / fchmodat2 with AT_SYMLINK_NOFOLLOW).
+        // chown(2) and utimensat(..., 0) would follow the link and mutate
+        // whatever it points at — possibly outside the skill tree — instead
+        // of the link itself. Detect the link once and use the no-follow
+        // syscall/flag for every branch below. A physical path beyond
+        // PATH_MAX defeats path-based typing; fall back to the parent-fd
+        // leaf stat so such a file is still typed no-follow and routed
+        // through the *at syscalls below, while any other stat error
+        // keeps its errno.
+        let long_path;
+        let is_symlink = match std::fs::symlink_metadata(&physical) {
+            Ok(m) => {
+                long_path = false;
+                m.file_type().is_symlink()
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, false) {
+                        Ok(st) => {
+                            long_path = true;
+                            st.st_mode & libc::S_IFMT == libc::S_IFLNK
+                        }
+                        Err(e2) => {
+                            reply.error(errno(&e2));
+                            return;
+                        }
+                    },
+                    Err(_) => {
+                        reply.error(errno(&e));
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                reply.error(errno(&e));
+                return;
+            }
+        };
+
         // 1. Handle size (truncate) — preserve existing logic
         if let Some(new_size) = size {
             let open_result = match std::fs::OpenOptions::new().write(true).open(&physical) {
@@ -1134,6 +1174,14 @@ impl SkillFs {
 
         // 2. Handle mode (chmod)
         if let Some(new_mode) = mode {
+            // Linux does not support changing a symlink's own mode; only
+            // fchmodat2(AT_SYMLINK_NOFOLLOW) delivers mode here for a link,
+            // and the kernel answers EOPNOTSUPP for it. set_permissions
+            // would silently chmod the target instead.
+            if is_symlink {
+                reply.error(libc::EOPNOTSUPP);
+                return;
+            }
             let perms = std::fs::Permissions::from_mode(new_mode);
             if let Err(e) = std::fs::set_permissions(&physical, perms) {
                 reply.error(errno(&e));
@@ -1155,9 +1203,29 @@ impl SkillFs {
             // -1 means "don't change" — on Linux (uid_t)-1 == u32::MAX
             let new_uid = uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
             let new_gid = gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
-            let ret = unsafe { libc::chown(c_path.as_ptr(), new_uid, new_gid) };
-            if ret != 0 {
-                let e = std::io::Error::last_os_error();
+            let chown_result = if long_path {
+                // chown(2)/lchown(2) cannot name a path beyond PATH_MAX;
+                // reach the leaf through the open parent directory,
+                // preserving the no-follow choice above.
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => {
+                        fchownat_leaf(&parent_fd, &leaf, new_uid, new_gid, !is_symlink).map(|_| 0)
+                    }
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                let ret = if is_symlink {
+                    unsafe { libc::lchown(c_path.as_ptr(), new_uid, new_gid) }
+                } else {
+                    unsafe { libc::chown(c_path.as_ptr(), new_uid, new_gid) }
+                };
+                if ret != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(0)
+                }
+            };
+            if let Err(e) = chown_result {
                 reply.error(errno(&e));
                 return;
             }
@@ -1243,10 +1311,32 @@ impl SkillFs {
             };
 
             let times = [atime_spec, mtime_spec];
-            let ret =
-                unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-            if ret != 0 {
-                let e = std::io::Error::last_os_error();
+            let utimensat_result = if long_path {
+                // utimensat cannot name a path beyond PATH_MAX; reach the
+                // leaf through the open parent directory, preserving the
+                // no-follow choice.
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => utimensat_leaf(&parent_fd, &leaf, &times, is_symlink),
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                // Same as chown above: times set through a no-follow syscall
+                // belong to the link, not to its target.
+                let flags = if is_symlink {
+                    libc::AT_SYMLINK_NOFOLLOW
+                } else {
+                    0
+                };
+                let ret = unsafe {
+                    libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), flags)
+                };
+                if ret != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            };
+            if let Err(e) = utimensat_result {
                 reply.error(errno(&e));
                 return;
             }
@@ -1260,11 +1350,15 @@ impl SkillFs {
         // `ENAMETOOLONG` here, and the kernel would surface that errno to
         // the caller while keeping the stale attr cache (`stat` after the
         // failed reply would still report the pre-truncate size).
-        let final_attr: std::io::Result<FileAttr> = match std::fs::metadata(&physical) {
+        let final_attr: std::io::Result<FileAttr> = match if is_symlink {
+            std::fs::symlink_metadata(&physical)
+        } else {
+            std::fs::metadata(&physical)
+        } {
             Ok(meta) => Ok(file_attr_from_metadata(&meta)),
             Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
                 match self.open_parent_dir_for(&path) {
-                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, true) {
+                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, !is_symlink) {
                         Ok(st) => Ok(file_attr_from_stat(&st)),
                         Err(e2) => Err(e2),
                     },

@@ -458,3 +458,163 @@ fn fuse_truncate_via_openat_fallback_at_max_path() {
 // future variants of `seed_dirs_to_overflow` may return it instead of a
 // `String` for parity with the FUSE-side helpers.
 const _: Option<OsString> = None;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// no-follow setattr on a leaf whose physical path exceeds PATH_MAX: the
+// daemon must type the inode through the parent-fd leaf stat and route
+// lchown / lutimes through the *at syscalls. Typing failure would treat
+// the link as a regular file (mutating its target); without the fallback
+// the whole setattr fails with ENAMETOOLONG.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn symlinkat_local(dir: &std::fs::File, target: &str, leaf: &str) -> std::io::Result<()> {
+    let c_target =
+        CString::new(target).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let c_leaf = CString::new(leaf).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let rc = unsafe { libc::symlinkat(c_target.as_ptr(), dir.as_raw_fd(), c_leaf.as_ptr()) };
+    if rc != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn fstatat_local(dir: &std::fs::File, leaf: &str, follow: bool) -> std::io::Result<libc::stat> {
+    let c = CString::new(leaf).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+    let rc = unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), &mut st, flags) };
+    if rc != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(st)
+    }
+}
+
+#[test]
+fn fuse_nofollow_setattr_via_openat_fallback_at_max_path() {
+    skip_if_no_fuse!();
+    let fx = match LongSourceMount::new() {
+        Some(fx) => fx,
+        None => return,
+    };
+
+    let target_abs_len = PATH_MAX_LINUX + 30;
+    let (deep_source_parent, leaf) = seed_dirs_to_overflow(&fx.source_sandbox(), target_abs_len);
+    let relative = deep_source_parent
+        .strip_prefix(fx.source_sandbox())
+        .expect("relative under sandbox")
+        .to_owned();
+    let mount_parent = fx.mount_sandbox().join(&relative);
+
+    // Seed a regular target and a symlink to it via *at calls so the
+    // source-side creation is not blocked by the very PATH_MAX boundary
+    // under test. The daemon-side physical path of BOTH leaves exceeds
+    // PATH_MAX, so `symlink_metadata` on it fails with ENAMETOOLONG.
+    let source_parent_fd = open_dir_for_at(&deep_source_parent).expect("open source parent fd");
+    let target_leaf = long_segment(b't', 40);
+    let target_c = CString::new(target_leaf.as_bytes()).unwrap();
+    let seed_fd = unsafe {
+        libc::openat(
+            source_parent_fd.as_raw_fd(),
+            target_c.as_ptr(),
+            libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
+            0o644 as libc::c_uint,
+        )
+    };
+    assert!(
+        seed_fd >= 0,
+        "openat target seed failed: {}",
+        std::io::Error::last_os_error()
+    );
+    unsafe { libc::close(seed_fd) };
+    symlinkat_local(&source_parent_fd, &target_leaf, &leaf).expect("symlinkat link leaf");
+
+    let target_before = fstatat_local(&source_parent_fd, &target_leaf, true).expect("stat target");
+
+    let mount_leaf = mount_parent.join(&leaf);
+    let mount_leaf_c = CString::new(mount_leaf.as_os_str().as_bytes()).unwrap();
+
+    // lutimes: a no-follow timestamp update on the link inode must change
+    // the LINK's mtime only. A daemon that mis-types the inode (or fails
+    // the request with ENAMETOOLONG) fails this.
+    let mtime_sec: i64 = 1_500_000_000;
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: mtime_sec,
+            tv_nsec: 0,
+        },
+    ];
+    let rc = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            mount_leaf_c.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "FUSE lutimes on an over-PATH_MAX link must succeed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let link_after = fstatat_local(&source_parent_fd, &leaf, false).expect("lstat link");
+    assert_eq!(
+        link_after.st_mtime, mtime_sec,
+        "the link's own mtime must be updated"
+    );
+    let target_after = fstatat_local(&source_parent_fd, &target_leaf, true).expect("stat target");
+    assert_eq!(
+        target_after.st_mtime, target_before.st_mtime,
+        "the symlink target's mtime must be untouched"
+    );
+
+    // lchown through the same leaf: pre-fix this failed outright with
+    // ENAMETOOLONG because chown(2) named the over-long physical path.
+    let link_gid_before = fstatat_local(&source_parent_fd, &leaf, false)
+        .expect("lstat link")
+        .st_gid;
+    let new_gid = if unsafe { libc::geteuid() } == 0 {
+        // Root can move the link to a distinct group so the change is
+        // observable; any gid number is valid without existing.
+        link_gid_before ^ 1
+    } else {
+        // Unprivileged processes may only re-assert their own group; the
+        // success of the call itself is still the regression signal.
+        unsafe { libc::getegid() }
+    };
+    let rc = unsafe {
+        libc::fchownat(
+            libc::AT_FDCWD,
+            mount_leaf_c.as_ptr(),
+            u32::MAX, // (uid_t)-1: leave the owner unchanged
+            new_gid as libc::gid_t,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "FUSE lchown on an over-PATH_MAX link must succeed: {}",
+        std::io::Error::last_os_error()
+    );
+    let link_after_chown = fstatat_local(&source_parent_fd, &leaf, false).expect("lstat link");
+    if unsafe { libc::geteuid() } == 0 {
+        assert_eq!(
+            link_after_chown.st_gid, new_gid,
+            "the link's own group must be updated"
+        );
+        let target_after_chown =
+            fstatat_local(&source_parent_fd, &target_leaf, true).expect("stat target");
+        assert_eq!(
+            target_after_chown.st_gid, target_before.st_gid,
+            "the symlink target's group must be untouched"
+        );
+    }
+}
