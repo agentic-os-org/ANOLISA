@@ -15,6 +15,77 @@ use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, fstatat_leaf, openat_leaf};
 
+/// Convert a FUSE `TimeOrNow` into the `timespec` the kernel expects;
+/// `None` becomes `UTIME_OMIT`. Pre-epoch instants are normalized so
+/// `tv_nsec` stays non-negative.
+fn timespec_from_time_or_now(value: Option<fuser::TimeOrNow>) -> libc::timespec {
+    match value {
+        Some(fuser::TimeOrNow::Now) => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+        Some(fuser::TimeOrNow::SpecificTime(t)) => match t.duration_since(UNIX_EPOCH) {
+            Ok(d) => libc::timespec {
+                tv_sec: d.as_secs() as i64,
+                tv_nsec: d.subsec_nanos() as i64,
+            },
+            Err(e) => {
+                // Pre-epoch time: negative seconds
+                let d = e.duration();
+                let mut sec = -(d.as_secs() as i64);
+                let mut nsec = -(d.subsec_nanos() as i64);
+                // Normalize: nsec should be non-negative for timespec
+                if nsec < 0 {
+                    sec -= 1;
+                    nsec += 1_000_000_000;
+                }
+                libc::timespec {
+                    tv_sec: sec,
+                    tv_nsec: nsec,
+                }
+            }
+        },
+        None => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+    }
+}
+
+/// Clone the fd backing an unlinked inode's setattr out of the handle
+/// table: the request's `fh` when the kernel attaches one, otherwise any
+/// live handle for the inode (the kernel does not attach the handle to
+/// every fd-based setattr — `fchmod(2)` sends mode without `FATTR_FH` —
+/// and POSIX keeps the inode alive until the last close). A failed clone
+/// keeps its own errno (EMFILE/ENFILE, ...) instead of collapsing into
+/// the ENOENT "no handle" reply; `Ok(None)` means no handle at all.
+fn clone_unlinked_handle_file(
+    handles: &crate::handles::HandleManager,
+    fh: Option<u64>,
+    ino: u64,
+) -> std::io::Result<Option<std::fs::File>> {
+    clone_unlinked_handle_file_with(handles, fh, ino, std::fs::File::try_clone)
+}
+
+/// `clone_unlinked_handle_file` with the fd copy itself injected, so a test
+/// can exercise the error mapping without having to exhaust the process's
+/// real descriptor table.
+fn clone_unlinked_handle_file_with(
+    handles: &crate::handles::HandleManager,
+    fh: Option<u64>,
+    ino: u64,
+    clone: impl Fn(&std::fs::File) -> std::io::Result<std::fs::File>,
+) -> std::io::Result<Option<std::fs::File>> {
+    let cloned = fh
+        .and_then(|fh| handles.with_handle(fh, |entry| entry.file.as_ref().map(&clone)))
+        .flatten()
+        .or_else(|| handles.with_handle_for_ino(ino, |f| clone(f)));
+    match cloned {
+        Some(result) => result.map(Some),
+        None => Ok(None),
+    }
+}
+
 impl SkillFs {
     pub(in crate::fs) fn write_impl(
         &mut self,
@@ -753,6 +824,83 @@ impl SkillFs {
         );
         reply.entry(&Duration::from_secs(1), &attr, 0);
     }
+    /// Apply a setattr request through an open file handle whose inode no
+    /// longer has a path mapping (the file was unlinked). The kernel's fd
+    /// keeps the inode alive, so ftruncate/fchmod/fchown/futimens must work.
+    #[allow(clippy::too_many_arguments)]
+    fn setattr_unlinked_handle(
+        &self,
+        ino: u64,
+        fh: Option<u64>,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        reply: ReplyAttr,
+    ) {
+        use std::os::unix::io::AsRawFd;
+
+        let file = match clone_unlinked_handle_file(&self.handles, fh, ino) {
+            Ok(Some(file)) => file,
+            // Captured virtual content has no fd to fall back to; the inode
+            // is gone, exactly as before.
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            // A failed fd copy (EMFILE/ENFILE, ...) means the handle is
+            // still alive but the fd could not be borrowed; report its own
+            // errno instead of the misleading ENOENT.
+            Err(e) => {
+                reply.error(errno(&e));
+                return;
+            }
+        };
+        let fd = file.as_raw_fd();
+
+        if let Some(new_size) = size {
+            if unsafe { libc::ftruncate(fd, new_size as libc::off_t) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+        if let Some(new_mode) = mode {
+            if unsafe { libc::fchmod(fd, new_mode & 0o7777) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+        if uid.is_some() || gid.is_some() {
+            let new_uid = uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
+            let new_gid = gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
+            if unsafe { libc::fchown(fd, new_uid, new_gid) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+        if atime.is_some() || mtime.is_some() {
+            let times = [
+                timespec_from_time_or_now(atime),
+                timespec_from_time_or_now(mtime),
+            ];
+            if unsafe { libc::futimens(fd, times.as_ptr()) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+
+        match file.metadata() {
+            Ok(meta) => {
+                let mut attr = file_attr_from_metadata(&meta);
+                attr.ino = ino;
+                reply.attr(&Duration::from_secs(1), &attr);
+            }
+            Err(e) => reply.error(errno(&e)),
+        }
+    }
+
     pub(in crate::fs) fn setattr_impl(
         &mut self,
         req: &Request,
@@ -764,7 +912,7 @@ impl SkillFs {
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<std::time::SystemTime>,
-        _fh: Option<u64>,
+        fh: Option<u64>,
         _crtime: Option<std::time::SystemTime>,
         _chgtime: Option<std::time::SystemTime>,
         _bkuptime: Option<std::time::SystemTime>,
@@ -783,8 +931,12 @@ impl SkillFs {
         let path = match self.inodes.get_path(ino) {
             Some(p) => p,
             None => {
-                reply.error(libc::ENOENT);
-                return;
+                // The inode was unlinked while an fd is still open. POSIX
+                // keeps the inode alive until the last close, so mutations
+                // through that fd must still work — use the handle's file
+                // instead of failing with ENOENT.
+                return self
+                    .setattr_unlinked_handle(ino, fh, mode, uid, gid, size, atime, mtime, reply);
             }
         };
 
@@ -1116,73 +1268,8 @@ impl SkillFs {
                 }
             };
 
-            let atime_spec = match atime {
-                Some(fuser::TimeOrNow::Now) => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_NOW,
-                },
-                Some(fuser::TimeOrNow::SpecificTime(t)) => {
-                    match t.duration_since(UNIX_EPOCH) {
-                        Ok(d) => libc::timespec {
-                            tv_sec: d.as_secs() as i64,
-                            tv_nsec: d.subsec_nanos() as i64,
-                        },
-                        Err(e) => {
-                            // Pre-epoch time: negative seconds
-                            let d = e.duration();
-                            let mut sec = -(d.as_secs() as i64);
-                            let mut nsec = -(d.subsec_nanos() as i64);
-                            // Normalize: nsec should be non-negative for timespec
-                            if nsec < 0 {
-                                sec -= 1;
-                                nsec += 1_000_000_000;
-                            }
-                            libc::timespec {
-                                tv_sec: sec,
-                                tv_nsec: nsec,
-                            }
-                        }
-                    }
-                }
-                None => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-            };
-
-            let mtime_spec = match mtime {
-                Some(fuser::TimeOrNow::Now) => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_NOW,
-                },
-                Some(fuser::TimeOrNow::SpecificTime(t)) => {
-                    match t.duration_since(UNIX_EPOCH) {
-                        Ok(d) => libc::timespec {
-                            tv_sec: d.as_secs() as i64,
-                            tv_nsec: d.subsec_nanos() as i64,
-                        },
-                        Err(e) => {
-                            // Pre-epoch time: negative seconds
-                            let d = e.duration();
-                            let mut sec = -(d.as_secs() as i64);
-                            let mut nsec = -(d.subsec_nanos() as i64);
-                            // Normalize: nsec should be non-negative for timespec
-                            if nsec < 0 {
-                                sec -= 1;
-                                nsec += 1_000_000_000;
-                            }
-                            libc::timespec {
-                                tv_sec: sec,
-                                tv_nsec: nsec,
-                            }
-                        }
-                    }
-                }
-                None => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-            };
+            let atime_spec = timespec_from_time_or_now(atime);
+            let mtime_spec = timespec_from_time_or_now(mtime);
 
             let times = [atime_spec, mtime_spec];
             let ret =
@@ -1251,5 +1338,43 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fd that cannot be duplicated must surface its own errno from the
+    /// setattr fd lookup, not be swallowed into the ENOENT "no handle"
+    /// reply: the kernel handle is alive and the setattr syscalls would
+    /// work given the fd.
+    #[test]
+    fn unlinked_setattr_clone_failure_keeps_its_errno() {
+        let handles = crate::handles::HandleManager::new();
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let fh = handles.allocate(7, libc::O_RDWR, Some(file), None);
+
+        // The injected copy fails the way an exhausted descriptor table
+        // fails (EMFILE) while the handle itself stays usable; the error
+        // must propagate verbatim. Injecting it keeps the test off the
+        // process's real descriptor budget.
+        let err = clone_unlinked_handle_file_with(&handles, Some(fh), 7, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+        })
+        .expect_err("a failed clone must surface its errno");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EMFILE),
+            "the clone error must propagate verbatim, got {err:?}"
+        );
+
+        // No handle for the inode stays `Ok(None)`, which the caller maps
+        // to ENOENT.
+        assert!(
+            clone_unlinked_handle_file(&handles, None, 999)
+                .unwrap()
+                .is_none()
+        );
     }
 }
