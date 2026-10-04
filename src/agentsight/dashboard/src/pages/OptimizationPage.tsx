@@ -1,4 +1,4 @@
-import React, { Fragment, useCallback, useEffect, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 import {
@@ -904,6 +904,12 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const [loadingResults, setLoadingResults] = useState(true);
   const [llmNotConfigured, setLlmNotConfigured] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  // Dimension requests run for tens of seconds (some are LLM calls). The route
+  // param can change while they are in flight, and the page keeps the same
+  // component instance, so a result must only be applied when it belongs to
+  // the session currently on screen.
+  const activeSessionRef = useRef(sessionId);
+  activeSessionRef.current = sessionId;
 
   // 进入分析页时先加载历史结果展示
   useEffect(() => {
@@ -957,6 +963,17 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const runDimensions = useCallback(
     (dims: DimKey[]) => {
       const has = (d: DimKey) => dims.includes(d);
+      // Apply a dimension's result only while this session is still active.
+      const forSession =
+        <T,>(apply: (data: T) => void) =>
+        (data: T) => {
+          if (activeSessionRef.current === sessionId) apply(data);
+        };
+      const failed = (dim: DimKey) => (e: unknown) => {
+        if (activeSessionRef.current !== sessionId) return;
+        handleDimError(e);
+        setProgress((prev) => ({ ...prev, [dim]: 'error' }));
+      };
       setProgress((prev) => {
         const next = { ...prev };
         dims.forEach((d) => {
@@ -968,76 +985,74 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       // summary — 叙事摘要，单次 LLM 调用，数秒
       if (has('summary'))
         runOptimizeDimension<TrajectorySummary>(sessionId, 'summary')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, summary: data }));
+          .then(
+            forSession<TrajectorySummary>((data) => {
+              setReport((prev) => ({ ...prev, summary: data }));
             setProgress((prev) => ({ ...prev, summary: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, summary: 'error' }));
-          });
+            }),
+          )
+          .catch(failed('summary'));
 
       // perf — 纯计算，毫秒级
       if (has('perf'))
         runOptimizeDimension<PerfStats>(sessionId, 'perf')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, perf: data }));
+          .then(
+            forSession<PerfStats>((data) => {
+              setReport((prev) => ({ ...prev, perf: data }));
             setProgress((prev) => ({ ...prev, perf: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, perf: 'error' }));
-          });
+            }),
+          )
+          .catch(failed('perf'));
 
       // perf-issues — Rust 供数 + LLM 策略选择，10-30s
       if (has('perfIssues'))
         runOptimizeDimension<PerfReport>(sessionId, 'perf-issues')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, perf_issues: data }));
+          .then(
+            forSession<PerfReport>((data) => {
+              setReport((prev) => ({ ...prev, perf_issues: data }));
             setProgress((prev) => ({ ...prev, perfIssues: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, perfIssues: 'error' }));
-          });
+            }),
+          )
+          .catch(failed('perfIssues'));
 
       // cost — 纯计算，毫秒级
       if (has('cost'))
         runOptimizeDimension<CostStats>(sessionId, 'cost')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, cost: data }));
+          .then(
+            forSession<CostStats>((data) => {
+              setReport((prev) => ({ ...prev, cost: data }));
             setProgress((prev) => ({ ...prev, cost: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, cost: 'error' }));
-          });
+            }),
+          )
+          .catch(failed('cost'));
 
       // cost-waste — Rust 候选 + LLM 判定，10-30s
       if (has('costWaste'))
         runOptimizeDimension<WasteReport>(sessionId, 'cost-waste')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, cost_waste: data }));
+          .then(
+            forSession<WasteReport>((data) => {
+              setReport((prev) => ({ ...prev, cost_waste: data }));
             setProgress((prev) => ({ ...prev, costWaste: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, costWaste: 'error' }));
-          });
+            }),
+          )
+          .catch(failed('costWaste'));
 
       // accuracy — LLM 多检测器，30-60s+，不设短超时
       if (has('accuracy'))
         runOptimizeDimension<AccuracyResult>(sessionId, 'accuracy')
-          .then((data) => {
-            setReport((prev) => ({
-              ...prev,
-              extraction: data.extraction,
-              failures: data.failures,
-              issues: data.issues ?? [],
-            }));
-            setProgress((prev) => ({ ...prev, accuracy: 'done' }));
-          })
+          .then(
+            forSession<AccuracyResult>((data) => {
+              setReport((prev) => ({
+                ...prev,
+                extraction: data.extraction,
+                failures: data.failures,
+                issues: data.issues ?? [],
+              }));
+              setProgress((prev) => ({ ...prev, accuracy: 'done' }));
+            }),
+          )
           .catch((e) => {
+            if (activeSessionRef.current !== sessionId) return;
             handleDimError(e);
             setProgress((prev) => ({ ...prev, accuracy: 'error' }));
             setAnalyzeError(t('opt.accuracy.analyzeFailed', { msg: userFacingError(e, t) }));

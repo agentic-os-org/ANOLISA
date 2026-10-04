@@ -188,3 +188,26 @@ test('atif-viewer: the document loader drops stale responses', () => {
     'AtifViewerPage: the savings write must be gated on the load request id',
   );
 });
+
+test('optimization: a dimension result must not land in another session', () => {
+  const source = readSource('src/pages/OptimizationPage.tsx');
+  assert.match(source, /const activeSessionRef = useRef\(sessionId\);/);
+
+  const run = source.indexOf('const runDimensions = useCallback(');
+  assert.ok(run >= 0, 'runDimensions must exist');
+  const body = source.slice(run, source.indexOf('[sessionId, handleDimError, t],', run));
+  // Every dimension write and failure handler must consult the guard: the
+  // requests run for tens of seconds while the route param can change.
+  assert.match(
+    body,
+    /if \(activeSessionRef\.current === sessionId\) apply\(data\);/,
+    'OptimizationPage: dimension results must be gated on the active session',
+  );
+  assert.match(
+    body,
+    /if \(activeSessionRef\.current !== sessionId\) return;\s*handleDimError\(e\);/,
+    'OptimizationPage: dimension failures must be gated on the active session',
+  );
+  const guarded = body.match(/forSession<[A-Za-z]+>\(/g) ?? [];
+  assert.equal(guarded.length, 6, 'all six dimensions must use the gated setter');
+});
