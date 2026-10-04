@@ -593,6 +593,62 @@ reason = "Command references shell command history"
 subsystem = "shell"
 arg = [{ key = { glob = "~/.bash_history" } }]
 
+# Standard per-user credential stores. These files hold plaintext
+# long-term credentials read by the AWS CLI, curl/netrc, git
+# credential-store, docker, and kubernetes; reading them must not ride
+# the read-only fall-through below. The glob `*` crosses `/` in this
+# matcher, so each pattern covers the ~, /home/<user>, and /root
+# spellings at once. Over-approximation is deliberate (fail closed):
+# an unusual path merely ending in the same suffix only costs an
+# approval prompt.
+[[rules]]
+name = "shell-sensitive-aws-credentials"
+outcome = "RequireApproval"
+reason = "Command references a cloud credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.aws/credentials" } }]
+
+[[rules]]
+name = "shell-sensitive-netrc"
+outcome = "RequireApproval"
+reason = "Command references a netrc credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.netrc" } }]
+
+[[rules]]
+name = "shell-sensitive-git-credentials"
+outcome = "RequireApproval"
+reason = "Command references stored git credentials"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.git-credentials" } }]
+
+[[rules]]
+name = "shell-sensitive-docker-config"
+outcome = "RequireApproval"
+reason = "Command references registry credentials"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.docker/config.json" } }]
+
+[[rules]]
+name = "shell-sensitive-kube-config"
+outcome = "RequireApproval"
+reason = "Command references cluster credentials"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.kube/config" } }]
+
+[[rules]]
+name = "shell-sensitive-gnupg"
+outcome = "RequireApproval"
+reason = "Command references private key material"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.gnupg/*" } }]
+
 # ==========================================================================
 # Shell: read-only single-token commands. Safe unless arguments reference
 # sensitive paths (guarded above).
