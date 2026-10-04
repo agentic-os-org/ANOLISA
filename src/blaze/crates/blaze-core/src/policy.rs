@@ -157,6 +157,19 @@ impl PolicyFile {
                 });
             }
         }
+        // A policy that matches a request but names no backend can never serve
+        // one: the create path has no candidate to select, so it would fail
+        // with an internal error instead of reporting a configuration problem.
+        // Reject it while the policy is loaded, exactly like an unsupported
+        // pool section.
+        if self.select.backend_priority.is_empty() {
+            return Err(BlazeError::PolicyEvalError {
+                reason: format!(
+                    "policy \"{}\": [select].backend_priority must not be empty",
+                    self.policy_name
+                ),
+            });
+        }
         // Validate [vm] vcpus/memory if present.
         if let Some(vm) = &self.vm {
             validate_vm_resource(&self.policy_name, "[vm]", Some(&vm.memory), Some(vm.vcpus))?;
@@ -1299,6 +1312,45 @@ vcpus = 64
             msg.contains("1..=32") && msg.contains("64"),
             "error should mention the limit and actual value: {msg}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_backend_priority() {
+        let raw = r#"
+manifest_version = 1
+policy_name = "empty-backends"
+
+[match]
+workload_class = "agent-tool"
+
+[select]
+backend_priority = []
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parse");
+        let error = pf
+            .validate()
+            .expect_err("a policy with no backend must be rejected");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("backend_priority") && msg.contains("empty-backends"),
+            "error should name the empty backend list and the policy: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_a_non_empty_backend_priority() {
+        let raw = r#"
+manifest_version = 1
+policy_name = "one-backend"
+
+[match]
+workload_class = "agent-tool"
+
+[select]
+backend_priority = ["mock"]
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parse");
+        pf.validate().expect("a listed backend must stay valid");
     }
 
     #[test]
