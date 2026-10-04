@@ -122,8 +122,15 @@ impl GenAIBuilder {
         Some(LLMRequest {
             messages,
             temperature: obj.get("temperature").and_then(|v| v.as_f64()),
-            max_tokens: obj
-                .get("max_tokens")
+            // The output cap has three spellings: the legacy chat
+            // `max_tokens`, the newer chat `max_completion_tokens` (the only
+            // one the o-series accepts), and the Responses API
+            // `max_output_tokens`. Read whichever the request carries so
+            // the token-limit interruption rules and the
+            // `gen_ai.request.max_tokens` telemetry keep working.
+            max_tokens: ["max_tokens", "max_completion_tokens", "max_output_tokens"]
+                .iter()
+                .find_map(|key| obj.get(*key))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32),
             frequency_penalty: obj.get("frequency_penalty").and_then(|v| v.as_f64()),
@@ -897,6 +904,33 @@ mod tests {
         assert_eq!(req.messages[0].role, "system");
         assert_eq!(req.messages[1].role, "user");
         assert!(req.stream);
+    }
+
+    #[test]
+    fn test_parse_request_body_max_completion_tokens() {
+        // Modern OpenAI clients send max_completion_tokens; the o-series
+        // models reject the legacy max_tokens spelling outright, so a
+        // captured request carries only the new field.
+        let body = r#"{
+            "model": "o3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_completion_tokens": 2048
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).unwrap();
+        assert_eq!(req.max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn test_parse_request_body_responses_max_output_tokens() {
+        // The Responses API (codex 0.137+ via dashscope /v1/responses)
+        // spells the output cap max_output_tokens.
+        let body = r#"{
+            "model": "gpt-5",
+            "input": [{"role": "user", "content": "Hello"}],
+            "max_output_tokens": 1024
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).unwrap();
+        assert_eq!(req.max_tokens, Some(1024));
     }
 
     #[test]

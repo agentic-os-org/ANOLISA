@@ -149,6 +149,15 @@ impl OpenAIParser {
         if let Some(stream) = body.get("stream") {
             normalized["stream"] = stream.clone();
         }
+        // The Responses API spells the output cap `max_output_tokens`; the
+        // normalized chat view must carry it into `max_tokens` so the
+        // downstream consumers of the chat shape (token-limit interruption
+        // rules, telemetry) see the cap.
+        if body.get("max_tokens").is_none() {
+            if let Some(max_output_tokens) = body.get("max_output_tokens") {
+                normalized["max_tokens"] = max_output_tokens.clone();
+            }
+        }
 
         serde_json::from_value::<OpenAIRequest>(normalized).ok()
     }
@@ -228,6 +237,16 @@ impl OpenAIParser {
         let mut content_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut finish_reason = Some("stop".to_string());
+        // A capped response ends with status="incomplete" and the cap reason
+        // in incomplete_details. Surface that as the chat-completions
+        // "length" finish so a truncated answer is not reported as a clean
+        // completion (the interruption detector's token-limit rules key on
+        // exactly that spelling).
+        let output_capped = body.get("status").and_then(|v| v.as_str()) == Some("incomplete")
+            && body
+                .pointer("/incomplete_details/reason")
+                .and_then(|v| v.as_str())
+                == Some("max_output_tokens");
 
         for item in output {
             let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -289,7 +308,11 @@ impl OpenAIParser {
             "choices": [{
                 "index": 0,
                 "message": message,
-                "finish_reason": finish_reason,
+                "finish_reason": if output_capped {
+                    Some("length".to_string())
+                } else {
+                    finish_reason
+                },
             }],
             "usage": usage_val,
         });
@@ -306,6 +329,9 @@ impl OpenAIParser {
         let mut model = String::new();
         let mut resp_id = String::new();
         let mut usage: Option<serde_json::Value> = None;
+        // Set by the terminal `response.incomplete` event when the stream
+        // was cut by the output cap.
+        let mut output_capped = false;
 
         for chunk in chunks {
             let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -370,6 +396,40 @@ impl OpenAIParser {
                         });
                     }
                 }
+                // A capped stream terminates with response.incomplete
+                // instead of response.completed: the terminal event carries
+                // the final usage, and the cap reason must surface as the
+                // chat-completions "length" finish rather than a clean
+                // "stop".
+                "response.incomplete" => {
+                    if let Some(resp) = chunk.get("response") {
+                        model = resp
+                            .get("model")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(id) = resp.get("id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() {
+                                resp_id = id.to_string();
+                            }
+                        }
+                        usage = resp.get("usage").map(|u| {
+                            serde_json::json!({
+                                "prompt_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "completion_tokens": u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "total_tokens": u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                            })
+                        });
+                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
+                            && resp
+                                .pointer("/incomplete_details/reason")
+                                .and_then(|v| v.as_str())
+                                == Some("max_output_tokens")
+                        {
+                            output_capped = true;
+                        }
+                    }
+                }
                 "response.created" => {
                     if let Some(resp) = chunk.get("response") {
                         if resp_id.is_empty() {
@@ -392,7 +452,12 @@ impl OpenAIParser {
             "role": "assistant",
             "content": if content_buf.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(content_buf) },
         });
-        let finish_reason = if !tool_calls.is_empty() {
+        let finish_reason = if output_capped {
+            // The cap ended the stream: report the truncation even when a
+            // tool call was in flight (its arguments may be cut mid-JSON,
+            // so a normal "tool_calls" terminal would overstate the turn).
+            "length"
+        } else if !tool_calls.is_empty() {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
             "tool_calls"
         } else {
@@ -1030,6 +1095,95 @@ mod tests {
             Some(OpenAIContent::Text(t)) => assert_eq!(t, "Let me check that for you."),
             _ => panic!("expected text content"),
         }
+    }
+
+    #[test]
+    fn test_parse_response_responses_incomplete_max_output_tokens() {
+        // A Responses API call that hit its output cap ends with
+        // status="incomplete" and incomplete_details.reason="max_output_tokens".
+        // The normalized chat view must surface that as finish_reason
+        // "length" instead of a normal "stop", or the interruption
+        // detector reports a capped answer as a clean completion.
+        let json = serde_json::json!({
+            "id": "resp_cap001",
+            "object": "response",
+            "created_at": 1780560263,
+            "model": "qwen-plus",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{
+                "content": [{"text": "partial answer", "type": "output_text"}],
+                "id": "msg_cap001",
+                "role": "assistant",
+                "status": "incomplete",
+                "type": "message"
+            }],
+            "usage": {"input_tokens": 57, "output_tokens": 1024, "total_tokens": 1081}
+        });
+
+        let response = OpenAIParser::parse_response(&json);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.choices[0].finish_reason, Some("length".to_string()));
+        match &resp.choices[0].message.content {
+            Some(OpenAIContent::Text(t)) => assert_eq!(t, "partial answer"),
+            _ => panic!("expected text content"),
+        }
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.completion_tokens, 1024);
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_incomplete() {
+        // A capped Responses stream terminates with response.incomplete —
+        // not response.completed. That terminal event carries the final
+        // usage, and the aggregated view must report finish_reason
+        // "length" with that usage instead of a clean "stop" with none.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cap_sse", "model": "qwen-plus", "status": "queued"}}),
+            serde_json::json!({"type": "response.in_progress"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "message", "id": "msg_001", "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_cap_sse",
+                "model": "qwen-plus",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+            }}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let response = OpenAIParser::parse_response(&body);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.id, "resp_cap_sse");
+        assert_eq!(resp.choices[0].finish_reason, Some("length".to_string()));
+        let content = resp.choices[0].message.content.as_ref().unwrap();
+        match content {
+            OpenAIContent::Text(t) => assert_eq!(t, "partial"),
+            _ => panic!("expected text content"),
+        }
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 50);
+        assert_eq!(usage.completion_tokens, 1024);
+    }
+
+    #[test]
+    fn test_parse_request_responses_max_output_tokens() {
+        // The Responses API spells the output cap max_output_tokens; the
+        // normalized chat view must carry it into max_tokens so downstream
+        // consumers (token-limit interruption rules, telemetry) see the cap.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": "Hello",
+            "max_output_tokens": 512
+        });
+        let request = OpenAIParser::parse_request(&json);
+        assert!(request.is_some());
+        assert_eq!(request.unwrap().max_tokens, Some(512));
     }
 
     #[test]
