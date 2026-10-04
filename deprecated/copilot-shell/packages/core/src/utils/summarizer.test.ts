@@ -113,6 +113,34 @@ describe('summarizers', () => {
       );
     });
 
+    it.each(['$&', '$`', "$'", '$$'])(
+      'should interpolate tool output containing %s verbatim into the prompt',
+      async (sequence) => {
+        const longText = `${'a'.repeat(60)}${sequence}${'b'.repeat(60)}`.repeat(
+          20,
+        );
+        const summary = 'This is a summary.';
+        (mockGeminiClient.generateContent as Mock).mockResolvedValue({
+          candidates: [{ content: { parts: [{ text: summary }] } }],
+        });
+
+        await summarizeToolOutput(
+          longText,
+          mockGeminiClient,
+          abortSignal,
+          1000,
+        );
+
+        expect(mockGeminiClient.generateContent).toHaveBeenCalledTimes(1);
+        const calledWith = (mockGeminiClient.generateContent as Mock).mock
+          .calls[0];
+        const prompt = calledWith[0][0].parts[0].text;
+        // The tool output must reach the prompt unmodified: String.replace
+        // replacement patterns ($&, $`, $', $$) must never be expanded.
+        expect(prompt).toContain(longText);
+      },
+    );
+
     it('should construct the correct prompt for summarization', async () => {
       const longText = 'This is a very long text.'.repeat(200);
       const summary = 'This is a summary.';

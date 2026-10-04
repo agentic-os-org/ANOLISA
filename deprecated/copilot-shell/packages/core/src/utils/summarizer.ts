@@ -72,10 +72,12 @@ export async function summarizeToolOutput(
   if (!textToSummarize || textToSummarize.length < maxOutputTokens) {
     return textToSummarize;
   }
-  const prompt = SUMMARIZE_TOOL_OUTPUT_PROMPT.replace(
-    '{maxOutputTokens}',
+  // The function form of replace is required here: interpolating the tool
+  // output as a plain replacement string would expand $-patterns ($&, $`, $',
+  // $$) that appear in the tool output itself.
+  const prompt = SUMMARIZE_TOOL_OUTPUT_PROMPT.replace('{maxOutputTokens}', () =>
     String(maxOutputTokens),
-  ).replace('{textToSummarize}', textToSummarize);
+  ).replace('{textToSummarize}', () => textToSummarize);
 
   const contents: Content[] = [{ role: 'user', parts: [{ text: prompt }] }];
   const toolOutputSummarizerConfig: GenerateContentConfig = {
