@@ -1,4 +1,4 @@
-use crate::chrome_trace::{ChromeTraceEvent, ns_to_us};
+use crate::chrome_trace::{ChromeTraceEvent, ns_to_us, truncate_at_char_boundary};
 use crate::probes::sslsniff::SslEvent;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -446,7 +446,7 @@ impl SSEEvent {
         let data_preview = if self.data.len() > 500 {
             format!(
                 "{}... ({} bytes total)",
-                preview_on_char_boundary(&self.data, 500),
+                truncate_at_char_boundary(&self.data, 500),
                 self.data.len()
             )
         } else {
@@ -484,19 +484,6 @@ impl SSEEvent {
             bp: None,
         }
     }
-}
-
-/// Shorten a display preview to at most `max_bytes`, cutting on a character
-/// boundary so multi-byte SSE payloads are never split mid-character.
-fn preview_on_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 #[cfg(test)]

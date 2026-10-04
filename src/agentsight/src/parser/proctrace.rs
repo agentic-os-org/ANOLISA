@@ -2,7 +2,7 @@
 //!
 //! Parses process events (execve, stdout, exit) from VariableEvent.
 
-use crate::chrome_trace::{ChromeTraceEvent, TraceArgs, ns_to_us};
+use crate::chrome_trace::{ChromeTraceEvent, TraceArgs, ns_to_us, truncate_at_char_boundary};
 use crate::probes::proctrace::VariableEvent;
 use serde_json::json;
 
@@ -124,7 +124,7 @@ impl ProcTraceParser {
             ProcEventType::Stdout => {
                 let data = parsed.stdout_data?;
                 let display_data = if data.len() > 100 {
-                    format!("{}...", boundary_preview(&data, 100))
+                    format!("{}...", truncate_at_char_boundary(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -204,7 +204,7 @@ impl TraceArgs for ParsedProcEvent {
                     let preview = if data.len() > 200 {
                         format!(
                             "{}... ({} bytes total)",
-                            boundary_preview(data, 200),
+                            truncate_at_char_boundary(data, 200),
                             data.len()
                         )
                     } else {
@@ -222,19 +222,6 @@ impl TraceArgs for ParsedProcEvent {
     }
 }
 
-/// Shorten a preview to at most `max_bytes`, cutting on a character boundary
-/// so multi-byte stdout text is never split mid-character.
-fn boundary_preview(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 impl ParsedProcEvent {
     /// Convert to Chrome Trace Event
     pub fn to_chrome_trace_event(&self) -> ChromeTraceEvent {
@@ -244,7 +231,7 @@ impl ParsedProcEvent {
             ProcEventType::Stdout => {
                 let data = self.stdout_data.as_ref().cloned().unwrap_or_default();
                 let display_data = if data.len() > 100 {
-                    format!("{}...", boundary_preview(&data, 100))
+                    format!("{}...", truncate_at_char_boundary(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -314,7 +301,7 @@ mod tests {
         assert!(!preview.contains('中'));
 
         // Short data is untouched.
-        assert_eq!(boundary_preview("hello", 100), "hello");
+        assert_eq!(truncate_at_char_boundary("hello", 100), "hello");
         assert!(!preview.contains('中'));
     }
 }

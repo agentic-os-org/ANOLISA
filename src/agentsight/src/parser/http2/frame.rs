@@ -3,7 +3,9 @@
 //! Defines `Http2FrameType` and `ParsedHttp2Frame` for zero-copy
 //! HTTP/2 binary frame representation.
 
-use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us};
+use crate::chrome_trace::{
+    ChromeTraceEvent, ToChromeTraceEvent, TraceArgs, ns_to_us, truncate_at_char_boundary,
+};
 use crate::probes::sslsniff::SslEvent;
 use hpack::Decoder;
 use serde_json::json;
@@ -456,7 +458,7 @@ impl TraceArgs for ParsedHttp2Frame {
             } else {
                 let preview = self.body_str();
                 if !preview.is_empty() {
-                    let truncated = truncate_on_char_boundary(preview, 200);
+                    let truncated = truncate_at_char_boundary(preview, 200);
                     args.insert("body_preview".to_string(), json!(truncated));
                 }
             }
@@ -503,19 +505,6 @@ impl ToChromeTraceEvent for ParsedHttp2Frame {
     }
 }
 
-/// Shorten a body preview to at most `max_bytes`, cutting on a character
-/// boundary so multi-byte text is never split mid-character.
-fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 impl fmt::Debug for ParsedHttp2Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("ParsedHttp2Frame");
@@ -536,7 +525,7 @@ impl fmt::Debug for ParsedHttp2Frame {
             } else if let Ok(text) = std::str::from_utf8(body) {
                 let text = text.trim();
                 if text.len() > 200 {
-                    let truncated = truncate_on_char_boundary(text, 200);
+                    let truncated = truncate_at_char_boundary(text, 200);
                     debug.field(
                         "body",
                         &format!("(text, {} bytes)\n{}...", body.len(), truncated),
