@@ -500,6 +500,18 @@ impl Uploader {
             .as_deref()
             .and_then(|_| Identity::read(&self.config.identity_cache_path));
 
+        // A metadata transfer failure in an earlier round must not pin this
+        // round to the fallback region. The latch lives on this client: the
+        // product-type probes (desktop-id, instance/instance-type) run
+        // against it directly, and `resolve_region` clones it — flag
+        // included — for the region probe, so a latched client silences
+        // every later round's probe. The probe is documented as per-round,
+        // so clear the latch first. A non-ECS host pays one bounded curl
+        // attempt per round (the latch still collapses the product-type
+        // key series within a round); an ECS host recovers from a transient
+        // failure on the next round instead of uploading to the wrong
+        // region's project for the daemon's lifetime.
+        self.client.clear_unreachable();
         // Probe the region once per round: detected → internal host; not
         // detected → cn-hangzhou + public host (see `RegionProbe`).
         let (region, use_internal) = self.resolve_region();
@@ -912,6 +924,10 @@ mod tests {
     }
 
     fn test_uploader(dir: &TempDir) -> Uploader {
+        test_uploader_with_metadata(dir, "http://127.0.0.1:19999/no-such-endpoint")
+    }
+
+    fn test_uploader_with_metadata(dir: &TempDir, metadata_url: &str) -> Uploader {
         let ops = dir.path().join("ops");
         fs::create_dir_all(&ops).unwrap();
         Uploader::new(UploaderConfig {
@@ -922,7 +938,7 @@ mod tests {
             release_path: dir.path().join("anolisa-release"),
             disable_marker_path: dir.path().join(".telemetry_disabled"),
             identity_cache_path: dir.path().join("identity.json"),
-            metadata_url: "http://127.0.0.1:19999/no-such-endpoint".to_string(),
+            metadata_url: metadata_url.to_string(),
             endpoint: test_endpoint("anon"),
             sleep_secs: 1,
             topic: "topic".to_string(),
@@ -1080,6 +1096,73 @@ mod tests {
         fs::write(&up.config.disable_marker_path, "").unwrap();
         up.run_once().unwrap();
         assert!(!up.config.offsets_path.exists());
+    }
+
+    #[test]
+    fn test_run_once_reprobes_region_after_a_failed_round() {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            crate::telemetry::metadata::with_metadata_script(
+                // Round 1: exactly ONE connection is dropped — the region
+                // probe, which runs on a clone of the uploader's client.
+                // The transfer failure latches the shared flag, so the
+                // product-type desktop-id / instance-type probes (on the
+                // uploader's own client) short-circuit without connecting;
+                // the strict scripted server below fails if any second
+                // connection arrives before the next round clears the
+                // latch. Round 2 re-probes all keys: the scripted
+                // responses are consumed in order.
+                &["region-id"],
+                &[
+                    ("region-id", 200, "cn-beijing\n"),
+                    ("desktop-id", 404, "missing\n"),
+                    ("instance/instance-type", 404, "missing\n"),
+                ],
+                |base| {
+                    let dir = TempDir::new().unwrap();
+                    let up = test_uploader_with_metadata(&dir, &format!("{base}/region-id"));
+                    write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+
+                    let mut urls: Vec<String> = Vec::new();
+                    up.run_once_with_post(|url, _| {
+                        urls.push(url.to_string());
+                        Ok(())
+                    })
+                    .unwrap();
+
+                    write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n{\"b\":2}\n");
+                    up.run_once_with_post(|url, body| {
+                        urls.push(url.to_string());
+                        assert!(
+                            body.contains("\"region\":\"cn-beijing\""),
+                            "round 2 must carry the detected region: {body}"
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+
+                    assert_eq!(urls.len(), 2);
+                    // Round 1 hit metadata transfer failures: the fallback
+                    // public host in cn-hangzhou is correct for that round.
+                    assert!(
+                        urls[0].starts_with(
+                            "https://anon-proj-cn-hangzhou.cn-hangzhou.log.aliyuncs.com"
+                        ),
+                        "round 1 (transfer failure) uses the fallback public host: {}",
+                        urls[0]
+                    );
+                    // Round 2 re-probes and recovers: without the per-round
+                    // latch reset, the latched client kept every later round
+                    // on the cn-hangzhou public host for the daemon's life.
+                    assert!(
+                        urls[1].starts_with(
+                            "https://anon-proj-cn-beijing.cn-beijing-internal.log.aliyuncs.com"
+                        ),
+                        "round 2 must use the detected internal host: {}",
+                        urls[1]
+                    );
+                },
+            );
+        });
     }
 
     #[test]
