@@ -247,5 +247,239 @@ describe('Session', () => {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
     });
+
+    it('percent-decodes file URIs so paths with spaces resolve', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const fileName = 'my file.md';
+      const filePath = path.join(tempDir, fileName);
+
+      try {
+        await fs.writeFile(filePath, '# Has a space\n', 'utf8');
+
+        const readManyFilesTool = {
+          buildAndExecute: vi.fn().mockResolvedValue({
+            llmContent: 'file content',
+            returnDisplay: 'ok',
+          }),
+        };
+        const toolRegistry = {
+          getTool: vi.fn((name: string) =>
+            name === 'read_many_files' ? readManyFilesTool : undefined,
+          ),
+        };
+        const fileService = {
+          shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+        };
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getToolRegistry = vi.fn().mockReturnValue(toolRegistry);
+        mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        const promptRequest: acp.PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: fileName,
+              uri: `file://${encodeURIComponent(fileName)}`,
+            },
+          ],
+        };
+
+        await session.prompt(promptRequest);
+
+        expect(readManyFilesTool.buildAndExecute).toHaveBeenCalledWith(
+          { paths: [fileName] },
+          expect.any(AbortSignal),
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves Windows drive-letter file URIs with percent escapes', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      // `C:` is a legal directory name on POSIX hosts, so the resolved
+      // absolute path stays within the temp root.
+      const windowsStylePath = 'C:/repo/my file.md';
+
+      try {
+        await fs.mkdir(path.join(tempDir, 'C:', 'repo'), { recursive: true });
+        await fs.writeFile(
+          path.join(tempDir, 'C:', 'repo', 'my file.md'),
+          '# On C\n',
+          'utf8',
+        );
+
+        const readManyFilesTool = {
+          buildAndExecute: vi.fn().mockResolvedValue({
+            llmContent: 'file content',
+            returnDisplay: 'ok',
+          }),
+        };
+        const toolRegistry = {
+          getTool: vi.fn((name: string) =>
+            name === 'read_many_files' ? readManyFilesTool : undefined,
+          ),
+        };
+        const fileService = {
+          shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+        };
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getToolRegistry = vi.fn().mockReturnValue(toolRegistry);
+        mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        const promptRequest: acp.PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: 'my file.md',
+              // Standard Zed-on-Windows form: drive letter in the path
+              // component, percent-encoded space.
+              uri: 'file:///C:/repo/my%20file.md',
+            },
+          ],
+        };
+
+        await session.prompt(promptRequest);
+
+        expect(readManyFilesTool.buildAndExecute).toHaveBeenCalledWith(
+          { paths: [windowsStylePath] },
+          expect.any(AbortSignal),
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves Windows UNC file URIs with percent escapes', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const uncPath = '\\\\server\\share\\my file.md';
+
+      try {
+        // Backslashes are legal filename characters on POSIX hosts, so the
+        // whole UNC remainder resolves to one file inside the temp root.
+        await fs.writeFile(path.join(tempDir, uncPath), '# On share\n', 'utf8');
+
+        const readManyFilesTool = {
+          buildAndExecute: vi.fn().mockResolvedValue({
+            llmContent: 'file content',
+            returnDisplay: 'ok',
+          }),
+        };
+        const toolRegistry = {
+          getTool: vi.fn((name: string) =>
+            name === 'read_many_files' ? readManyFilesTool : undefined,
+          ),
+        };
+        const fileService = {
+          shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+        };
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getToolRegistry = vi.fn().mockReturnValue(toolRegistry);
+        mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        const promptRequest: acp.PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: 'my file.md',
+              uri: 'file://server/share/my%20file.md',
+            },
+          ],
+        };
+
+        await session.prompt(promptRequest);
+
+        expect(readManyFilesTool.buildAndExecute).toHaveBeenCalledWith(
+          { paths: [uncPath] },
+          expect.any(AbortSignal),
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps POSIX absolute file URIs as absolute decoded paths', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const fileName = 'posix file.md';
+      const filePath = path.join(tempDir, fileName);
+
+      try {
+        await fs.writeFile(filePath, '# POSIX\n', 'utf8');
+
+        const readManyFilesTool = {
+          buildAndExecute: vi.fn().mockResolvedValue({
+            llmContent: 'file content',
+            returnDisplay: 'ok',
+          }),
+        };
+        const toolRegistry = {
+          getTool: vi.fn((name: string) =>
+            name === 'read_many_files' ? readManyFilesTool : undefined,
+          ),
+        };
+        const fileService = {
+          shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+        };
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getToolRegistry = vi.fn().mockReturnValue(toolRegistry);
+        mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        const encodedPath = filePath
+          .split(path.sep)
+          .map((segment) => encodeURIComponent(segment))
+          .join('/');
+
+        const promptRequest: acp.PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: fileName,
+              uri: `file://${encodedPath}`,
+            },
+          ],
+        };
+
+        await session.prompt(promptRequest);
+
+        expect(readManyFilesTool.buildAndExecute).toHaveBeenCalledWith(
+          { paths: [filePath] },
+          expect.any(AbortSignal),
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
   });
 });

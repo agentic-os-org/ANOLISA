@@ -67,6 +67,46 @@ import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 
+const FILE_URI_SCHEME = 'file://';
+
+/**
+ * Converts a file URI to a path in a platform-independent way.
+ *
+ * Clients encode file mentions as standard WHATWG file URIs:
+ * - POSIX: `file:///home/user/my%20file.md` -> `/home/user/my file.md`
+ * - Windows drive letter: `file:///C:/repo/my%20file.md` -> `C:/repo/my file.md`
+ *   (stripping the leading slash keeps `path.resolve(root, 'C:/...')` from
+ *   producing `C:\C:\repo\...`, which would fail the within-root check)
+ * - Windows UNC: `file://server/share/my%20file.md` -> `\\server\share\my file.md`
+ *
+ * Percent escapes are decoded with `decodeURIComponent`; malformed sequences
+ * fall back to the raw remainder so a single bad mention cannot fail the
+ * whole prompt. Remainders without a slash (a filename in the authority
+ * position, as sent by some clients) keep the legacy relative-path behavior.
+ */
+function fileUriToPath(uri: string): string {
+  const remainder = uri.slice(FILE_URI_SCHEME.length);
+  let decoded = remainder;
+  try {
+    decoded = decodeURIComponent(remainder);
+  } catch {
+    // Malformed percent sequences: fall back to the raw remainder
+    // rather than failing the whole prompt.
+  }
+  // Windows drive-letter path: file:///C:/repo/file.md -> C:/repo/file.md.
+  if (/^\/[A-Za-z]:(?:[/\\]|$)/.test(decoded)) {
+    return decoded.slice(1);
+  }
+  // UNC path: file://server/share/file.md -> \\server\share\file.md.
+  // Only applies when the authority is a host (no leading slash but at
+  // least one separating slash); plain authority-position filenames such
+  // as file://my%20file.md stay relative paths.
+  if (!decoded.startsWith('/') && decoded.includes('/')) {
+    return `\\\\${decoded.replace(/\//g, '\\')}`;
+  }
+  return decoded;
+}
+
 /**
  * Session represents an active conversation session with the AI model.
  * It uses modular components for consistent event emission:
@@ -785,8 +825,6 @@ export class Session implements SessionContext {
     message: acp.ContentBlock[],
     abortSignal: AbortSignal,
   ): Promise<Part[]> {
-    const FILE_URI_SCHEME = 'file://';
-
     const embeddedContext: acp.EmbeddedResourceResource[] = [];
 
     const parts = message.map((part) => {
@@ -807,7 +845,7 @@ export class Session implements SessionContext {
               fileData: {
                 mimeData: part.mimeType,
                 name: part.name,
-                fileUri: part.uri.slice(FILE_URI_SCHEME.length),
+                fileUri: fileUriToPath(part.uri),
               },
             };
           } else {
