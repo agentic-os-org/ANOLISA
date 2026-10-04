@@ -278,8 +278,23 @@ fn split_sections(
     let mut sections = std::collections::HashMap::new();
     let mut current_name: Option<String> = None;
     let mut current_content = String::new();
+    // Fenced code blocks are examples, not contract text: a `## Parameters`
+    // heading (or a parameter-shaped bullet) inside a fence must neither open
+    // a section nor feed structured extraction. Track the open fence so its
+    // lines stay out of `sections` until the matching closing fence.
+    let mut open_fence: Option<(char, usize)> = None;
 
     for line in body.lines() {
+        if let Some((fence_char, fence_len)) = open_fence {
+            if is_fence_close(line, fence_char, fence_len) {
+                open_fence = None;
+            }
+            continue;
+        }
+        if let Some(fence) = fence_open(line) {
+            open_fence = Some(fence);
+            continue;
+        }
         if let Some(heading) = line.strip_prefix("## ") {
             if let Some(name) = current_name.take() {
                 record_section(&mut sections, name, current_content, issues);
@@ -297,6 +312,45 @@ fn split_sections(
     }
 
     sections
+}
+
+/// Opening fence of a markdown code block: three or more backticks or
+/// tildes, indented by at most three spaces (CommonMark), optionally
+/// followed by an info string. Returns the fence character and length so
+/// the matching closing fence can be recognized. Per CommonMark the info
+/// string of a backtick fence may not contain a backtick — such a line is
+/// inline code, not a fence — while a tilde fence's info string may.
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let fence_char = rest.chars().next()?;
+    if fence_char != '`' && fence_char != '~' {
+        return None;
+    }
+    let fence_len = rest.chars().take_while(|c| *c == fence_char).count();
+    if fence_len < 3 {
+        return None;
+    }
+    if fence_char == '`' && rest[fence_len..].contains('`') {
+        return None;
+    }
+    Some((fence_char, fence_len))
+}
+
+/// Closing fence: indented by at most three spaces, the same character
+/// repeated at least as many times as the opening fence, followed only by
+/// whitespace (CommonMark).
+fn is_fence_close(line: &str, fence_char: char, fence_len: usize) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let count = rest.chars().take_while(|c| *c == fence_char).count();
+    count >= fence_len && rest[count..].trim().is_empty()
 }
 
 /// Section names that feed structured extraction. Only these form the
