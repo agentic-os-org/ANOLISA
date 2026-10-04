@@ -157,11 +157,17 @@ impl ViewsConfig {
         source_dir: &Path,
         new_skills: &[String],
     ) -> std::io::Result<()> {
-        if let Some(view) = self.views.iter_mut().find(|v| v.default) {
-            for skill in new_skills {
-                if !view.skills.contains(skill) {
-                    view.skills.push(skill.clone());
-                }
+        let Some(view) = self.views.iter_mut().find(|v| v.default) else {
+            // Nothing to assign to. Saving an unchanged config and reporting
+            // Ok made the caller log an auto-assignment that never happened.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no default view configured; new skills were not assigned",
+            ));
+        };
+        for skill in new_skills {
+            if !view.skills.contains(skill) {
+                view.skills.push(skill.clone());
             }
         }
         self.save(source_dir)
@@ -263,6 +269,26 @@ mod tests {
 
         let loaded = ViewsConfig::load(dir.path()).unwrap();
         assert!(loaded.default_skills().contains(&"new-skill".to_string()));
+    }
+
+    #[test]
+    fn test_assign_to_default_without_a_default_view_errors() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config();
+        for view in &mut cfg.views {
+            view.default = false;
+        }
+        cfg.save(dir.path()).unwrap();
+        let path = dir.path().join("skillfs-views.toml");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = cfg
+            .assign_to_default(dir.path(), &["new-skill".to_string()])
+            .expect_err("a config without a default view cannot assign");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(!cfg.all_assigned_skills().contains("new-skill"));
+        // The config file is left untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]
