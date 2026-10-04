@@ -115,6 +115,10 @@ ce-runner 支持三种任务前缀,对应不同执行模式:
 
 ## 输出
 
+批量输入只能选择同一任务 YAML 一次，各 YAML 必须声明唯一、非空的字符串 `task_id`。
+重复选择（包括目录别名）、冲突的 ID，以及不可读取或无效的任务 YAML，都会在
+gateway 或 worker 配置前报错。重复执行同一任务请使用 `--trials`。
+
 ```
 claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
 ├── <task_id>_xxxx.jsonl   # 转换后的 trace
