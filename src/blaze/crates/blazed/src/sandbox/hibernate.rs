@@ -1292,13 +1292,18 @@ impl OwnedHibernateDir {
             )
         })?;
         let mut names = BTreeSet::new();
-        for entry in Dir::new(directory).map_err(|source| {
+        // Rewind the cloned descriptor before reading: the directory offset
+        // is shared with the retained owner, so a previous scan would
+        // otherwise leave this one observing an empty listing.
+        let mut stream = Dir::new(directory).map_err(|source| {
             hibernate_io_error(
                 "scan hibernation directory",
                 self.configured_path().to_path_buf(),
                 std::io::Error::from(source),
             )
-        })? {
+        })?;
+        stream.rewind();
+        for entry in stream {
             let entry = entry.map_err(|source| {
                 hibernate_io_error(
                     "scan hibernation directory",
@@ -1334,13 +1339,18 @@ impl OwnedHibernateDir {
             )
         })?;
         let mut names = Vec::new();
-        for entry in Dir::new(directory).map_err(|source| {
+        // Rewind the cloned descriptor before reading: the directory offset
+        // is shared with the retained owner, so a previous scan would
+        // otherwise leave this one observing an empty listing.
+        let mut stream = Dir::new(directory).map_err(|source| {
             hibernate_io_error(
                 "scan hibernation directory",
                 self.configured_path().to_path_buf(),
                 std::io::Error::from(source),
             )
-        })? {
+        })?;
+        stream.rewind();
+        for entry in stream {
             let entry = entry.map_err(|source| {
                 hibernate_io_error(
                     "scan hibernation directory",
@@ -2127,13 +2137,20 @@ fn run_dir_names(parent: &OwnedRunDir) -> Result<BTreeSet<String>> {
         )
     })?;
     let mut names = BTreeSet::new();
-    for entry in Dir::new(directory).map_err(|source| {
+    // The scanner clones a descriptor whose directory offset is shared with
+    // the retained owner. `Dir` starts reading at that offset, so a previous
+    // scan of the same owner would leave it at end-of-directory and this scan
+    // would silently observe an empty listing. Rewind so every scan reports
+    // the directory as it is now.
+    let mut stream = Dir::new(directory).map_err(|source| {
         hibernate_io_error(
             "scan sandbox directory",
             parent.configured_path().to_path_buf(),
             std::io::Error::from(source),
         )
-    })? {
+    })?;
+    stream.rewind();
+    for entry in stream {
         let entry = entry.map_err(|source| {
             hibernate_io_error(
                 "scan sandbox directory",
@@ -2236,6 +2253,45 @@ mod tests {
             1,
             "only the UTF-8 hibernation entry should be reported"
         );
+    }
+
+    #[test]
+    fn repeated_run_dir_scans_observe_the_same_entries() {
+        let temp = tempfile::tempdir().expect("temp");
+        let run_dir = OwnedRunDir::for_test(Uuid::new_v4(), temp.path().join("run"));
+        std::fs::write(run_dir.path().join("state.json"), b"{}").expect("state record");
+        std::fs::create_dir(run_dir.path().join(HIBERNATE_DIRECTORY)).expect("hibernate dir");
+
+        // Hibernate scans this directory before capture and destroy scans it
+        // again to reclaim the published image. Every scan must observe the
+        // directory as it is now, not the remainder of a preceding scan.
+        let first = run_dir_names(&run_dir).expect("first scan");
+        let second = run_dir_names(&run_dir).expect("second scan");
+
+        assert_eq!(first, second);
+        assert!(second.contains("state.json"));
+        assert!(second.contains(HIBERNATE_DIRECTORY));
+    }
+
+    #[test]
+    fn repeated_hibernate_dir_scans_observe_the_same_entries() {
+        let temp = tempfile::tempdir().expect("temp");
+        let staging = staging_root(temp.path());
+        staging
+            .create_subdirectory(PAYLOAD_BACKEND_DIR)
+            .expect("backend subtree");
+
+        // Layout validation, manifest building, and removal each scan the same
+        // retained directory; every scan must see the current entries.
+        for _ in 0..2 {
+            let names = staging.names().expect("name scan");
+            assert!(names.contains(PAYLOAD_BACKEND_DIR));
+            let names_os = staging.names_os().expect("raw name scan");
+            assert_eq!(
+                names_os,
+                vec![std::ffi::OsString::from(PAYLOAD_BACKEND_DIR)]
+            );
+        }
     }
 
     #[test]

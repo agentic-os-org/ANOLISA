@@ -2584,6 +2584,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn destroy_removes_hibernation_artifacts_without_a_restart() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+
+        let (status, hibernated) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/hibernate"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hibernated["state"], "hibernated");
+        let hibernate_dir = config.daemon.state_dir.join(id).join("hibernate");
+        assert!(hibernate_dir.is_dir(), "hibernation must publish artifacts");
+
+        assert!(state.manager.destroy(uuid).await.expect("destroy"));
+        assert_eq!(
+            state.manager.get(uuid).expect("destroyed lifecycle").state,
+            SandboxState::Destroyed
+        );
+        assert!(
+            !hibernate_dir.exists(),
+            "destroy must remove the hibernation image it reports as reclaimed"
+        );
+    }
+
+    #[tokio::test]
     async fn hibernate_releases_the_backend_and_resume_survives_restart() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
