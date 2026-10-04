@@ -162,21 +162,26 @@ export const SecurityObservabilityPage: React.FC = () => {
     const collect = <T,>(
       result: PromiseSettledResult<SecurityApiResponse<T>>,
       setter: (value: SecurityApiResponse<T>) => void,
+      clear: () => void,
     ): SecurityApiResponse<T> | null => {
       if (result.status === 'fulfilled') {
         setter(result.value);
         return result.value;
       }
       errors.push(errorMessage(result.reason, t));
+      // Drop the previous range's payload: the banner explains the failure,
+      // but its numbers would otherwise sit under the new range's label and
+      // read as current.
+      clear();
       return null;
     };
 
-    collect(results[0] as PromiseSettledResult<SecurityApiResponse<SecuritySummary>>, setSummary);
-    collect(results[1] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setCategoryCounts);
-    collect(results[2] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setEventTypeCounts);
-    collect(results[3] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setResultCounts);
-    collect(results[4] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setVerdictCounts);
-    collect(results[5] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>>, setRecentEvents);
+    collect(results[0] as PromiseSettledResult<SecurityApiResponse<SecuritySummary>>, setSummary, () => setSummary(null));
+    collect(results[1] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setCategoryCounts, () => setCategoryCounts(null));
+    collect(results[2] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setEventTypeCounts, () => setEventTypeCounts(null));
+    collect(results[3] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setResultCounts, () => setResultCounts(null));
+    collect(results[4] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setVerdictCounts, () => setVerdictCounts(null));
+    collect(results[5] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>>, setRecentEvents, () => setRecentEvents(null));
     const sessionResult = collect(
       results[6] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecuritySessionSummary>>>,
       (value) => {
@@ -185,6 +190,11 @@ export const SecurityObservabilityPage: React.FC = () => {
         // flight, drop this write instead of overwriting the newer range.
         if (sessionsRequestId === sessionsRequestIdRef.current) {
           setSecuritySessions(value);
+        }
+      },
+      () => {
+        if (sessionsRequestId === sessionsRequestIdRef.current) {
+          setSecuritySessions(null);
         }
       },
     );

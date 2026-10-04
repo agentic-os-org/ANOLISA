@@ -312,3 +312,38 @@ test('skill metrics: an older range agent list must not overwrite the newer rang
   assert.deepEqual(driver.slots[3].value, ['beta'],
     'the older range response must not overwrite the newer range agent list');
 });
+
+test('security overview: a failed card must not keep the previous range payload', async () => {
+  const { calls, driver, rendered } = renderSecurityPage();
+  const loadOverview = rendered.callbacks[1];
+
+  // First batch: every card answers, with a distinctive sample event.
+  const first = loadOverview();
+  calls.fetchSecuritySummary[0].resolve({ state: 'ok', data: {} });
+  for (let i = 0; i < 4; i += 1) calls.fetchSecurityCountBy[i].resolve({ state: 'ok', data: { items: [] } });
+  calls.fetchSecurityEvents[0].resolve({ state: 'ok', data: { items: [{ event_id: 'probe-event' }] } });
+  calls.fetchSecuritySessions[0].resolve({ state: 'ok', data: { items: [] } });
+  await first;
+  await settle();
+
+  const eventsSlot = driver.slots.findIndex(
+    (slot) => slot && slot.value && slot.value.data && Array.isArray(slot.value.data.items)
+      && slot.value.data.items[0] && slot.value.data.items[0].event_id === 'probe-event',
+  );
+  assert.ok(eventsSlot >= 0, 'the overview sample must land in some slot');
+
+  // The range changes; every card answers except the event sample.
+  const second = loadOverview();
+  calls.fetchSecuritySummary[1].resolve({ state: 'ok', data: {} });
+  for (let i = 4; i < 8; i += 1) calls.fetchSecurityCountBy[i].resolve({ state: 'ok', data: { items: [] } });
+  calls.fetchSecurityEvents[1].reject(new Error('boom'));
+  calls.fetchSecuritySessions[1].resolve({ state: 'ok', data: { items: [] } });
+  await second;
+  await settle();
+
+  assert.equal(
+    driver.slots[eventsSlot].value,
+    null,
+    "a failed card must not show the previous range's events under the new range",
+  );
+});
