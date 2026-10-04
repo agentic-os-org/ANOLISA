@@ -69,19 +69,62 @@ export function stringify(
  */
 function formatValue(value: unknown): string {
   if (typeof value === 'string') {
-    // Quote strings that might be ambiguous or contain special characters
-    if (
-      value.includes(':') ||
-      value.includes('#') ||
-      value.includes('"') ||
-      value.includes('\\') ||
-      value.trim() !== value
-    ) {
-      // Escape backslashes THEN quotes
-      return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    if (needsDoubleQuoting(value)) {
+      return doubleQuote(value);
     }
     return value;
   }
 
+  if (typeof value === 'object' && value !== null) {
+    // Deeper than the single nesting level this formatter supports —
+    // nested objects AND arrays at any depth. Serialize as a quoted JSON
+    // string so the value stays recoverable instead of degrading to
+    // "[object Object]" (nested arrays of objects) or a lossy String()
+    // join (nested arrays of primitives).
+    return doubleQuote(JSON.stringify(value));
+  }
+
   return String(value);
+}
+
+/**
+ * Reports whether a string value must be emitted in double-quoted style to
+ * survive a stringify/parse round-trip.
+ */
+function needsDoubleQuoting(value: string): boolean {
+  // Special characters and untrimmed whitespace always require quoting.
+  if (
+    value.includes(':') ||
+    value.includes('#') ||
+    value.includes('"') ||
+    value.includes('\\') ||
+    value.trim() !== value ||
+    /[\n\r\t]/.test(value)
+  ) {
+    return true;
+  }
+  // Multi-line plain scalars fold newlines on re-parse, and strings that
+  // re-parse as another YAML type (booleans, numbers, null, ...) or that
+  // are not valid plain scalars at all must be quoted too. Round-tripping
+  // the candidate through the same parser keeps this exactly consistent
+  // with what parse() will do.
+  try {
+    return typeof load(value) !== 'string';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Emits a string in double-quoted style with YAML escape sequences.
+ * Backslashes are escaped first, then quotes, then control characters.
+ */
+function doubleQuote(value: string): string {
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+  return `"${escaped}"`;
 }

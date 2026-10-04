@@ -10,13 +10,19 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {
   convertClaudeToQwenConfig,
+  convertClaudeAgentConfig,
   mergeClaudeConfigs,
   isClaudePluginConfig,
   convertClaudePluginPackage,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
+  type ClaudeAgentConfig,
 } from './claude-converter.js';
+import {
+  parse as parseYaml,
+  stringify as stringifyYaml,
+} from '../utils/yaml-parser.js';
 
 describe('convertClaudeToQwenConfig', () => {
   it('should convert basic Claude config', () => {
@@ -66,6 +72,36 @@ describe('convertClaudeToQwenConfig', () => {
     const result = convertClaudeToQwenConfig(claudeConfig);
 
     expect(result.lspServers).toEqual(claudeConfig.lspServers);
+  });
+
+  it('should keep hooks object arrays recoverable through the YAML round-trip', () => {
+    // Claude agent hooks are preserved as-is by convertClaudeAgentConfig
+    // and written back through stringifyYaml; the nested PreToolUse array
+    // of objects must not degrade to [object Object] on disk.
+    const hooks = {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: 'echo hi' }],
+        },
+      ],
+    };
+    const claudeAgent: ClaudeAgentConfig = {
+      name: 'hooked-agent',
+      description: 'agent with hooks',
+      hooks,
+      systemPrompt: 'prompt body',
+    };
+
+    const qwenAgent = convertClaudeAgentConfig(claudeAgent);
+    const yaml = stringifyYaml(qwenAgent);
+
+    expect(yaml).not.toContain('[object Object]');
+    const parsed = parseYaml(yaml) as Record<string, unknown>;
+    const hooksOut = parsed['hooks'] as Record<string, unknown>;
+    expect(JSON.parse(hooksOut['PreToolUse'] as string)).toEqual(
+      hooks.PreToolUse,
+    );
   });
 
   it('should throw error for missing name', () => {

@@ -236,5 +236,109 @@ describe('yaml-parser', () => {
         expect(typeof result['description']).toBe('string');
       });
     });
+
+    describe('round-trip integrity', () => {
+      it('should round-trip multi-line strings', () => {
+        const original = { description: 'first line\nsecond line' };
+        const result = parse(stringify(original));
+        expect(result).toEqual(original);
+      });
+
+      it('should round-trip boolean-like strings', () => {
+        for (const lookalike of ['true', 'false', 'yes', 'no', 'null', '~']) {
+          const original = { value: lookalike };
+          const result = parse(stringify(original));
+          expect(result).toEqual(original);
+        }
+      });
+
+      it('should round-trip number-like strings', () => {
+        for (const lookalike of ['123', '-1.5', '1e3', '0x1f', '0o7', '012']) {
+          const original = { value: lookalike };
+          const result = parse(stringify(original));
+          expect(result).toEqual(original);
+        }
+      });
+
+      it('should quote strings that look like YAML special values', () => {
+        expect(stringify({ value: 'true' })).toBe('value: "true"');
+        expect(stringify({ value: '123' })).toBe('value: "123"');
+      });
+    });
+
+    describe('deep values', () => {
+      it('should not emit [object Object] for values nested deeper than one level', () => {
+        const deep = { modelConfig: { defaults: { temperature: 0.7 } } };
+        const output = stringify(deep);
+        expect(output).not.toContain('[object Object]');
+      });
+
+      it('should serialize deeply nested values losslessly enough to recover them', () => {
+        const nested = { temperature: 0.7, maxTokens: 100 };
+        const output = stringify({ modelConfig: { defaults: nested } });
+        const parsed = parse(output);
+        const inner = parsed['modelConfig'] as Record<string, unknown>;
+        // The deeper value is preserved as a JSON string that can be recovered.
+        expect(JSON.parse(inner['defaults'] as string)).toEqual(nested);
+      });
+    });
+
+    describe('nested arrays', () => {
+      it('should not degrade object arrays nested under objects to [object Object]', () => {
+        // Claude agent hooks: PreToolUse is an array of objects nested
+        // one level under `hooks`.
+        const hooks = {
+          PreToolUse: [{ matcher: 'Bash' }],
+        };
+        const output = stringify({ hooks });
+        expect(output).not.toContain('[object Object]');
+        expect(output).toContain('PreToolUse:');
+      });
+
+      it('should keep object arrays nested under objects recoverable', () => {
+        const hooks = {
+          PreToolUse: [
+            {
+              matcher: 'Bash',
+              hooks: [{ type: 'command', command: 'echo hi' }],
+            },
+          ],
+        };
+        const output = stringify({ hooks });
+        const parsed = parse(output);
+        const hooksOut = parsed['hooks'] as Record<string, unknown>;
+        // The array survived as a JSON string; JSON.parse recovers it whole.
+        expect(JSON.parse(hooksOut['PreToolUse'] as string)).toEqual(
+          hooks.PreToolUse,
+        );
+      });
+
+      it('should keep arrays nested inside objects at any depth recoverable', () => {
+        const matrix = [
+          [1, 2],
+          [3, 4],
+        ];
+        const output = stringify({ grid: { cells: matrix } });
+        const parsed = parse(output);
+        const grid = parsed['grid'] as Record<string, unknown>;
+        expect(JSON.parse(grid['cells'] as string)).toEqual(matrix);
+      });
+
+      it('should keep arrays nested inside arrays recoverable as sequence items', () => {
+        const pairs = [
+          ['a', 'b'],
+          ['c', 'd'],
+        ];
+        const output = stringify({ pairs });
+        // Top-level array renders as a block sequence; each nested array
+        // item must stay a recoverable JSON string, not an "a,b" join.
+        expect(output).not.toContain('a,b');
+        const parsed = parse(output);
+        const items = parsed['pairs'] as unknown[];
+        expect(items).toHaveLength(2);
+        expect(JSON.parse(items[0] as string)).toEqual(pairs[0]);
+        expect(JSON.parse(items[1] as string)).toEqual(pairs[1]);
+      });
+    });
   });
 });
