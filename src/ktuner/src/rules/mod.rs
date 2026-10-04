@@ -1171,7 +1171,7 @@ fn eval_tcp_congestion_control(info: &SystemInfo, recs: &mut Vec<Recommendation>
         let avail_path = "/proc/sys/net/ipv4/tcp_available_congestion_control";
         if info.param_exists(avail_path) {
             let available = read_sysctl_string(avail_path);
-            if available.contains("bbr") {
+            if congestion_algo_available(&available, "bbr") {
                 recs.push(Recommendation {
                     param: "net.ipv4.tcp_congestion_control".to_string(),
                     current_value: current,
@@ -5426,7 +5426,7 @@ fn eval_tcp_available_congestion(_info: &SystemInfo, _recs: &mut Vec<Recommendat
         return 1;
     }
     let content = read_sysctl_string(path);
-    if !content.contains("bbr") {
+    if !congestion_algo_available(&content, "bbr") {
         return 1;
     }
     let current_algo = read_sysctl_string("/proc/sys/net/ipv4/tcp_congestion_control");
@@ -5759,9 +5759,34 @@ fn kernel_at_least(version: &str, want_major: u64, want_minor: u64) -> bool {
     (major, minor) >= (want_major, want_minor)
 }
 
+/// Whether the exact algorithm name `algo` appears in a whitespace-separated
+/// `tcp_available_congestion_control` listing. Names must be compared as
+/// whole tokens: a substring match accepts "bbr2"/"bbr_plus" when plain
+/// "bbr" is not registered, and the kernel rejects writing an unregistered
+/// name with ENOENT — a recommendation that can never be applied.
+fn congestion_algo_available(available: &str, algo: &str) -> bool {
+    available.split_whitespace().any(|name| name == algo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bbr_availability_requires_an_exact_algorithm_token() {
+        // Plain bbr present, in any position.
+        assert!(congestion_algo_available("reno cubic bbr", "bbr"));
+        assert!(congestion_algo_available("bbr reno cubic", "bbr"));
+        // Variants whose names merely contain "bbr" must NOT count: the
+        // kernel rejects writing an unregistered algorithm name with ENOENT,
+        // so a substring match produces a recommendation that can never be
+        // applied.
+        assert!(!congestion_algo_available("reno cubic bbr2", "bbr"));
+        assert!(!congestion_algo_available("reno cubic bbr_plus", "bbr"));
+        assert!(!congestion_algo_available("bbr2", "bbr"));
+        // Absent entirely.
+        assert!(!congestion_algo_available("reno cubic", "bbr"));
+    }
     use crate::detect::*;
 
     #[test]
