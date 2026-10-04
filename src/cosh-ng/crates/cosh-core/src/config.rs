@@ -1167,6 +1167,23 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
         if let Some(ref m) = provider.model {
             preserved.push_str(&format!("model = \"{}\"\n", escape_toml_value(m)));
         }
+        // `extra_params` carries user request parameters (thinking switches,
+        // sampling overrides). Omitting it here erased them from disk on every
+        // rewrite — an auth edit, a provider switch, or a delete of another
+        // provider — while the in-memory config kept the file's values for the
+        // rest of the process, so the loss only surfaced on the next start.
+        if let Some(ref extra) = provider.extra_params {
+            match toml::Value::try_from(extra) {
+                Ok(value) => preserved.push_str(&format!("extra_params = {value}\n")),
+                // A JSON-only shape (for example a null entry) has no TOML
+                // representation; dropping the rewrite entirely would lose the
+                // rest of the provider, so only the unrepresentable field is
+                // skipped and the user is told why.
+                Err(error) => eprintln!(
+                    "[cosh-core] Warning: cannot persist extra_params for provider {name}: {error}"
+                ),
+            }
+        }
         if let Some(ref ak) = provider.access_key_id {
             preserved.push_str(&format!("access_key_id = \"{}\"\n", escape_toml_value(ak)));
         }
@@ -2191,6 +2208,31 @@ approval_mode = "balanced"
         assert_eq!(content.matches("[ai.providers.").count(), 1);
     }
 
+    #[test]
+    fn persist_round_trips_provider_extra_params() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &user_path,
+            "[ai]\nactive_provider = \"custom\"\n\n\
+             [ai.providers.custom]\ntype = \"generic\"\n\
+             base_url = \"https://example.test/v1\"\napi_key = \"sk-extra\"\n\
+             extra_params = { enable_thinking = false, top_p = 0.5 }\n",
+        )
+        .unwrap();
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        assert!(config.ai.providers["custom"].extra_params.is_some());
+
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        let reloaded = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        assert_eq!(
+            reloaded.ai.providers["custom"].extra_params,
+            config.ai.providers["custom"].extra_params,
+            "extra_params were dropped by persist; file:\n{content}"
+        );
+    }
     #[test]
     fn persist_replaces_ai_headers_with_inline_comments_without_duplication() {
         let tmp = tempfile::TempDir::new().unwrap();
