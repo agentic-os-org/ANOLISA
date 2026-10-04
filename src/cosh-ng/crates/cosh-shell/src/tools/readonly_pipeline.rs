@@ -227,6 +227,7 @@ fn validate_search_stage(argv: &[String], index: usize) -> Result<(), ReadonlyPi
     if index == 0 {
         return Err(error("stdin-stage-required", argv.join(" ")));
     }
+    let program = argv[0].as_str();
     let positional = argv
         .iter()
         .skip(1)
@@ -235,6 +236,11 @@ fn validate_search_stage(argv: &[String], index: usize) -> Result<(), ReadonlyPi
     if positional > 1 {
         return Err(error("file-operand-not-allowed", argv.join(" ")));
     }
+    for arg in argv.iter().skip(1) {
+        if search_arg_carries_operand_file_or_program(arg, program) {
+            return Err(error("option-operand-not-allowed", argv.join(" ")));
+        }
+    }
     Ok(())
 }
 
@@ -242,12 +248,149 @@ fn validate_stdin_filter_stage(argv: &[String], index: usize) -> Result<(), Read
     if index == 0 {
         return Err(error("stdin-stage-required", argv.join(" ")));
     }
+    let program = argv[0].as_str();
     for arg in argv.iter().skip(1) {
         if !arg.starts_with('-') && !previous_arg_takes_value(argv, arg) {
             return Err(error("file-operand-not-allowed", argv.join(" ")));
         }
+        if filter_arg_carries_path_operand(arg, program) {
+            return Err(error("option-operand-not-allowed", argv.join(" ")));
+        }
     }
     Ok(())
+}
+
+/// Long-option names whose operand is a path or a program, per filter
+/// program. `sort` writes via `--output`/`--temporary-directory`, executes
+/// `--compress-program`, and reads operand files via `--files0-from`/
+/// `--random-source`; `wc` shares `--files0-from`. `cut`, `head`, and
+/// `uniq` have none of these: cut's `--output-delimiter=` takes a
+/// delimiter STRING, not a path, and must stay allowed. These options
+/// take their operand inline (`--output=PATH`) or in the next token, so
+/// the positional file-operand rejection never sees the path — they are
+/// denied in every spelling, including unambiguous GNU abbreviations
+/// (`--out=`, `--o=` are valid spellings of `--output` because no other
+/// sort option starts with those prefixes).
+fn filter_denied_long_options(program: &str) -> &'static [&'static str] {
+    match program {
+        "sort" => &[
+            "output",
+            "temporary-directory",
+            "compress-program",
+            "files0-from",
+            "random-source",
+        ],
+        "wc" => &["files0-from"],
+        _ => &[],
+    }
+}
+
+/// True when `arg` is a long option (`--name` / `--name=value`) whose name
+/// is, or unambiguously abbreviates, one of `denied`. A prefix test in
+/// this direction never rejects a longer distinct option (`cut`'s
+/// `--output-delimiter=` is not a prefix of `output` and stays allowed).
+fn long_option_is_denied(arg: &str, denied: &[&str]) -> bool {
+    let Some(option) = arg.strip_prefix("--") else {
+        return false;
+    };
+    if option.is_empty() {
+        return false;
+    }
+    let option = option.split('=').next().unwrap_or(option);
+    denied.iter().any(|name| name.starts_with(option))
+}
+
+/// True when `arg` is a short-option cluster of the stdin-filter family
+/// that reaches `o` (sort's output file) or `T` (sort's temporary
+/// directory) as an option: `-oPATH`, `-o=PATH`, `-noPATH`, and a bare
+/// `-o` whose value comes from the next token all redirect or write
+/// outside the pipeline. `k`, `S`, and `t` also take values, so the scan
+/// stops once one of them is reached — the rest of the cluster (or the
+/// next token) is that option's value, not a further option. For `cut`,
+/// `d` (the delimiter) is value-taking as well, so `cut -do -f1` must
+/// stop at `d` and treat `o` as its value, while for `sort` `-d` is the
+/// dictionary-order flag and `-do` still reaches `o`.
+fn filter_short_cluster_has_path_option(arg: &str, program: &str) -> bool {
+    let Some(cluster) = arg.strip_prefix('-') else {
+        return false;
+    };
+    if cluster.is_empty() || cluster.starts_with('-') {
+        return false;
+    }
+    for ch in cluster.chars() {
+        match ch {
+            'o' | 'T' => return true,
+            'k' | 'S' | 't' => return false,
+            'd' if program == "cut" => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn filter_arg_carries_path_operand(arg: &str, program: &str) -> bool {
+    long_option_is_denied(arg, filter_denied_long_options(program))
+        || filter_short_cluster_has_path_option(arg, program)
+}
+
+/// True when `arg` is a search-stage (`grep`/`rg`) option whose operand is
+/// a pattern file or an executed program: `-f`/`--file` (pattern file —
+/// attached `-fFILE`, bare `-f` with the value in the next token, or
+/// inside a cluster like `-nf FILE`), rg's `--pre`/`--pre-glob`
+/// preprocessor, and rg's `--hostname-bin`. The sibling readonly-rules
+/// path already treats `rg --pre=cat` as a mutating form; the pipeline
+/// validator must not be the weaker gate.
+fn search_arg_carries_operand_file_or_program(arg: &str, program: &str) -> bool {
+    if let Some(cluster) = arg.strip_prefix('-') {
+        if !cluster.is_empty() && !cluster.starts_with('-') {
+            for ch in cluster.chars() {
+                match ch {
+                    // grep/rg: pattern file; always value-taking, never a flag.
+                    'f' => return true,
+                    // Value-taking options of grep/rg (`-e`, `-g`, `-m`,
+                    // `-A`/`-B`/`-C` context, `-d`/`-D` actions, `-j`,
+                    // `-M`, rg's `-t` type): the rest of the cluster (or
+                    // the next token) is the value, so no further option
+                    // can hide behind them.
+                    'e' | 'g' | 'm' | 't' | 'A' | 'B' | 'C' | 'd' | 'D' | 'j' | 'M' => {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            return false;
+        }
+    }
+    let Some(option) = arg.strip_prefix("--") else {
+        return false;
+    };
+    if option.is_empty() {
+        return false;
+    }
+    let option = option.split('=').next().unwrap_or(option);
+    // Each entry is the shortest input prefix that GNU resolves
+    // unambiguously to the denied option, so abbreviations are denied
+    // with the full name while the harmless same-prefix options stay
+    // allowed. `--file` matches EXACTLY for both programs: grep has
+    // `--files-with-matches`/`--files-without-match` and rg has
+    // `--files`, so a prefix would over-block them (and `--fil` is
+    // ambiguous in GNU anyway, never reaching the executor); grep's
+    // `--exclude`/`--include` take a GLOB pattern (harmless), so the
+    // boundary is "exclude-f"/"include-f"; rg's `--pre` is exact
+    // because `--pretty` shares the prefix, `pre-` covers `--pre-glob`,
+    // `hostname` separates `--hostname-bin` from `--heading`/`--hidden`,
+    // and `--ignore-f` separates `--ignore-file` from
+    // `--ignore-case`/`--ignore-vcs`.
+    let grep_denied_exact = ["file"];
+    let grep_denied_prefix = ["exclude-f", "include-f"];
+    let rg_denied_exact = ["file", "pre"];
+    let rg_denied_prefix = ["pre-", "hostname", "ignore-f"];
+    let (exact, prefix): (&[&str], &[&str]) = if program == "rg" {
+        (&rg_denied_exact, &rg_denied_prefix)
+    } else {
+        (&grep_denied_exact, &grep_denied_prefix)
+    };
+    exact.contains(&option) || prefix.iter().any(|p| option.starts_with(p))
 }
 
 fn previous_arg_takes_value(argv: &[String], arg: &str) -> bool {
