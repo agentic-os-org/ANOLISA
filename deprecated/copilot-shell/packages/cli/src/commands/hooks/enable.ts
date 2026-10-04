@@ -22,17 +22,20 @@ export async function handleEnableHook(hookName: string): Promise<void> {
   const settings = loadSettings(workingDir);
 
   try {
-    // Get current hooks settings
-    const mergedSettings = settings.merged as
-      | Record<string, unknown>
-      | undefined;
-    const hooksSettings = (mergedSettings?.['hooks'] || {}) as Record<
+    // Get the workspace-scope hooks settings. Reading the merged object
+    // here would copy user-scope hook definitions into the workspace
+    // settings file on write (event arrays merge with CONCAT, so the
+    // copies would also make user hooks run twice at runtime).
+    const workspaceSettings = settings.forScope(SettingScope.Workspace)
+      .settings as Record<string, unknown>;
+    const hooksSettings = (workspaceSettings['hooks'] || {}) as Record<
       string,
       unknown
     >;
     const disabledHooks = (hooksSettings['disabled'] || []) as string[];
 
-    // Check if hook is in disabled list
+    // Check if hook is in the workspace disabled list. A hook disabled only
+    // in user scope cannot be enabled from here.
     if (!disabledHooks.includes(hookName)) {
       debugLogger.info(`Hook "${hookName}" is not disabled.`);
       return;
