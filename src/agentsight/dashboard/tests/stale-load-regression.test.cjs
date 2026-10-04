@@ -291,3 +291,21 @@ test('system-audit: load-more must not append a page from a superseded list', ()
     'SystemAuditPage.loadMoreEvents: the version must be re-checked between the await and the append',
   );
 });
+
+test('reuse-labels: a refetch after a long action honours the active filter', () => {
+  const source = readSource('src/pages/ReuseLabelsPage.tsx');
+  assert.match(source, /const labelFilterRef = useRef\(labelFilter\);/);
+  assert.match(source, /const stateFilterRef = useRef\(stateFilter\);/);
+  // The fetch must read the filters at request time: the judge/triage actions
+  // await the refetch in a closure that captured the filters when they started.
+  assert.match(
+    source,
+    /label: labelFilterRef\.current \|\| undefined,\s*confirmState: stateFilterRef\.current \|\| undefined,/,
+    'ReuseLabelsPage.load: the request must use the current filters',
+  );
+  assert.match(
+    source,
+    /}, \[\]\);\s*useEffect\(\(\) => \{\s*void load\(\);\s*\}, \[load, labelFilter, stateFilter\]\);/,
+    'ReuseLabelsPage: the effect must re-run on a filter change now that load is stable',
+  );
+});
