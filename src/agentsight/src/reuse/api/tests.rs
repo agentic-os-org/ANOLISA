@@ -118,6 +118,39 @@ fn triage_labels_every_trajectory_and_reports_the_split() {
 }
 
 #[test]
+fn triage_reports_truncation_only_when_rows_were_left_out() {
+    // `truncated` tells the caller to continue with the next page. A full
+    // page that happens to equal the limit is not truncation.
+    let (trajectories, labels) = stores("truncation");
+    insert(&trajectories, "s1", &substantive_atif());
+    insert(&trajectories, "s2", &substantive_atif());
+    let query = TriageQuery {
+        limit: Some(2),
+        ..TriageQuery::default()
+    };
+    let report = run_triage(
+        Some(&trajectories),
+        &labels,
+        &query,
+        &TriageConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(report.examined, 2);
+    assert!(!report.truncated, "exactly `limit` rows exist");
+
+    insert(&trajectories, "s3", &substantive_atif());
+    let report = run_triage(
+        Some(&trajectories),
+        &labels,
+        &query,
+        &TriageConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(report.examined, 2);
+    assert!(report.truncated, "a third row did not fit the page");
+}
+
+#[test]
 fn a_second_run_over_unchanged_content_relabels_nothing() {
     // What makes the endpoint safe to poll: identical bytes under identical
     // rules cannot produce a different verdict, so the work is skipped.

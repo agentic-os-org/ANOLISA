@@ -331,19 +331,27 @@ pub fn run_triage(
     let limit = clamp(query.limit, DEFAULT_TRIAGE_LIMIT, MAX_TRIAGE_LIMIT);
     let version = config.version();
 
-    let session_ids: Vec<String> = match &query.session_id {
-        Some(id) => vec![id.clone()],
-        None => trajectories
-            .list_summaries(None, None, None, limit)
-            .map_err(|e| ReuseApiError::Trajectories(e.to_string()))?
-            .into_iter()
-            .map(|summary| summary.session_id)
-            .collect(),
+    let (session_ids, truncated): (Vec<String>, bool) = match &query.session_id {
+        Some(id) => (vec![id.clone()], false),
+        None => {
+            // Fetch one row past the page so "exactly `limit` rows exist" is
+            // distinguishable from "`limit` cut the run short": the store caps
+            // the result, so a full page alone proves nothing.
+            let mut ids: Vec<String> = trajectories
+                .list_summaries(None, None, None, limit.saturating_add(1))
+                .map_err(|e| ReuseApiError::Trajectories(e.to_string()))?
+                .into_iter()
+                .map(|summary| summary.session_id)
+                .collect();
+            let truncated = ids.len() as i64 > limit;
+            ids.truncate(limit as usize);
+            (ids, truncated)
+        }
     };
 
     let mut report = TriageReport {
         triage_version: version.clone(),
-        truncated: query.session_id.is_none() && session_ids.len() as i64 >= limit,
+        truncated,
         ..TriageReport::default()
     };
 
