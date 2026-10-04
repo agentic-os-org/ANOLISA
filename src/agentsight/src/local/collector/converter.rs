@@ -86,43 +86,46 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                 let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
 
                 if let Some(blocks) = content_arr {
-                    let is_tool_result = blocks
+                    // One user message can carry tool results and text at the
+                    // same time (typing while a tool call is pending). Both
+                    // belong to the trajectory: the results as observations on
+                    // the agent step, the text as its own user step.
+                    if blocks
                         .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
-
-                    if is_tool_result {
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    {
                         append_tool_results(&mut steps, blocks);
-                    } else {
-                        let mut message_text = String::new();
-                        for block in blocks {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                if !text.is_empty() {
-                                    if !message_text.is_empty() {
-                                        message_text.push('\n');
-                                    }
-                                    message_text.push_str(text);
+                    }
+
+                    let mut message_text = String::new();
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            if !text.is_empty() {
+                                if !message_text.is_empty() {
+                                    message_text.push('\n');
                                 }
+                                message_text.push_str(text);
                             }
                         }
-                        if !message_text.is_empty() {
-                            step_id += 1;
-                            steps.push(Step {
-                                step_id,
-                                timestamp,
-                                source: StepSource::User,
-                                message: message_text,
-                                model_name: None,
-                                reasoning_effort: None,
-                                reasoning_content: None,
-                                tool_calls: None,
-                                observation: None,
-                                metrics: None,
-                                extra: None,
-                                llm_call_count: None,
-                                is_copied_context: None,
-                            });
-                        }
+                    }
+                    if !message_text.is_empty() {
+                        step_id += 1;
+                        steps.push(Step {
+                            step_id,
+                            timestamp,
+                            source: StepSource::User,
+                            message: message_text,
+                            model_name: None,
+                            reasoning_effort: None,
+                            reasoning_content: None,
+                            tool_calls: None,
+                            observation: None,
+                            metrics: None,
+                            extra: None,
+                            llm_call_count: None,
+                            is_copied_context: None,
+                        });
                     }
                 } else if let Some(content_str) =
                     event.pointer("/message/content").and_then(|c| c.as_str())
@@ -398,6 +401,27 @@ mod tests {
         let content = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"result"}]}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 0);
+    }
+
+    #[test]
+    fn test_user_text_beside_tool_result_is_kept() {
+        // A user can type while a tool call is pending; Claude Code then
+        // records one message holding both the tool results and the text.
+        let content = r#"{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"tc1","name":"ls","input":null}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"file.txt"},{"type":"text","text":"keep going with plan B"}]}}"#;
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+
+        let user_steps: Vec<_> = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .collect();
+        assert_eq!(user_steps.len(), 1);
+        assert_eq!(user_steps[0].message, "keep going with plan B");
+
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("tc1"));
     }
 
     #[test]
