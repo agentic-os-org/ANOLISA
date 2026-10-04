@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall,
+    Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult, Step, StepSource,
+    ToolCall, ATIF_SCHEMA_VERSION,
 };
 
 /// Return `true` when the events look like a Codex rollout stream
@@ -357,14 +357,11 @@ pub fn extract_private_metadata(
                         // from role=user response_items, so the count must
                         // follow the same fallback; message-less items produce
                         // no step and are not counted.
-                        if !has_user_event_msg
-                            && !joined_text(payload.get("content")).is_empty()
-                        {
+                        if !has_user_event_msg && !joined_text(payload.get("content")).is_empty() {
                             user_count += 1;
                         }
                     }
                     _ => {}
-                }
                 }
             }
             _ => {}
