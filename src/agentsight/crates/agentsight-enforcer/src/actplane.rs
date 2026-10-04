@@ -1457,11 +1457,13 @@ fn extract_guarded_paths(dsl: &str) -> Vec<String> {
                     // unlabelled AGENT rule and guarded its path for every
                     // process in the domain.
                     let clause_rest = &rest[end + 1..];
-                    let clause_end = ["because", "block ", "notify ", "kill ", "rule ", "source ", "label "]
-                        .iter()
-                        .filter_map(|marker| clause_rest.find(marker))
-                        .min()
-                        .unwrap_or(clause_rest.len());
+                    let clause_end = [
+                        "because", "block ", "notify ", "kill ", "rule ", "source ", "label ",
+                    ]
+                    .iter()
+                    .filter_map(|marker| clause_rest.find(marker))
+                    .min()
+                    .unwrap_or(clause_rest.len());
                     let clause = &clause_rest[..clause_end];
                     let words: Vec<&str> = clause.split_whitespace().collect();
                     let has_unless = words.contains(&"unless");
@@ -1552,7 +1554,8 @@ mod tests {
             "a SECRET-gated clause must not be fast-pathed"
         );
 
-        let unless = "rule r:\n  block unlink file \"/data/important\" unless AGENT\n  because \"x\"\n";
+        let unless =
+            "rule r:\n  block unlink file \"/data/important\" unless AGENT\n  because \"x\"\n";
         assert!(extract_guarded_paths(unless).is_empty());
 
         let agent = "rule r:\n  block unlink file \"/data/important\" if AGENT\n  because \"x\"\n";
