@@ -22,6 +22,58 @@ import {
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
 
 /**
+ * Thrown when a token endpoint request fails. Carries the OAuth `error`
+ * code parsed from the structured response body (JSON or
+ * form-urlencoded), if the body has one, so callers can distinguish a
+ * definitive rejection (`invalid_grant`) from transient failures
+ * (network errors, 5xx bodies, unexpected responses) by comparing the
+ * structured code exactly instead of substring-matching the
+ * human-readable message, where the code may appear in a description
+ * or an unrelated error body.
+ */
+export class OAuthEndpointError extends Error {
+  constructor(
+    message: string,
+    readonly oauthErrorCode: string | null,
+  ) {
+    super(message);
+    this.name = 'OAuthEndpointError';
+  }
+}
+
+/**
+ * Parses the structured OAuth `error` code from a token endpoint
+ * response body, accepting either a JSON object or a form-urlencoded
+ * string. Returns null when the body carries no structured error code
+ * (e.g. a plain-text or HTML 5xx body that merely mentions a code in
+ * prose).
+ */
+function parseOAuthErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.error === 'string' &&
+      parsed.error.length > 0
+    ) {
+      return parsed.error;
+    }
+  } catch {
+    // Not a JSON body — try form-urlencoded below.
+  }
+  try {
+    const error = new URLSearchParams(body).get('error');
+    if (error) {
+      return error;
+    }
+  } catch {
+    // Unparseable body — no structured code.
+  }
+  return null;
+}
+
+/**
  * OAuth configuration for an MCP server.
  */
 export interface MCPOAuthConfig {
@@ -535,9 +587,10 @@ export class MCPOAuthProvider {
       } catch {
         // Fall back to raw error
       }
-      throw new Error(
+      throw new OAuthEndpointError(
         errorMessage ||
           `Token refresh failed: ${response.status} - ${responseText}`,
+        parseOAuthErrorCode(responseText),
       );
     }
 
@@ -569,8 +622,9 @@ export class MCPOAuthProvider {
         // Check for error in response
         const error = tokenParams.get('error');
         const errorDescription = tokenParams.get('error_description');
-        throw new Error(
+        throw new OAuthEndpointError(
           `Token refresh failed: ${error || 'unknown_error'} - ${errorDescription || responseText}`,
+          error || null,
         );
       }
 
@@ -893,12 +947,42 @@ ${authUrl}
 
         return newToken.accessToken;
       } catch (error) {
-        console.error(`Failed to refresh token: ${getErrorMessage(error)}`);
-        // Remove invalid token
-        await this.tokenStorage.deleteCredentials(serverName);
+        const message = getErrorMessage(error);
+        if (isInvalidGrantError(error)) {
+          // The refresh token was definitively rejected (revoked/expired):
+          // re-authentication is the only way forward, so drop the stored
+          // credentials.
+          console.error(`Failed to refresh token: ${message}`);
+          await this.tokenStorage.deleteCredentials(serverName);
+        } else {
+          // Transient failure (network error, 5xx, unexpected response):
+          // keep the stored refresh token so the next call can retry
+          // instead of forcing a full re-authentication.
+          console.error(
+            `Failed to refresh token (will retry later, credentials kept): ${message}`,
+          );
+        }
       }
     }
 
     return null;
   }
+}
+
+/**
+ * Whether a refresh failure definitively means the refresh token is no
+ * longer usable (OAuth `invalid_grant`), as opposed to a transient error
+ * such as a network failure or a 5xx response.
+ *
+ * The comparison is exact against the structured OAuth error code that
+ * `refreshAccessToken` parses onto {@link OAuthEndpointError}: the code
+ * can also appear inside an `error_description` or an unrelated error
+ * body (e.g. a 503 page mentioning "invalid_grant"), and those must not
+ * delete valid credentials.
+ */
+function isInvalidGrantError(error: unknown): boolean {
+  return (
+    error instanceof OAuthEndpointError &&
+    error.oauthErrorCode === 'invalid_grant'
+  );
 }

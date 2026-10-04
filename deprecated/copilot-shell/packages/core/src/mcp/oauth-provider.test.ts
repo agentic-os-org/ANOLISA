@@ -36,7 +36,7 @@ import type {
   OAuthTokenResponse,
   OAuthClientRegistrationResponse,
 } from './oauth-provider.js';
-import { MCPOAuthProvider } from './oauth-provider.js';
+import { MCPOAuthProvider, OAuthEndpointError } from './oauth-provider.js';
 import type { OAuthToken } from './token-storage/types.js';
 import { MCPOAuthTokenStorage } from './oauth-token-storage.js';
 import type {
@@ -816,6 +816,76 @@ describe('MCPOAuthProvider', () => {
         'Token refresh failed: invalid_request - Invalid refresh token',
       );
     });
+
+    it('should throw OAuthEndpointError carrying the parsed structured code', async () => {
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 400,
+          contentType: 'application/x-www-form-urlencoded',
+          text: 'error=invalid_grant&error_description=Refresh+token+revoked',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const formError = await authProvider
+        .refreshAccessToken(
+          mockConfig,
+          'revoked_refresh_token',
+          'https://auth.example.com/token',
+        )
+        .catch((error: unknown) => error);
+
+      expect(formError).toBeInstanceOf(OAuthEndpointError);
+      expect((formError as OAuthEndpointError).oauthErrorCode).toBe(
+        'invalid_grant',
+      );
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 400,
+          contentType: 'application/json',
+          text: JSON.stringify({
+            error: 'invalid_grant',
+            error_description: 'refresh token expired',
+          }),
+        }),
+      );
+
+      const jsonError = await authProvider
+        .refreshAccessToken(
+          mockConfig,
+          'expired_refresh_token',
+          'https://auth.example.com/token',
+        )
+        .catch((error: unknown) => error);
+
+      expect(jsonError).toBeInstanceOf(OAuthEndpointError);
+      expect((jsonError as OAuthEndpointError).oauthErrorCode).toBe(
+        'invalid_grant',
+      );
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 503,
+          contentType: 'text/html',
+          text: '<html>invalid_grant mentioned in prose</html>',
+        }),
+      );
+
+      const proseError = await authProvider
+        .refreshAccessToken(
+          mockConfig,
+          'some_refresh_token',
+          'https://auth.example.com/token',
+        )
+        .catch((error: unknown) => error);
+
+      expect(proseError).toBeInstanceOf(OAuthEndpointError);
+      expect((proseError as OAuthEndpointError).oauthErrorCode).toBeNull();
+    });
   });
 
   describe('getValidToken', () => {
@@ -924,7 +994,7 @@ describe('MCPOAuthProvider', () => {
           ok: false,
           status: 400,
           contentType: 'application/x-www-form-urlencoded',
-          text: 'error=invalid_request&error_description=Invalid refresh token',
+          text: 'error=invalid_grant&error_description=Refresh token revoked',
         }),
       );
 
@@ -941,6 +1011,221 @@ describe('MCPOAuthProvider', () => {
       expect(console.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to refresh token'),
       );
+    });
+
+    it('should keep stored credentials when refresh fails with a transient network error', async () => {
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+
+      mockFetch.mockRejectedValueOnce(
+        new TypeError('fetch failed: network is down'),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBeNull();
+      // A transient network error must not destroy the refresh token; the
+      // next call should be able to retry the refresh.
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should keep stored credentials when the token endpoint returns a server error', async () => {
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 503,
+          contentType: 'text/plain',
+          text: 'Service Unavailable',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should keep credentials when invalid_grant appears only in the error description', async () => {
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+
+      // Structured code is temporarily_unavailable; the literal string
+      // invalid_grant only appears inside the human description. The
+      // deletion decision must compare the structured code exactly.
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 503,
+          contentType: 'application/x-www-form-urlencoded',
+          text: 'error=temporarily_unavailable&error_description=invalid_grant+validation+unavailable',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should keep credentials when a 5xx body merely mentions invalid_grant in prose', async () => {
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 503,
+          contentType: 'text/html',
+          text: '<html><body>invalid_grant validation unavailable, retry later</body></html>',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should remove credentials for a structured invalid_grant code in a JSON error body', async () => {
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 400,
+          contentType: 'application/json',
+          text: JSON.stringify({
+            error: 'invalid_grant',
+            error_description: 'refresh token expired',
+          }),
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBeNull();
+      expect(tokenStorage.deleteCredentials).toHaveBeenCalledWith(
+        'test-server',
+      );
+    });
+
+    it('should keep credentials for other structured OAuth error codes', async () => {
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: false,
+          status: 401,
+          contentType: 'application/x-www-form-urlencoded',
+          text: 'error=invalid_client&error_description=Client+authentication+failed',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
     });
 
     it('should return null for token without refresh capability', async () => {
