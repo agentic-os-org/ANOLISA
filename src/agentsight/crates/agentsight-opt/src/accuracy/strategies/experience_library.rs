@@ -113,7 +113,7 @@ impl ExperienceLibraryStrategy {
         // order; the signal list fed to the LLM (and any lesson derived from
         // it) then differed between runs of the same trace. Break ties by
         // cluster key.
-        clusters.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+        clusters.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
         for ((name, cmd), (n, first_id)) in clusters {
             let cmd_short: String = cmd.chars().take(80).collect();
             signals.push(Signal {

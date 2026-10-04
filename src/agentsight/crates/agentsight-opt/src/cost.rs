@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::atif::{AtifStep, AtifTrajectory, observation_result_is_error};
+use crate::atif::{observation_result_is_error, AtifStep, AtifTrajectory};
 use crate::types::{
     CostFinding, CostHeadroom, CostRatioMetrics, CostSegment, CostStats, LlmCall,
     RedundantCallGroup, TurnLedgerRow, WasteCandidate, WasteCandidateSet,
@@ -1129,7 +1129,7 @@ pub(crate) fn extract_waste_candidates_from(
     // inputs. The agent-step ordinal is the replay step index. (Backtrack
     // signals live in the turn ledger, keyed by the same ordinal.)
     let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
-    // (first replay turn, replays, tokens, snippet)
+                                                                            // (first replay turn, replays, tokens, snippet)
     let mut user_inputs: Vec<(usize, usize, usize, String)> = Vec::new();
 
     let mut turn_idx: i64 = -1;

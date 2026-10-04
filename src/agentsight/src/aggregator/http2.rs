@@ -2138,7 +2138,8 @@ mod tests {
             (b":method".to_vec(), b"POST".to_vec()),
             (b"content-type".to_vec(), b"application/json".to_vec()),
         ];
-        let req_initial = req_encoder.encode(req_initial_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let req_initial =
+            req_encoder.encode(req_initial_headers.iter().map(|(n, v)| (&n[..], &v[..])));
         let req_trailers_headers = [(b"x-request-checksum".to_vec(), b"def".to_vec())];
         let req_trailers =
             req_encoder.encode(req_trailers_headers.iter().map(|(n, v)| (&n[..], &v[..])));
@@ -2189,7 +2190,11 @@ mod tests {
             create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2200),
         )]);
 
-        assert_eq!(completed.len(), 1, "trailers END_STREAM completes the stream");
+        assert_eq!(
+            completed.len(),
+            1,
+            "trailers END_STREAM completes the stream"
+        );
         let stream = &completed[0];
         assert_eq!(
             stream.content_encoding().as_deref(),
