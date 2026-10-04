@@ -164,6 +164,24 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
 
         let (frontmatter, body) = parse_frontmatter(&content);
 
+        let exported = ExportedMemory {
+            path: rel_path.clone(),
+            frontmatter: frontmatter.clone(),
+            content: body,
+        };
+
+        // Tasks travel with the archive whenever `include_tasks` is set: a
+        // task's frontmatter has no `category`/`source` field, so applying
+        // those fact-metadata filters to it dropped the whole task inventory
+        // from a filtered export (and the subsequent import into a fresh
+        // store lost it while reporting success).
+        if rel_path.starts_with("tasks/") {
+            if filter.include_tasks {
+                tasks.push(exported);
+            }
+            continue;
+        }
+
         // Apply category filter
         if let Some(ref cat) = filter.category {
             let entry_cat = frontmatter.get("category").cloned().unwrap_or_default();
@@ -182,28 +200,15 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             }
         }
 
-        let exported = ExportedMemory {
-            path: rel_path.clone(),
-            frontmatter: frontmatter.clone(),
-            content: body,
-        };
-
-        // Separate tasks from regular memories
-        if rel_path.starts_with("tasks/") {
-            if filter.include_tasks {
-                tasks.push(exported);
-            }
-        } else {
-            // Update stats
-            if let Some(cat) = frontmatter.get("category") {
-                *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
-            }
-            if let Some(src) = frontmatter.get("source") {
-                *stats.by_source.entry(src.clone()).or_insert(0) += 1;
-            }
-            stats.total_bytes += content.len() as u64;
-            memories.push(exported);
+        // Update stats
+        if let Some(cat) = frontmatter.get("category") {
+            *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
         }
+        if let Some(src) = frontmatter.get("source") {
+            *stats.by_source.entry(src.clone()).or_insert(0) += 1;
+        }
+        stats.total_bytes += content.len() as u64;
+        memories.push(exported);
     }
 
     let agent_id = std::env::var("MCP_CLIENT_NAME").unwrap_or_else(|_| "unknown".into());
