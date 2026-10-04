@@ -401,7 +401,12 @@ impl GenAISqliteStore {
         let range_ns = end_ns.saturating_sub(start_ns).max(1);
         // SQLite evaluates x/0 as NULL, which would collapse every row into
         // one NULL bucket and make bucket_start_ns unreadable as an integer.
-        let bucket_ns = (range_ns / bucket_count as i64).max(1);
+        // Round the width UP: floor division lets the last bucket index reach
+        // range_ns / bucket_ns >= bucket_count (up to ~2x when the span is
+        // just under twice the requested count), so callers got more buckets
+        // than they asked for. With ceil, every index stays < bucket_count.
+        let bucket_ns = range_ns.saturating_add(bucket_count as i64 - 1) / bucket_count as i64;
+        let bucket_ns = bucket_ns.max(1);
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -484,7 +489,12 @@ impl GenAISqliteStore {
         let range_ns = end_ns.saturating_sub(start_ns).max(1);
         // SQLite evaluates x/0 as NULL, which would collapse every row into
         // one NULL bucket and make bucket_start_ns unreadable as an integer.
-        let bucket_ns = (range_ns / bucket_count as i64).max(1);
+        // Round the width UP: floor division lets the last bucket index reach
+        // range_ns / bucket_ns >= bucket_count (up to ~2x when the span is
+        // just under twice the requested count), so callers got more buckets
+        // than they asked for. With ceil, every index stays < bucket_count.
+        let bucket_ns = range_ns.saturating_add(bucket_count as i64 - 1) / bucket_count as i64;
+        let bucket_ns = bucket_ns.max(1);
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 

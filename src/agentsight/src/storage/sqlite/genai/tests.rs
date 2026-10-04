@@ -387,6 +387,40 @@ fn test_get_token_timeseries_returns_buckets() {
 }
 
 #[test]
+fn test_get_token_timeseries_respects_requested_bucket_count() {
+    // A span of 5 steps over 3 buckets floors bucket_ns to 5*STEP/3, and the
+    // calls at offsets 0..5 land in indices 0,0,1,1,2,3 - four buckets for a
+    // request of three. The width must be rounded up so the count cannot
+    // exceed the parameter.
+    let (store, path) = create_populated_store("ts_bucket_cap");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 5 * STEP_NS, None, 3)
+        .unwrap();
+    assert!(
+        r.len() <= 3,
+        "requested 3 buckets, got {}: {:?}",
+        r.len(),
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_model_timeseries_respects_requested_bucket_count() {
+    let (store, path) = create_populated_store("mts_bucket_cap");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 5 * STEP_NS, None, 3)
+        .unwrap();
+    let distinct: std::collections::HashSet<i64> = r.iter().map(|b| b.bucket_start_ns).collect();
+    assert!(
+        distinct.len() <= 3,
+        "requested 3 buckets, got {}",
+        distinct.len()
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_token_timeseries_empty_range() {
     let (store, path) = create_populated_store("ts_empty");
     let r = store.get_token_timeseries(0, 1, None, 1).unwrap();
