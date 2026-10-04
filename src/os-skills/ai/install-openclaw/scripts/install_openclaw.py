@@ -520,6 +520,14 @@ def preflight_model_call(args, metadata):
     print("  [OK] API key, baseUrl, and model id accepted by endpoint")
 
 
+def _restrict_to_owner(path) -> None:
+    """Best-effort owner-only mode for files that contain credentials."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # e.g. filesystems that do not support POSIX modes
+
+
 def apply_config(config, config_path, *, dry_run=False):
     print("\n--- Writing OpenClaw config ---\n")
     if dry_run:
@@ -543,11 +551,15 @@ def apply_config(config, config_path, *, dry_run=False):
     if config_path.exists():
         backup_path = config_path.with_name(config_path.name + ".bak")
         backup_path.write_bytes(config_path.read_bytes())
+        # The backup holds the previous API key; keep it owner-only as well.
+        _restrict_to_owner(backup_path)
 
     tmp_path = config_path.with_name(config_path.name + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as fh:
         json.dump(merged, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
+    # The config contains the Model Studio API key in cleartext.
+    _restrict_to_owner(tmp_path)
     os.replace(tmp_path, config_path)
 
     for key in config:
@@ -1106,6 +1118,8 @@ def clear_cached_operator_device_auth(args):
         with tmp_path.open("w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
+        # Device auth holds operator tokens; keep the replacement owner-only.
+        _restrict_to_owner(tmp_path)
         os.replace(tmp_path, path)
         print(f"  cleared cached operator device auth: {path}")
 
