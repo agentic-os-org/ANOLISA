@@ -224,6 +224,25 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             dv.set("sqref", new)
             changes += 1
 
+    # 6. Worksheet-level <autoFilter ref="...">, <sortState ref="..."> and
+    # <sortCondition ref="...">. They select rows just like a table's copies
+    # (handled by process_table), so a stale range silently drops shifted rows
+    # from the filter/sort scope.
+    for element in root.iter():
+        if element.tag not in (
+            _tag("autoFilter"),
+            _tag("sortState"),
+            _tag("sortCondition"),
+        ):
+            continue
+        old = element.get("ref", "")
+        if not old:
+            continue
+        new = shift_sqref(old, at, delta)
+        if new != old:
+            element.set("ref", new)
+            changes += 1
+
     if changes > 0:
         _write_tree(tree, path)
     return changes
