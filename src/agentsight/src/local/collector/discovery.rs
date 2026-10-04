@@ -419,24 +419,53 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
 }
 
 /// Strip `<system-reminder>...</system-reminder>` blocks from text.
+///
+/// A reminder may open and close on the same line, and a line may carry text
+/// outside the tags; only the block itself is removed. Lines that hold
+/// nothing but reminder content are dropped whole, so a multi-line reminder
+/// leaves no blank gap behind.
 fn strip_system_context(text: &str) -> String {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+
     let mut result = String::new();
     let mut in_reminder = false;
     for line in text.lines() {
-        if line.contains("<system-reminder>") {
-            in_reminder = true;
-            continue;
-        }
-        if line.contains("</system-reminder>") {
-            in_reminder = false;
-            continue;
-        }
-        if !in_reminder {
-            if !result.is_empty() {
-                result.push('\n');
+        let mut rest = line;
+        let mut kept = String::new();
+        let mut saw_reminder = in_reminder;
+        while !rest.is_empty() {
+            if in_reminder {
+                saw_reminder = true;
+                match rest.find(CLOSE) {
+                    Some(idx) => {
+                        in_reminder = false;
+                        rest = &rest[idx + CLOSE.len()..];
+                    }
+                    None => break,
+                }
+            } else {
+                match rest.find(OPEN) {
+                    Some(idx) => {
+                        kept.push_str(&rest[..idx]);
+                        saw_reminder = true;
+                        in_reminder = true;
+                        rest = &rest[idx + OPEN.len()..];
+                    }
+                    None => {
+                        kept.push_str(rest);
+                        break;
+                    }
+                }
             }
-            result.push_str(line);
         }
+        if saw_reminder && kept.is_empty() {
+            continue;
+        }
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&kept);
     }
     result.trim().to_string()
 }
@@ -493,6 +522,19 @@ mod tests {
     fn test_strip_system_context_multiline_reminder() {
         let text = "before\n<system-reminder>\nline1\nline2\n</system-reminder>\nafter";
         assert_eq!(strip_system_context(text), "before\nafter");
+    }
+
+    #[test]
+    fn test_strip_system_context_inline_reminder_keeps_later_lines() {
+        // A reminder can open and close on the same line. The closing tag
+        // must end the block, not leave the rest of the message stripped.
+        let text = "real question\n<system-reminder>ignore me</system-reminder>\nfollow-up detail";
+        assert_eq!(strip_system_context(text), "real question\nfollow-up detail");
+
+        assert_eq!(
+            strip_system_context("<system-reminder>note</system-reminder>after"),
+            "after"
+        );
     }
 
     #[test]
