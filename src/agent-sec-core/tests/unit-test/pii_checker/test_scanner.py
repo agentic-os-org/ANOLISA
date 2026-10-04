@@ -47,6 +47,21 @@ def test_cn_id_with_lowercase_x_is_detected():
     assert "cn_id" in _types(result)
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "id=0000000000000000",
+        "pad 0000 0000 0000 0000 z",
+    ),
+)
+def test_zero_filled_digit_runs_are_not_credit_cards(text):
+    result = _scan(text, redact_output=True)
+
+    assert result["verdict"] == "pass"
+    assert "credit_card" not in _types(result)
+    assert result["redacted_text"] == text
+
+
 def test_credentials_are_deny():
     token = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."

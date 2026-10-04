@@ -16,6 +16,10 @@ def luhn_check(value: str) -> bool:
     digits = [int(ch) for ch in re.sub(r"\D", "", value)]
     if len(digits) < 13 or len(digits) > 19:
         return False
+    # Zero-filled placeholders satisfy the checksum but do not identify a
+    # payment card. The native engine rejects them too.
+    if all(digit == 0 for digit in digits):
+        return False
 
     total = 0
     parity = len(digits) % 2

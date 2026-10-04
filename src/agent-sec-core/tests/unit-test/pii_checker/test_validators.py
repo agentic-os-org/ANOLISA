@@ -31,6 +31,20 @@ def test_luhn_invalid_card():
     assert not luhn_check("4111 1111 1111 1112")
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        "0000000000000",
+        "0000 0000 0000 0000",
+        "0000000000000000000",
+        "０" * 16,
+    ),
+)
+def test_luhn_rejects_zero_filled_placeholders(value):
+    # Zero runs satisfy the checksum but are padding, not payment cards.
+    assert not luhn_check(value)
+
+
 def test_cn_id_valid_checksum_and_date():
     assert validate_cn_id("11010519491231002X")
 
