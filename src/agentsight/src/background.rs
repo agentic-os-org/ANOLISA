@@ -471,7 +471,6 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst), "flag set on activation");
     }
 
-    #[test]
     /// A path change on an already-active exporter needs no account id: the
     /// exporter exists and reads the process-global dynamic path.
     #[test]
@@ -498,6 +497,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn test_decide_sls_reactivation() {
         let flag = AtomicBool::new(true); // already active
         let action = decide_sls_config_change(Some(Some("/p2.log".into())), &flag, "ecs-uid");
