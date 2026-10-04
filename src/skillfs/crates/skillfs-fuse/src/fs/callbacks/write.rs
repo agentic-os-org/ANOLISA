@@ -349,6 +349,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,

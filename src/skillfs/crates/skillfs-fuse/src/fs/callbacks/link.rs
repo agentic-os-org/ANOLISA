@@ -263,6 +263,15 @@ impl SkillFs {
             return;
         }
 
+        // I4/H3: reject symlink creation on hidden skills unless the
+        // path matches the post-publish grace whitelist — the same gate
+        // `create`/`unlink`/`rename` apply, so a hidden skill cannot be
+        // given new directory entries through `symlink`.
+        if self.should_reject_hidden_write(&skill_name, Some(&relative_path)) {
+            reply.error(libc::ENOENT);
+            return;
+        }
+
         // T2 default policy: only **relative** same-skill symlink targets
         // are accepted. Absolute targets are rejected even when they land
         // inside the same skill — in non-in-place mounts an absolute
@@ -619,6 +628,18 @@ impl SkillFs {
             Some(format!("dst={}", new_path_str)),
         ) {
             reply.error(errno);
+            return;
+        }
+
+        // I4/H3: reject hardlinks whose source or destination belongs
+        // to a hidden skill unless grace-allowed — the same gate the
+        // other mutating callbacks apply, so a hidden skill cannot be
+        // given new directory entries (or have its files linked out)
+        // through `link`.
+        if self.should_reject_hidden_write(&src_skill, Some(&src_rel))
+            || self.should_reject_hidden_write(&dst_skill, Some(&dst_rel))
+        {
+            reply.error(libc::ENOENT);
             return;
         }
 

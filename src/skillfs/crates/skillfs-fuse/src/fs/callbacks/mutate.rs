@@ -301,6 +301,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,
@@ -486,6 +489,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillDir { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, None)
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,
@@ -495,6 +501,10 @@ impl SkillFs {
                     skill_name,
                     Some(relative_path),
                 ),
+                PathType::NestedSkillDir {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(category, skill_name, None),
                 _ => false,
             };
             if reject {
@@ -776,7 +786,37 @@ impl SkillFs {
 
         // I4/H3: reject renames on hidden skills unless both sides
         // match the post-publish grace whitelist.
-        for pt in [&old_path_type, &new_path_type] {
+        //
+        // I2 carve-out: a staging-root → skill-dir rename is the
+        // install-completion mechanism. The destination name is
+        // usually still ledger-hidden at rename time (the resolver has
+        // not seen the new skill yet), so the hidden gate must not
+        // fire on either side of that rename — the post-publish grace
+        // session started right after the rename is what gates
+        // follow-up mutations. (The staging validation block below
+        // re-derives the same shape for its own checks.)
+        let staging_install_rename = matches!(
+            (&old_path_type, &new_path_type),
+            (
+                PathType::SkillDir { skill_name: old_name },
+                PathType::SkillDir { .. },
+            ) if self.is_staging_skill_root(old_name)
+        ) || matches!(
+            (&old_path_type, &new_path_type),
+            (
+                PathType::NestedSkillDir { skill_name: old_skill, .. },
+                PathType::NestedSkillDir { .. },
+            ) if self.is_staging_skill_root(old_skill)
+        );
+        // Hidden *sources* are always rejected, and so are hidden
+        // *targets that already exist on disk*. A target side that
+        // does not physically exist is the whole-skill rename /
+        // store-sync flow: the new name has no resolver entry yet,
+        // which `should_reject_hidden_write` would misread as
+        // `Hidden` (a missing entry resolves hidden), so the free
+        // target is only rejected when a physical skill directory is
+        // actually being renamed onto.
+        for (is_target_side, pt) in [(false, &old_path_type), (true, &new_path_type)] {
             let reject = match pt {
                 PathType::Passthrough {
                     skill_name,
@@ -784,6 +824,13 @@ impl SkillFs {
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
                 PathType::SkillMd { skill_name } => {
                     self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::SkillDir { skill_name } => {
+                    !staging_install_rename
+                        && self.should_reject_hidden_write(skill_name, None)
+                        && (!is_target_side
+                            || std::fs::symlink_metadata(self.skill_physical_dir(skill_name))
+                                .is_ok())
                 }
                 PathType::NestedPassthrough {
                     category,
@@ -802,6 +849,13 @@ impl SkillFs {
                     skill_name,
                     Some(Path::new("SKILL.md")),
                 ),
+                PathType::NestedSkillDir {
+                    category,
+                    skill_name,
+                } => {
+                    !staging_install_rename
+                        && self.should_reject_hermes_nested_hidden_write(category, skill_name, None)
+                }
                 _ => false,
             };
             if reject {
