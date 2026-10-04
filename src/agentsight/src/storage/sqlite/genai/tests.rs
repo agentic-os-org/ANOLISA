@@ -973,6 +973,71 @@ fn test_list_agent_names() {
 }
 
 #[test]
+fn test_list_agent_names_merges_case_variants() {
+    // The agent-names list feeds the dashboard's agent filter, and every
+    // agent-filtered query matches case-insensitively, so case variants of
+    // one agent must be a single entry — two spellings offered the same agent
+    // twice while every other view (latency, timeseries, savings) merges it.
+    let (store, path) = create_populated_store("agent_names_case");
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+                   provider, model, input_tokens, output_tokens, total_tokens,\
+                   session_id, trace_id, conversation_id, agent_name, pid,\
+                   status, tool_call_ids, event_json, process_name, user_query\
+                   ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+                   ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18)";
+        for (call_id, agent, start) in [
+            ("case-1", "Qoder", BASE_NS),
+            ("case-2", "qoder", BASE_NS + STEP_NS),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    start,
+                    start + STEP_NS,
+                    STEP_NS,
+                    "openai",
+                    "gpt-4",
+                    10_i64,
+                    10_i64,
+                    20_i64,
+                    "sess-case",
+                    "trace-case",
+                    "conv-case",
+                    agent,
+                    100_i32,
+                    "complete",
+                    None::<&str>,
+                    "proc-case",
+                    None::<&str>
+                ],
+            )
+            .unwrap();
+        }
+    }
+    let names = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .unwrap();
+    let qoder_entries: Vec<&String> = names
+        .iter()
+        .filter(|n| n.eq_ignore_ascii_case("qoder"))
+        .collect();
+    assert_eq!(
+        qoder_entries.len(),
+        1,
+        "case variants of one agent must be a single filter entry: {names:?}"
+    );
+    assert_eq!(qoder_entries[0].as_str(), "Qoder", "stable MIN spelling");
+    // The pre-existing rows keep their entries.
+    assert!(names.contains(&"agent-a".to_string()));
+    assert!(names.contains(&"agent-b".to_string()));
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_lookup_session_for_pid() {
     let (store, path) = create_populated_store("lookup_pid");
     assert_eq!(

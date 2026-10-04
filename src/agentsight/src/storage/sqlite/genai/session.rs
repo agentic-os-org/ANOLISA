@@ -489,7 +489,11 @@ impl GenAISqliteStore {
         Ok(rows)
     }
 
-    /// List all distinct agent_name values observed in the given time window.
+    /// List the distinct agent labels observed in the given time window,
+    /// merging case variants of one agent into a single entry (the filter
+    /// consumers pass to every other agent-scoped query, which all match
+    /// case-insensitively). The reported spelling is the group's `MIN`, the
+    /// same stable-spelling rule `get_agent_token_summary` uses.
     pub fn list_agent_names(
         &self,
         start_ns: i64,
@@ -497,11 +501,12 @@ impl GenAISqliteStore {
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT agent_name
+            "SELECT MIN(agent_name) AS agent_name
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND agent_name IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
+             GROUP BY agent_name COLLATE NOCASE
              ORDER BY agent_name ASC",
         )?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| row.get::<_, String>(0))?;
