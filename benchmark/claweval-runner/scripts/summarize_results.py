@@ -216,7 +216,9 @@ def build_table(data, reports: dict | None = None):
 
         trials = task.get("trials", [])
         for i, trial in enumerate(trials, 1):
-            trace_field = trial.get("trace", "")
+            # ce_runner.batch_runner writes "trace_file"; native claw-eval
+            # writes "trace". Join on whichever the trial carries.
+            trace_field = trial.get("trace") or trial.get("trace_file", "")
             trace_basename = os.path.basename(trace_field) if trace_field else ""
             trial_hash = extract_trial_hash(trace_field)
             # Look up report by basename (e.g. M001_clock_xxxx.jsonl)
