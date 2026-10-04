@@ -812,7 +812,7 @@ impl BackendSpawner for BubblewrapSpawner {
     }
 
     async fn probe(&self, binary_path: &Path) -> Result<bool> {
-        Ok(binary_path.is_file())
+        Ok(executable_regular_file(binary_path))
     }
 
     async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &OwnedRunDir) -> Result<()> {
@@ -1489,6 +1489,31 @@ pub(super) async fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// Whether `path` names a regular file the daemon may execute.
+///
+/// Backend probes use this instead of a bare existence check so a configured
+/// path whose execute permission was withdrawn — or that was replaced by a
+/// non-executable file — is skipped at startup, exactly like a missing binary.
+/// Such a backend cannot start a sandbox at all, so selecting it would turn
+/// every create request into a `500` instead of the documented fallback.
+pub(super) fn executable_regular_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 pub(super) async fn record_backend_stopped(marker: &Path) -> Result<()> {
     tokio::fs::write(marker, b"stopped\n").await?;
     Ok(())
@@ -2145,6 +2170,53 @@ mod tests {
         request.request.instance_id = Uuid::new_v4();
         assert!(
             BackendSpawnRequest::new(request.request.clone(), request.run_dir.clone()).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bubblewrap_probe_rejects_a_path_it_cannot_execute() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let binary = temp.path().join("bwrap");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").expect("write backend");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644))
+            .expect("withdraw execute permission");
+
+        // A non-executable regular file cannot start a sandbox, so the probe
+        // must report the backend as unusable and let the daemon fall back
+        // instead of selecting a backend whose every create fails with 500.
+        assert!(
+            !BubblewrapSpawner
+                .probe(&binary)
+                .await
+                .expect("inspect non-executable backend"),
+            "a non-executable backend binary must not probe as usable"
+        );
+        assert!(
+            !BubblewrapSpawner
+                .probe(temp.path())
+                .await
+                .expect("inspect directory"),
+            "a directory must not probe as a usable backend binary"
+        );
+        assert!(
+            !BubblewrapSpawner
+                .probe(&temp.path().join("missing"))
+                .await
+                .expect("inspect missing path"),
+            "a missing path must not probe as usable"
+        );
+
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("restore execute permission");
+        assert!(
+            BubblewrapSpawner
+                .probe(&binary)
+                .await
+                .expect("inspect executable backend"),
+            "an executable backend binary must probe as usable"
         );
     }
 

@@ -1197,4 +1197,38 @@ backend_priority = ["bubblewrap"]
         assert!(!config.storage.images_dir.exists());
         assert!(!config.daemon.state_dir.exists());
     }
+
+    #[tokio::test]
+    async fn non_executable_bubblewrap_binary_falls_back_to_mock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let binary = temp.path().join("bwrap");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").expect("write backend");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644))
+            .expect("withdraw execute permission");
+
+        let mut config = DaemonConfig::default();
+        config
+            .backends
+            .insert(BackendKind::Bubblewrap.as_str().to_string(), binary.clone());
+
+        // `bubblewrap` passes a bare existence check, so a path whose execute
+        // permission was withdrawn used to be selected as the active backend
+        // and every create failed with `500 Permission denied` instead of the
+        // documented MockSpawner fallback.
+        let (_, active) = build_spawners(&config, false).await;
+        assert_eq!(
+            active,
+            BackendKind::Mock,
+            "a backend binary the daemon cannot execute must be skipped"
+        );
+
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("restore execute permission");
+        let (_, active) = build_spawners(&config, false).await;
+        assert_eq!(
+            active,
+            BackendKind::Bubblewrap,
+            "an executable backend binary must still be selected"
+        );
+    }
 }
