@@ -13,7 +13,8 @@ use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{
-    errno, mkdirat_leaf, open_dir_path, rename_noreplace, renameat2_leaf, unlinkat_leaf,
+    errno, fstatat_leaf, mkdirat_leaf, open_dir_path, rename_noreplace, renameat2_leaf,
+    unlinkat_leaf,
 };
 
 /// Which source directory a skill-dir rename addresses, and therefore
@@ -1163,6 +1164,20 @@ impl SkillFs {
             "rename"
         );
 
+        // POSIX rename(2) over hard links to the same backing object is a
+        // successful no-op: both directory entries survive. Detect it by
+        // object identity BEFORE the physical rename (the old path is gone
+        // afterwards in every other case), because the post-rename inode
+        // surgery below would otherwise evict the replaced name's mapping
+        // even though that path is still live.
+        let hardlink_noop = match (
+            backing_object_identity(&old_physical),
+            backing_object_identity(&new_physical),
+        ) {
+            (Some(old_id), Some(new_id)) => old_id == new_id,
+            _ => false,
+        };
+
         let rename_result = if no_replace {
             rename_noreplace(&old_physical, &new_physical)
         } else {
@@ -1199,6 +1214,28 @@ impl SkillFs {
 
         match rename_result {
             Ok(()) => {
+                if hardlink_noop {
+                    // Same backing object: the physical rename was a no-op
+                    // and both directory entries still resolve. Record the
+                    // syscall for the audit trail and leave the inode map,
+                    // store, staging notify, and mutation observe untouched
+                    // — nothing on disk moved.
+                    debug!(
+                        old = %old_path, new = %new_path,
+                        "rename: same-object hard link, mappings untouched"
+                    );
+                    self.emit_event(
+                        SkillEvent::new(SkillEventKind::Rename)
+                            .with_optional_skill_name(event_skill)
+                            .with_optional_relative_path(event_relative)
+                            .with_action(SkillEventAction::Allowed)
+                            .with_caller(req.uid(), req.gid())
+                            .with_detail(new_path.clone()),
+                    );
+                    reply.ok();
+                    return;
+                }
+
                 // Update inode mappings.
                 self.inodes.rename_path(&old_path, &new_path);
 
@@ -1610,6 +1647,44 @@ fn enforce_skill_discover_readonly(path_type: &PathType) -> Option<i32> {
     }
 }
 
+/// `(dev, ino)` identity of a physical path, with the long-path fallback.
+///
+/// rename(2) over hard links to one object is a POSIX no-op: both names
+/// survive and the kernel reports success, so the inode-map surgery that
+/// a real replacement needs must not run. The kernel's VFS short-circuits
+/// same-inode renames before they reach FUSE, but SkillFS assigns
+/// per-path FUSE inodes to hard links, so a rename whose two names hold
+/// *distinct* FUSE inodes CAN reach this daemon with a single backing
+/// object — the caller must recognize it by identity, and the old path is
+/// gone after the rename, so the probe runs before it.
+///
+/// When the leaf's absolute path exceeds `PATH_MAX`, the plain
+/// `symlink_metadata` fails with `ENAMETOOLONG` even though the parent
+/// directory still opens and `fstatat` with just the leaf component
+/// succeeds — the same shape the rename fallback in `rename_impl` relies
+/// on for the physical rename itself. The identity probe must take that
+/// same shape: without the fallback, a same-object rename whose paths
+/// exceed `PATH_MAX` was misclassified as a replace (the metadata error
+/// fell into "different objects"), the physical rename then succeeded
+/// through the dirfd fallback as a POSIX no-op, and the inode surgery
+/// evicted a still-live alias's mapping.
+fn backing_object_identity(physical: &Path) -> Option<(u64, u64)> {
+    match std::fs::symlink_metadata(physical) {
+        Ok(meta) => {
+            use std::os::unix::fs::MetadataExt;
+            Some((meta.dev(), meta.ino()))
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+            let parent = physical.parent()?;
+            let leaf = physical.file_name()?;
+            let dir = open_dir_path(parent).ok()?;
+            let st = fstatat_leaf(&dir, leaf, false).ok()?;
+            Some((st.st_dev as u64, st.st_ino as u64))
+        }
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1700,5 +1775,142 @@ mod tests {
             "placeholder must merge the directory-name issue, got {:?}",
             entry.parse_status
         );
+    }
+
+    #[test]
+    fn same_backing_object_is_detected_for_hard_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::hard_link(&a, &b).expect("hard link a b");
+
+        let a_id = backing_object_identity(&a).expect("identity a");
+        let b_id = backing_object_identity(&b).expect("identity b");
+        assert!(a_id == b_id, "two names for one object must be recognized");
+    }
+
+    #[test]
+    fn distinct_objects_are_not_confused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let d = dir.path().join("d");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::write(&b, b"y").expect("file b");
+        std::fs::create_dir(&d).expect("dir d");
+
+        let a_id = backing_object_identity(&a).expect("identity a");
+        let b_id = backing_object_identity(&b).expect("identity b");
+        let d_id = backing_object_identity(&d).expect("identity d");
+        assert!(a_id != b_id);
+        assert!(a_id != d_id);
+    }
+
+    #[test]
+    fn a_replaced_file_is_not_the_same_object() {
+        // The ordinary replacement case: rename over an unrelated file
+        // must NOT be treated as a no-op.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::write(&b, b"y").expect("file b");
+        let a_id = backing_object_identity(&a).expect("identity a");
+        let b_id = backing_object_identity(&b).expect("identity b");
+        assert!(a_id != b_id);
+    }
+
+    /// Build a directory chain whose leaf files push the absolute path
+    /// past `PATH_MAX` while the deepest directory itself stays openable,
+    /// the exact shape the rename fallback and (now) the identity probe
+    /// must handle via parent-dir fds.
+    fn deep_dir_with_overlong_leaves(root: &Path) -> (std::path::PathBuf, String, String) {
+        let mut deep = root.to_path_buf();
+        loop {
+            let next = deep.join("d".repeat(200));
+            // Descend as deep as the directory path itself allows; the
+            // ~240-char leaves then push the file paths past PATH_MAX.
+            if next.as_os_str().len() >= libc::PATH_MAX as usize {
+                break;
+            }
+            std::fs::create_dir(&next).expect("deep mkdir");
+            deep = next;
+        }
+        let leaf_a = "s".repeat(240);
+        let leaf_b = "l".repeat(240);
+        assert!(
+            deep.join(&leaf_a).as_os_str().len() >= libc::PATH_MAX as usize,
+            "the leaf's absolute path must exceed PATH_MAX"
+        );
+        assert!(
+            deep.as_os_str().len() < libc::PATH_MAX as usize,
+            "the deepest directory must stay openable by absolute path"
+        );
+        (deep, leaf_a, leaf_b)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn identity_survives_beyond_path_max() {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deep, leaf_a, leaf_b) = deep_dir_with_overlong_leaves(dir.path());
+
+        // Create the file and its hard-link alias through the parent dir
+        // fd: the absolute paths cannot be used for that (ENAMETOOLONG).
+        let parent = open_dir_path(&deep).expect("open deep parent");
+        {
+            let mut f = crate::sys::openat_leaf(
+                &parent,
+                std::ffi::OsStr::new(&leaf_a),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+                0o644,
+            )
+            .expect("create leaf a via dirfd");
+            f.write_all(b"shared").expect("write leaf a");
+        }
+        let ca = crate::sys::cstring_from_os_str(std::ffi::OsStr::new(&leaf_a)).unwrap();
+        let cb = crate::sys::cstring_from_os_str(std::ffi::OsStr::new(&leaf_b)).unwrap();
+        let rc = unsafe {
+            libc::linkat(
+                parent.as_raw_fd(),
+                ca.as_ptr(),
+                parent.as_raw_fd(),
+                cb.as_ptr(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "linkat through the dirfd must succeed");
+
+        // Sanity: the plain absolute paths really are beyond PATH_MAX —
+        // this is the condition that used to blind the identity probe.
+        assert!(std::fs::symlink_metadata(deep.join(&leaf_a)).is_err());
+        assert!(std::fs::symlink_metadata(deep.join(&leaf_b)).is_err());
+
+        // The dirfd fallback recognizes both names as one object.
+        let a_id = backing_object_identity(&deep.join(&leaf_a))
+            .expect("identity beyond PATH_MAX for leaf a");
+        let b_id = backing_object_identity(&deep.join(&leaf_b))
+            .expect("identity beyond PATH_MAX for leaf b");
+        assert_eq!(a_id, b_id, "the alias pair must share one identity");
+
+        // And a distinct deep file is still distinguished.
+        let leaf_c = "c".repeat(240);
+        {
+            let mut f = crate::sys::openat_leaf(
+                &parent,
+                std::ffi::OsStr::new(&leaf_c),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+                0o644,
+            )
+            .expect("create leaf c via dirfd");
+            f.write_all(b"other").expect("write leaf c");
+        }
+        let c_id = backing_object_identity(&deep.join(&leaf_c))
+            .expect("identity beyond PATH_MAX for leaf c");
+        assert_ne!(a_id, c_id);
     }
 }
