@@ -345,7 +345,7 @@ pub async fn run_causal_attribution(
         "sess"
     };
     let cache_key = (
-        format!("{}:{}", scope_tag, resolved_session_id),
+        format!("{scope_tag}:{resolved_session_id}"),
         req.round_index,
     );
     if !req.force {
@@ -1256,7 +1256,7 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
             let found: Option<String> = conn
                 .query_row(sql, [incoming], |r| r.get::<_, String>(0))
                 .ok();
-            log::info!("resolver: conversation_id lookup → {:?}", found);
+            log::info!("resolver: conversation_id lookup → {found:?}");
             if found.is_some() {
                 return found;
             }
@@ -1272,13 +1272,13 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
         let found: Option<String> = conn
             .query_row(sql, [incoming], |r| r.get::<_, String>(0))
             .ok();
-        log::info!("resolver: trace_id lookup → {:?}", found);
+        log::info!("resolver: trace_id lookup → {found:?}");
         if found.is_some() {
             return found;
         }
     }
 
-    log::info!("resolver: no mapping for '{}' — passthrough", incoming);
+    log::info!("resolver: no mapping for '{incoming}' — passthrough");
     None
 }
 
@@ -1397,9 +1397,7 @@ fn probe_atif_column(
 
         for column in text_columns {
             let sample_sql = format!(
-                "SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" IS NOT NULL LIMIT 1",
-                col = column,
-                table = table,
+                "SELECT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL LIMIT 1",
             );
             let sample: Option<String> = conn
                 .query_row(&sample_sql, [], |r| r.get::<_, String>(0))
@@ -1415,17 +1413,8 @@ fn probe_atif_column(
             // typical of local trajectory stores).
             let session_column = find_session_column(&conn, &table)?;
             let rows_sql = match session_column.as_deref() {
-                Some(col) => format!(
-                    "SELECT \"{col}\" FROM \"{table}\" WHERE \"{sid_col}\" = ?1",
-                    col = column,
-                    table = table,
-                    sid_col = col,
-                ),
-                None => format!(
-                    "SELECT \"{col}\" FROM \"{table}\"",
-                    col = column,
-                    table = table,
-                ),
+                Some(col) => format!("SELECT \"{column}\" FROM \"{table}\" WHERE \"{col}\" = ?1",),
+                None => format!("SELECT \"{column}\" FROM \"{table}\"",),
             };
             let mut rows = match conn.prepare(&rows_sql) {
                 Ok(s) => s,
@@ -1678,10 +1667,7 @@ fn normalize_kind(raw: &str) -> String {
         // Fall through: keep the raw string but lowercase so the frontend's
         // defensive fallback style kicks in instead of crashing.
         other => {
-            log::warn!(
-                "causal-attribution: unknown verdict.kind {:?}, treating as ok",
-                other,
-            );
+            log::warn!("causal-attribution: unknown verdict.kind {other:?}, treating as ok",);
             "ok".to_string()
         }
     }

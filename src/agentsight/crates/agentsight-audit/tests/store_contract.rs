@@ -760,11 +760,7 @@ fn count_by_returns_one_row_per_key_when_null_and_unknown_coexist() {
         .count_by("destination_class")
         .expect("grouping should work");
     let unknown: Vec<_> = counts.iter().filter(|item| item.key == "unknown").collect();
-    assert_eq!(
-        unknown.len(),
-        1,
-        "one key must appear once, got {counts:?}"
-    );
+    assert_eq!(unknown.len(), 1, "one key must appear once, got {counts:?}");
     assert_eq!(unknown[0].count, 2);
 }
 

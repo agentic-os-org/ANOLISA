@@ -628,7 +628,10 @@ impl Http2Stream {
     /// table).
     pub fn request_headers_json(&self) -> String {
         if let Some(ref headers) = self.decoded_request_headers {
-            let decoded = headers.iter().cloned().collect::<std::collections::HashMap<_, _>>();
+            let decoded = headers
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>();
             return serde_json::to_string(&decoded).unwrap_or_default();
         }
         if let Some(ref headers) = self.request_headers {
@@ -648,7 +651,10 @@ impl Http2Stream {
     /// Prefers the stateful HPACK decode, like [`Self::request_headers_json`].
     pub fn response_headers_json(&self) -> String {
         if let Some(ref headers) = self.decoded_response_headers {
-            let decoded = headers.iter().cloned().collect::<std::collections::HashMap<_, _>>();
+            let decoded = headers
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>();
             return serde_json::to_string(&decoded).unwrap_or_default();
         }
         if let Some(ref headers) = self.response_headers {
@@ -1113,8 +1119,10 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
-                        let sse_ended =
-                            response_sse_stream_ended(strip_data_padding(frame.payload(), frame.flags));
+                        let sse_ended = response_sse_stream_ended(strip_data_padding(
+                            frame.payload(),
+                            frame.flags,
+                        ));
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() || sse_ended {
                             // Response is complete
@@ -1180,8 +1188,10 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
-                        let sse_ended =
-                            response_sse_stream_ended(strip_data_padding(frame.payload(), frame.flags));
+                        let sse_ended = response_sse_stream_ended(strip_data_padding(
+                            frame.payload(),
+                            frame.flags,
+                        ));
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() || sse_ended {
                             // Response is complete
@@ -1911,7 +1921,6 @@ mod tests {
     // --- HPACK stateful decode tests ---
 
     #[test]
-    #[test]
     fn data_frame_padding_is_not_part_of_the_body() {
         // RFC 7540 §6.1 allows DATA frames to be padded: the pad-length byte
         // and the padding bytes are framing, not body. They used to be
@@ -1944,7 +1953,9 @@ mod tests {
         // otherwise prefixes the body and the event is no longer recognised.
         let sse = Http2Stream::new(StreamId::new(connection_id, 2), 0);
         let mut padded_body = vec![1];
-        padded_body.extend_from_slice(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n");
+        padded_body.extend_from_slice(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n",
+        );
         padded_body.push(0);
         let mut stream_with_sse = sse;
         stream_with_sse.response_data_frames.push(create_test_frame(
@@ -1957,6 +1968,7 @@ mod tests {
         assert_eq!(stream_with_sse.first_output_timestamp_ns(), Some(33));
     }
 
+    #[test]
     fn test_strip_headers_framing_bare() {
         let payload = b"\x82\x86\x84";
         assert_eq!(strip_headers_framing(payload, 0x00), payload.as_slice());

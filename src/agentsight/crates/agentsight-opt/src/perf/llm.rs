@@ -17,7 +17,7 @@ use crate::types::{
 fn short_label(s: &str) -> String {
     let truncated: String = s.chars().take(20).collect();
     if s.chars().count() > 20 {
-        format!("{}…", truncated)
+        format!("{truncated}…")
     } else {
         truncated
     }
@@ -87,7 +87,7 @@ pub async fn identify_issues(
             let messages = build_strategy_prompt(&candidates, strategy, trajectory);
             let strategy_id = strategy.id;
             let strategy_name = strategy.name;
-            let label = format!("perf:{}", strategy_id);
+            let label = format!("perf:{strategy_id}");
             async move {
                 let result: std::result::Result<PerfStrategyEval, _> = client
                     .chat_json_parsed_labeled(messages, Some(&label))
@@ -138,9 +138,9 @@ pub async fn identify_issues(
         }
 
         idx += 1;
-        let sig_id = format!("sig_{}", idx);
-        let cause_id = format!("cause_{}", idx);
-        let strat_id = format!("strat_{}", idx);
+        let sig_id = format!("sig_{idx}");
+        let cause_id = format!("cause_{idx}");
+        let strat_id = format!("strat_{idx}");
 
         let saving = eval.estimated_saving_secs;
         let confidence = if eval.confidence.is_empty() {

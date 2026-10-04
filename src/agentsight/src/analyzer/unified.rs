@@ -1546,7 +1546,7 @@ mod tests {
     ) -> crate::aggregator::Http2Stream {
         let response_body = sse_chunk.map_or_else(
             || "data: [DONE]\n\n".to_string(),
-            |chunk| format!("data: {}\n\ndata: [DONE]\n\n", chunk),
+            |chunk| format!("data: {chunk}\n\ndata: [DONE]\n\n"),
         );
         build_http2_stream(
             path,

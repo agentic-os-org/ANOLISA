@@ -31,12 +31,9 @@ pub fn parse_chatml(input: &str) -> Result<ChatMLDocument> {
         let after_marker = block_start + IM_START.len();
 
         // Find the role: text from after <|im_start|> to the first newline
-        let role_end = input[after_marker..].find('\n').ok_or_else(|| {
-            anyhow!(
-                "No newline after <|im_start|> at byte offset {}",
-                block_start
-            )
-        })?;
+        let role_end = input[after_marker..]
+            .find('\n')
+            .ok_or_else(|| anyhow!("No newline after <|im_start|> at byte offset {block_start}"))?;
         let role = input[after_marker..after_marker + role_end]
             .trim()
             .to_string();
@@ -46,11 +43,7 @@ pub fn parse_chatml(input: &str) -> Result<ChatMLDocument> {
 
         // Find the matching <|im_end|>
         let end_offset = input[content_start..].find(IM_END).ok_or_else(|| {
-            anyhow!(
-                "No matching <|im_end|> for <|im_start|>{} at byte offset {}",
-                role,
-                block_start
-            )
+            anyhow!("No matching <|im_end|> for <|im_start|>{role} at byte offset {block_start}")
         })?;
         let content_end = content_start + end_offset;
 

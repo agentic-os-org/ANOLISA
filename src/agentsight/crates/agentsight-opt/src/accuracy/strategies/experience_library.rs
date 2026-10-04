@@ -112,8 +112,8 @@ impl ExperienceLibraryStrategy {
         for ((name, cmd), (n, first_id)) in clusters {
             let cmd_short: String = cmd.chars().take(80).collect();
             signals.push(Signal {
-                id: format!("repeat_cluster:{}:{}", name, cmd_short),
-                desc: format!("重复调用簇：{} `{}` 共 {} 次", name, cmd_short, n),
+                id: format!("repeat_cluster:{name}:{cmd_short}"),
+                desc: format!("重复调用簇：{name} `{cmd_short}` 共 {n} 次"),
                 first_call_id: first_id.to_string(),
             });
         }

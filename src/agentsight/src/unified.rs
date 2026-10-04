@@ -584,8 +584,7 @@ impl AgentSight {
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
-                "SLS sysom mode detected (path={}), skipping SQLite and default SLS exporter",
-                path
+                "SLS sysom mode detected (path={path}), skipping SQLite and default SLS exporter"
             );
             if logtail_currently_enabled {
                 let exporter = LogtailExporter::new_with_fixed_path(
@@ -1333,8 +1332,7 @@ impl AgentSight {
                         }
                     } else {
                         log::warn!(
-                            "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            response_id
+                            "Deferred GenAI call queued without pending_info (response_id={response_id}), crash detection blind spot remains"
                         );
                     }
                     self.pending_genai.push(PendingGenAI {

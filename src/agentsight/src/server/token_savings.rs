@@ -355,13 +355,11 @@ pub(crate) fn build_explanation(
 ) -> String {
     if category == "mcp_response" {
         format!(
-            "MCP Response Compression: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "MCP Response Compression: original {before_tokens} tokens → {after_tokens} tokens, ratio {compression_ratio:.1}%. The following {compounding_turns} LLM calls benefit, compounding to {compounded} tokens saved."
         )
     } else {
         format!(
-            "Tool Output Optimization: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "Tool Output Optimization: original {before_tokens} tokens → {after_tokens} tokens, ratio {compression_ratio:.1}%. The following {compounding_turns} LLM calls benefit, compounding to {compounded} tokens saved."
         )
     }
 }
@@ -420,7 +418,7 @@ pub(crate) fn generate_optimization_tips(
     if zero_savings_sessions > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: format!("Found {} unoptimized sessions", zero_savings_sessions),
+            title: format!("Found {zero_savings_sessions} unoptimized sessions"),
             description: "Some sessions have high consumption but no optimization records; the corresponding agents may not have tokenless enabled or make few tool calls. Check the agent configuration for these sessions.".to_string(),
         });
     }

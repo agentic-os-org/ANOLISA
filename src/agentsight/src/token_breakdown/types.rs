@@ -182,7 +182,7 @@ mod tests {
             role: "user".to_string(),
             raw_content: "Hello".to_string(),
         };
-        let debug = format!("{:?}", block);
+        let debug = format!("{block:?}");
         assert!(debug.contains("user"));
     }
 

@@ -137,8 +137,8 @@ fn process_session(
     // reject the whole file, losing every complete record before the tail.
     // Lossy decoding turns that tail into a malformed line, which
     // `load_jsonl_events` skips like any other malformed line.
-    let content = std::fs::read(&session.path)
-        .with_context(|| format!("read {}", session.path.display()))?;
+    let content =
+        std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
     let events = qoder::load_jsonl_events(&content);
     if events.is_empty() {

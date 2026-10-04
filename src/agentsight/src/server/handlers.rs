@@ -2633,11 +2633,8 @@ mod tests {
             "/sessions/any/traces?start_ns=2000&end_ns=1000",
             "/skill-metrics?start_ns=2000&end_ns=1000",
         ] {
-            let rejected = awtest::call_service(
-                &app,
-                awtest::TestRequest::get().uri(uri).to_request(),
-            )
-            .await;
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
@@ -2650,7 +2647,8 @@ mod tests {
             "/sessions?start_ns=1000&end_ns=2000",
             "/timeseries?start_ns=1000&end_ns=2000&buckets=1",
         ] {
-            let ok = awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            let ok =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(ok.status(), StatusCode::OK, "{uri}");
         }
 
@@ -2681,11 +2679,8 @@ mod tests {
             "/interruptions/session-counts?start_ns=2000&end_ns=1000",
             "/interruptions/conversation-counts?start_ns=2000&end_ns=1000",
         ] {
-            let rejected = awtest::call_service(
-                &app,
-                awtest::TestRequest::get().uri(uri).to_request(),
-            )
-            .await;
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,

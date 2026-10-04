@@ -398,8 +398,7 @@ impl HealthChecker {
                     let removed = store.remove_normal_exits();
                     if removed > 0 {
                         log::debug!(
-                            "Removed {} normal-exit entries from health store (no crash event)",
-                            removed
+                            "Removed {removed} normal-exit entries from health store (no crash event)"
                         );
                     }
                 }

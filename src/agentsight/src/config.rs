@@ -790,9 +790,7 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     std::fs::write(path, DEFAULT_AGENTS_JSON)
         .with_context(|| format!("Failed to replace outdated config at {path:?}"))?;
     log::info!(
-        "Config schema_version {:?} < {}, replaced it with defaults at {path:?} (backup at {backup:?})",
-        on_disk_version,
-        CURRENT_SCHEMA_VERSION
+        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, replaced it with defaults at {path:?} (backup at {backup:?})"
     );
     Ok(())
 }
@@ -2431,8 +2429,7 @@ mod tests {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         let custom = format!(
-            r#"{{"schema_version": {}, "features": {{"token_stats": true}}}}"#,
-            CURRENT_SCHEMA_VERSION
+            r#"{{"schema_version": {CURRENT_SCHEMA_VERSION}, "features": {{"token_stats": true}}}}"#
         );
         std::fs::write(&path, &custom).unwrap();
         ensure_default_agents_config(&path).unwrap();

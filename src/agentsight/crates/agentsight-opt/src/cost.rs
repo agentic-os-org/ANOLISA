@@ -227,9 +227,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             CostFinding {
                 severity: "high".to_string(),
                 html: format!(
-                    "<b>{}/{}</b> 个 agent 步无消息、无工具调用且无 usage（疑似采集不完整）。\
-                     体积与 token 数字仅反映用户/系统侧内容，<b>不可作为优化依据</b>。",
-                    empty_agent_steps, agent_steps
+                    "<b>{empty_agent_steps}/{agent_steps}</b> 个 agent 步无消息、无工具调用且无 usage（疑似采集不完整）。\
+                     体积与 token 数字仅反映用户/系统侧内容，<b>不可作为优化依据</b>。"
                 ),
             },
         );

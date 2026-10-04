@@ -24,7 +24,12 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
     matches!(
         reason,
         Some(
-            "stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence" | "pause_turn"
+            "stop"
+                | "tool_calls"
+                | "end_turn"
+                | "tool_use"
+                | "stop_sequence"
+                | "pause_turn"
                 | "refusal"
         )
     )

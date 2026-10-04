@@ -448,10 +448,8 @@ esac
         // whose PATH finds the fake, so the assertion covers the command the
         // recovery path actually spawns without mutating other tests' env.
         const CHILD: &str = "AGENTSIGHT_OOM_LOCALE_CHILD";
-        let fake_dir = std::env::temp_dir().join(format!(
-            "agentsight-fake-dmesg-{}",
-            std::process::id()
-        ));
+        let fake_dir =
+            std::env::temp_dir().join(format!("agentsight-fake-dmesg-{}", std::process::id()));
 
         if std::env::var_os(CHILD).is_none() {
             std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
