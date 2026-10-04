@@ -98,6 +98,20 @@ fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> 
 /// let count = count_request_tokens(&request, tokenizer.as_ref(), template.as_ref())?;
 /// println!("Total: {} tokens", count.total_tokens);
 /// ```
+/// Provider for the manual token counters, decided by the request path.
+///
+/// A host-name substring is not the path: `POST /v1/messages` is Anthropic
+/// even though it never spells "anthropic", and an Anthropic request through a
+/// proxy carries no such word at all. The path-based detection the message
+/// parser uses is authoritative; anything unrecognised stays OpenAI.
+fn manual_provider_from_path(path: &str) -> &'static str {
+    match crate::analyzer::message::MessageParser::detect_provider(path) {
+        Some("anthropic") => "anthropic",
+        Some("sysom") => "sysom",
+        _ => "openai",
+    }
+}
+
 pub fn count_request_tokens(
     request_json: &serde_json::Value,
     tokenizer: &LlmTokenizer,
@@ -867,11 +881,7 @@ impl Analyzer {
         };
 
         // Extract provider from path
-        let provider = if path.contains("anthropic") {
-            "anthropic"
-        } else {
-            "openai"
-        };
+        let provider = manual_provider_from_path(&path);
 
         // Count input tokens from request messages using chat template. The
         // same parser as `count_request_tokens`: OpenAI chat completions,
@@ -1300,12 +1310,7 @@ impl Analyzer {
             .to_string();
 
         // Extract provider from path
-        let provider = if path.contains("anthropic") {
-            "anthropic"
-        } else {
-            "openai"
-        }
-        .to_string();
+        let provider = manual_provider_from_path(&path).to_string();
 
         // Count request tokens
         let request_count = count_request_tokens(request_json_ref, tokenizer, chat_template)?;
@@ -1337,6 +1342,22 @@ impl Analyzer {
 
 #[cfg(test)]
 mod tests {
+    /// The manual counters labelled every `/v1/messages` call openai, and
+    /// `billed_input_tokens` only adds cache counters for Anthropic, so those
+    /// records under-reported their cache usage.
+    #[test]
+    fn manual_provider_follows_the_path_not_the_host_name() {
+        assert_eq!(manual_provider_from_path("/v1/messages"), "anthropic");
+        assert_eq!(
+            manual_provider_from_path("https://api.anthropic.com/v1/messages"),
+            "anthropic"
+        );
+        assert_eq!(manual_provider_from_path("/proxy/v1/messages"), "anthropic");
+        assert_eq!(manual_provider_from_path("/v1/chat/completions"), "openai");
+        assert_eq!(manual_provider_from_path("/v1/responses"), "openai");
+        assert_eq!(manual_provider_from_path("/anything"), "openai");
+    }
+
     use super::*;
     use crate::probes::sslsniff::SslEvent;
     use std::rc::Rc;
