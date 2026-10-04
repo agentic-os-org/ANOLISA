@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `install-qwencode` skill for installing Qwen Code (qwen CLI)
+  from npm and wiring the Tokenless extension into it: node 22+/npm/python3
+  preflight, qwen lookup across the adapter's PATH, tokenless and rtk runtime
+  readiness checks, `anolisa adapter enable tokenless qwencode` registration
+  with npm-fallback to the adapter's own install script, and
+  `qwen extensions list` verification. (#1293)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

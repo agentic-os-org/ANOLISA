@@ -9,6 +9,14 @@
 
 ## [未发布]
 
+### 新增
+
+- 新增 `install-qwencode` 技能，覆盖 Qwen Code（qwen CLI）安装与 Tokenless
+  扩展接入：npm 官方包安装（Node 22+ 预检）、适配器 PATH 探测 qwen、
+  tokenless/rtk 就绪检查、`anolisa adapter enable tokenless qwencode` 注册
+  （npm 直装时回退到适配器自带安装脚本）以及 `qwen extensions list` 验证。
+  （#1293）
+
 ## [0.6.3] - 2026-08-21
 
 ### 修复

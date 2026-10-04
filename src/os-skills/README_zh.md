@@ -22,6 +22,7 @@
 - **install-claude-code** — 安装和配置 Claude Code IDE
 - **install-qwenpaw** — 部署 QwenPaw AI 助手（支持钉钉集成）
 - **install-openclaw** — 安装和配置 OpenClaw
+- **install-qwencode** — 安装 Qwen Code CLI 并接入 Tokenless 扩展
 - **install-tokenless** — 安装和配置 Tokenless（LLM token 优化）
 - **qwenpaw-usage** — QwenPaw 使用指南
 - **setup-mcp** — 在 Copilot Shell 中配置 MCP 服务器
