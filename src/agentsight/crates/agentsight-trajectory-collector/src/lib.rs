@@ -264,6 +264,53 @@ mod tests {
     }
 
     #[test]
+    fn test_process_session_settles_when_one_session_has_two_paths() {
+        // One session id discovered under two roots (e.g. a Codex rollout
+        // under `.codex/sessions` and `.codex/archived_sessions`): the
+        // session_id primary key keeps a single row whose file_path is
+        // rewritten by whichever path ingests last. Both paths must still
+        // settle — before the fix neither path's state matched on the next
+        // round, so both files were fully re-read and re-upserted (churning
+        // collected_at_ns) on every scan round.
+        let base = tmp_dir("dual-path");
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let first = write_session(&projects);
+
+        let archive = base.join("archived-sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        let second = archive.join(format!("{UUID_A}.jsonl"));
+        std::fs::copy(&first, &second).unwrap();
+
+        let discovered = |path: PathBuf| DiscoveredSession {
+            path,
+            project: "data-myapp".into(),
+            session_id: UUID_A.into(),
+            is_subagent: false,
+            source: "qoder".into(),
+        };
+        let s1 = discovered(first);
+        let s2 = discovered(second);
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        // Round 1: both paths are new and get ingested.
+        assert!(process_session(&store, &s1, 0).unwrap());
+        assert!(process_session(&store, &s2, 0).unwrap());
+        assert_eq!(store.count().unwrap(), 1, "one row per session id");
+
+        // Round 2: unchanged files on both paths are skipped.
+        assert!(
+            !process_session(&store, &s1, 0).unwrap(),
+            "unchanged first path must not re-ingest"
+        );
+        assert!(
+            !process_session(&store, &s2, 0).unwrap(),
+            "unchanged second path must not re-ingest"
+        );
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
     fn test_scan_once_ingests_and_skips_unchanged() {
         let base = tmp_dir("scan");
         let projects = base.join("projects");

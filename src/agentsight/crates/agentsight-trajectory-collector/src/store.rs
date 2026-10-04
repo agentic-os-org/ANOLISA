@@ -236,8 +236,11 @@ impl TrajectoryStore {
             )",
             [],
         )?;
-        // Lightweight bookkeeping for files that failed conversion (corrupted
-        // JSONL, empty events, etc.) so they are not re-read every scan round.
+        // Lightweight per-path scan bookkeeping so unchanged files are not
+        // re-read every scan round: it records files that failed conversion
+        // (corrupted JSONL, empty events, ...) and, via
+        // [`TrajectoryStore::upsert_trajectory`], successfully ingested
+        // paths whose session row no longer points at them.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skipped_files (
                 file_path TEXT PRIMARY KEY,
@@ -274,8 +277,9 @@ impl TrajectoryStore {
 
     /// Returns `(file_size, file_mtime_ns)` recorded for `file_path`, if any.
     /// Drives the incremental scan: unchanged files are skipped.
-    /// Checks both successfully ingested trajectories and skipped (corrupted)
-    /// files.
+    /// Checks the successfully ingested trajectory row first and the per-path
+    /// scan bookkeeping (failed conversions, and ingested paths the session
+    /// row no longer points at) second.
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
@@ -369,9 +373,21 @@ impl TrajectoryStore {
                 record.last_user_message,
             ],
         )?;
+        // Keep per-path scan bookkeeping for the ingested path. The
+        // trajectory row is keyed by session_id and stores a single
+        // file_path, so the same session discovered under two roots (e.g.
+        // a Codex rollout under `.codex/sessions` and
+        // `.codex/archived_sessions`) rewrites file_path on each upsert;
+        // without path-keyed bookkeeping the path not currently stored on
+        // the row would miss the incremental check and be fully re-read and
+        // re-upserted (collected_at_ns churn) on every scan round. Maintenance
+        // purges the bookkeeping row again once the trajectory row itself
+        // carries the same path (it serves the check directly).
         conn.execute(
-            "DELETE FROM skipped_files WHERE file_path = ?1",
-            params![record.file_path],
+            "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
+            params![record.file_path, record.file_size, record.file_mtime_ns],
         )?;
         Ok(())
     }
@@ -1275,6 +1291,36 @@ mod tests {
         assert_eq!(
             store.get_file_state(&rec.file_path).unwrap(),
             Some((1024, 42))
+        );
+    }
+
+    #[test]
+    fn test_file_state_survives_session_repath() {
+        // The same session id under two discovery roots alternately wins the
+        // session_id primary key, rewriting the row's file_path. The path no
+        // longer stored on the row must keep its scan state, or that file
+        // misses the incremental check every round and is re-read and
+        // re-upserted forever.
+        let store = TrajectoryStore::new_with_path(&tmp_db("repath")).unwrap();
+        let a = sample_record();
+        store.upsert_trajectory(&a).unwrap();
+
+        let mut b = sample_record();
+        b.file_path = "/root/.codex/archived_sessions/s-1.jsonl".into();
+        b.file_size = 2048;
+        b.file_mtime_ns = 99;
+        store.upsert_trajectory(&b).unwrap();
+
+        assert_eq!(store.count().unwrap(), 1, "one row per session id");
+        assert_eq!(
+            store.get_file_state(&a.file_path).unwrap(),
+            Some((1024, 42)),
+            "the first path keeps its state after the row re-paths"
+        );
+        assert_eq!(
+            store.get_file_state(&b.file_path).unwrap(),
+            Some((2048, 99)),
+            "the winning path keeps its state via the row"
         );
     }
 
