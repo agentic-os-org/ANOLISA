@@ -123,12 +123,26 @@ pub struct WorkspaceEntry {
 ///
 /// - File does not exist: returns `Ok(None)`
 /// - File exists but format error: returns `Err`
+/// - File written by a newer schema (`version > DAEMON_STATE_VERSION`):
+///   returns `Err` — silently loading it would drop fields the newer
+///   version wrote (serde defaults) and the next `save_state` would then
+///   overwrite them with the old schema.
 pub fn load_state(state_dir: &Path) -> Result<Option<DaemonStateFile>> {
     let path = state_dir.join(STATE_FILE);
     match fs::read_to_string(&path) {
         Ok(content) => {
             let state: DaemonStateFile = serde_json::from_str(&content)
                 .with_context(|| format!("Failed to parse state file: {}", path.display()))?;
+            if state.version > DAEMON_STATE_VERSION {
+                anyhow::bail!(
+                    "unsupported state file version {} in {} (this build supports up to {}): \
+                     it was written by a newer ws-ckpt; upgrade ws-ckpt before starting \
+                     the daemon, or move the file aside to re-register workspaces",
+                    state.version,
+                    path.display(),
+                    DAEMON_STATE_VERSION
+                );
+            }
             Ok(Some(state))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -310,6 +324,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = load_state(dir.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_rejects_future_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = sample_state();
+        state.version = DAEMON_STATE_VERSION + 1;
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(dir.path().join(STATE_FILE), json).unwrap();
+
+        let err =
+            load_state(dir.path()).expect_err("a state.json from a newer schema must be rejected");
+        assert!(
+            err.to_string().contains("version"),
+            "error should name the version conflict: {err:#}"
+        );
     }
 
     #[test]
