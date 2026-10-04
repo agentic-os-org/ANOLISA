@@ -343,11 +343,18 @@ Main behavior:
 - Prepares the SWE-bench repository in a temporary workspace.
 - Mounts the repository into the OpenClaw sandbox at `/testbed`.
 - Uses a separate OpenClaw workspace mounted at `/workspace`.
-- Writes per-instance profiles under `<output>/run/openclaw-profiles/<instance_id>/`.
+- Writes attempt profiles under `<output>/run/openclaw-profiles/<instance_id>-<attempt_id>/`.
 - Copies the base OpenClaw config and mutates only the per-instance profile.
 - Runs through `openclaw --profile <profile> agent --local --json ...`.
 - Cleans profile symlinks, temporary workspaces, and sandbox containers after
   execution.
+
+Each attempt owns its temporary repository, profile, runtime agent/session IDs,
+and preparation container. Overlapping attempts for the same instance cannot
+clear each other's workspaces or sandbox containers, even with the same output
+directory. Use different output directories to retain independent result summaries
+and predictions; shared output files do not coordinate independent processes.
+Run metadata records the exact profile paths for trace collection.
 
 Base OpenClaw config resolution order:
 
@@ -586,7 +593,7 @@ Check:
 - `which openclaw`
 - `OPENCLAW_CONFIG_PATH`
 - `~/.openclaw/openclaw.json`
-- `output/run/openclaw-profiles/<instance_id>/openclaw.json`
+- `output/run/openclaw-profiles/<instance_id>-<attempt_id>/openclaw.json`
 - `output/run/openclaw-errors/<instance_id>.log`
 
 The OpenClaw adapter does not mutate the base config file. It copies the base
