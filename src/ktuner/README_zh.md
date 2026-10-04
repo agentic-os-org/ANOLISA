@@ -35,8 +35,8 @@ sudo ktuner rollback
 
 | 退出码 | 含义 |
 |--------|------|
-| 0      | 成功（check：系统已最优；tune/fix/rollback：已应用） |
-| 1      | check：存在调优建议（非错误，表示系统可改善）；tune：存在建议但当前环境均不可应用（status "blocked"，如容器内只读 /proc/sys） |
+| 0      | 成功（check：系统已最优；tune/fix/rollback：已应用；rollback 指完全恢复或账本为空） |
+| 1      | check：存在调优建议（非错误，表示系统可改善）；tune：存在建议但当前环境均不可应用（status "blocked"，如容器内只读 /proc/sys）；rollback：部分参数未能恢复（status "Partial"/"Nothing"，账本与 sysctl.d 持久化已保留，修复原因后请重试） |
 | 2      | 错误（详情见 stderr JSON） |
 
 ### check 输出

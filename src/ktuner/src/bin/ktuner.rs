@@ -380,6 +380,28 @@ fn why_with(
     }
 }
 
+/// Exit code for a completed `ktuner rollback`. Pure so the exit-code
+/// contract is unit-testable without touching the rollback ledger.
+///
+/// 0 only when the restore was actually total (`failed == 0 && skipped == 0`,
+/// mirroring `tuner::rollback_should_finalize`): a param whose write failed,
+/// or whose path was absent (skipped), is unrestored — its original value is
+/// still needed, the ledger and sysctl.d persistence were kept for a retry,
+/// and a reboot would re-apply the tuned value. Reporting exit 0 there
+/// contradicts the README contract ("rollback: applied OK") and `check`/
+/// `tune`'s shared "1 = attention needed" convention.
+///
+/// Deliberate exception: an existing-but-empty ledger yields 0/0/0 — there
+/// was nothing recorded, so there is nothing to restore; that is "applied OK"
+/// in the only sense available, and `rollback_should_finalize` cleans up.
+fn rollback_exit_code(outcome: &tuner::RollbackOutcome) -> i32 {
+    if outcome.failed > 0 || outcome.skipped > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 fn cmd_rollback() -> Result<i32> {
     let is_root = unsafe { libc::geteuid() } == 0;
     if !is_root {
@@ -394,7 +416,7 @@ fn cmd_rollback() -> Result<i32> {
         "status": format!("{status:?}"),
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(0)
+    Ok(rollback_exit_code(&outcome))
 }
 
 fn gather() -> Result<(detect::SystemInfo, rules::EvalResult)> {
@@ -436,6 +458,89 @@ mod tests {
         let (output, code) = tune_short_circuit(&[], 0).expect("must short-circuit");
         assert_eq!(code, 0);
         assert_eq!(output, json!({ "status": "optimal", "applied": 0 }));
+    }
+
+    #[test]
+    fn rollback_exit_zero_when_fully_restored() {
+        // The `Full` case is still success.
+        let outcome = tuner::RollbackOutcome {
+            restored: 3,
+            failed: 0,
+            skipped: 0,
+        };
+        assert_eq!(rollback_exit_code(&outcome), 0);
+    }
+
+    #[test]
+    fn rollback_exit_one_when_a_restore_write_fails() {
+        let outcome = tuner::RollbackOutcome {
+            restored: 2,
+            failed: 1,
+            skipped: 0,
+        };
+        assert_eq!(rollback_exit_code(&outcome), 1);
+    }
+
+    #[test]
+    fn rollback_exit_one_when_a_path_was_skipped() {
+        // The offline-block-device case that motivated the keep-the-ledger
+        // gate: the param's original value is still needed for a retry.
+        let outcome = tuner::RollbackOutcome {
+            restored: 2,
+            failed: 0,
+            skipped: 1,
+        };
+        assert_eq!(rollback_exit_code(&outcome), 1);
+    }
+
+    #[test]
+    fn rollback_exit_one_when_nothing_was_restored() {
+        // status "Nothing" must not masquerade as success.
+        let outcome = tuner::RollbackOutcome {
+            restored: 0,
+            failed: 2,
+            skipped: 1,
+        };
+        assert_eq!(rollback_exit_code(&outcome), 1);
+    }
+
+    #[test]
+    fn rollback_exit_zero_for_an_empty_ledger() {
+        // Pins the documented exception: nothing recorded means nothing to
+        // restore, and rollback_should_finalize cleans up the leftovers.
+        let outcome = tuner::RollbackOutcome {
+            restored: 0,
+            failed: 0,
+            skipped: 0,
+        };
+        assert_eq!(rollback_exit_code(&outcome), 0);
+    }
+
+    #[test]
+    fn rollback_exit_agrees_with_classify_rollback() {
+        // For every non-empty ledger the exit code and the status
+        // classifier can never drift apart.
+        for restored in 0..=2 {
+            for failed in 0..=2 {
+                for skipped in 0..=2 {
+                    if restored + failed + skipped == 0 {
+                        continue;
+                    }
+                    let outcome = tuner::RollbackOutcome {
+                        restored,
+                        failed,
+                        skipped,
+                    };
+                    let expect_one =
+                        tuner::classify_rollback(&outcome) != tuner::RollbackStatus::Full;
+                    assert_eq!(
+                        rollback_exit_code(&outcome),
+                        i32::from(expect_one),
+                        "restored={restored} failed={failed} skipped={skipped}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
