@@ -1204,10 +1204,30 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     Ok(())
 }
 
+/// Escape a value for a TOML basic string.
+///
+/// Values reach persistence as raw user/env data, so every character TOML
+/// forbids inside a basic string — the quote, the backslash, and all control
+/// characters — must be escaped. Emitting one raw control character (a value
+/// copied with a carriage return, for example) makes the whole `config.toml`
+/// unparseable, and the next load silently drops the complete user layer
+/// instead of reporting the damaged file.
 fn escape_toml_value(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            c if c < ' ' || c == '\u{7f}' => escaped.push_str(&format!("\\u{:04X}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -2250,5 +2270,42 @@ approval_mode = "balanced"
         assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
         assert!(parsed.ai.providers.contains_key("new-provider"));
         assert_eq!(parsed.ai.providers.len(), 1);
+    }
+
+    #[test]
+    fn persist_keeps_config_parseable_when_a_value_contains_a_control_character() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &user_path,
+            "[ai]\nactive_provider = \"carrier\"\n\n\
+             [ai.providers.carrier]\ntype = \"dashscope\"\n\
+             api_key = \"sk-live\\rreturned\"\n\n\
+             [agent]\nmax_turns = 7\n",
+        )
+        .unwrap();
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        assert_eq!(
+            config.ai.providers["carrier"].api_key.as_deref(),
+            Some("sk-live\rreturned")
+        );
+
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        let reparsed = toml::from_str::<CoreConfig>(&content);
+        assert!(
+            reparsed.is_ok(),
+            "persisted config must stay parseable, got {reparsed:?}; file:\n{content}"
+        );
+
+        // The whole user layer must survive the rewrite: an unparseable file is
+        // dropped silently on the next load and every setting reverts to default.
+        let reloaded = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        assert_eq!(
+            reloaded.ai.providers["carrier"].api_key.as_deref(),
+            Some("sk-live\rreturned")
+        );
+        assert_eq!(reloaded.agent.max_turns, 7);
     }
 }
