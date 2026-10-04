@@ -588,9 +588,10 @@ impl PolicyEngine {
     }
 
     /// Load every `*.toml` file under `dir` into a single engine. Files
-    /// whose `manifest_version` is unsupported, or whose schema fails to
-    /// parse, are wrapped in [`BlazeError::PolicyLoadError`] (caller can
-    /// decide between `fail`/`warn` per [`crate::config::PolicyLoadErrorMode`]).
+    /// whose `manifest_version` is unsupported, whose schema fails to
+    /// parse, or which fail [`PolicyFile::validate`], are wrapped in
+    /// [`BlazeError::PolicyLoadError`] (caller can decide between
+    /// `fail`/`warn` per [`crate::config::PolicyLoadErrorMode`]).
     pub fn load_dir(dir: &Path) -> Result<Self> {
         let mut policies = Vec::new();
         let entries = fs::read_dir(dir).map_err(|e| BlazeError::PolicyLoadError {
@@ -604,7 +605,12 @@ impl PolicyEngine {
                 continue;
             }
             let policy = load_one(&path)?;
-            policy.validate()?;
+            policy
+                .validate()
+                .map_err(|error| BlazeError::PolicyLoadError {
+                    path: path.clone(),
+                    source: Box::new(error),
+                })?;
             if policy.pool.is_some() {
                 tracing::warn!(
                     path = %path.display(),
@@ -873,6 +879,39 @@ sequence = ["template-reg:bind-mm-template"]
             .evaluate(&HashMap::new(), &img)
             .expect_err("no match");
         assert!(matches!(err, BlazeError::PolicyEvalError { .. }));
+    }
+
+    #[test]
+    fn load_dir_wraps_validate_failures_with_the_offending_path() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        fs::write(tmp.path().join("good.toml"), sample_toml()).expect("write good");
+        let bad = r#"
+manifest_version = 1
+policy_name = "bad-vm"
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+
+[vm]
+vcpus = 0
+memory = "4G"
+"#;
+        fs::write(tmp.path().join("bad.toml"), bad).expect("write bad");
+
+        let error = PolicyEngine::load_dir(tmp.path()).expect_err("invalid policy must fail load");
+
+        match &error {
+            BlazeError::PolicyLoadError { path, .. } => {
+                assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("bad.toml"));
+            }
+            other => panic!(
+                "validate failures must be wrapped in PolicyLoadError with the file path, got: {other:?}"
+            ),
+        }
+        assert!(error.to_string().contains("bad.toml"));
     }
 
     #[test]
