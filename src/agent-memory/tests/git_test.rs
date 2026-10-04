@@ -81,6 +81,52 @@ fn read_does_not_create_commits() {
 }
 
 #[test]
+fn mem_log_caps_huge_limits() {
+    // limit.max(1) floors but never ceilings: u32::MAX would ask the
+    // revwalk for the entire history. Grow the repo past the expected
+    // 1000-commit ceiling (directly through git2 — one tool call per
+    // commit via auto-commit would be far too slow) and assert the
+    // returned entry count is bounded by the ceiling, not the ask.
+    let (_tmp, svc) = setup(true, false);
+
+    let repo = git2::Repository::open(&svc.mount.root).unwrap();
+    let sig = git2::Signature::now("bulk", "bulk@example.com").unwrap();
+    let mut tip = repo.head().unwrap().peel_to_commit().unwrap().id();
+    for i in 0..1100 {
+        let blob = repo.blob(format!("n{i}").as_bytes()).unwrap();
+        let mut tb = repo.treebuilder(None).unwrap();
+        tb.insert("bulk.md", blob, 0o100644).unwrap();
+        let tree = tb.write().unwrap();
+        let parent = repo.find_commit(tip).unwrap();
+        tip = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &format!("bulk {i}"),
+                &repo.find_tree(tree).unwrap(),
+                &[&parent],
+            )
+            .unwrap();
+    }
+
+    let entries = svc.mem_log(u32::MAX as usize, None).unwrap();
+    assert_eq!(
+        entries.len(),
+        1000,
+        "mem_log must cap the returned entries at 1000, got {}",
+        entries.len()
+    );
+    // Newest first — the bulk commits are the tip of the history.
+    assert!(entries[0].summary.contains("bulk 1099"));
+
+    // A limit within the ceiling is honored as-is.
+    let small = svc.mem_log(5, None).unwrap();
+    assert_eq!(small.len(), 5);
+    assert!(small[0].summary.contains("bulk 1099"));
+}
+
+#[test]
 fn mem_revert_restores_committed_content() {
     let (_tmp, svc) = setup(true, true);
     svc.write("doc.md", "v1", false).unwrap();
