@@ -513,6 +513,13 @@ fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<
     // Filtering every line that appears in the command deleted real output:
     // `echo /etc/hosts` printing `/etc/hosts` is a result, not an echo, and
     // losing it makes a grounded claim read as ungrounded.
+    //
+    // The dropped line has to be the invocation itself, not merely a line the
+    // invocation happens to mention. `command.contains(bare)` also matched a
+    // result that answers the command — `ls /var/log/app.log` prints
+    // `/var/log/app.log` — so a successful one-line listing lost the very
+    // observation it produced. Compare against the whole command instead; the
+    // prompt markers stripped above keep `$ ls -la` matching `ls -la`.
     let mut lines = text.lines().peekable();
     let mut leading_blanks: Vec<&str> = Vec::new();
     while lines.peek().is_some_and(|l| l.trim().is_empty()) {
@@ -520,7 +527,7 @@ fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<
     }
     if let Some(first) = lines.peek() {
         let bare = first.trim().trim_start_matches(['$', '>', '#']).trim();
-        if !bare.is_empty() && command.contains(bare) {
+        if !bare.is_empty() && bare == command.trim() {
             lines.next();
         }
     }
