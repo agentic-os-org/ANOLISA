@@ -155,6 +155,15 @@ impl IndexHandle {
         store.compact(cold_after_days)
     }
 
+    /// Snapshot paths retired by conflict resolution for context consumers.
+    ///
+    /// # Errors
+    /// Returns database errors if lifecycle state cannot be read.
+    pub fn superseded_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.superseded_paths()
+    }
+
     /// Return counts of warm vs cold files.
     pub fn warm_cold_counts(&self) -> Result<(usize, usize)> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());

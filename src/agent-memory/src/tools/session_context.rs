@@ -29,8 +29,23 @@ const MAX_CONTEXT_BYTES: usize = 8192;
 /// injection into the agent's system prompt.
 ///
 /// - `limit`: max number of recent session summaries to include (default 5)
+///
+/// Excludes facts retired in the index or marked `superseded_by` on disk.
+/// Without an index, on-disk markers still exclude retired facts.
+///
+/// # Errors
+/// Returns database errors if the enabled index's lifecycle state cannot be read.
 pub fn memory_session_context(svc: &MemoryService, limit: Option<usize>) -> Result<String> {
     let limit = limit.unwrap_or(DEFAULT_LIMIT).max(1);
+
+    // The database flag is authoritative; disk markers are best-effort and
+    // also preserve retirement when the index is disabled or rebuilt.
+    let superseded = svc
+        .index
+        .as_ref()
+        .map(|index| index.superseded_paths())
+        .transpose()?
+        .unwrap_or_default();
 
     // Collect all fact files with their frontmatter metadata.
     let mut summaries: Vec<FactEntry> = Vec::new();
@@ -54,7 +69,7 @@ pub fn memory_session_context(svc: &MemoryService, limit: Option<usize>) -> Resu
             Ok(r) => r.to_string_lossy().to_string(),
             Err(_) => continue,
         };
-        if !rel.starts_with("facts/") {
+        if !rel.starts_with("facts/") || superseded.contains(&rel) {
             continue;
         }
 
@@ -64,6 +79,12 @@ pub fn memory_session_context(svc: &MemoryService, limit: Option<usize>) -> Resu
         };
 
         let (fm, _body) = parse_frontmatter(&content);
+        if fm
+            .get("superseded_by")
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            continue;
+        }
         let category = fm.get("category").cloned().unwrap_or_default();
         let created_at = fm.get("created_at").cloned().unwrap_or_default();
         let title = fm
