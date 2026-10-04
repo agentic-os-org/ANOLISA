@@ -31,14 +31,35 @@ pub(crate) fn resolve_and_read_target(
     Ok((host_pid, start_time))
 }
 
+/// Reads a `/proc` text file, decoding non-UTF-8 bytes lossily.
+///
+/// `/proc/<pid>/stat` and `/proc/<pid>/status` embed the process name, and the
+/// kernel allows almost any non-NUL bytes in a name (`prctl(PR_SET_NAME)` sets
+/// them directly, and an executable whose name is not valid UTF-8 passes them
+/// on). `read_to_string` rejects such a file outright, which made a target
+/// process unvalidatable — and its PID unresolvable — purely because of its
+/// name, while every field these parsers read (start time, NSpid, PPid) is
+/// plain ASCII positioned after or around the name. A lossy decode keeps all
+/// of those fields intact.
+fn read_proc_text_lossy(path: &str) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Reads the Linux process start time after excluding protected service processes.
 pub(crate) fn read_process_start_time(pid: i32) -> Result<u64, TargetValidationError> {
     if pid <= 1 || pid == std::process::id() as i32 {
         return Err(TargetValidationError::ProtectedProcess(pid));
     }
 
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))
+    let stat = read_proc_text_lossy(&format!("/proc/{pid}/stat"))
         .map_err(|source| TargetValidationError::ProcessIo { pid, source })?;
+    validate_stat(pid, &stat)
+}
+
+/// Validates a decoded `/proc/<pid>/stat` payload: excludes protected service
+/// processes by name, then reads the start-time field (22, 0-based 19 after
+/// the comm) that follows the parenthesized name.
+fn validate_stat(pid: i32, stat: &str) -> Result<u64, TargetValidationError> {
     let open = stat
         .find('(')
         .ok_or(TargetValidationError::InvalidStat(pid))?;
@@ -154,7 +175,7 @@ pub(crate) fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 
 }
 
 fn read_nspid_chain(pid: i32) -> Vec<i32> {
-    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+    let Ok(status) = read_proc_text_lossy(&format!("/proc/{pid}/status")) else {
         return vec![];
     };
     parse_nspid_from_status(&status)
@@ -179,7 +200,7 @@ fn first_nspid(pid: i32) -> Option<i32> {
 }
 
 fn proc_start_time(pid: i32) -> Result<u64, ()> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
+    let stat = read_proc_text_lossy(&format!("/proc/{pid}/stat")).map_err(|_| ())?;
     parse_start_time_from_stat(&stat)
 }
 
@@ -388,5 +409,81 @@ mod tests {
     fn parse_start_time_from_malformed_stat() {
         assert!(parse_start_time_from_stat("garbage").is_err());
         assert!(parse_start_time_from_stat("").is_err());
+    }
+
+    #[test]
+    fn read_proc_text_lossy_keeps_ascii_fields_across_invalid_bytes() {
+        // /proc/<pid>/stat embeds the comm between the parentheses, and the
+        // kernel allows non-NUL non-UTF-8 bytes in a comm. `read_to_string`
+        // rejects the whole file; the lossy read must keep every ASCII field
+        // the parsers rely on and mark only the offending byte.
+        let dir = std::env::temp_dir().join(format!("agentsight_stat_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("stat");
+        let mut stat = b"42 (cla".to_vec();
+        stat.push(0xa0); // one invalid UTF-8 byte inside the process name
+        stat.extend_from_slice(b"ude) S 1 42 42 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 99999 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n");
+        fs::write(&path, &stat).expect("write non-UTF-8 stat");
+
+        let text = read_proc_text_lossy(path.to_str().unwrap()).expect("lossy read must succeed");
+        assert!(text.starts_with("42 (cla\u{fffd}ude) S "));
+        assert!(
+            text.contains(" 99999 "),
+            "the ASCII start-time field survives"
+        );
+
+        // The parsers consume exactly this lossy shape and still resolve.
+        assert_eq!(parse_start_time_from_stat(&text), Ok(99999));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_proc_text_lossy_reports_missing_files() {
+        assert!(read_proc_text_lossy("/proc/2000000000/stat").is_err());
+    }
+
+    #[test]
+    fn parse_start_time_survives_a_replacement_char_in_the_comm() {
+        // A comm decoded lossily keeps its parentheses structure, so the
+        // start-time field behind the name stays reachable.
+        let stat = "42 (cl\u{fffd}ude) S 1 42 42 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 77777 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
+        assert_eq!(parse_start_time_from_stat(stat), Ok(77777));
+    }
+
+    #[test]
+    fn parse_nspid_survives_a_replacement_char_in_the_name_line() {
+        // /proc/<pid>/status leads with `Name:`, so a non-UTF-8 name decodes
+        // lossily in front of the NSpid line the resolver needs.
+        let status = "Name:\tcl\u{fffd}ude\nPid:\t39560\nNSpid:\t39560\t1\nTgid:\t39560\n";
+        assert_eq!(parse_nspid_from_status(status), vec![39560, 1]);
+    }
+
+    #[test]
+    fn validate_stat_parses_a_non_utf8_comm_lossily() {
+        // End-to-end over the validation flow: the same non-UTF-8 stat that
+        // `read_to_string` rejects must validate through the reader plus the
+        // protected-name check and the start-time field.
+        let dir = std::env::temp_dir().join(format!("agentsight_stat_e2e_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("stat");
+        let mut stat = b"4242 (qoder".to_vec();
+        stat.push(0xff);
+        stat.extend_from_slice(
+            b") S 1 42 42 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 55555 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+        );
+        fs::write(&path, &stat).expect("write non-UTF-8 stat");
+
+        let text = read_proc_text_lossy(path.to_str().unwrap()).expect("lossy read");
+        assert_eq!(validate_stat(4242, &text).ok(), Some(55555_u64));
+
+        // Guard: the protected-name check still fires on an ordinary stat.
+        let protected = "7 (agentsight) S 1 42 42 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 1 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
+        assert!(matches!(
+            validate_stat(7, protected),
+            Err(TargetValidationError::ProtectedProcess(_))
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
