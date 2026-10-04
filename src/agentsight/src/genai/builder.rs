@@ -554,6 +554,21 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                // Anthropic nests the message id inside `message_start` —
+                // none of its SSE events carries a top-level "id" — so
+                // without this lookup a drained Anthropic stream records
+                // no trace_id even after the model fix above (the live
+                // path already tolerates the nesting via response_map's
+                // anywhere-in-body message-id match).
+                if trace_id.is_none()
+                    && json.get("type").and_then(|v| v.as_str()) == Some("message_start")
+                {
+                    if let Some(id) = json.pointer("/message/id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            trace_id = Some(id.to_string());
+                        }
+                    }
+                }
                 chunks.push(json);
             }
         }
@@ -891,6 +906,14 @@ mod tests {
             enrichment.model.as_deref(),
             Some("claude-sonnet-4-5"),
             "model must be read from message_start.message.model"
+        );
+        // The message id is nested in message_start.message too — no
+        // Anthropic SSE event carries a top-level "id" — so trace_id
+        // must come from /message/id, not be lost on the drained path.
+        assert_eq!(
+            enrichment.trace_id.as_deref(),
+            Some("msg_1"),
+            "trace_id must be read from message_start.message.id"
         );
 
         let json = enrichment
