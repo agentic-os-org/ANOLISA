@@ -173,6 +173,20 @@ def _has_hardening_stats(event: SecurityEvent) -> bool:
     return isinstance(result.get("total"), int) and result.get("total", 0) > 0
 
 
+def _happened_after(event: SecurityEvent, reference: SecurityEvent) -> bool:
+    """Return whether *event* happened after *reference*.
+
+    SecurityEvent timestamps are normalized to UTC ISO-8601, so the comparison
+    is chronological; unparseable values are treated as "not after".
+    """
+    try:
+        return datetime.fromisoformat(event.timestamp) > datetime.fromisoformat(
+            reference.timestamp
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _has_actionable_hardening_failure(event: SecurityEvent) -> bool:
     """Return whether a hardening event has a parsed rule failure to fix."""
     result = _get_result(event)
@@ -244,10 +258,12 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
         total = result.get("total", 0)
         failures = result.get("failures", [])
 
-        # Include fixed count from reinforce operations in compliance calculation
+        # Include fixed counts from reinforcements that have not been verified
+        # by a newer scan: a later scan's `passed` count already accounts for
+        # fixes applied before it, so adding those again inflates compliance.
         fixed_count = 0
         for e in reinforcements:
-            if _has_hardening_stats(e):
+            if _has_hardening_stats(e) and _happened_after(e, latest_scan):
                 reinf_result = _get_result(e)
                 fixed_count += reinf_result.get("fixed", 0)
 
