@@ -1062,6 +1062,30 @@ mod tests {
     }
 
     #[test]
+    fn test_build_pending_from_request_responses_retrieval_is_skipped() {
+        // The drain path must not persist a pending row for an interrupted
+        // retrieval poll either: a GET /v1/responses/{id} has no request
+        // body to anchor a conversation — a phantom interrupted llm_call
+        // with no user input whose response would land on the next drain.
+        let builder = GenAIBuilder::new();
+        let mut req = make_request("/v1/responses/resp_abc123", "");
+        req.method = "GET".to_string();
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        assert!(
+            builder
+                .build_pending_from_request(
+                    &req,
+                    &ConnectionId { pid: 1, ssl_ptr: 2 },
+                    &mapper,
+                    &cache
+                )
+                .is_none(),
+            "a retrieval poll must not create a pending row"
+        );
+    }
+
+    #[test]
     fn test_build_pending_from_request_evicts_conversation_anchor() {
         // build_pending_from_request 只在中断场景（进程崩溃或空闲超时）下被
         // 调用，因此总是会驱逐 conversation 锚点：固定文本先通过正常路径

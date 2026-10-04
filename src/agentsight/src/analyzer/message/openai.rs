@@ -637,7 +637,15 @@ impl OpenAIParser {
     pub fn matches_path(path: &str) -> bool {
         path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            || path.contains("/v1/responses")
+            // The Responses API's per-id sub-endpoints (GET retrieve, POST
+            // cancel, DELETE) share the /v1/responses prefix but are not
+            // inference calls: the retrieval response IS the stored
+            // response object (object=="response" + output[] + usage), so
+            // deep-parsing a poll would re-record the create call's output
+            // and re-count its usage tokens as a second llm_call. Must
+            // stay in lockstep with GenAIBuilder::is_llm_api_path.
+            || (path.contains("/v1/responses")
+                && !path.contains("/v1/responses/"))
     }
 }
 
@@ -837,6 +845,30 @@ mod tests {
         // bare /responses should NOT match (too broad, would catch non-LLM traffic)
         assert!(!OpenAIParser::matches_path("/responses"));
         assert!(!OpenAIParser::matches_path("/api/survey/responses"));
+    }
+
+    #[test]
+    fn test_matches_path_rejects_responses_sub_endpoints() {
+        // GET /v1/responses/{id} (retrieve), POST /v1/responses/{id}/cancel
+        // and DELETE /v1/responses/{id} share the /v1/responses prefix but
+        // are not inference calls: the retrieval response IS the stored
+        // response object (object=="response" + output[] + usage), so
+        // deep-parsing a poll would re-record the create call's output and
+        // re-count its usage tokens as a second llm_call.
+        assert!(!OpenAIParser::matches_path("/v1/responses/resp_abc123"));
+        assert!(!OpenAIParser::matches_path(
+            "https://api.openai.com/v1/responses/resp_abc123"
+        ));
+        assert!(!OpenAIParser::matches_path(
+            "/v1/responses/resp_abc123/cancel"
+        ));
+        // The create endpoint keeps matching, in both bare-path and
+        // full-URL shapes.
+        assert!(OpenAIParser::matches_path("/v1/responses"));
+        assert!(OpenAIParser::matches_path("https://api.openai.com/v1/responses"));
+        assert!(OpenAIParser::matches_path(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+        ));
     }
 
     #[test]

@@ -252,14 +252,22 @@ impl GenAIBuilder {
             || path.contains("/v1/completions")
             // Anthropic's /v1/messages/count_tokens (token counting) and
             // /v1/messages/batches* (Batch API) share the inference prefix
-            // but are not inference calls; the OpenAI arms have no such
-            // sub-endpoints. Must stay in lockstep with
+            // but are not inference calls. Must stay in lockstep with
             // AnthropicParser::matches_path so a count-tokens call neither
             // creates a row (this gate) nor gets deep-parsed (that gate).
             || (path.contains("/v1/messages")
                 && !path.contains("/v1/messages/count_tokens")
                 && !path.contains("/v1/messages/batches"))
-            || path.contains("/v1/responses")
+            // The Responses API's per-id sub-endpoints (GET retrieve,
+            // POST cancel, DELETE) share the /v1/responses prefix but are
+            // not inference calls: the retrieval response IS the stored
+            // response object, so admitting a poll re-records the create
+            // call's output and re-counts its usage tokens. Must stay in
+            // lockstep with OpenAIParser::matches_path so a retrieval
+            // neither creates a row (this gate) nor gets deep-parsed
+            // (that gate).
+            || (path.contains("/v1/responses")
+                && !path.contains("/v1/responses/"))
             || path.contains("/chat/completions")
             || path.contains("/completions")
             || path.contains("/api/v1/copilot/generate_copilot")
@@ -903,6 +911,29 @@ mod tests {
         // The real endpoint still passes the gate.
         assert!(builder.is_llm_api_path("/v1/messages"));
         assert!(builder.is_llm_api_path("https://api.anthropic.com/v1/messages"));
+    }
+
+    /// The Responses API's per-id sub-endpoints (GET retrieve, POST cancel,
+    /// DELETE) share the /v1/responses prefix but are not inference calls —
+    /// the OpenAI twin of the count-tokens gate above. The retrieval
+    /// response is the stored response object, so admitting a poll here
+    /// re-records the create call's output and re-counts its usage tokens.
+    #[test]
+    fn test_is_llm_api_path_rejects_responses_sub_endpoints() {
+        let builder = GenAIBuilder::new();
+        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123"));
+        assert!(!builder.is_llm_api_path(
+            "https://api.openai.com/v1/responses/resp_abc123"
+        ));
+        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/cancel"));
+        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/input_items"));
+        // The create endpoint still passes the gate, in bare-path,
+        // full-URL and compatible-mode shapes.
+        assert!(builder.is_llm_api_path("/v1/responses"));
+        assert!(builder.is_llm_api_path("https://api.openai.com/v1/responses"));
+        assert!(builder.is_llm_api_path(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+        ));
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which

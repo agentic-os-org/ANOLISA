@@ -971,6 +971,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_build_llm_call_returns_none_for_responses_retrieval() {
+        // A retrieval poll (GET /v1/responses/{id}) answers with the STORED
+        // response object — the same object=="response" + output[] + usage
+        // shape the create call answered with — so the deep-parse path
+        // would turn the poll into a full phantom llm_call on top of the
+        // row the real create already produced: re-recorded output text,
+        // re-counted usage tokens, and a fast round-trip dragging e2e
+        // latency percentiles down.
+        let builder = GenAIBuilder::new();
+        let mut http = make_http(
+            "/v1/responses/resp_abc123",
+            None,
+            Some(
+                r#"{"id":"resp_abc123","object":"response","status":"completed","model":"gpt-5","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello!","annotations":[]}]}],"usage":{"input_tokens":12,"output_tokens":5,"total_tokens":17}}"#
+                    .to_string(),
+            ),
+        );
+        http.method = "GET".to_string();
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "a retrieval poll is not an inference call and must not build an llm_call"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_responses_cancel() {
+        // POST /v1/responses/{id}/cancel shares the /v1/responses prefix
+        // too; cancelling a background response creates no new inference.
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/responses/resp_abc123/cancel",
+            Some("{}".to_string()),
+            Some(
+                r#"{"id":"resp_abc123","object":"response","status":"cancelled","model":"gpt-5","output":[]}"#
+                    .to_string(),
+            ),
+        );
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "cancel is not an inference call and must not build an llm_call"
+        );
+    }
+
     // ── Verification: HTTPS-fallback trigger for unparsable LLM traffic ──
     //
     // An LLM API path whose body cannot be parsed into semantic messages must
