@@ -5663,22 +5663,47 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
         return 1;
     }
     let ratio = read_sysctl_u64(ratio_path);
-    let db_present = info.processes.iter().any(|p| {
-        p.name.contains("postgres") || p.name.contains("mysql") || p.name.contains("oracle")
-    });
-    if db_present && ratio < 80 {
-        recs.push(Recommendation {
-            param: "vm.overcommit_ratio".to_string(),
-            current_value: ratio.to_string(),
-            recommended_value: "80".to_string(),
-            reason: "overcommit_memory=2 模式下 ratio 过低会限制可用内存，数据库建议设为 80-90"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    overcommit_ratio_recommendation(oc_mode, ratio, is_database_present(info), recs);
     1
+}
+
+/// Whether the sampled process list contains a database server, matched at name
+/// boundaries exactly like every other DB-gated rule (`has_process`).
+///
+/// The old inline predicate substring-matched the whole comm
+/// (`p.name.contains("mysql")`), so MySQL client tools — an open `mysql` shell,
+/// `mysqldump`, `mysqlrouter` — counted as the database itself and a host that
+/// only runs them was tuned as if the DB lived there: the same false-positive
+/// class #4100 removed from `has_process` (etcdctl satisfied "etcd"), left
+/// behind at this direct-iteration site.
+fn is_database_present(info: &SystemInfo) -> bool {
+    info.has_process("postgres") || info.has_process("mysqld") || info.has_process("oracle")
+}
+
+/// Pure core of the `vm.overcommit_ratio` rule: a strict-mode
+/// (`overcommit_memory == 2`) database host whose ratio sits below 80 gets
+/// exactly one raise-to-80 recommendation. Split from the /proc probe so the
+/// branch is assertable on any host instead of only on one already running
+/// `overcommit_memory=2`.
+fn overcommit_ratio_recommendation(
+    oc_mode: u64,
+    ratio: u64,
+    db_present: bool,
+    recs: &mut Vec<Recommendation>,
+) {
+    if !db_present || oc_mode != 2 || ratio >= 80 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "vm.overcommit_ratio".to_string(),
+        current_value: ratio.to_string(),
+        recommended_value: "80".to_string(),
+        reason: "overcommit_memory=2 模式下 ratio 过低会限制可用内存，数据库建议设为 80-90"
+            .to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -5762,6 +5787,73 @@ mod tests {
         );
         // Malformed input: no recommendation rather than a partial write.
         assert_eq!(sem_recommendation(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn overcommit_db_detection_matches_at_name_boundaries() {
+        // The #4100 false-positive class, at the one site the boundary fix did
+        // not reach: the old predicate substring-matched the whole comm, so
+        // MySQL client tools counted as the database itself.
+        fn info_with(names: &[&str]) -> SystemInfo {
+            let mut info = make_test_info();
+            info.processes = names
+                .iter()
+                .map(|n| ProcessInfo {
+                    name: n.to_string(),
+                })
+                .collect();
+            info
+        }
+        // Real database servers, including role-prefixed worker comms.
+        for name in ["postgres", "postgres: writer", "mysqld", "oracle"] {
+            assert!(
+                is_database_present(&info_with(&[name])),
+                "{name} is a database"
+            );
+        }
+        // Client tools and proxies merely embed the server's name.
+        for name in [
+            "mysql",
+            "mysqldump",
+            "mysqlrouter",
+            "mysqlbinlog",
+            "pg_dump",
+        ] {
+            assert!(
+                !is_database_present(&info_with(&[name])),
+                "{name} is not the database"
+            );
+        }
+        assert!(!is_database_present(&info_with(&[])));
+    }
+
+    #[test]
+    fn overcommit_ratio_recommendation_requires_a_real_database() {
+        // A strict-mode host running only client tooling must not be tuned:
+        // under the old substring predicate mysqldump/mysqlrouter passed here.
+        let mut recs = Vec::new();
+        overcommit_ratio_recommendation(2, 50, false, &mut recs);
+        assert!(recs.is_empty(), "client tools are not a database workload");
+
+        // The genuine case still fires with the documented value.
+        let mut recs = Vec::new();
+        overcommit_ratio_recommendation(2, 50, true, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].param, "vm.overcommit_ratio");
+        assert_eq!(recs[0].current_value, "50");
+        assert_eq!(recs[0].recommended_value, "80");
+        assert_eq!(recs[0].confidence, Confidence::Medium);
+
+        // Non-strict overcommit modes stay silent even for a real database.
+        for oc_mode in [0, 1] {
+            let mut recs = Vec::new();
+            overcommit_ratio_recommendation(oc_mode, 50, true, &mut recs);
+            assert!(recs.is_empty(), "mode {oc_mode} is not strict overcommit");
+        }
+        // A ratio already at or above the floor needs no change.
+        let mut recs = Vec::new();
+        overcommit_ratio_recommendation(2, 80, true, &mut recs);
+        assert!(recs.is_empty(), "80 already meets the floor");
     }
 
     #[test]
