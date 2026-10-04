@@ -70,6 +70,19 @@ def col_number(s: str) -> int:
     return n
 
 
+def _style_index(cell: ET.Element) -> int:
+    """Return a cell's style index, treating invalid values as the default style.
+
+    Hand-edited XML (and some third-party writers) can carry an empty or
+    non-numeric `s` attribute; `int()` on it used to abort the whole edit
+    after the row shift had already rewritten the workbook.
+    """
+    try:
+        return int(cell.get("s", "0"))
+    except ValueError:
+        return 0
+
+
 def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     wb_tree = ET.parse(os.path.join(work_dir, "xl", "workbook.xml"))
     rid = None
@@ -128,7 +141,7 @@ def get_row_styles(ws_tree: ET.ElementTree, row_num: int) -> dict[str, int]:
                 ref = c.get("r", "")
                 col_str = re.match(r"([A-Z]+)", ref)
                 if col_str:
-                    styles[col_str.group(1)] = int(c.get("s", "0"))
+                    styles[col_str.group(1)] = _style_index(c)
             break
     return styles
 

@@ -76,6 +76,18 @@ def col_letter(n: int) -> str:
     return r
 
 
+def _style_index(cell: ET.Element) -> int:
+    """Return a cell's style index, treating invalid values as the default style.
+
+    Hand-edited XML (and some third-party writers) can carry an empty or
+    non-numeric `s` attribute; `int()` on it aborted the whole edit.
+    """
+    try:
+        return int(cell.get("s", "0"))
+    except ValueError:
+        return 0
+
+
 def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     wb_tree = ET.parse(os.path.join(work_dir, "xl", "workbook.xml"))
     rid = None
@@ -131,7 +143,7 @@ def get_cell_style(ws_tree: ET.ElementTree, col: str, row: int) -> int:
         if row_el.get("r") == str(row):
             for c in row_el:
                 if c.get("r") == ref:
-                    return int(c.get("s", "0"))
+                    return _style_index(c)
     return 0
 
 
@@ -219,7 +231,7 @@ def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
     row_el = row_map[border_row]
     # Collect all cells in this row and their styles
     for c in row_el:
-        old_s = int(c.get("s", "0"))
+        old_s = _style_index(c)
         if old_s not in style_remap:
             xf_list = list(cellxfs)
             ref_xf = xf_list[min(old_s, len(xf_list) - 1)]
@@ -232,7 +244,7 @@ def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
 
     # 3. Apply remapped styles to all cells in the row
     for c in row_el:
-        old_s = int(c.get("s", "0"))
+        old_s = _style_index(c)
         if old_s in style_remap:
             c.set("s", str(style_remap[old_s]))
 
