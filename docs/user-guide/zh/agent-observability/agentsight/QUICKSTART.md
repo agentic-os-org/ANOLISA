@@ -3,7 +3,7 @@
 [English](../../../en/agent-observability/agentsight/QUICKSTART.md)
 
 这一页带你从一台空机器走到「Dashboard 上能看到自己的 Agent 流量」。下面的命令在一台 Alibaba Cloud
-Linux 4（内核 6.6）主机上以 AgentSight 0.11 验证过；示例输出保留了真实的排版格式，但 ID 一律用占位
+Linux 4（内核 6.6）主机上以 AgentSight 0.13.0 验证过；示例输出保留了真实的排版格式，但 ID 一律用占位
 值、数字一律取整，因此你看到的都不是真实采集结果。
 
 ## 1. 检查前置条件
@@ -69,6 +69,8 @@ $ sudo agentsight discover
 
 总计: 1 个 Agent
 ```
+
+> `discover` 和 `token` 无论 locale 都输出中文。两者都支持 `--json`，可得到稳定的、与语言无关的输出。
 
 ## 5. 确认数据落库
 

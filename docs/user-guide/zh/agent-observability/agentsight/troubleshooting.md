@@ -160,7 +160,7 @@ sudo cat /sys/fs/cgroup/system.slice/agentsight.service/memory.current
 ## 输出语言看起来不统一
 
 `summary`、`metrics`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定的机器
-可读输出时请用 `--json`——注意 `discover` 没有这个参数，需要机器可读的发现结果可以查 `/api/agent-health`。Dashboard 跟随浏览器语言，也可以手动切换。
+可读输出时请用 `--json`。Dashboard 跟随浏览器语言，也可以手动切换。
 
 ## 常见问题
 

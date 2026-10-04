@@ -3,7 +3,7 @@
 [中文版](../../../zh/agent-observability/agentsight/QUICKSTART.md)
 
 This page takes you from an empty machine to a Dashboard showing your own Agent traffic.
-The commands were verified on an Alibaba Cloud Linux 4 host (kernel 6.6) running AgentSight 0.11;
+The commands were verified on an Alibaba Cloud Linux 4 host (kernel 6.6) running AgentSight 0.13.0;
 the sample output keeps the real layout but uses placeholder IDs and round numbers, so nothing you
 see below is a real capture.
 
@@ -73,9 +73,8 @@ $ sudo agentsight discover
 总计: 1 个 Agent
 ```
 
-> `discover` and `token` print in Chinese regardless of locale. `token` has a `--json` flag for
-> language-neutral output; `discover` does not, so parse its text or query `/api/agent-health` when
-> you need machine-readable discovery data.
+> `discover` and `token` print in Chinese regardless of locale. Both accept `--json` for stable,
+> language-neutral output.
 
 ## 5. Check that data landed
 

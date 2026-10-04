@@ -178,8 +178,7 @@ Linux-only.
 ## Output language looks inconsistent
 
 `summary`, `metrics`, and `interruption` print English; `discover` and `token` print Chinese
-regardless of locale. Use `--json` where you need stable machine-readable output — `discover` has no
-`--json`, so query `/api/agent-health` instead. The Dashboard
+regardless of locale. Use `--json` where you need stable machine-readable output. The Dashboard
 follows the browser language and has a manual switch.
 
 ## Frequently asked
