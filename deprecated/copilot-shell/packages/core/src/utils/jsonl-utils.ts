@@ -44,6 +44,9 @@ function getFileLock(filePath: string): Mutex {
 /**
  * Reads the first N lines from a JSONL file efficiently.
  * Returns an array of parsed objects.
+ *
+ * A torn or corrupt record (for example a trailing line left by a crash during
+ * an append) is skipped so it cannot discard the valid records around it.
  */
 export async function readLines<T = unknown>(
   filePath: string,
@@ -61,7 +64,11 @@ export async function readLines<T = unknown>(
       if (results.length >= count) break;
       const trimmed = line.trim();
       if (trimmed.length > 0) {
-        results.push(JSON.parse(trimmed) as T);
+        try {
+          results.push(JSON.parse(trimmed) as T);
+        } catch {
+          continue;
+        }
       }
     }
 
@@ -80,6 +87,9 @@ export async function readLines<T = unknown>(
 /**
  * Reads all lines from a JSONL file.
  * Returns an array of parsed objects.
+ *
+ * A torn or corrupt record is skipped instead of discarding every valid record
+ * in the file, so an interrupted append stays recoverable.
  */
 export async function read<T = unknown>(filePath: string): Promise<T[]> {
   try {
@@ -93,7 +103,11 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
     for await (const line of rl) {
       const trimmed = line.trim();
       if (trimmed.length > 0) {
-        results.push(JSON.parse(trimmed) as T);
+        try {
+          results.push(JSON.parse(trimmed) as T);
+        } catch {
+          continue;
+        }
       }
     }
 
