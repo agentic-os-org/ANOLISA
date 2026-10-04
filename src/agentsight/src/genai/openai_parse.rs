@@ -912,7 +912,9 @@ impl GenAIBuilder {
         let mut added_indexes: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut orphan_done: Vec<(String, String, String)> = Vec::new();
         // Set by the terminal `response.incomplete` event when the stream was
-        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`.
+        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`;
+        // `response.completed` sets `completed` for the finish fallback below.
+        let mut completed = false;
         let mut output_capped = false;
 
         for chunk in chunks {
@@ -934,6 +936,13 @@ impl GenAIBuilder {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         reasoning_buf.push_str(delta);
                     }
+                }
+                "response.created" => {
+                    saw_responses_event = true;
+                }
+                "response.completed" => {
+                    saw_responses_event = true;
+                    completed = true;
                 }
                 "response.output_item.added" => {
                     saw_responses_event = true;
@@ -1012,6 +1021,7 @@ impl GenAIBuilder {
                 // of response.completed; the cap reason must surface as the
                 // chat-completions "length" finish rather than a clean "stop".
                 "response.incomplete" => {
+                    saw_responses_event = true;
                     if let Some(resp) = chunk.get("response") {
                         if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
                             && resp
@@ -1076,11 +1086,17 @@ impl GenAIBuilder {
         }
         parts.extend(tool_parts);
 
-        // Same finish-reason convention as the analyzer's aggregator: the cap
-        // wins even when a tool call was in flight, because its arguments may
-        // be cut mid-JSON.
+        // Same finish-reason convention as the analyzer's aggregator: the
+        // terminal event decides. A capped stream is the chat "length"
+        // finish — the cap wins even when a tool call was in flight, because
+        // its arguments may be cut mid-JSON — and a stream whose capture
+        // never saw a terminal event at all keeps an unknown finish instead
+        // of a fabricated clean stop, the same None the Anthropic merger
+        // leaves on a missing message_delta.
         let finish_reason = if output_capped {
             Some("length".to_string())
+        } else if !completed {
+            None
         } else if parts
             .iter()
             .any(|p| matches!(p, MessagePart::ToolCall { .. }))
@@ -1826,6 +1842,36 @@ mod tests {
             MessagePart::Text { content } if content == "partial"
         ));
         assert_eq!(finish.as_deref(), Some("length"));
+    }
+
+    /// A stream whose capture never saw a terminal event (dead-pid drain of
+    /// an interrupted call) keeps an unknown finish instead of a fabricated
+    /// clean stop, and an in-flight tool call still flushes with its partial
+    /// arguments.
+    #[test]
+    fn test_extract_parts_from_sse_body_responses_truncated_flushes_call() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_3"}},
+            {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_t","name":"read_file"}},
+            {"type":"response.function_call_arguments.delta","delta":"{\"path\":"}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_t"));
+                assert_eq!(name, "read_file");
+                // Arguments cut mid-JSON stay a None payload, not a lossy
+                // partial parse.
+                assert!(arguments.is_none());
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert!(finish.is_none(), "no terminal event means no finish reason");
     }
 
     #[test]
