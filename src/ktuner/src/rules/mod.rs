@@ -1919,11 +1919,24 @@ fn host_needs_ip_forward(info: &SystemInfo) -> bool {
     false
 }
 
+/// Whether a `/proc/net/bonding`-style directory actually contains a bond.
+///
+/// The bonding module creates this directory from its pernet init
+/// (`bond_create_proc_dir`) as soon as it is loaded — even with
+/// `max_bonds=0` and no bond interface — so the directory's mere existence
+/// is not evidence of bonding. The kernel puts one file per bond into it,
+/// so a non-empty directory is the signal.
+fn proc_bonding_has_bonds(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 /// Whether the host uses link bonding. The ARP-tuning rules key off "2+ NICs",
 /// but bond members are multiple NICs forming ONE logical link where settings
 /// like arp_filter/arp_ignore can break the bond, so they must skip bonded hosts.
 fn has_bond() -> bool {
-    if std::path::Path::new("/proc/net/bonding").is_dir() {
+    if proc_bonding_has_bonds(std::path::Path::new("/proc/net/bonding")) {
         return true;
     }
     dir_has_bond(std::path::Path::new("/sys/class/net"))
@@ -5823,6 +5836,18 @@ mod tests {
 
         let dir = NetDir::new(&["eth0/", "lo/"]);
         assert!(!dir_has_bond(&dir.0));
+    }
+
+    #[test]
+    fn proc_bonding_dir_without_bonds_is_not_a_bond() {
+        // `modprobe bonding` creates /proc/net/bonding even with no bond
+        // (max_bonds=0). The directory alone must not skip ARP tuning; one
+        // file per bond is the real signal.
+        let dir = NetDir::new(&[]);
+        assert!(!proc_bonding_has_bonds(&dir.0));
+
+        let dir = NetDir::new(&["bond0"]);
+        assert!(proc_bonding_has_bonds(&dir.0));
     }
 
     #[test]
