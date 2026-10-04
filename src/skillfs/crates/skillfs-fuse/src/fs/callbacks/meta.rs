@@ -972,7 +972,12 @@ impl SkillFs {
         0
     }
 
-    fn flat_access_read_path(
+    /// Physical directory a **read** of `skill_name` must be served from:
+    /// staging/pending candidates and post-publish grace paths read the
+    /// live source; every other path follows the D1.1 resolver (live
+    /// source, trusted snapshot, or hidden). Shared by `access` and
+    /// `readlink` so both agree on what a read observes.
+    pub(in crate::fs) fn flat_access_read_path(
         &self,
         skill_name: &str,
         relative_path: Option<&Path>,
@@ -1001,7 +1006,10 @@ impl SkillFs {
             })
     }
 
-    fn nested_access_read_path(
+    /// Hermes counterpart of [`Self::flat_access_read_path`]: staging,
+    /// pending, and grace paths read the live nested skill directory,
+    /// everything else follows the D1.1 resolver.
+    pub(in crate::fs) fn nested_access_read_path(
         &self,
         category: &str,
         skill_name: &str,

@@ -68,7 +68,52 @@ impl SkillFs {
                     reply.error(libc::EINVAL);
                     return;
                 }
-                let physical = self.skill_physical_dir(&skill_name).join(&relative_path);
+                // Trusted `.skill-meta` access keeps the live-source
+                // management view, exactly like lookup/getattr/open/access:
+                // a trusted caller must be able to read the metadata
+                // namespace even when the regular skill view is a fallback
+                // snapshot or hidden. Untrusted callers stay hidden.
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                let physical = match self.is_trusted_skill_meta_access(&pt, req) {
+                    Some(false) => {
+                        self.emit_event(
+                            SkillEvent::new(SkillEventKind::Readlink)
+                                .with_skill_name(&skill_name)
+                                .with_relative_path(&relative_path)
+                                .with_action(SkillEventAction::Failed)
+                                .with_errno(libc::ENOENT)
+                                .with_caller(req.uid(), req.gid()),
+                        );
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => self.skill_physical_dir(&skill_name).join(&relative_path),
+                    // Serve ordinary skill content from the same directory
+                    // the rest of the read path resolves to: staging/pending/
+                    // grace paths read the live source, a ledger fallback
+                    // reads the trusted snapshot, and a hidden skill is not
+                    // readable at all. Reading the live source unconditionally
+                    // mixed a live target with the snapshot's symlink type for
+                    // fallback skills.
+                    None => match self.flat_access_read_path(&skill_name, Some(&relative_path)) {
+                        Some(p) => p,
+                        None => {
+                            self.emit_event(
+                                SkillEvent::new(SkillEventKind::Readlink)
+                                    .with_skill_name(&skill_name)
+                                    .with_relative_path(&relative_path)
+                                    .with_action(SkillEventAction::Failed)
+                                    .with_errno(libc::ENOENT)
+                                    .with_caller(req.uid(), req.gid()),
+                            );
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                    },
+                };
                 match std::fs::read_link(&physical) {
                     Ok(target) => {
                         use std::os::unix::ffi::OsStrExt;
@@ -145,24 +190,49 @@ impl SkillFs {
             | PathType::NestedSkillDir { .. } => {
                 reply.error(libc::EINVAL);
             }
-            PathType::HermesMetaChild {
-                name,
-                relative_path,
-            }
-            | PathType::CategoryPassthrough {
-                name,
-                relative_path,
-            }
-            | PathType::NestedPassthrough {
-                category: name,
-                skill_name: _,
-                relative_path,
-            } => {
+            PathType::HermesMetaChild { .. } | PathType::CategoryPassthrough { .. } => {
+                // Not a skill leaf: plain passthrough, no activation mapping.
                 let physical = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
                 };
-                let _ = (&name, &relative_path);
+                match std::fs::read_link(&physical) {
+                    Ok(target) => {
+                        use std::os::unix::ffi::OsStrExt;
+                        reply.data(target.as_os_str().as_bytes());
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                // Mirror the flat branch: trusted `.skill-meta` access reads
+                // the live nested source (matching lookup/getattr/open/
+                // access), while ordinary skill content follows the nested
+                // read directory (live source, staging/pending candidate, or
+                // trusted snapshot).
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                let physical = match self.is_trusted_skill_meta_access(&npt, req) {
+                    Some(false) => return reply.error(libc::ENOENT),
+                    Some(true) => self
+                        .hermes_skill_physical_dir(&category, &skill_name)
+                        .join(&relative_path),
+                    None => match self.nested_access_read_path(
+                        &category,
+                        &skill_name,
+                        Some(&relative_path),
+                    ) {
+                        Some(p) => p,
+                        None => return reply.error(libc::ENOENT),
+                    },
+                };
                 match std::fs::read_link(&physical) {
                     Ok(target) => {
                         use std::os::unix::ffi::OsStrExt;
