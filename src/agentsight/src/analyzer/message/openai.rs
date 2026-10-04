@@ -865,7 +865,9 @@ mod tests {
         // The create endpoint keeps matching, in both bare-path and
         // full-URL shapes.
         assert!(OpenAIParser::matches_path("/v1/responses"));
-        assert!(OpenAIParser::matches_path("https://api.openai.com/v1/responses"));
+        assert!(OpenAIParser::matches_path(
+            "https://api.openai.com/v1/responses"
+        ));
         assert!(OpenAIParser::matches_path(
             "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
         ));

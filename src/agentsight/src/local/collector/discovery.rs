@@ -529,7 +529,10 @@ mod tests {
         // A reminder can open and close on the same line. The closing tag
         // must end the block, not leave the rest of the message stripped.
         let text = "real question\n<system-reminder>ignore me</system-reminder>\nfollow-up detail";
-        assert_eq!(strip_system_context(text), "real question\nfollow-up detail");
+        assert_eq!(
+            strip_system_context(text),
+            "real question\nfollow-up detail"
+        );
 
         assert_eq!(
             strip_system_context("<system-reminder>note</system-reminder>after"),

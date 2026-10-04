@@ -922,18 +922,16 @@ mod tests {
     fn test_is_llm_api_path_rejects_responses_sub_endpoints() {
         let builder = GenAIBuilder::new();
         assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123"));
-        assert!(!builder.is_llm_api_path(
-            "https://api.openai.com/v1/responses/resp_abc123"
-        ));
+        assert!(!builder.is_llm_api_path("https://api.openai.com/v1/responses/resp_abc123"));
         assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/cancel"));
         assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/input_items"));
         // The create endpoint still passes the gate, in bare-path,
         // full-URL and compatible-mode shapes.
         assert!(builder.is_llm_api_path("/v1/responses"));
         assert!(builder.is_llm_api_path("https://api.openai.com/v1/responses"));
-        assert!(builder.is_llm_api_path(
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
-        ));
+        assert!(
+            builder.is_llm_api_path("https://dashscope.aliyuncs.com/compatible-mode/v1/responses")
+        );
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which

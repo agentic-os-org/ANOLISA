@@ -701,8 +701,9 @@ mod tests {
             ],
             "tools": request["tools"].clone()
         });
-        let other = crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
-            .expect("request is counted");
+        let other =
+            crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
+                .expect("request is counted");
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
