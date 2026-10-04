@@ -291,6 +291,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, RwLock};
 
+    use crate::config::StorageConfig;
     use crate::database::{
         DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
     };
