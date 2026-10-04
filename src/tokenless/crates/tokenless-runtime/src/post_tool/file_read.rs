@@ -5,7 +5,8 @@
 //! it is source the agent may edit.
 
 /// Programs that only print their operands; `sed` qualifies separately when it
-/// runs in `-n` mode with a print-only script such as `sed -n '1,80p' page.html`.
+/// runs in quiet mode (`-n`, `-ne`, `--quiet`, `--silent`) with a print-only
+/// script such as `sed -n '1,80p' page.html`.
 const PRINT_PROGRAMS: [&str; 7] = ["cat", "head", "tail", "nl", "less", "more", "bat"];
 
 /// Returns whether `command` is a plain invocation that only prints local files.
@@ -45,14 +46,50 @@ pub(crate) fn prints_local_files(command: &str) -> bool {
     let (options, operands): (Vec<&str>, Vec<&str>) =
         rest.iter().partition(|word| word.starts_with('-'));
     if *program == "sed" {
-        return options.contains(&"-n")
-            && !options
-                .iter()
-                .any(|option| option.starts_with("-i") || option.starts_with("--in-place"))
-            && operands.len() >= 2
-            && is_print_script(operands[0]);
+        // Quiet mode arrives alone (`-n`), bundled into a short-option
+        // cluster (`-ne '1,80p'`), or spelled out (`--quiet`, `--silent`);
+        // in-place editing disqualifies either way, because `-ni` edits the
+        // file instead of only printing it.
+        let mut quiet = false;
+        let mut in_place = false;
+        for option in &options {
+            if matches!(*option, "--quiet" | "--silent") {
+                quiet = true;
+            } else if option.starts_with("--in-place") {
+                in_place = true;
+            } else {
+                let (option_quiet, option_in_place) = sed_cluster(option);
+                quiet = quiet || option_quiet;
+                in_place = in_place || option_in_place;
+            }
+        }
+        return quiet && !in_place && operands.len() >= 2 && is_print_script(operands[0]);
     }
     PRINT_PROGRAMS.contains(program) && !operands.is_empty()
+}
+
+/// Reads the quiet (`-n`) and in-place (`-i`) flags out of one `sed`
+/// short-option cluster, following getopt: only the last option of a cluster
+/// may take its argument from the next word, so a value-taking letter (`e`,
+/// `f`, `l`, and `i`, whose inline remainder is a backup suffix) ends the
+/// scan and everything after it belongs to that value. An unknown letter
+/// ends the scan as well, so `-en '5p'` — where `e` consumes `n` as its
+/// script — and `-fnever` never look quiet, while `-ne` and `-sne` do.
+fn sed_cluster(option: &str) -> (bool, bool) {
+    let (mut quiet, mut in_place) = (false, false);
+    for letter in option.strip_prefix('-').unwrap_or("").chars() {
+        match letter {
+            'n' => quiet = true,
+            'i' => {
+                in_place = true;
+                break;
+            }
+            'e' | 'f' | 'l' => break,
+            's' | 'z' | 'u' | 'E' => {}
+            _ => break,
+        }
+    }
+    (quiet, in_place)
 }
 
 /// Matches a `sed` script made only of addresses and the `p` command.
@@ -139,6 +176,10 @@ mod tests {
             "cd a && cd b && cat page.html",
             "sed -n '1,80p' page.html",
             "sed -n -e 5p page.html",
+            "sed -ne '1,80p' page.html",
+            "sed -nE 5p page.html",
+            "sed --quiet '1,80p' page.html",
+            "sed --silent 5p page.html",
             "cat 'my page.html'",
             "cat \"q\\\"x.html\"",
             "cat my\\ page.html",
@@ -170,6 +211,10 @@ mod tests {
             "sed -i 's/a/b/' page.html",
             "sed -n 's/a/b/p' page.html",
             "sed -n '1,5p'",
+            "sed -ni '5p' page.html",
+            "sed --quiet --in-place '5p' page.html",
+            "sed -en '5p' page.html",
+            "sed -fnever '5p' page.html",
             "cat 'page.html",
             "cat page.html\\",
             "cat \"page.html",
