@@ -117,7 +117,25 @@ impl ConsolidatedFact {
         out.push_str(&format!("created_at: {}\n", self.created_at));
         out.push_str(&format!("confidence: {}\n", self.confidence));
         out.push_str("---\n\n");
-        let safe_content = self.content.replace("\n---\n", "\n- - -\n");
+        // Neutralise "---" delimiter lines so flat frontmatter readers and
+        // body extractors cannot mistake content for a closing fence.
+        // The interior pattern needs a newline on both sides, so anchor
+        // the content start/end explicitly: a leading "---\n" has no
+        // preceding newline inside the content, and a trailing "\n---"
+        // only gains its final newline AFTER this check (appended below).
+        let mut safe_content = self.content.replace("\n---\n", "\n- - -\n");
+        if safe_content.starts_with("---\n") {
+            safe_content.replace_range(..4, "- - -\n");
+        }
+        if safe_content.ends_with("\n---") {
+            let start = safe_content.len() - 4;
+            safe_content.replace_range(start.., "\n- - -");
+        }
+        // Degenerate case: content that is exactly "---" becomes a bare
+        // delimiter line once the trailing newline is appended.
+        if safe_content == "---" {
+            safe_content = "- - -".to_string();
+        }
         out.push_str(&safe_content);
         if !self.content.ends_with('\n') {
             out.push('\n');
@@ -158,6 +176,50 @@ fn sanitize_hint(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Mirror of the canonical flat frontmatter reader (see
+    /// `user_profile.rs` / `memory_observe.rs`) so the writer stays
+    /// honest against the real read path without reaching across
+    /// module privacy.
+    fn parse_frontmatter_flat(content: &str) -> std::collections::HashMap<String, String> {
+        let mut fm = std::collections::HashMap::new();
+        if let Some(rest) = content.strip_prefix("---\n") {
+            if let Some(end) = rest.find("\n---") {
+                for line in rest[..end].lines() {
+                    if let Some((key, value)) = line.split_once(": ") {
+                        let key = key.trim();
+                        let value = value.trim().trim_matches('"');
+                        if !key.starts_with(' ') && !key.starts_with('-') {
+                            fm.insert(key.to_string(), value.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        fm
+    }
+
+    /// Mirror of the canonical body extractor (see `user_profile.rs`).
+    fn extract_body(content: &str) -> String {
+        if let Some(rest) = content.strip_prefix("---\n") {
+            if let Some(end) = rest.find("\n---\n") {
+                return rest[end + 5..].trim().to_string();
+            }
+        }
+        content.trim().to_string()
+    }
+
+    fn fact_with_content(content: &str) -> ConsolidatedFact {
+        ConsolidatedFact::new(
+            "sid",
+            FactCategory::Lesson,
+            "T".into(),
+            content.to_string(),
+            "mem_write".into(),
+            vec![],
+            0.9,
+        )
+    }
+
     #[test]
     fn fact_new_generates_ulid() {
         let f = ConsolidatedFact::new(
@@ -190,6 +252,57 @@ mod tests {
         assert!(md.contains("source_tool: mem_edit"));
         assert!(md.contains("x.rs"));
         assert!(md.contains("Details here"));
+    }
+
+    #[test]
+    fn markdown_content_starting_with_delimiter_is_escaped() {
+        let f = fact_with_content("---\nruns cargo fix");
+        let md = f.to_markdown();
+
+        // Frontmatter still parses cleanly.
+        let fm = parse_frontmatter_flat(&md);
+        assert_eq!(fm.get("id").map(String::as_str), Some(f.id.as_str()));
+
+        // Body must not open with a bare "---" line that flat readers
+        // would treat as a delimiter (the BM25 description extractor
+        // would index "---" as the first body line).
+        let body = extract_body(&md);
+        assert!(
+            !body.lines().any(|l| l == "---"),
+            "stray delimiter line in body: {body:?}"
+        );
+        assert!(body.starts_with("- - -"));
+    }
+
+    #[test]
+    fn markdown_content_ending_with_delimiter_is_escaped() {
+        let f = fact_with_content("note about hr\n---");
+        let md = f.to_markdown();
+
+        let fm = parse_frontmatter_flat(&md);
+        assert_eq!(fm.get("session_id").map(String::as_str), Some("sid"));
+
+        // The trailing "\n---" only gains its final newline AFTER the
+        // interior replacement runs, so it must be anchored explicitly.
+        let body = extract_body(&md);
+        assert!(
+            !body.lines().any(|l| l == "---"),
+            "stray delimiter line in body: {body:?}"
+        );
+        assert!(body.ends_with("- - -"));
+    }
+
+    #[test]
+    fn markdown_interior_delimiter_still_escaped() {
+        let f = fact_with_content("a\n---\nb");
+        let md = f.to_markdown();
+
+        let body = extract_body(&md);
+        assert!(
+            !body.lines().any(|l| l == "---"),
+            "stray delimiter line in body: {body:?}"
+        );
+        assert!(body.contains("- - -"));
     }
 
     #[test]
