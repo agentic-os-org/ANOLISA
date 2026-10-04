@@ -814,7 +814,9 @@ impl SkillFs {
         // is renamed to a skill directory, validate the target name
         // against sensitive namespaces and invalid skill name shapes.
         // Flat layout: SkillDir → SkillDir.
-        // Hermes layout: NestedSkillDir → NestedSkillDir (same category).
+        // Hermes layout: NestedSkillDir → NestedSkillDir (same category),
+        // and top-level staging roots classified by NAME (see the H3 arm
+        // below for why the type pairs alone cannot enumerate them).
         let is_staging_rename = if let Some(ref matcher) = self.staging_matcher {
             match (&old_path_type, &new_path_type) {
                 (
@@ -866,6 +868,59 @@ impl SkillFs {
                             old = %old_path,
                             new = %new_path,
                             "rename: rejecting Hermes staging rename to invalid target"
+                        );
+                        self.emit_event(
+                            SkillEvent::new(SkillEventKind::Rename)
+                                .with_optional_skill_name(event_skill.clone())
+                                .with_optional_relative_path(event_relative.clone())
+                                .with_action(SkillEventAction::Rejected)
+                                .with_errno(libc::EACCES)
+                                .with_caller(req.uid(), req.gid())
+                                .with_detail(format!(
+                                    "class=invalid_staging_rename_target old={} new={}",
+                                    old_path, new_path
+                                )),
+                        );
+                        reply.error(libc::EACCES);
+                        return;
+                    }
+                    true
+                }
+                // H3: Hermes top-level staging rename, classified by NAME
+                // rather than by type pair. While a top-level staging root
+                // is being populated it parses as a CategoryDir (no
+                // SKILL.md yet — an interrupted install) and as a SkillDir
+                // once the manifest has been written. The rename target
+                // parses as a CategoryDir (non-in-place mount, or a name
+                // that already exists as a directory) or as a HermesMeta
+                // (in-place mount, fresh name: the depth-1 in-place
+                // rewrite classifies not-yet-existing entries as
+                // top-level files). A (SkillDir, SkillDir) pair is already
+                // validated by the flat arm above, so this arm observes
+                // every other combination. Without it the validation — and
+                // the install-completion notify below — could be bypassed
+                // by choosing the mount mode or the manifest timing: a
+                // top-level staging rename onto `.skill-meta` silently
+                // succeeded, and a completed install never notified.
+                (
+                    PathType::SkillDir {
+                        skill_name: old_name,
+                    }
+                    | PathType::CategoryDir { category: old_name },
+                    PathType::SkillDir {
+                        skill_name: new_name,
+                    }
+                    | PathType::CategoryDir { category: new_name }
+                    | PathType::HermesMeta { name: new_name },
+                ) if self.skill_layout == crate::path::SkillLayout::Hermes
+                    && matcher.is_staging_root(old_name) =>
+                {
+                    if !crate::security::install::is_valid_staging_rename_target(new_name, matcher)
+                    {
+                        warn!(
+                            old = %old_path,
+                            new = %new_path,
+                            "rename: rejecting Hermes top-level staging rename to invalid target"
                         );
                         self.emit_event(
                             SkillEvent::new(SkillEventKind::Rename)
@@ -1069,6 +1124,15 @@ impl SkillFs {
                             category,
                             skill_name,
                         } => Some(Self::hermes_skill_id(category, skill_name)),
+                        // H3: Hermes top-level staging rename — the new
+                        // top-level skill id is the bare name, whether the
+                        // target parsed as a category, as a HermesMeta
+                        // (in-place fresh name), or as an existing
+                        // top-level Skill. Matches
+                        // enumerate_hermes_top_level_skills and the
+                        // resolver key used for mixed-layout skills.
+                        PathType::CategoryDir { category } => Some(category.clone()),
+                        PathType::HermesMeta { name } => Some(name.clone()),
                         _ => None,
                     };
                     if let Some(ref id) = notify_id {

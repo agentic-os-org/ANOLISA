@@ -73,6 +73,14 @@ impl SkillFs {
                         if is_reserved_lifecycle_name(&name) {
                             continue;
                         }
+                        // I2/H3: top-level staging roots are installer-private
+                        // workspaces; hide them from the root listing exactly
+                        // as the flat layout hides them from /skills and the
+                        // Hermes CategoryDir branch hides them inside a
+                        // category.
+                        if self.is_staging_skill_root(&name) {
+                            continue;
+                        }
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = self.skill_inode_path(&name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -713,6 +721,13 @@ impl SkillFs {
                             // S3: reserved lifecycle roots are never ordinary
                             // hub content, whatever their physical shape.
                             if is_reserved_lifecycle_name(&name) {
+                                continue;
+                            }
+                            // I2/H3: top-level staging roots are hidden from
+                            // the opendir snapshot too (the readdir branch
+                            // filters them; a snapshot taken at opendir must
+                            // not leak them either).
+                            if self.is_staging_skill_root(&name) {
                                 continue;
                             }
                             let kind = dir_entry_file_type(&entry);

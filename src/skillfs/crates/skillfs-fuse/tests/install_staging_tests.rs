@@ -3030,6 +3030,252 @@ fn hermes_staging_exact_path_accessible() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// H3: Hermes top-level staging. A staging root at the mount root parses as
+// a CategoryDir while it is being populated (no SKILL.md yet — an
+// interrupted install) and as a SkillDir once the manifest has been
+// written; a fresh top-level rename target parses as a HermesMeta on an
+// in-place mount. The rename handling must classify BOTH source states
+// and BOTH target shapes, or the validation and the install-completion
+// notify can be bypassed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_top_level_staging_hidden_from_root_listing() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+        // A top-level staging root being populated by an installer.
+        let staging = src.join(".openclaw-install-stage-alpha");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("SKILL.md"),
+            "---\nname: alpha\ndescription: staged\n---\n",
+        )
+        .unwrap();
+    });
+
+    let entries = common::list_dir_names(fix.mp());
+    assert!(
+        !entries.contains(&".openclaw-install-stage-alpha".to_string()),
+        "a top-level staging root must NOT appear in the root listing: {:?}",
+        entries
+    );
+    // The seeded category must remain visible.
+    assert!(
+        entries.contains(&"apple".to_string()),
+        "existing category must be visible: {:?}",
+        entries
+    );
+    // Exact-path access stays fully allowed (the I2 hiding is
+    // listing-only).
+    assert!(
+        fix.mp()
+            .join(".openclaw-install-stage-alpha/SKILL.md")
+            .exists()
+    );
+}
+
+#[test]
+fn hermes_top_level_staging_rename_triggers_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-beta");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: beta\ndescription: installed\n---\n",
+    )
+    .unwrap();
+
+    // Rename the staging root to a valid TOP-LEVEL skill name: the
+    // completion signal for the install.
+    let final_path = fix.mp().join("beta");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    fix.wait_for_notify(1);
+
+    let events = fix.notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "beta" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the top-level skill beta, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0].canonical_skill_dir.ends_with("/beta"),
+        "skillDir must end with /beta, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The installed skill is readable through the mount.
+    let manifest = std::fs::read_to_string(final_path.join("SKILL.md")).unwrap();
+    assert!(manifest.contains("name: beta"));
+}
+
+#[test]
+fn hermes_top_level_staging_partial_rename_triggers_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    // An interrupted install: the staging root exists but its manifest
+    // has not been written yet, so the source side of the rename parses
+    // as a plain CategoryDir rather than a top-level Skill.
+    let staging = fix.mp().join(".openclaw-install-stage-beta");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("data.txt"), "partial payload").unwrap();
+
+    // Completing the install by renaming the partial workspace to its
+    // final top-level name must still be the one notify-bearing event.
+    let final_path = fix.mp().join("beta");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    fix.wait_for_notify(1);
+
+    let events = fix.notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "beta" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the top-level skill beta, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0].canonical_skill_dir.ends_with("/beta"),
+        "skillDir must end with /beta, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The renamed workspace survives intact and is reachable at its
+    // final name.
+    let data = std::fs::read_to_string(final_path.join("data.txt")).unwrap();
+    assert_eq!(data, "partial payload");
+    // The root listing shows the final name, not the staging name.
+    let entries = common::list_dir_names(fix.mp());
+    assert!(
+        entries.contains(&"beta".to_string()),
+        "the installed top-level name must be listed: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&".openclaw-install-stage-beta".to_string()),
+        "the staging name must be gone: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn hermes_top_level_staging_rename_to_sensitive_name_rejected() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-evil");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: evil\ndescription: probes sensitive target\n---\n",
+    )
+    .unwrap();
+
+    // Rename onto a sensitive namespace name: the flat and intra-category
+    // arms reject this with EACCES; the top-level arm must too, for a
+    // complete staging root (manifest written, parses as a Skill)...
+    let target = fix.mp().join(".skill-meta");
+    let result = std::fs::rename(&staging, &target);
+    assert!(
+        result.is_err(),
+        "rename onto .skill-meta must be rejected with EACCES"
+    );
+    // The sensitive name was not created on the source.
+    assert!(!fix.source.path().join(".skill-meta").exists());
+    // The staging workspace is untouched (exact-path access preserved).
+    assert!(staging.join("SKILL.md").exists());
+
+    // ...and for a partial one (no manifest yet, parses as a Category).
+    let partial = fix.mp().join(".openclaw-install-stage-evil-partial");
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("data.txt"), "payload").unwrap();
+    let result_partial = std::fs::rename(&partial, &target);
+    assert!(
+        result_partial.is_err(),
+        "partial staging rename onto .skill-meta must be rejected with EACCES"
+    );
+    assert!(!fix.source.path().join(".skill-meta").exists());
+    assert!(partial.join("data.txt").exists());
+}
+
+#[test]
+fn hermes_top_level_staging_writes_no_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-new");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: test\n---\n",
+    )
+    .unwrap();
+    std::fs::write(staging.join("data.txt"), "payload").unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+    fix.notify_controller.flush_for_testing();
+
+    let staging_events: Vec<_> = fix
+        .notify_client
+        .events()
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .cloned()
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "top-level staging writes must not trigger any notify: {:?}",
+        staging_events
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // H3: Hermes pending install tests
 // ─────────────────────────────────────────────────────────────────────────────
 
