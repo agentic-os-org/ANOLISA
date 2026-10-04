@@ -47,22 +47,89 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
-    const child = spawn(callCommand, [this.toolName]);
-    child.stdin.write(JSON.stringify(this.params));
-    child.stdin.end();
 
+    // Serialize before spawning: a payload the JSON serializer rejects
+    // (for example a bigint admitted by a permissive schema) must fail
+    // the call outright with the same failure completion the async error
+    // paths use. Spawning first would leave a stdin-reading call command
+    // blocked waiting for EOF, so `close` never fires and execute()
+    // hangs forever.
+    let payload: string;
+    try {
+      payload = JSON.stringify(this.params);
+    } catch (err) {
+      const failure = err instanceof Error ? err : new Error(String(err));
+      const llmContent = [
+        'Stdout: (empty)',
+        'Stderr: (empty)',
+        `Error: ${failure}`,
+        'Exit Code: (none)',
+        'Signal: (none)',
+      ].join('\n');
+      return {
+        llmContent,
+        returnDisplay: llmContent,
+        error: {
+          message: llmContent,
+          type: ToolErrorType.DISCOVERED_TOOL_EXECUTION_ERROR,
+        },
+      };
+    }
+
+    const child = spawn(callCommand, [this.toolName]);
+
+    // The child may exit before consuming stdin (e.g. a crashing tool
+    // command). Without a handler, the resulting EPIPE surfaces as an
+    // unhandled stream error; capture it and report it as a tool failure.
+    let writeError: Error | null = null;
+    child.stdin.on('error', (err) => {
+      writeError ??= err;
+    });
+    try {
+      child.stdin.write(payload);
+      child.stdin.end();
+    } catch (err) {
+      writeError ??= err instanceof Error ? err : new Error(String(err));
+      // A synchronous write failure leaves the child blocked reading
+      // stdin for EOF, so `close` would never fire and execute() would
+      // hang forever. Tear the stream and the child down so the close
+      // handler below settles with the captured error.
+      child.stdin.destroy();
+      child.kill();
+    }
+
+    // Cap accumulated output like the tool discovery command does, so a
+    // runaway child cannot buffer without bound.
+    const MAX_OUTPUT_SIZE = 10 * 1024 * 1024; // 10MB limit, per stream
     let stdout = '';
     let stderr = '';
+    let stdoutByteLength = 0;
+    let stderrByteLength = 0;
+    let sizeLimitExceeded = false;
     let error: Error | null = null;
     let code: number | null = null;
     let signal: NodeJS.Signals | null = null;
 
     await new Promise<void>((resolve) => {
       const onStdout = (data: Buffer) => {
+        if (sizeLimitExceeded) return;
+        if (stdoutByteLength + data.length > MAX_OUTPUT_SIZE) {
+          sizeLimitExceeded = true;
+          child.kill();
+          return;
+        }
+        stdoutByteLength += data.length;
         stdout += data?.toString();
       };
 
       const onStderr = (data: Buffer) => {
+        if (sizeLimitExceeded) return;
+        if (stderrByteLength + data.length > MAX_OUTPUT_SIZE) {
+          sizeLimitExceeded = true;
+          child.kill();
+          return;
+        }
+        stderrByteLength += data.length;
         stderr += data?.toString();
       };
 
@@ -97,13 +164,23 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     });
 
     // if there is any error, non-zero exit code, signal, or stderr, return error details instead of stdout
-    if (error || code !== 0 || signal || stderr) {
+    if (
+      writeError ||
+      error ||
+      code !== 0 ||
+      signal ||
+      stderr ||
+      sizeLimitExceeded
+    ) {
       const llmContent = [
         `Stdout: ${stdout || '(empty)'}`,
         `Stderr: ${stderr || '(empty)'}`,
-        `Error: ${error ?? '(none)'}`,
+        `Error: ${writeError ?? error ?? '(none)'}`,
         `Exit Code: ${code ?? '(none)'}`,
         `Signal: ${signal ?? '(none)'}`,
+        ...(sizeLimitExceeded
+          ? [`Truncated: output exceeded the ${MAX_OUTPUT_SIZE} byte limit`]
+          : []),
       ].join('\n');
       return {
         llmContent,

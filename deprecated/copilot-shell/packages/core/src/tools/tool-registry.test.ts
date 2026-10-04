@@ -14,6 +14,7 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
 import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
+import { PassThrough, EventEmitter } from 'node:stream';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 
@@ -369,7 +370,7 @@ describe('ToolRegistry', () => {
       const executionProcess = {
         stdout: { on: vi.fn(), removeListener: vi.fn() },
         stderr: { on: vi.fn(), removeListener: vi.fn() },
-        stdin: { write: vi.fn(), end: vi.fn() },
+        stdin: { write: vi.fn(), end: vi.fn(), on: vi.fn() },
         on: vi.fn(),
         connected: true,
         disconnect: vi.fn(),
@@ -427,6 +428,127 @@ describe('ToolRegistry', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe(JSON.stringify(params));
+    });
+
+    function createFakeChildProcess() {
+      const child = new EventEmitter() as any;
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      child.disconnect = vi.fn();
+      child.connected = true;
+      return child;
+    }
+
+    it('should treat EPIPE on stdin as a tool failure with partial output instead of crashing', async () => {
+      vi.spyOn(config, 'getToolDiscoveryCommand').mockReturnValue(
+        'my-discovery-command',
+      );
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('my-call-command');
+
+      const fakeChild = createFakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(fakeChild);
+
+      const tool = new DiscoveredTool(config, 'epipe-tool', 'A test tool', {});
+      const invocation = tool.build({ param: 'value' });
+      const execution = invocation.execute(new AbortController().signal);
+
+      // The child exits before consuming stdin, so the write fails with EPIPE.
+      const epipeError = Object.assign(new Error('write EPIPE'), {
+        code: 'EPIPE',
+      });
+      fakeChild.stdin.emit('error', epipeError);
+      fakeChild.stdout.write(Buffer.from('partial stdout before exit'));
+      fakeChild.stderr.write(Buffer.from('bye'));
+      fakeChild.emit('close', 1, null);
+
+      const result = await execution;
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.DISCOVERED_TOOL_EXECUTION_ERROR,
+      );
+      expect(String(result.llmContent)).toContain('partial stdout before exit');
+      expect(String(result.llmContent)).toContain('EPIPE');
+    });
+
+    it('should cap accumulated output instead of buffering unbounded child output', async () => {
+      vi.spyOn(config, 'getToolDiscoveryCommand').mockReturnValue(
+        'my-discovery-command',
+      );
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('my-call-command');
+
+      const fakeChild = createFakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(fakeChild);
+
+      const tool = new DiscoveredTool(config, 'chatty-tool', 'A test tool', {});
+      const invocation = tool.build({});
+      const execution = invocation.execute(new AbortController().signal);
+
+      const MAX_OUTPUT_SIZE = 10 * 1024 * 1024;
+      const chunk = Buffer.alloc(6 * 1024 * 1024, 0x61); // 6MB of 'a'
+      fakeChild.stdout.write(chunk); // 6MB, still under the cap
+      fakeChild.stdout.write(chunk); // 12MB total, exceeds the cap
+      fakeChild.emit('close', null, 'SIGKILL');
+
+      const result = await execution;
+
+      // The runaway child must be killed and the tool must fail.
+      expect(fakeChild.kill).toHaveBeenCalled();
+      expect(result.error?.type).toBe(
+        ToolErrorType.DISCOVERED_TOOL_EXECUTION_ERROR,
+      );
+      // Whatever is reported back must not exceed the cap (plus a small
+      // envelope for the surrounding error details).
+      expect(String(result.llmContent).length).toBeLessThan(
+        MAX_OUTPUT_SIZE + 1024,
+      );
+      expect(String(result.llmContent)).not.toContain('b'.repeat(1024));
+    });
+
+    it('should settle with the execution error when stdin fails synchronously', async () => {
+      vi.spyOn(config, 'getToolDiscoveryCommand').mockReturnValue(
+        'my-discovery-command',
+      );
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('my-call-command');
+
+      const fakeChild = createFakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(fakeChild);
+
+      const tool = new DiscoveredTool(config, 'bigint-tool', 'A test tool', {});
+      // A permissive schema can admit a bigint, which JSON.stringify
+      // rejects synchronously before anything reaches stdin.
+      const invocation = tool.build({ value: 1n });
+      const execution = invocation.execute(new AbortController().signal);
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'execution did not settle after a synchronous stdin failure',
+              ),
+            ),
+          5_000,
+        );
+      });
+
+      let result;
+      try {
+        result = await Promise.race([execution, timeoutPromise]);
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      // The invocation must not hang waiting for a child that never got a
+      // stdin payload; it settles through the same failure completion the
+      // async error paths use, and never spawns the call command at all.
+      expect(spawn).not.toHaveBeenCalled();
+      expect(result.error?.type).toBe(
+        ToolErrorType.DISCOVERED_TOOL_EXECUTION_ERROR,
+      );
+      expect(String(result.llmContent)).toContain('BigInt');
     });
   });
 });
