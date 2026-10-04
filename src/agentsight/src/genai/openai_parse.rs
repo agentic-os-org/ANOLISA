@@ -783,13 +783,28 @@ impl GenAIBuilder {
     ///
     /// Shares the analyzer's per-item tool state so interleaved arguments and
     /// done payloads stay attached to their own call. Incomplete calls survive
-    /// without a per-call done event.
+    /// without a per-call done event. A done event keyed by an identity no
+    /// `output_item.added` carried (a capture that attached after the headers)
+    /// cannot be routed by the item state; its complete arguments are still
+    /// kept, re-attached to the call that was current when it arrived.
     pub(super) fn merge_responses_sse_chunks(
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         let mut text_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
+        // Done payloads the item router cannot attribute: the router matches a
+        // done event by the item id / output index its `output_item.added`
+        // carried, and a capture that started mid-stream can attach before
+        // those headers were seen. Dropping such a payload persists the call
+        // with no arguments even though the done event carries them, so record
+        // it against the last added function_call (the router's current call)
+        // and re-attach it below.
+        let mut last_added: Option<(String, String)> = None;
+        let mut added_item_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut added_indexes: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut orphan_done: Vec<(String, String, String)> = Vec::new();
 
         for chunk in chunks {
             calls.observe(chunk);
@@ -801,7 +816,48 @@ impl GenAIBuilder {
                         text_buf.push_str(delta);
                     }
                 }
-                "response.output_item.added" => saw_responses_event = true,
+                "response.output_item.added" => {
+                    saw_responses_event = true;
+                    let item = chunk.get("item");
+                    if item.and_then(|i| i.get("type")).and_then(|t| t.as_str())
+                        == Some("function_call")
+                    {
+                        if let Some(id) = item.and_then(|i| i.get("id")).and_then(|v| v.as_str()) {
+                            added_item_ids.insert(id.to_string());
+                        }
+                        if let Some(index) = chunk.get("output_index").and_then(|v| v.as_u64()) {
+                            added_indexes.insert(index);
+                        }
+                        last_added = Some((
+                            item.and_then(|i| i.get("call_id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            item.and_then(|i| i.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        ));
+                    }
+                }
+                "response.function_call_arguments.done" => {
+                    if let Some(arguments) = chunk.get("arguments").and_then(|a| a.as_str()) {
+                        let item_id = chunk.get("item_id").and_then(|v| v.as_str());
+                        let output_index = chunk.get("output_index").and_then(|v| v.as_u64());
+                        let identified = item_id.is_some() || output_index.is_some();
+                        let routed = (item_id.is_some_and(|id| added_item_ids.contains(id)))
+                            || (output_index.is_some_and(|i| added_indexes.contains(&i)));
+                        if identified && !routed && last_added.is_some() {
+                            if let Some((call_id, name)) = &last_added {
+                                orphan_done.push((
+                                    call_id.clone(),
+                                    name.clone(),
+                                    arguments.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -810,7 +866,7 @@ impl GenAIBuilder {
             return None;
         }
 
-        let tool_parts: Vec<_> = calls
+        let mut tool_parts: Vec<_> = calls
             .into_calls()
             .map(|(id, name, arguments)| MessagePart::ToolCall {
                 id: if id.is_empty() { None } else { Some(id) },
@@ -818,6 +874,25 @@ impl GenAIBuilder {
                 arguments: serde_json::from_str(&arguments).ok(),
             })
             .collect();
+        for part in &mut tool_parts {
+            if let MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } = part
+            {
+                if arguments.is_some() {
+                    continue;
+                }
+                if let Some((_, (_, _, payload))) =
+                    orphan_done.iter().enumerate().find(|(_, (oid, oname, _))| {
+                        *oid == id.as_deref().unwrap_or("") && oname == name
+                    })
+                {
+                    *arguments = serde_json::from_str(payload).ok();
+                }
+            }
+        }
 
         let mut parts = Vec::new();
         if !text_buf.is_empty() {

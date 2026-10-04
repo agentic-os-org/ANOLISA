@@ -1108,6 +1108,52 @@ mod tests {
         }
     }
 
+    /// `response.function_call_arguments.done` carries the complete arguments
+    /// for its call; the deltas that precede it are a best-effort stream a
+    /// late-attached capture can miss entirely. The analyzer's aggregator
+    /// prefers the done payload for that reason, so the drain merger has to as
+    /// well — otherwise a drained call is persisted with no arguments.
+    #[test]
+    fn test_extract_sse_enrichment_responses_done_arguments_are_kept() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_d1","name":"get_weather"}}"#,
+            ),
+            // Capture started after the argument deltas: the done event is the
+            // only place the arguments appear.
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.done","item_id":"fc_d1","arguments":"{\"city\":\"Beijing\"}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_d1","model":"qwen-plus"}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from responses SSE");
+        let json = enrichment
+            .output_messages
+            .expect("drained responses output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_d1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments,
+                    &Some(serde_json::json!({"city": "Beijing"})),
+                    "the done event's arguments are authoritative"
+                );
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_generate_id_unique() {
         let builder = GenAIBuilder::new();
