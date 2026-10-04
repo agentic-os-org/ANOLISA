@@ -324,7 +324,27 @@ impl SandboxInstance {
     }
 
     /// Persist an operation before starting its first data-plane mutation.
-    pub fn begin_operation(&mut self, kind: OperationKind) {
+    ///
+    /// Mirrors the typed `begin_*_operation` helpers: refuses to replace a
+    /// journal that is still active, since discarding it would also discard
+    /// the crash-recovery phase recorded for the in-flight operation.
+    pub fn begin_operation(&mut self, kind: OperationKind) -> Result<()> {
+        if let Some(active) = &self.operation {
+            return Err(BlazeError::OperationInProgress {
+                active: active.kind.to_string(),
+                requested: kind.to_string(),
+            });
+        }
+        self.begin_operation_unchecked(kind);
+        Ok(())
+    }
+
+    /// Replace the journal unconditionally.
+    ///
+    /// Escape hatch for paths that deliberately supersede an unfinished
+    /// operation (destroy superseding an in-flight checkpoint): the active
+    /// journal and its crash-recovery phase are intentionally discarded.
+    pub fn begin_operation_unchecked(&mut self, kind: OperationKind) {
         self.operation = Some(OperationJournal {
             kind,
             started_at: Utc::now(),
@@ -898,7 +918,9 @@ mod tests {
     fn create_journal_round_trips() {
         let tmp = tempfile::tempdir().expect("tmp");
         let mut instance = fresh();
-        instance.begin_operation(OperationKind::Create);
+        instance
+            .begin_operation(OperationKind::Create)
+            .expect("begin create");
         instance.persist(tmp.path()).expect("persist");
 
         let mut loaded = SandboxInstance::load(tmp.path(), instance.id).expect("load");
@@ -914,7 +936,9 @@ mod tests {
     fn prune_journal_round_trips_without_a_checkpoint_selection() {
         let tmp = tempfile::tempdir().expect("tmp");
         let mut instance = fresh();
-        instance.begin_operation(OperationKind::Prune);
+        instance
+            .begin_operation(OperationKind::Prune)
+            .expect("begin prune");
         instance.persist(tmp.path()).expect("persist");
 
         let loaded = SandboxInstance::load(tmp.path(), instance.id).expect("load");
@@ -973,7 +997,9 @@ mod tests {
     #[test]
     fn checkpoint_journal_cannot_replace_an_active_operation() {
         let mut instance = fresh();
-        instance.begin_operation(OperationKind::Create);
+        instance
+            .begin_operation(OperationKind::Create)
+            .expect("begin create");
         let journal = instance.operation.clone();
 
         let error = instance
@@ -986,6 +1012,43 @@ mod tests {
                 if active == "create" && requested == "checkpoint"
         ));
         assert_eq!(instance.operation, journal);
+    }
+
+    #[test]
+    fn begin_operation_cannot_replace_an_active_journal() {
+        let mut instance = fresh();
+        instance
+            .begin_operation(OperationKind::Create)
+            .expect("begin create");
+        let journal = instance.operation.clone();
+
+        let error = instance
+            .begin_operation(OperationKind::Destroy)
+            .expect_err("an unguarded begin must not discard an active journal");
+
+        assert!(matches!(
+            error,
+            BlazeError::OperationInProgress { active, requested }
+                if active == "create" && requested == "destroy"
+        ));
+        assert_eq!(instance.operation, journal);
+    }
+
+    #[test]
+    fn begin_operation_unchecked_replaces_the_active_journal() {
+        // The escape hatch destroy uses: supersede an in-flight operation on
+        // purpose, discarding its journal.
+        let mut instance = fresh();
+        instance
+            .begin_operation(OperationKind::Create)
+            .expect("begin create");
+
+        instance.begin_operation_unchecked(OperationKind::Destroy);
+
+        assert_eq!(
+            instance.operation.as_ref().map(|journal| journal.kind),
+            Some(OperationKind::Destroy)
+        );
     }
 
     #[test]
@@ -1105,7 +1168,9 @@ mod tests {
     #[test]
     fn restore_journal_cannot_replace_an_active_operation() {
         let mut instance = fresh();
-        instance.begin_operation(OperationKind::Create);
+        instance
+            .begin_operation(OperationKind::Create)
+            .expect("begin create");
         let journal = instance.operation.clone();
 
         let error = instance

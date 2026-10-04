@@ -5264,7 +5264,9 @@ mod tests {
         let journal = {
             let mut instances = state.instances.lock().expect("instances");
             let instance = instances.get_mut(&uuid).expect("instance");
-            instance.begin_operation(OperationKind::Create);
+            instance
+                .begin_operation(OperationKind::Create)
+                .expect("begin create");
             state
                 .state_store
                 .persist(instance)
@@ -5803,7 +5805,9 @@ mod tests {
         instance
             .transition(SandboxState::Creating)
             .expect("creating");
-        instance.begin_operation(OperationKind::Create);
+        instance
+            .begin_operation(OperationKind::Create)
+            .expect("begin create");
         let run_dir = config.daemon.state_dir.join(instance.id.to_string());
         let run_dir_owner = OwnedRunDir::for_test(instance.id, run_dir.clone());
         BubblewrapSpawner

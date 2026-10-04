@@ -571,7 +571,7 @@ impl SandboxManager {
         }
 
         let checkpoint_history_expected = instance.last_checkpoint.is_some();
-        instance.begin_operation(OperationKind::Prune);
+        instance.begin_operation(OperationKind::Prune)?;
         self.persist_and_retain(instance)?;
 
         let checkpoints = self.checkpoints.clone();

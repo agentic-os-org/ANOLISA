@@ -474,7 +474,7 @@ impl SandboxManager {
         let operation_lock = self.operation_lock(instance.id);
         let _operation = operation_lock.lock().await;
         instance.transition(SandboxState::Creating)?;
-        instance.begin_operation(OperationKind::Create);
+        instance.begin_operation(OperationKind::Create)?;
 
         // Publish the stable identity and create intent before allocation.
         if let Err(error) = self.state_store.persist(&instance) {
@@ -832,7 +832,9 @@ impl SandboxManager {
         if original.operation.as_ref().map(|operation| operation.kind)
             != Some(OperationKind::Destroy)
         {
-            original.begin_operation(OperationKind::Destroy);
+            // Destroy deliberately supersedes any other in-flight operation:
+            // its journal replaces (and discards) the active one.
+            original.begin_operation_unchecked(OperationKind::Destroy);
         }
         if let Err(error) = crate::failpoint::state("destroy-intent-state-commit")
             .and_then(|_| self.state_store.persist(&original))
@@ -1152,7 +1154,7 @@ impl SandboxManager {
         original: BlazeDaemonError,
     ) -> BlazeDaemonError {
         if instance.operation.is_none() {
-            instance.begin_operation(OperationKind::Create);
+            instance.begin_operation_unchecked(OperationKind::Create);
         }
         let mut cleanup_errors = Vec::new();
         let backend = if registered {

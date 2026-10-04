@@ -728,7 +728,9 @@ mod tests {
             .expect("creating to running");
         metadata.backend_ownership = BackendOwnership::Running;
         if active_operation {
-            metadata.begin_operation(OperationKind::Create);
+            metadata
+                .begin_operation(OperationKind::Create)
+                .expect("begin create");
         }
         resources
             .instances
@@ -1133,7 +1135,8 @@ mod tests {
             .expect("instances")
             .get_mut(&blocked)
             .expect("metadata")
-            .begin_operation(OperationKind::Destroy);
+            .begin_operation(OperationKind::Destroy)
+            .expect("begin destroy");
 
         let summary = manager.sync_all_artifacts(Duration::from_secs(1)).await;
 

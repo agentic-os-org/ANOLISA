@@ -1527,7 +1527,7 @@ mod tests {
             stored
                 .transition(SandboxState::Destroyed)
                 .expect("terminal transition");
-            stored.begin_operation(operation);
+            stored.begin_operation(operation).expect("begin operation");
             stored.persist(temporary.path()).expect("persist state");
 
             let error =
