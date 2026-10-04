@@ -129,7 +129,14 @@ fn shorten_contains_literal(lit: &str) -> String {
     if !last.is_empty() && last.len() <= MAX_CONTAINS_LITERAL {
         return last.to_string();
     }
-    let start = trimmed.len().saturating_sub(MAX_CONTAINS_LITERAL);
+    // Cut at a character boundary: the literal comes from a parsed policy
+    // string and may contain multi-byte UTF-8, so a raw byte index can land
+    // inside a character and panic. Moving forward only shortens the
+    // returned suffix, keeping it within the byte budget.
+    let mut start = trimmed.len() - MAX_CONTAINS_LITERAL;
+    while !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
     trimmed[start..].to_string()
 }
 
@@ -241,6 +248,22 @@ fn absolute_path_discards_after_star(pat: &str, lowered: &(u8, String)) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contains_literal_truncation_is_char_boundary_safe() {
+        // 6 CJK chars = 18 bytes, no '/', so the last-16-byte cut (start = 2)
+        // landed inside the first character and panicked.
+        let lowered = lower_path("数据数据数据数据数据数据");
+        assert_eq!(lowered.0, M_CONTAINS);
+        assert!(lowered.1.len() <= MAX_CONTAINS_LITERAL);
+        assert!(lowered.1.is_char_boundary(0));
+
+        // The same through the public compiler entry point.
+        let src =
+            "rule r:\n  block write file \"数据数据数据数据数据数据\" if true\n  because \"x\"\n";
+        let compiled = crate::dsl::compile_str(src).expect("policy must compile");
+        assert!(!compiled.bytes.is_empty());
+    }
 
     #[test]
     fn repo_relative_paths_match_absolute_runtime_paths() {
