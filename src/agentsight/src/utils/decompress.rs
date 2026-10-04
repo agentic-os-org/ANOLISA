@@ -118,17 +118,35 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
 ///
 /// A gzip body is a series of members (RFC 1952 §2.2), and a server that
 /// flushes one member per SSE event produces several — the same shape the
-/// zstd branch handles for concatenated frames. Decode all of them, but keep
-/// the first member when a truncated capture leaves the tail incomplete:
-/// `read_capped` returns `raw` unchanged when a decoder rejects the body, so
-/// an incomplete multi-member stream falls through to the single-member
-/// decoder instead of degrading to the still-compressed bytes.
+/// zstd branch handles for concatenated frames. Decode all of them, and
+/// keep what decoded before a truncated tail: `read_to_end` has already
+/// appended the complete members when the torn one errors, so a capture
+/// truncated long after the first member keeps every complete member, the
+/// way the zstd streaming decoder keeps every complete block. Only when
+/// nothing decoded at all does the single-member decoder run as a
+/// fallback, preserving the first member of a two-member stream whose tail
+/// is torn.
 fn decompress_gzip(body: &[u8]) -> Vec<u8> {
-    let all = read_capped(flate2::read::MultiGzDecoder::new(body), body, "gzip");
-    if all != body {
-        return all;
+    let mut decoded = Vec::new();
+    let result = flate2::read::MultiGzDecoder::new(body)
+        .take(MAX_DECOMPRESSED_LEN as u64 + 1)
+        .read_to_end(&mut decoded);
+    if decoded.len() > MAX_DECOMPRESSED_LEN {
+        log::warn!(
+            "gzip decompressed output exceeds {MAX_DECOMPRESSED_LEN} bytes, \
+             using raw body (possible decompression bomb)"
+        );
+        return body.to_vec();
     }
-    read_capped(flate2::read::GzDecoder::new(body), body, "gzip")
+    match result {
+        Ok(_) => decoded,
+        // The truncated member errored after the complete ones were decoded.
+        Err(e) if !decoded.is_empty() => {
+            log::debug!("gzip decompression failed ({e:?}), keeping decoded members");
+            decoded
+        }
+        Err(_) => read_capped(flate2::read::GzDecoder::new(body), body, "gzip"),
+    }
 }
 
 /// Growable output sink for the incremental zstd decoder with the same hard
@@ -529,6 +547,28 @@ mod tests {
         assert_eq!(
             decompress_body(&truncated, Some("gzip")),
             b"first member".to_vec()
+        );
+    }
+
+    #[test]
+    fn gzip_truncated_tail_keeps_every_complete_member() {
+        // A capture can be truncated long after the first member: members one
+        // and two are complete and only the third is torn. Falling back to the
+        // single-member decoder keeps just the first member and silently drops
+        // the second; every complete member must survive, like the zstd
+        // streaming decoder keeps every complete block.
+        let mut members = Vec::new();
+        for text in ["first member", "second member", "third member"] {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            enc.write_all(text.as_bytes()).unwrap();
+            members.push(enc.finish().unwrap());
+        }
+        let mut truncated = members[0].clone();
+        truncated.extend_from_slice(&members[1]);
+        truncated.extend_from_slice(&members[2][..6]);
+        assert_eq!(
+            decompress_body(&truncated, Some("gzip")),
+            b"first membersecond member".to_vec()
         );
     }
 
