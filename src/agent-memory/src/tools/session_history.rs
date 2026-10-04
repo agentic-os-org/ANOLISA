@@ -4,6 +4,9 @@
 //! - `memory_sessions`: list historical session summaries from facts/summary/
 //! - `memory_timeline`: show tool call log from a specific session
 
+use std::os::fd::AsFd;
+use std::path::Path;
+
 use serde::Serialize;
 
 use crate::audit::AuditEntry;
@@ -58,7 +61,13 @@ pub fn memory_sessions(svc: &MemoryService, limit: usize) -> Result<String> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
+        // Anchor the read to the mount's root_fd (openat2
+        // RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS) like every other content read:
+        // a symlink planted at facts/summary/<name>.md must fail with
+        // PathOutsideMount instead of returning the link target's content to
+        // the model.
+        let rel = Path::new("facts").join("summary").join(entry.file_name());
+        let content = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
             Ok(c) => c,
             Err(_) => continue,
         };
