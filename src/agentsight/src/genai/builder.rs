@@ -542,12 +542,19 @@ impl GenAIBuilder {
                         }
                     }
                 }
-                // Extract response id (trace_id) from first chunk that has it
+                // Extract response id (trace_id) from the first chunk that has
+                // it. Anthropic nests it in the `message_start` envelope exactly
+                // like the model above, so a drained Anthropic stream recorded
+                // no response id at all and every correlation fell back to the
+                // internally generated call id.
                 if trace_id.is_none() {
-                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
-                        if !id.is_empty() {
-                            trace_id = Some(id.to_string());
-                        }
+                    let id = json
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| json.pointer("/message/id").and_then(|v| v.as_str()))
+                        .filter(|id| !id.is_empty());
+                    if let Some(id) = id {
+                        trace_id = Some(id.to_string());
                     }
                 }
                 if trace_id.is_none() {
@@ -999,6 +1006,13 @@ mod tests {
             enrichment.model.as_deref(),
             Some("claude-sonnet-4-5"),
             "model must be read from message_start.message.model"
+        );
+        // So is the response id: without it a drained Anthropic call loses its
+        // trace_id and correlation falls back to the generated call id.
+        assert_eq!(
+            enrichment.trace_id.as_deref(),
+            Some("msg_1"),
+            "response id must be read from message_start.message.id"
         );
 
         let json = enrichment
