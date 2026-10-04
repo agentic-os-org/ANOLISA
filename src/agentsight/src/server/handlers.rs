@@ -2034,6 +2034,120 @@ mod tests {
         assert_eq!(arr[0]["session_id"], "s-1");
     }
 
+    fn test_app_state_with_trajectory_and_reuse(
+        trajectory_store: Option<Arc<TrajectoryStore>>,
+        reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
+    ) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            reuse_store,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(trajectory_store)),
+        })
+    }
+
+    /// The reuse-label filter runs *after* the SQL `LIMIT`, so with `limit=N`
+    /// any matching trajectory older than the newest N rows is invisible:
+    /// `/api/trajectories?label=good` silently answers an empty list even
+    /// though a labelled trajectory exists. The label parameter is documented
+    /// as a filter over originals, and an agent asking for `good` history is
+    /// exactly the caller that cannot tell an empty filter from no data.
+    #[actix_web::test]
+    async fn trajectory_label_filter_keeps_matches_beyond_the_newest_limit_window() {
+        let db = unique_handler_db("label-filter-window");
+        let tstore = TrajectoryStore::new_with_path(&db).unwrap();
+        // Oldest first, so collected_at_ns orders s-1 < s-2 < s-3.
+        for session in ["s-1", "s-2", "s-3"] {
+            tstore
+                .upsert_trajectory(&trajectory_record(session, "proj-a", "qoder"))
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let tstore = Arc::new(tstore);
+
+        let label_dir = temp_root("reuse-label-window");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+        reuse
+            .upsert_auto_label(
+                "s-1",
+                crate::reuse::label::TrajectoryIdentity {
+                    title: Some("old but good".to_string()),
+                    project: "proj-a".to_string(),
+                    source: "qoder".to_string(),
+                    agent_name: "qoder".to_string(),
+                    started_at: None,
+                    is_subagent: false,
+                },
+                crate::reuse::TriageOutcome {
+                    label: crate::reuse::TrajectoryLabel::Good,
+                    reason: "fixture".to_string(),
+                    metrics: crate::reuse::TriageMetrics {
+                        n_steps: 2,
+                        n_user_turns: 1,
+                        n_tool_calls: 0,
+                        max_agent_len: 10,
+                    },
+                    n_findings: 0,
+                    rules: Vec::new(),
+                },
+                "fixture-hash",
+                "fixture-version",
+            )
+            .unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?label=good&limit=2")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows: serde_json::Value = awtest::read_body_json(resp).await;
+        let arr = rows.as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "the labelled trajectory must survive the limit filter: {rows}"
+        );
+        assert_eq!(arr[0]["session_id"], "s-1");
+
+        cleanup_db(&db);
+        let _ = std::fs::remove_dir_all(&label_dir);
+    }
+
     #[actix_web::test]
     async fn trajectory_detail_returns_raw_atif_and_404() {
         let data = test_app_state_with_trajectory_store(Some(seeded_trajectory_store("detail")));
@@ -4200,20 +4314,40 @@ pub async fn list_trajectories(
         Some(v) if v > 0 => v.min(TRAJECTORY_MAX_LIMIT),
         _ => TRAJECTORY_DEFAULT_LIMIT,
     };
+    // Label filters live in `reuse.db`, so they cannot be pushed into the
+    // `trajectories.db` query — they are applied to the fetched rows. Applying
+    // them *after* the SQL cap would make every match older than the newest
+    // `limit` rows invisible, so a labelled query must read the whole summary
+    // set (small, payload-free rows) and only then truncate to `limit`.
+    let fetch_limit = if reuse_label_filter_requested(&query) {
+        i64::MAX
+    } else {
+        limit
+    };
     match tstore.list_summaries(
         query.project.as_deref(),
         query.source.as_deref(),
         query.agent_name.as_deref(),
-        limit,
+        fetch_limit,
     ) {
         Ok(mut rows) => {
             filter_rows_by_reuse_labels(&data, &query, &mut rows);
+            rows.truncate(limit as usize);
             HttpResponse::Ok().json(rows)
         }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Whether the query asks for any `reuse.db`-backed filtering.
+///
+/// Label filters cannot run in SQL because the labels live in a second
+/// database, so this is what tells the caller to scan summaries without the
+/// display cap before filtering.
+fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
+    query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true)
 }
 
 /// Applies the reuse-label query parameters to trajectory summary rows.
@@ -4228,9 +4362,7 @@ fn filter_rows_by_reuse_labels(
     query: &TrajectoryQuery,
     rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
 ) {
-    let labels_needed =
-        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
-    if !labels_needed {
+    if !reuse_label_filter_requested(query) {
         return;
     }
     let Some(labels) = data.reuse_store.as_deref() else {

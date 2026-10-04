@@ -44,20 +44,36 @@ pub async fn list_trajectories(
         Some(v) if v > 0 => v.min(TRAJECTORY_MAX_LIMIT),
         _ => TRAJECTORY_DEFAULT_LIMIT,
     };
+    // Label filters live in `reuse.db`, so they are applied after the
+    // `trajectories.db` query. Fetching only the newest `limit` rows first
+    // would hide every match older than them, so a labelled query reads the
+    // whole summary set (payload-free rows) and truncates after filtering —
+    // same contract as the Linux endpoint.
+    let fetch_limit = if reuse_label_filter_requested(&query) {
+        i64::MAX
+    } else {
+        limit
+    };
     match tstore.list_summaries(
         query.project.as_deref(),
         query.source.as_deref(),
         query.agent_name.as_deref(),
-        limit,
+        fetch_limit,
     ) {
         Ok(mut rows) => {
             filter_rows_by_reuse_labels(state.as_ref(), &query, &mut rows);
+            rows.truncate(limit as usize);
             HttpResponse::Ok().json(rows)
         }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Whether the query asks for any `reuse.db`-backed filtering.
+fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
+    query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true)
 }
 
 /// Applies the reuse-label query parameters; mirrors the Linux endpoint's
@@ -67,9 +83,7 @@ fn filter_rows_by_reuse_labels(
     query: &TrajectoryQuery,
     rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
 ) {
-    let labels_needed =
-        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
-    if !labels_needed {
+    if !reuse_label_filter_requested(query) {
         return;
     }
     let Some(labels) = state.reuse_store.as_deref() else {
@@ -320,6 +334,111 @@ mod tests {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
         })
+    }
+
+    fn make_state_with_reuse(
+        store: Arc<TrajectoryStore>,
+        reuse: Arc<crate::reuse::ReuseStore>,
+        db_path: PathBuf,
+    ) -> web::Data<LocalState> {
+        web::Data::new(LocalState {
+            trajectory_store: Arc::new(RwLock::new(Some(store))),
+            database_manager: manager(&db_path),
+            db_path,
+            storage_config: StorageConfig::default(),
+            reuse_store: Some(reuse),
+            reuse_llm_judge_enabled: false,
+        })
+    }
+
+    /// Same contract as the Linux endpoint: a reuse-label filter must not be
+    /// applied after the SQL cap, or a labelled trajectory older than the
+    /// newest `limit` rows is silently dropped from the answer.
+    #[actix_web::test]
+    async fn trajectory_label_filter_keeps_older_labelled_rows() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_local_label_filter_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let db_path = tmp.join("trajectories.db");
+        {
+            let store = TrajectoryStore::new_with_path(&db_path).unwrap();
+            for session in ["old-good", "new-1", "new-2"] {
+                let record = agentsight_trajectory_collector::TrajectoryRecord {
+                    session_id: session.to_string(),
+                    schema_version: "ATIF-v1.7".to_string(),
+                    agent_name: "qoder".to_string(),
+                    model_name: None,
+                    num_steps: 1,
+                    total_prompt_tokens: None,
+                    total_completion_tokens: None,
+                    start_time: None,
+                    end_time: None,
+                    first_user_message: None,
+                    last_user_message: None,
+                    atif_json: "{\"schema_version\":\"ATIF-v1.7\",\"steps\":[]}".to_string(),
+                    project: "p".to_string(),
+                    source: "qoder".to_string(),
+                    is_subagent: false,
+                    file_path: format!("/tmp/{session}.jsonl"),
+                    file_size: 1,
+                    file_mtime_ns: 1,
+                };
+                store.upsert_trajectory(&record).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
+        let reuse = crate::reuse::ReuseStore::open_private(&tmp).unwrap();
+        reuse
+            .upsert_auto_label(
+                "old-good",
+                crate::reuse::label::TrajectoryIdentity {
+                    title: None,
+                    project: "p".to_string(),
+                    source: "qoder".to_string(),
+                    agent_name: "qoder".to_string(),
+                    started_at: None,
+                    is_subagent: false,
+                },
+                crate::reuse::TriageOutcome {
+                    label: crate::reuse::TrajectoryLabel::Good,
+                    reason: "fixture".to_string(),
+                    metrics: crate::reuse::TriageMetrics {
+                        n_steps: 1,
+                        n_user_turns: 1,
+                        n_tool_calls: 0,
+                        max_agent_len: 1,
+                    },
+                    n_findings: 0,
+                    rules: Vec::new(),
+                },
+                "hash",
+                "version",
+            )
+            .unwrap();
+
+        let state = make_state_with_reuse(store, Arc::new(reuse), db_path.clone());
+        let app = test::init_service(App::new().app_data(state).service(list_trajectories)).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/trajectories?label=good&limit=2")
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
+        let rows: serde_json::Value = test::read_body_json(resp).await;
+        let arr = rows.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "labelled row must survive the limit: {rows}");
+        assert_eq!(arr[0]["session_id"], "old-good");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[actix_web::test]
