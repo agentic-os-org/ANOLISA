@@ -615,6 +615,9 @@ impl Reporter {
                 println!("{}", human_json(fields));
             }
             "task_cancelled" => print_task_id(fields),
+            "task_retried" | "task_input_appended" | "approval_resolved" => {
+                print_task_id(fields);
+            }
             "store_inspection" => println!("{}", human_json(fields)),
             _ => {}
         }
