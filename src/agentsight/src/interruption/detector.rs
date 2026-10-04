@@ -650,7 +650,10 @@ impl InterruptionDetector {
                 if let Some(max_tokens) = call.request.max_tokens {
                     // If input tokens are much larger than the output cap, this
                     // is almost certainly a context-length issue, not output truncation.
-                    if usage.input_tokens > max_tokens * 4 {
+                    // Widen before multiplying: a large (but legal) max_tokens
+                    // overflows u32, and the wrap can make any input look
+                    // oversized (or hide a real overflow).
+                    if u64::from(usage.input_tokens) > u64::from(max_tokens) * 4 {
                         let detail = serde_json::json!({
                             "model": call.model,
                             "input_tokens": usage.input_tokens,
@@ -1063,6 +1066,37 @@ mod tests {
             events
                 .iter()
                 .any(|e| e.interruption_type == InterruptionType::ContextOverflow)
+        );
+    }
+
+    #[test]
+    fn test_finish_reason_overflow_check_does_not_wrap_on_large_max_tokens() {
+        // max_tokens is a u32 parsed straight from the request body. Multiplying
+        // it by 4 in u32 wraps: 1_500_000_000 * 4 == 1_705_032_704, which is
+        // larger than the tiny input below, so the wrap fabricates a
+        // ContextOverflow for a request whose input is nowhere near the cap.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(1_500_000_000);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            total_tokens: 110,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow),
+            "input 100 is far below the 6e9-token cap; the wrap must not flag overflow"
         );
     }
 
