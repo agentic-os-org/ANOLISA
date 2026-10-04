@@ -10,6 +10,11 @@ from agent_sec_cli import __version__ as AGENT_SEC_VERSION
 from agent_sec_cli.skill_ledger.scanner.builtins.dispatcher import (
     run_builtin_scanner,
 )
+from agent_sec_cli.skill_ledger.scanner.limits import (
+    MAX_DIRECTORY_DEPTH,
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+)
 from agent_sec_cli.skill_ledger.scanner.names import (
     CODE_SCANNER_NAME,
     STATIC_SCANNER_NAME,
@@ -22,9 +27,6 @@ from agent_sec_cli.skill_ledger.scanner.skill_code_scanner import (
 )
 
 SCHEMA_VERSION = "1"
-MAX_FILES = 2_000
-MAX_TOTAL_BYTES = 50 * 1024 * 1024
-MAX_DIRECTORY_DEPTH = 32
 
 _SKIPPED_DIRS = frozenset(
     {

@@ -3,25 +3,43 @@
 This module intentionally implements only local static checks.  It does not
 import cisco-ai-skill-scanner, YARA, LLM analyzers, remote services, or UI
 dependencies.
+
+Memory bounding: the scan streams one file at a time and never retains all
+decoded files at once.  The tree walk enforces the shared file-count,
+directory-depth, and aggregate-byte budgets from ``scanner.limits``; file
+reads are size-checked first and capped at ``maxFileBytes + 1`` so an
+oversized file is never fully buffered.  Cumulative decoded text and total
+findings carry their own explicit caps.  Tripping any cap stops the scan and
+emits one structured ``scanner_limit`` diagnostic finding instead of
+scanning unbounded content.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
+
+from agent_sec_cli.skill_ledger.scanner.limits import (
+    MAX_DIRECTORY_DEPTH,
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+)
 from agent_sec_cli.skill_ledger.scanner.names import STATIC_SCANNER_NAME
 
 SCANNER_NAME = STATIC_SCANNER_NAME
-SCANNER_VERSION = "cisco-static-only-0.1.1"
+SCANNER_VERSION = "cisco-static-only-0.2.0"
 SCANNER_SOURCE = "cisco-skill-scanner-static-only"
 
 _SKILL_MANIFEST = "SKILL.md"
 _DEFAULT_MAX_FILE_BYTES = 1_000_000
+_MAX_TOTAL_TEXT_CHARS = 50_000_000
+_MAX_FINDINGS = 10_000
 _SKIP_DIRS = frozenset(
     {
         ".git",
@@ -128,10 +146,20 @@ class StaticRule:
     compiled: re.Pattern[str]
 
 
+@dataclass
+class _ScanBudget:
+    """Mutable accounting for one bounded scan (not a retained buffer)."""
+
+    file_count: int = 0
+    total_bytes: int = 0
+    text_chars: int = 0
+
+
 @dataclass(frozen=True)
-class _TextFile:
+class _StreamedFile:
+    """One decoded file, dropped as soon as its rules have run."""
+
     rel_path: str
-    path: Path
     text: str
     is_code: bool
 
@@ -141,7 +169,13 @@ def scan_skill(
     *,
     options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Scan a Skill directory and return ``NormalizedFinding`` dictionaries."""
+    """Scan a Skill directory and return ``NormalizedFinding`` dictionaries.
+
+    The scan is streaming and bounded: at most one decoded file is held at a
+    time, and file-count / depth / aggregate-byte / cumulative-text /
+    findings caps stop the scan with a structured diagnostic instead of
+    scaling memory with the Skill's aggregate text size.
+    """
     root = Path(skill_dir).resolve()
     opts = options or {}
     max_file_bytes = int(opts.get("maxFileBytes", _DEFAULT_MAX_FILE_BYTES))
@@ -149,54 +183,206 @@ def scan_skill(
     findings: list[dict[str, Any]] = []
 
     skill_path = root / _SKILL_MANIFEST
-    skill_text = _read_required_text(skill_path, _SKILL_MANIFEST, findings)
+    skill_text = _read_required_text(
+        skill_path, _SKILL_MANIFEST, findings, max_file_bytes
+    )
     front_matter: dict[str, Any] = {}
-    body_text = skill_text
+    network_declared = False
     if skill_text is not None:
         front_matter, body_text = _scan_skill_manifest(skill_text, findings)
-
-    text_files: list[_TextFile] = []
-    for path in _walk_skill_files(root, findings):
-        rel_path = str(path.relative_to(root))
-        _scan_path_metadata(path, rel_path, findings)
-        text = _read_optional_text(path, rel_path, max_file_bytes, findings)
-        if text is not None:
-            text_files.append(
-                _TextFile(
-                    rel_path=rel_path,
-                    path=path,
-                    text=text,
-                    is_code=_is_code_file(path, text),
-                )
-            )
-
-    for rule in rules:
-        try:
-            if rule.target == "skill" and skill_text is not None:
+        network_declared = _network_declared(front_matter)
+        for rule in rules:
+            if rule.target != "skill":
+                continue
+            try:
                 _apply_rule(rule, _SKILL_MANIFEST, body_text, findings)
-            elif rule.target == "all_text":
-                for text_file in text_files:
-                    _apply_rule(rule, text_file.rel_path, text_file.text, findings)
-            elif rule.target == "code":
-                for text_file in text_files:
-                    if text_file.is_code:
-                        _apply_rule(rule, text_file.rel_path, text_file.text, findings)
-        except Exception as exc:
+            except Exception as exc:
+                findings.append(_rule_error_finding(rule, exc))
+
+    budget = _ScanBudget()
+    network_reported = False
+    for streamed in _iter_streamed_files(
+        root, findings, budget, max_file_bytes, skill_text
+    ):
+        for rule in rules:
+            try:
+                if rule.target == "all_text":
+                    _apply_rule(rule, streamed.rel_path, streamed.text, findings)
+                elif rule.target == "code" and streamed.is_code:
+                    _apply_rule(rule, streamed.rel_path, streamed.text, findings)
+            except Exception as exc:
+                findings.append(_rule_error_finding(rule, exc))
+
+        if not network_declared and not network_reported and streamed.is_code:
+            network_hint = _find_network_hint(streamed.text)
+            if network_hint is not None:
+                line_number, matched_text = network_hint
+                findings.append(
+                    _finding(
+                        rule="undeclared-network-access",
+                        severity="medium",
+                        message=(
+                            "Skill helper content appears to use network access "
+                            "not declared in metadata."
+                        ),
+                        file=streamed.rel_path,
+                        line=line_number,
+                        metadata={
+                            "category": "network",
+                            "title": "Undeclared network behavior",
+                            "remediation": (
+                                "Declare network behavior in SKILL.md metadata "
+                                "or remove the network call."
+                            ),
+                            "matchedText": _safe_excerpt(matched_text),
+                        },
+                    )
+                )
+                network_reported = True
+
+        if len(findings) >= _MAX_FINDINGS:
             findings.append(
-                _finding(
-                    rule="scanner-rule-error",
-                    severity="medium",
-                    message=f"Static rule {rule.id!r} failed during scan: {exc}",
+                _limit_finding(
+                    "findings-limit",
+                    "Static scan stopped after reaching the findings budget.",
                     metadata={
-                        "category": "scanner_error",
-                        "title": "Static rule error",
-                        "remediation": "Fix or disable the failing static rule.",
+                        "max_findings": _MAX_FINDINGS,
                     },
                 )
             )
+            break
 
-    _scan_undeclared_network(front_matter, text_files, findings)
     return findings
+
+
+def _iter_streamed_files(
+    root: Path,
+    findings: list[dict[str, Any]],
+    budget: _ScanBudget,
+    max_file_bytes: int,
+    skill_text: str | None,
+) -> Iterator[_StreamedFile]:
+    """Stream decoded text files one at a time under the scan budgets.
+
+    Walking uses ``os.walk`` directly instead of materialising
+    ``sorted(root.rglob("*"))``, so the path list itself never scales with
+    tree size.  Each yielded file is fully processed and dropped by the
+    caller before the next one is read.  The manifest is not re-read: when
+    the required read succeeded its text is reused, and when it failed the
+    required read already emitted the manifest's diagnostic.
+    """
+    for path in _iter_skill_files(root, findings, budget):
+        rel_path = path.relative_to(root).as_posix()
+        _scan_path_metadata(path, rel_path, findings)
+        if rel_path == _SKILL_MANIFEST and path.parent == root:
+            if skill_text is None:
+                continue
+            text = skill_text
+        else:
+            text = _read_optional_text(path, rel_path, max_file_bytes, findings)
+            if text is None:
+                continue
+        budget.text_chars += len(text)
+        if budget.text_chars > _MAX_TOTAL_TEXT_CHARS:
+            findings.append(
+                _limit_finding(
+                    "cumulative-text-limit",
+                    "Skill text content exceeds the cumulative static-scan budget.",
+                    metadata={
+                        "max_total_text_chars": _MAX_TOTAL_TEXT_CHARS,
+                        "total_text_chars": budget.text_chars,
+                    },
+                )
+            )
+            return
+        yield _StreamedFile(
+            rel_path=rel_path,
+            text=text,
+            is_code=_is_code_file(path, text),
+        )
+
+
+def _iter_skill_files(
+    root: Path,
+    findings: list[dict[str, Any]],
+    budget: _ScanBudget,
+) -> Iterator[Path]:
+    """Yield regular files under *root*, enforcing the shared tree budgets.
+
+    Symlinked directories are pruned with a warning finding (matching the
+    previous ``rglob`` behavior); deeper-than-budget directories are pruned
+    with a ``directory-depth-limit`` diagnostic; exceeding the file-count or
+    aggregate-byte budget stops the walk with one diagnostic each.
+    """
+    for current_root, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(current_root)
+        relative_dir = current.relative_to(root)
+        if len(relative_dir.parts) > MAX_DIRECTORY_DEPTH:
+            findings.append(
+                _limit_finding(
+                    "directory-depth-limit",
+                    f"Skill directory depth exceeds {MAX_DIRECTORY_DEPTH}; "
+                    "deeper entries are not scanned.",
+                    file=relative_dir.as_posix(),
+                    metadata={"max_directory_depth": MAX_DIRECTORY_DEPTH},
+                )
+            )
+            dirnames[:] = []
+            continue
+
+        kept: list[str] = []
+        for dirname in sorted(dirnames):
+            if dirname in _SKIP_DIRS:
+                continue
+            entry = current / dirname
+            if entry.is_symlink():
+                _scan_symlink(root, entry, entry.relative_to(root).as_posix(), findings)
+                continue
+            kept.append(dirname)
+        dirnames[:] = kept
+
+        for filename in sorted(filenames):
+            entry = current / filename
+            rel_path = entry.relative_to(root).as_posix()
+            if entry.is_symlink():
+                _scan_symlink(root, entry, rel_path, findings)
+                continue
+            if not entry.is_file():
+                continue
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                continue
+
+            budget.file_count += 1
+            if budget.file_count > MAX_FILES:
+                findings.append(
+                    _limit_finding(
+                        "file-count-limit",
+                        f"Skill contains more than {MAX_FILES} scannable files.",
+                        metadata={
+                            "max_files": MAX_FILES,
+                            "file_count": budget.file_count,
+                        },
+                    )
+                )
+                return
+
+            budget.total_bytes += size
+            if budget.total_bytes > MAX_TOTAL_BYTES:
+                findings.append(
+                    _limit_finding(
+                        "total-size-limit",
+                        f"Skill content exceeds {MAX_TOTAL_BYTES} bytes.",
+                        metadata={
+                            "max_total_bytes": MAX_TOTAL_BYTES,
+                            "total_bytes": budget.total_bytes,
+                        },
+                    )
+                )
+                return
+
+            yield entry
 
 
 @lru_cache(maxsize=1)
@@ -338,21 +524,6 @@ def _scan_skill_manifest(
     return metadata, body
 
 
-def _walk_skill_files(root: Path, findings: list[dict[str, Any]]) -> list[Path]:
-    """Return sorted files under *root*, warning on symlink escapes."""
-    files: list[Path] = []
-    for entry in sorted(root.rglob("*")):
-        rel = entry.relative_to(root)
-        if _is_skipped(rel):
-            continue
-        if entry.is_symlink():
-            _scan_symlink(root, entry, str(rel), findings)
-            continue
-        if entry.is_file():
-            files.append(entry)
-    return files
-
-
 def _scan_symlink(
     root: Path,
     path: Path,
@@ -452,10 +623,16 @@ def _read_required_text(
     path: Path,
     rel_path: str,
     findings: list[dict[str, Any]],
+    max_file_bytes: int,
 ) -> str | None:
-    """Read a required text file and create a warning finding on failure."""
+    """Read a required text file and create a warning finding on failure.
+
+    The size is checked before any read, and the read itself is capped at
+    ``max_file_bytes + 1`` bytes so an oversized required file is never
+    fully buffered.
+    """
     try:
-        return path.read_text(encoding="utf-8")
+        size = path.stat().st_size
     except OSError as exc:
         findings.append(
             _finding(
@@ -470,6 +647,33 @@ def _read_required_text(
                 },
             )
         )
+        return None
+    if size > max_file_bytes:
+        findings.append(_large_file_finding(rel_path, max_file_bytes))
+        return None
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(max_file_bytes + 1)
+    except OSError as exc:
+        findings.append(
+            _finding(
+                rule="file-read-error",
+                severity="medium",
+                message=f"Required file could not be read: {exc}",
+                file=rel_path,
+                metadata={
+                    "category": "scanner_error",
+                    "title": "File read error",
+                    "remediation": "Ensure the Skill file is readable.",
+                },
+            )
+        )
+        return None
+    if len(raw) > max_file_bytes:
+        findings.append(_large_file_finding(rel_path, max_file_bytes))
+        return None
+    try:
+        return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         findings.append(
             _finding(
@@ -484,7 +688,7 @@ def _read_required_text(
                 },
             )
         )
-    return None
+        return None
 
 
 def _read_optional_text(
@@ -493,11 +697,37 @@ def _read_optional_text(
     max_file_bytes: int,
     findings: list[dict[str, Any]],
 ) -> str | None:
-    """Read a text-like file.  Binary or oversized files are skipped."""
+    """Read a text-like file.  Binary or oversized files are skipped.
+
+    The size is checked via ``stat`` before any read, and the read itself is
+    capped at ``max_file_bytes + 1`` bytes, so a file that is oversized (or
+    grows between ``stat`` and read) is never fully buffered.
+    """
     if path.suffix.lower() not in _TEXT_EXTENSIONS:
         return None
     try:
-        raw = path.read_bytes()
+        size = path.stat().st_size
+    except OSError as exc:
+        findings.append(
+            _finding(
+                rule="file-read-error",
+                severity="medium",
+                message=f"File could not be read during static scan: {exc}",
+                file=rel_path,
+                metadata={
+                    "category": "scanner_error",
+                    "title": "File read error",
+                    "remediation": "Ensure the Skill file is readable.",
+                },
+            )
+        )
+        return None
+    if size > max_file_bytes:
+        findings.append(_large_file_finding(rel_path, max_file_bytes))
+        return None
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(max_file_bytes + 1)
     except OSError as exc:
         findings.append(
             _finding(
@@ -514,20 +744,7 @@ def _read_optional_text(
         )
         return None
     if len(raw) > max_file_bytes:
-        findings.append(
-            _finding(
-                rule="large-file-skipped",
-                severity="medium",
-                message="File exceeded static scanner size limit and was skipped.",
-                file=rel_path,
-                metadata={
-                    "category": "scanner_limit",
-                    "title": "Large file skipped",
-                    "remediation": "Keep Skill files small enough for static review or raise the scanner limit.",
-                    "maxFileBytes": max_file_bytes,
-                },
-            )
-        )
+        findings.append(_large_file_finding(rel_path, max_file_bytes))
         return None
     if b"\0" in raw:
         return None
@@ -548,6 +765,64 @@ def _read_optional_text(
             )
         )
         return None
+
+
+def _large_file_finding(rel_path: str, max_file_bytes: int) -> dict[str, Any]:
+    """Build the shared oversized-file diagnostic."""
+    return _finding(
+        rule="large-file-skipped",
+        severity="medium",
+        message="File exceeded static scanner size limit and was skipped.",
+        file=rel_path,
+        metadata={
+            "category": "scanner_limit",
+            "title": "Large file skipped",
+            "remediation": (
+                "Keep Skill files small enough for static review or raise the "
+                "scanner limit."
+            ),
+            "maxFileBytes": max_file_bytes,
+        },
+    )
+
+
+def _rule_error_finding(rule: StaticRule, exc: Exception) -> dict[str, Any]:
+    """Build the per-rule failure diagnostic."""
+    return _finding(
+        rule="scanner-rule-error",
+        severity="medium",
+        message=f"Static rule {rule.id!r} failed during scan: {exc}",
+        metadata={
+            "category": "scanner_error",
+            "title": "Static rule error",
+            "remediation": "Fix or disable the failing static rule.",
+        },
+    )
+
+
+def _limit_finding(
+    rule: str,
+    message: str,
+    *,
+    file: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a structured scan-budget diagnostic."""
+    return _finding(
+        rule=rule,
+        severity="medium",
+        message=message,
+        file=file,
+        metadata={
+            "category": "scanner_limit",
+            "title": "Scan budget limit reached",
+            "remediation": (
+                "Reduce the Skill size or split it so it can be scanned "
+                "within the documented memory budget."
+            ),
+            **(metadata or {}),
+        },
+    )
 
 
 def _apply_rule(
@@ -577,42 +852,13 @@ def _apply_rule(
     )
 
 
-def _scan_undeclared_network(
-    front_matter: dict[str, Any],
-    text_files: list[_TextFile],
-    findings: list[dict[str, Any]],
-) -> None:
-    """Warn when network behavior appears without a metadata declaration."""
+def _network_declared(front_matter: dict[str, Any]) -> bool:
+    """Return whether SKILL.md metadata declares network behavior."""
     declaration_text = " ".join(
         str(front_matter.get(key, ""))
         for key in ("description", "allowedTools", "allowed_tools", "capabilities")
     )
-    if _NETWORK_DECLARATION_RE.search(declaration_text):
-        return
-
-    for text_file in text_files:
-        if not text_file.is_code:
-            continue
-        network_hint = _find_network_hint(text_file.text)
-        if network_hint is None:
-            continue
-        line_number, matched_text = network_hint
-        findings.append(
-            _finding(
-                rule="undeclared-network-access",
-                severity="medium",
-                message="Skill helper content appears to use network access not declared in metadata.",
-                file=text_file.rel_path,
-                line=line_number,
-                metadata={
-                    "category": "network",
-                    "title": "Undeclared network behavior",
-                    "remediation": "Declare network behavior in SKILL.md metadata or remove the network call.",
-                    "matchedText": _safe_excerpt(matched_text),
-                },
-            )
-        )
-        return
+    return _NETWORK_DECLARATION_RE.search(declaration_text) is not None
 
 
 def _find_network_hint(text: str) -> tuple[int, str] | None:
@@ -674,11 +920,6 @@ def _slash_comment_start(line: str) -> int:
             start = idx + 2
             continue
         return idx
-
-
-def _is_skipped(rel_path: Path) -> bool:
-    """Return whether a relative path is under a skipped directory."""
-    return any(part in _SKIP_DIRS for part in rel_path.parts)
 
 
 def _is_allowed_hidden_file_path(parts: tuple[str, ...]) -> bool:

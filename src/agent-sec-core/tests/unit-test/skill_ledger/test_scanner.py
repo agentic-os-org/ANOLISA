@@ -779,7 +779,7 @@ class TestCiscoStaticScanner(unittest.TestCase):
             result = run_builtin_scanner(CISCO_STATIC_SCANNER_NAME, skill)
             self.assertEqual(result.scanner, CISCO_STATIC_SCANNER_NAME)
             self.assertEqual(result.version, CISCO_STATIC_SCANNER_VERSION)
-            self.assertEqual(result.version, "cisco-static-only-0.1.1")
+            self.assertEqual(result.version, "cisco-static-only-0.2.0")
             self.assertEqual(result.findings, [])
 
     def test_skipped_dirs_are_not_scanned(self):
