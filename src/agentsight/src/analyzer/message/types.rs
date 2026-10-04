@@ -496,6 +496,32 @@ pub enum AnthropicContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    /// Thinking the provider encrypted instead of returning in the clear.
+    ///
+    /// The API requires clients to pass these back in later requests, so they
+    /// appear both in responses and in the conversation history of every
+    /// subsequent request — a closed variant set would fail those parses
+    /// wholesale. The payload is opaque ciphertext: kept for fidelity, it
+    /// contributes no parts.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        /// Opaque ciphertext blob
+        #[serde(default)]
+        data: String,
+    },
+    /// Catch-all for block types added after this enum was written
+    /// (`server_tool_use`, `web_search_tool_result`,
+    /// `code_execution_tool_result`, `document`, `search_result`, …).
+    ///
+    /// Without it the FIRST unknown tag fails the whole request/response
+    /// parse ("unknown variant …") and every text/tool_use block in the same
+    /// message is lost. `#[serde(other)]` is only valid on unit variants of
+    /// internally tagged enums, so the payload is not preserved; the block
+    /// is skipped when converting to parts. Serialization emits
+    /// `{"type":"Unknown"}` — acceptable because raw blocks are never
+    /// persisted; only their `MessagePart` conversions are.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Anthropic image source

@@ -200,6 +200,13 @@ impl AnthropicParser {
                                     signature: String::new(),
                                 })
                             }
+                            // No mergeable deltas follow: redacted thinking is
+                            // opaque ciphertext and unknown types have no
+                            // defined delta shape. Leave the slot empty so any
+                            // deltas that do arrive are dropped instead of
+                            // being appended to a neighbouring block.
+                            AnthropicContentBlock::RedactedThinking { .. }
+                            | AnthropicContentBlock::Unknown => None,
                             _ => {
                                 // Text or any other block type
                                 Some(CurrentBlock::Text {
@@ -987,5 +994,213 @@ mod tests {
             }
             other => panic!("Expected ToolUse, got {other:?}"),
         }
+    }
+
+    // ── Unknown / redacted block tolerance ─────────────────────────────
+    //
+    // The wire format is open: Anthropic adds block types (server tools,
+    // redacted thinking) without notice. A closed variant set makes the
+    // FIRST unknown tag fail the whole request/response parse, losing every
+    // text/tool_use block in the same message.
+
+    #[test]
+    fn test_parse_response_with_redacted_thinking_keeps_other_blocks() {
+        let json = serde_json::json!({
+            "id": "msg_rt",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+                {"type": "text", "text": "Here is the analysis."},
+                {"type": "redacted_thinking", "data": "BASE64CIPHERTEXT=="},
+                {"type": "tool_use", "id": "toolu_rt", "name": "Bash", "input": {"command": "ls"}}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 20}
+        });
+
+        let response = AnthropicParser::parse_response(&json)
+            .expect("one redacted block must not fail the whole response");
+        assert_eq!(response.content.len(), 3);
+        match &response.content[0] {
+            AnthropicContentBlock::Text { text, .. } => {
+                assert_eq!(text, "Here is the analysis.")
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &response.content[1] {
+            AnthropicContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "BASE64CIPHERTEXT==")
+            }
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+        match &response.content[2] {
+            AnthropicContentBlock::ToolUse { name, .. } => assert_eq!(name, "Bash"),
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        assert_eq!(response.usage.output_tokens, 20);
+    }
+
+    #[test]
+    fn test_parse_response_with_server_tool_blocks_keeps_other_blocks() {
+        let json = serde_json::json!({
+            "id": "msg_srv",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "rust"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []},
+                {"type": "text", "text": "Based on the search results…"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 30}
+        });
+
+        let response = AnthropicParser::parse_response(&json)
+            .expect("server tool blocks must not fail the whole response");
+        assert_eq!(response.content.len(), 3);
+        assert!(matches!(
+            &response.content[0],
+            AnthropicContentBlock::Unknown
+        ));
+        match &response.content[2] {
+            AnthropicContentBlock::Text { text, .. } => {
+                assert_eq!(text, "Based on the search results…")
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_request_with_redacted_thinking_history() {
+        // The API requires clients to pass redacted_thinking back in later
+        // requests, so assistant history carries it on every turn.
+        let json = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "metadata": {"user_id": "session_42"},
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": [
+                    {"type": "redacted_thinking", "data": "BASE64=="},
+                    {"type": "text", "text": "Hi!"}
+                ]},
+                {"role": "user", "content": "Continue"}
+            ]
+        });
+
+        let request = AnthropicParser::parse_request(&json)
+            .expect("redacted history must not fail the whole request");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(
+            request
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("user_id"))
+                .and_then(|v| v.as_str()),
+            Some("session_42")
+        );
+        // The assistant message's text is still reachable.
+        assert_eq!(request.messages[1].content.as_text(), "Hi!");
+    }
+
+    #[test]
+    fn test_parse_request_with_document_block_user_message() {
+        let json = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="}},
+                    {"type": "text", "text": "Summarize the attached document."}
+                ]}
+            ]
+        });
+
+        let request =
+            AnthropicParser::parse_request(&json).expect("document block must parse as Unknown");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(
+            request.messages[0].content.as_text(),
+            "Summarize the attached document."
+        );
+    }
+
+    #[test]
+    fn test_aggregate_sse_skips_unknown_block_without_losing_neighbors() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_mix",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "usage": {"input_tokens": 5, "output_tokens": 0}
+                }
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "first"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1, "content_block": {"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {}}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"q\":"}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "second"}},
+            {"type": "content_block_stop", "index": 2},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events)
+            .expect("one unknown block must not sink the stream");
+        // The unknown server_tool_use block contributes nothing; both text
+        // blocks survive with their deltas merged and uncontaminated.
+        let texts: Vec<&str> = resp
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[test]
+    fn test_aggregate_sse_redacted_thinking_block_is_tolerated() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_rt2",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "usage": {"input_tokens": 5, "output_tokens": 0}
+                }
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "redacted_thinking", "data": "BASE64=="}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "answer"}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events)
+            .expect("redacted thinking must not sink the stream");
+        let texts: Vec<&str> = resp
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["answer"]);
     }
 }

@@ -653,6 +653,11 @@ impl GenAIBuilder {
                     })
                 }
             }
+            // Redacted thinking is opaque ciphertext and unknown block types
+            // carry no interpretable content — neither becomes a part, but
+            // crucially neither fails the parse any more.
+            crate::analyzer::message::AnthropicContentBlock::RedactedThinking { .. }
+            | crate::analyzer::message::AnthropicContentBlock::Unknown => None,
             _ => None,
         }
     }
@@ -736,6 +741,14 @@ impl GenAIBuilder {
                                         content: thinking.clone(),
                                     });
                                 }
+                                // Redacted thinking is opaque ciphertext and
+                                // unknown block types carry no interpretable
+                                // content — neither becomes a part, but
+                                // crucially neither fails the parse any more.
+                                crate::analyzer::message::AnthropicContentBlock::RedactedThinking {
+                                    ..
+                                }
+                                | crate::analyzer::message::AnthropicContentBlock::Unknown => {}
                                 _ => {}
                             }
                         }
