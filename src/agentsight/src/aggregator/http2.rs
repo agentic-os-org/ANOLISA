@@ -315,7 +315,11 @@ impl Http2Stream {
         match direction {
             StreamDirection::Request => {
                 if frame.is_headers() {
-                    self.request_headers = Some(frame.clone());
+                    // First HEADERS wins: a second one in this direction is
+                    // trailers, not the request head.
+                    if self.request_headers.is_none() {
+                        self.request_headers = Some(frame.clone());
+                    }
                     if frame.has_end_stream() {
                         self.request_complete = true;
                     }
@@ -328,7 +332,10 @@ impl Http2Stream {
             }
             StreamDirection::Response => {
                 if frame.is_headers() {
-                    self.response_headers = Some(frame.clone());
+                    // First HEADERS wins: a second one is trailers.
+                    if self.response_headers.is_none() {
+                        self.response_headers = Some(frame.clone());
+                    }
                     if frame.has_end_stream() {
                         self.response_complete = true;
                     }
@@ -1015,8 +1022,15 @@ impl Http2StreamAggregator {
         if let Some(hdrs) = decoded {
             let pair = self.decoded_headers_store.entry(stream_id).or_default();
             match direction {
-                StreamDirection::Request => pair.request = Some(hdrs),
-                StreamDirection::Response => pair.response = Some(hdrs),
+                // Keep the first decode per direction: a later HEADERS in the
+                // same direction is trailers, whose block must not shadow the
+                // initial response/request headers the body decode reads.
+                StreamDirection::Request => {
+                    pair.request.get_or_insert(hdrs);
+                }
+                StreamDirection::Response => {
+                    pair.response.get_or_insert(hdrs);
+                }
             }
         }
     }
@@ -1053,7 +1067,12 @@ impl Http2StreamAggregator {
             } => {
                 if direction == StreamDirection::Request {
                     if frame.is_headers() {
-                        request_headers = Some(frame.clone());
+                        // A second request-direction HEADERS is trailers (RFC
+                        // 7540 §8.1): the initial request headers stay
+                        // authoritative.
+                        if request_headers.is_none() {
+                            request_headers = Some(frame.clone());
+                        }
                         if frame.has_end_stream() {
                             // Request is complete (no body)
                             return Http2StreamState::RequestComplete {
@@ -1160,7 +1179,12 @@ impl Http2StreamAggregator {
             } => {
                 if direction == StreamDirection::Response {
                     if frame.is_headers() {
-                        response_headers = Some(frame.clone());
+                        // A second response HEADERS is trailers: the initial
+                        // response headers carry the content-* metadata the
+                        // body decode depends on, so they stay authoritative.
+                        if response_headers.is_none() {
+                            response_headers = Some(frame.clone());
+                        }
                         if frame.has_end_stream() {
                             // Response is complete
                             let mut stream = Http2Stream::new(
@@ -2071,6 +2095,99 @@ mod tests {
         assert_eq!(
             hdrs.iter().find(|(n, _)| n == "authorization").unwrap().1,
             "Bearer sk-test123"
+        );
+    }
+
+    #[test]
+    fn trailers_do_not_replace_the_initial_headers() {
+        // A server may end the body with a trailers HEADERS frame (END_STREAM
+        // rides on the trailers, not on the last DATA). Both the frame slot
+        // and the decoded-headers store kept only the most recent HEADERS per
+        // direction, so the trailers replaced the initial response headers
+        // and `content-encoding: gzip` disappeared — the collected body could
+        // no longer be decompressed. The same overwrite exists on the request
+        // side for request trailers.
+        let connection_id = ConnectionId {
+            pid: 900,
+            ssl_ptr: 0x9000,
+        };
+
+        let mut resp_encoder = Encoder::new();
+        let initial_headers = [
+            (b":status".to_vec(), b"200".to_vec()),
+            (b"content-encoding".to_vec(), b"gzip".to_vec()),
+        ];
+        let initial = resp_encoder.encode(initial_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let trailers_headers = [(b"x-checksum".to_vec(), b"abc".to_vec())];
+        let trailers = resp_encoder.encode(trailers_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+
+        let mut req_encoder = Encoder::new();
+        let req_initial_headers = [
+            (b":method".to_vec(), b"POST".to_vec()),
+            (b"content-type".to_vec(), b"application/json".to_vec()),
+        ];
+        let req_initial = req_encoder.encode(req_initial_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let req_trailers_headers = [(b"x-request-checksum".to_vec(), b"def".to_vec())];
+        let req_trailers =
+            req_encoder.encode(req_trailers_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+
+        let mut aggregator = Http2StreamAggregator::new();
+        // Request: HEADERS (no END_STREAM) → DATA → trailers HEADERS+END_STREAM.
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x04,
+            req_initial,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1000),
+        )]);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x00,
+            0x00,
+            b"{}".to_vec(),
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1100),
+        )]);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x05,
+            req_trailers,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1200),
+        )]);
+        // Response: initial HEADERS → DATA (no END_STREAM) → trailers HEADERS.
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x04,
+            initial,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2000),
+        )]);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x00,
+            0x00,
+            vec![0x1f, 0x8b, 0x08, 0x00],
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2100),
+        )]);
+        let completed = aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x05,
+            trailers,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2200),
+        )]);
+
+        assert_eq!(completed.len(), 1, "trailers END_STREAM completes the stream");
+        let stream = &completed[0];
+        assert_eq!(
+            stream.content_encoding().as_deref(),
+            Some("gzip"),
+            "the initial response headers must survive the trailers"
+        );
+        assert_eq!(
+            stream.request_header("content-type").as_deref(),
+            Some("application/json"),
+            "the initial request headers must survive the trailers"
         );
     }
 
