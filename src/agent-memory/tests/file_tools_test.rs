@@ -303,6 +303,40 @@ fn diff_missing_file_errors() {
     assert!(matches!(err, MemoryError::NotFound(_)));
 }
 
+#[test]
+fn diff_rejects_file_exceeding_cap() {
+    // mem_diff slurps both inputs in full; without the cap check a giant
+    // file would be read into memory twice before diffy ever runs. mem_read
+    // enforces max_read_bytes (read_rejects_file_exceeding_cap above) —
+    // mem_diff must not bypass it on either input.
+    let (_t, svc) = setup_with_read_cap(10);
+    svc.write("small.md", "abc", false).unwrap();
+    svc.write("big.md", "this content is way more than ten bytes", false)
+        .unwrap();
+
+    // Oversized file as the first input.
+    let err = svc.diff("big.md", "small.md").unwrap_err();
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "expected InvalidArgument, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("exceeds read limit"),
+        "expected read limit error, got: {err}"
+    );
+
+    // And as the second input.
+    let err = svc.diff("small.md", "big.md").unwrap_err();
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(_)),
+        "expected InvalidArgument, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("exceeds read limit"),
+        "expected read limit error, got: {err}"
+    );
+}
+
 // mem_promote happy / error paths are exercised in tests/session_test.rs
 // (promote_copies_scratch_to_store, promote_missing_scratch_file_returns_not_found,
 //  session_log_degrades_gracefully_when_session_dir_unavailable).
