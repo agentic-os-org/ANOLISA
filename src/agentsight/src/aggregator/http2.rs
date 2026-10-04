@@ -1911,7 +1911,6 @@ mod tests {
     // --- HPACK stateful decode tests ---
 
     #[test]
-    #[test]
     fn data_frame_padding_is_not_part_of_the_body() {
         // RFC 7540 §6.1 allows DATA frames to be padded: the pad-length byte
         // and the padding bytes are framing, not body. They used to be
@@ -1957,6 +1956,7 @@ mod tests {
         assert_eq!(stream_with_sse.first_output_timestamp_ns(), Some(33));
     }
 
+    #[test]
     fn test_strip_headers_framing_bare() {
         let payload = b"\x82\x86\x84";
         assert_eq!(strip_headers_framing(payload, 0x00), payload.as_slice());
