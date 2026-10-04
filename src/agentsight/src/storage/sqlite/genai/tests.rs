@@ -1154,7 +1154,8 @@ fn test_list_traces_by_session_with_time_range() {
         .list_traces_by_session("sess-1", Some(BASE_NS), Some(BASE_NS + STEP_NS), true)
         .unwrap();
     assert_eq!(r.len(), 1); // only conv-1
-    assert_eq!(r[0].call_count, 2); // call-1, call-2    cleanup_db(&path);
+    assert_eq!(r[0].call_count, 2); // call-1, call-2
+    cleanup_db(&path);
 }
 
 #[test]
@@ -1783,7 +1784,9 @@ fn test_complete_pending_keeps_captured_request_evidence() {
         agent_name: Some("claude".to_string()),
         http_method: Some("POST".to_string()),
         http_path: Some("/v1/messages".to_string()),
-        input_messages: Some(r#"[{"role":"user","content":"what changed in this file?"}]"#.to_string()),
+        input_messages: Some(
+            r#"[{"role":"user","content":"what changed in this file?"}]"#.to_string(),
+        ),
         system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
         user_query: Some("what changed in this file?".to_string()),
         is_sse: true,
@@ -1849,7 +1852,9 @@ fn test_complete_pending_keeps_captured_request_evidence() {
             )
             .unwrap();
         assert!(
-            input.as_deref().is_some_and(|v| v.contains("what changed in this file?")),
+            input
+                .as_deref()
+                .is_some_and(|v| v.contains("what changed in this file?")),
             "the captured request view must survive a completion without parsed messages, got {input:?}"
         );
         assert!(
@@ -1921,7 +1926,10 @@ fn test_complete_pending_keeps_captured_request_evidence() {
                 |r| r.get(0),
             )
             .ok();
-        assert!(system.is_some(), "a parsed system prompt must still be written");
+        assert!(
+            system.is_some(),
+            "a parsed system prompt must still be written"
+        );
     }
 
     cleanup_db(&path);
