@@ -209,9 +209,29 @@ class TokenlessMiddleware(MiddlewareBase):
         forwarded = source
         command = None
         if command_field is not None:
-            arguments = json.loads(source.input)
-            if not isinstance(arguments, dict):
-                raise TypeError(f"{source.name} arguments must be a JSON object")
+            try:
+                arguments = json.loads(source.input)
+                if not isinstance(arguments, dict):
+                    raise TypeError(f"{source.name} arguments must be a JSON object")
+            except (json.JSONDecodeError, TypeError):
+                # The host (agentscope 2.x) repairs malformed tool
+                # arguments upstream, but the raw string still reaches the
+                # middleware; raising here kills the whole agent reply.
+                # Fail open: forward the call untransformed and keep
+                # lossless-only output handling.
+                async for item in next_handler(**input_kwargs):
+                    if isinstance(item, ToolResponse):
+                        yield await self._after_response(
+                            item,
+                            source.name,
+                            origin,
+                            optimization,
+                            attribution,
+                            None,
+                        )
+                    else:
+                        yield item
+                return
             transformed = await self.sdk.pre_tool(
                 PreToolRequest(
                     tool_name=source.name,
