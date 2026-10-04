@@ -99,7 +99,7 @@ pub(super) async fn events(
                     "limit": page.limit,
                     "offset": page.offset,
                     "next_offset": ((page.offset as u64).saturating_add(page.items.len() as u64) < page.total)
-                        .then_some(page.offset + page.limit as i64),
+                        .then(|| page.offset.saturating_add(page.limit as i64)),
                 }),
             )
         }
@@ -145,7 +145,7 @@ fn session_page_view(page: &SecuritySessionPage) -> Value {
         "limit": page.limit,
         "offset": page.offset,
         "next_offset": ((page.offset as u64).saturating_add(page.items.len() as u64) < page.total)
-            .then_some(page.offset + page.limit as i64),
+            .then(|| page.offset.saturating_add(page.limit as i64)),
     })
 }
 
@@ -442,5 +442,33 @@ mod tests {
         assert_eq!(data["offset"], 1_000);
         assert_eq!(data["next_offset"], 1_001);
         assert_eq!(data["items"][0]["security_event_count"], 2_500);
+    }
+
+    #[test]
+    fn session_api_survives_an_offset_near_the_i64_limit() {
+        // The client-supplied offset is only clamped at zero, so it can be
+        // i64::MAX. `then_some(page.offset + page.limit)` evaluated the sum
+        // eagerly: with overflow checks on the handler panicked, without
+        // them a wrapped negative next_offset reached the client.
+        let page = SecuritySessionPage {
+            items: vec![SecuritySession {
+                session_id: "session-edge".into(),
+                first_seen_ns: 10,
+                last_seen_ns: 20,
+                security_event_count: 1,
+            }],
+            total: i64::MAX as u64,
+            limit: 100,
+            offset: i64::MAX,
+        };
+
+        let data = session_page_view(&page);
+
+        assert_eq!(data["offset"], i64::MAX);
+        assert_eq!(
+            data["next_offset"],
+            serde_json::Value::Null,
+            "no further page exists past the last offset"
+        );
     }
 }
