@@ -128,7 +128,12 @@ def _safe_int(value: object) -> int:
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str) and value.strip():
-        return int(value)
+        # Trace JSON 来自手工编辑或第三方目录：非数字字符串按默认值
+        # 兜底，不得让 analyze-traces 以裸 ValueError 崩掉
+        try:
+            return int(value)
+        except ValueError:
+            return 0
     return 0
 
 
