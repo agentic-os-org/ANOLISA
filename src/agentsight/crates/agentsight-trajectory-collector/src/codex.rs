@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use agentsight_atif::{
-    Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult, Step, StepSource,
-    ToolCall, ATIF_SCHEMA_VERSION,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall,
 };
 
 /// Return `true` when the events look like a Codex rollout stream
