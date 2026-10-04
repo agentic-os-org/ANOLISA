@@ -22,6 +22,24 @@ use ws_ckpt_common::{
 use crate::fs_watcher::WorkspaceWatcher;
 use crate::index_store;
 
+/// Outcome of the workspace quiescence check.
+///
+/// [`Quiescence::MonitoringUnavailable`] is the fail-closed verdict for a
+/// watch that is known stale (its inode is no longer behind the
+/// registration path) and could not be re-armed: the retired inode's flag
+/// is permanently silent, so treating it as "not writing" would assume
+/// quiescence without any monitoring behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quiescence {
+    /// No recent writes observed by a current (or absent) watcher.
+    Safe,
+    /// The watcher observed writes inside the quiet period.
+    Writing,
+    /// The watch is known stale and re-arming failed; quiescence cannot
+    /// be established.
+    MonitoringUnavailable,
+}
+
 /// Resolve parent aliases without following the final workspace symlink.
 ///
 /// Missing anchors and parent directories remain addressable after detachment.
@@ -858,14 +876,96 @@ impl DaemonState {
         }
     }
 
+    /// Re-arm the write watcher for `ws_id` after the backend swapped the
+    /// live subvolume behind the registration path (rollback). inotify
+    /// watches inodes, not paths, so the old watch keeps observing the
+    /// retired subvolume and the quiescence guard would be permanently
+    /// inert for the rest of the daemon's lifetime.
+    ///
+    /// Returns whether a current watch is in place afterwards: `false`
+    /// means the stored watch is known stale and re-arming failed, so
+    /// quiescence cannot be established from it.
+    pub fn rearm_watcher(&self, ws_id: &str, registration_path: &Path) -> bool {
+        match WorkspaceWatcher::start(registration_path) {
+            Ok(watcher) => {
+                self.register_watcher(ws_id.to_string(), watcher);
+                true
+            }
+            Err(e) => {
+                warn!(
+                    "failed to re-arm write watcher for {} after subvolume swap: {}",
+                    ws_id, e
+                );
+                false
+            }
+        }
+    }
+
+    /// True when the stored watch targets the inode currently behind the
+    /// registration path. A missing path keeps the existing watch (the
+    /// detached-registration guard already refuses operations there).
+    fn watcher_target_is_current(&self, ws_id: &str, registration_path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let watchers = match self.watchers.lock() {
+            Ok(w) => w,
+            Err(_) => return true,
+        };
+        let Some(w) = watchers.get(ws_id) else {
+            return true;
+        };
+        match std::fs::metadata(registration_path) {
+            Ok(meta) => w.target_identity() == (meta.dev(), meta.ino()),
+            Err(_) => true, // cannot disprove; keep the watch
+        }
+    }
+
     /// Check if a workspace is quiescent (no recent writes).
-    /// Returns true if safe to snapshot, or if no watcher is registered.
-    pub async fn check_workspace_quiescent(&self, ws_id: &str) -> bool {
+    ///
+    /// `registration_path` is supplied by the guarded flows, which call this
+    /// check while already holding the workspace's WRITE lock — for them the
+    /// workspace's own read lock is permanently unavailable, so the heal
+    /// path must not depend on it. Callers without the lock pass `None` and
+    /// the heal uses the workspace state opportunistically.
+    ///
+    /// Returns [`Quiescence::Safe`] when no watcher is registered (the
+    /// long-standing contract: registration alone gates the flows).
+    pub async fn check_workspace_quiescent(
+        &self,
+        ws_id: &str,
+        registration_path: Option<&Path>,
+    ) -> Quiescence {
+        // Defense in depth: rollback re-arms the watch proactively, but any
+        // other path that replaced the live subvolume (or a failed re-arm)
+        // would leave the watch on a dead inode — indistinguishable from a
+        // healthy one by the flag alone, since no events ever arrive. Heal
+        // it before deciding.
+        let heal_path = match registration_path {
+            Some(path) => Some(path.to_path_buf()),
+            // Lock-free callers only: guarded flows hold the write lock, so
+            // their try_read would always fail and the heal would never run.
+            None => self
+                .get_by_wsid(ws_id)
+                .and_then(|arc| arc.try_read().ok().map(|ws| ws.path.clone())),
+        };
+        let mut fresh_watch = false;
+        if let Some(path) = heal_path {
+            if !self.watcher_target_is_current(ws_id, &path) {
+                if self.rearm_watcher(ws_id, &path) {
+                    fresh_watch = true;
+                } else {
+                    // The watch is known stale and re-arming failed: monitoring
+                    // is unavailable, so quiescence cannot be established from
+                    // the retired inode's (permanently silent) flag. Report that
+                    // instead of assuming quiescence.
+                    return Quiescence::MonitoringUnavailable;
+                }
+            }
+        }
         // Extract the AtomicBool from the watcher without holding the lock across await
         let is_writing_arc = {
             let watchers = match self.watchers.lock() {
                 Ok(w) => w,
-                Err(_) => return true,
+                Err(_) => return Quiescence::Safe,
             };
             match watchers.get(ws_id) {
                 Some(w) => Some(std::sync::Arc::clone(&w.is_writing_flag())),
@@ -873,16 +973,25 @@ impl DaemonState {
             }
         };
         match is_writing_arc {
-            None => true,
+            None => Quiescence::Safe,
             Some(flag) => {
-                if !flag.load(std::sync::atomic::Ordering::Acquire) {
-                    return true;
+                // A freshly re-armed watcher's flag starts false and is set
+                // asynchronously by its forwarder task, so an already-active
+                // writer has not necessarily been observed yet: the check
+                // must complete the quiet-period observation instead of
+                // taking the not-writing shortcut to Safe.
+                if !fresh_watch && !flag.load(std::sync::atomic::Ordering::Acquire) {
+                    return Quiescence::Safe;
                 }
                 // Wait 100ms quiet period
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 flag.store(false, std::sync::atomic::Ordering::Release);
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                !flag.load(std::sync::atomic::Ordering::Acquire)
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
+                    Quiescence::Writing
+                } else {
+                    Quiescence::Safe
+                }
             }
         }
     }
@@ -2142,5 +2251,281 @@ mod tests {
             &state.get_by_path(&path).unwrap(),
             &state.get_by_wsid(&entries[0].ws_id).unwrap()
         ));
+    }
+
+    // ── Watcher re-arm after inode swap (rollback) ─────────────────────
+
+    /// Registration layout with a symlink, like the daemon's own: register
+    /// the anchor, watch the resolved live directory.
+    fn watcher_fixture() -> (tempfile::TempDir, DaemonState, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let anchor = root.path().join("ws");
+        std::os::unix::fs::symlink(&live, &anchor).unwrap();
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        state
+            .register_workspace(
+                "ws".to_string(),
+                anchor.clone(),
+                SnapshotIndex::new(anchor.clone()),
+            )
+            .unwrap();
+        (root, state, anchor)
+    }
+
+    fn stored_target(state: &DaemonState, ws_id: &str) -> (u64, u64) {
+        state
+            .watchers
+            .lock()
+            .unwrap()
+            .get(ws_id)
+            .map(|w| w.target_identity())
+            .expect("watcher must be registered")
+    }
+
+    /// Swap the live directory behind the registration symlink with plain
+    /// fs ops — the same shape as the btrfs rollback (rename aside, create
+    /// replacement, delete old), no btrfs needed.
+    fn swap_live_inode(root: &std::path::Path) {
+        let live = root.join("live");
+        let aside = root.join("live.rollback-tmp");
+        std::fs::rename(&live, &aside).unwrap();
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("canary"), "new subvolume").unwrap();
+        std::fs::remove_dir_all(&aside).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quiescence_check_self_heals_a_stale_watch() {
+        // Swap the inode WITHOUT going through rollback (simulating any
+        // other swap path or a failed proactive re-arm): the check must
+        // leave a stored watch targeting the new inode.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_eq!(
+            stored_target(&state, "ws"),
+            (new_meta.dev(), new_meta.ino()),
+            "the stale watch must have been re-armed onto the replacement inode"
+        );
+    }
+
+    #[tokio::test]
+    async fn rearm_is_a_noop_when_the_target_is_current() {
+        // Healthy path: no swap, the quiescence check must not churn the
+        // watcher (pinned via the monotonic seq).
+        let (_root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let seq = watcher.watch_seq();
+        state.register_watcher("ws".to_string(), watcher);
+
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .unwrap()
+                .get("ws")
+                .unwrap()
+                .watch_seq(),
+            seq,
+            "a current watch must not be re-armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rearm_survives_a_missing_registration_path() {
+        // Detached registration: the path cannot be resolved; the re-arm
+        // fails, the old watch is retained, and the quiescence check keeps
+        // today's contract (true — the detached-registration guard refuses
+        // operations anyway).
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let old_target = watcher.target_identity();
+        state.register_watcher("ws".to_string(), watcher);
+
+        std::fs::remove_file(root.path().join("ws")).unwrap();
+        assert!(!state.rearm_watcher("ws", &anchor));
+        assert_eq!(stored_target(&state, "ws"), old_target);
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_swap_leaves_a_stale_watch_that_the_guard_detects() {
+        // The hazard itself, pinned structurally: after the inode swap the
+        // OLD watch (left by a rollback that did not re-arm) targets an
+        // inode that is no longer behind the registration path — which is
+        // exactly what `watcher_target_is_current` exists to detect.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let stale_target = watcher.target_identity();
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_ne!(
+            stale_target,
+            (new_meta.dev(), new_meta.ino()),
+            "the swap must have changed the live inode"
+        );
+        assert!(
+            !state.watcher_target_is_current("ws", &anchor),
+            "a watch left on the retired inode must be detectable as stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn quiescence_check_does_not_deadlock_under_the_write_lock() {
+        // The guarded flows call check_workspace_quiescent while holding the
+        // workspace's write lock; the heal path must therefore never block
+        // on that lock. A regression to read().await hangs forever — this
+        // test fails via timeout instead.
+        let (_root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        let arc = state.get_by_wsid("ws").expect("workspace");
+        let _write_guard = arc.write().await;
+
+        let check = state.check_workspace_quiescent("ws", Some(&anchor));
+        let verdict = tokio::time::timeout(std::time::Duration::from_secs(5), check)
+            .await
+            .expect("must not deadlock under the write lock");
+        assert_eq!(verdict, Quiescence::Safe);
+    }
+
+    #[tokio::test]
+    async fn quiescence_heals_a_stale_watch_under_the_caller_held_write_lock() {
+        // The reviewed gap: the guarded flows (legacy checkpoint, guarded
+        // checkpoint, guarded rollback) hold the workspace write lock when
+        // they call the check, so the old opportunistic try_read heal never
+        // ran and a stale watch survived every guarded round — its
+        // permanently silent flag kept approving snapshots of a live
+        // workspace. The caller now hands the registration path to the
+        // check, and the heal must run under that held lock.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+
+        let arc = state.get_by_wsid("ws").expect("workspace");
+        let _write_guard = arc.write().await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Safe
+        );
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_eq!(
+            stored_target(&state, "ws"),
+            (new_meta.dev(), new_meta.ino()),
+            "the stale watch must heal even while the write lock is held"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_the_caller_path_a_held_write_lock_still_defers_the_heal() {
+        // The None path keeps its documented opportunistic contract: under
+        // a held write lock it skips the heal this round (it cannot take
+        // the read lock). This pins why the guarded flows must pass the
+        // registration path instead.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let stale_target = watcher.target_identity();
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_ne!(stale_target, (new_meta.dev(), new_meta.ino()));
+
+        let arc = state.get_by_wsid("ws").expect("workspace");
+        let _write_guard = arc.write().await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+        assert_eq!(
+            stored_target(&state, "ws"),
+            stale_target,
+            "the opportunistic path must not heal under a held write lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_freshly_rearmed_watch_observes_an_already_active_writer() {
+        // The reviewed gap: after the heal re-arms a stale watch mid-write,
+        // the fresh watcher's flag starts false and is set asynchronously by
+        // its forwarder task, so the check must not shortcut to Safe before
+        // the quiet-period observation has seen an already-active writer.
+        // A writer that stays active across the whole check window plays the
+        // reviewer's container-reproduction role.
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+        swap_live_inode(root.path());
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = std::sync::Arc::clone(&stop);
+            let live = std::fs::canonicalize(&anchor).expect("live dir");
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let file = std::fs::File::create(live.join("busy.log")).unwrap();
+                let mut writer = std::io::BufWriter::new(file);
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    writeln!(writer, "busy").unwrap();
+                    writer.flush().unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            })
+        };
+
+        // The heal re-arms the stale watch while the writer is active; the
+        // check must complete the quiet-period observation and report the
+        // writer instead of trusting the fresh flag's initial false.
+        let verdict = state.check_workspace_quiescent("ws", Some(&anchor)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        assert_eq!(
+            verdict,
+            Quiescence::Writing,
+            "an already-active writer must be observed after the re-arm"
+        );
+
+        // Once the writer stops and the quiet period passes, the next check
+        // returns to Safe on the now-current watch.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Safe
+        );
     }
 }
