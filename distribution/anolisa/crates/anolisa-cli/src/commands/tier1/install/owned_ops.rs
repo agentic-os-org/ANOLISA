@@ -452,19 +452,7 @@ impl OwnedOps for RawReplayOps<'_> {
     }
 
     fn remove_owned_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
-        for file in &self.prior.files {
-            match fs::remove_file(&file.path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(OwnedOpError(format!(
-                        "failed to remove {}: {err}",
-                        file.path.display()
-                    )));
-                }
-            }
-        }
-        Ok(StepSuccess::clean())
+        remove_recorded_files(self.layout, &self.prior.files)
     }
 
     fn write_record(&mut self, write: RecordWrite) -> Result<StepSuccess, OwnedOpError> {
@@ -797,6 +785,42 @@ impl OwnedOps for RawTeardownOps<'_> {
     fn restore_backup(&mut self) -> Vec<String> {
         Vec::new()
     }
+}
+
+/// Remove the recorded owned files of an owned record during a replay plan.
+///
+/// The record's file list is the removal authority, and it may be forged,
+/// stale, or damaged (see `path_safety`). A path outside the ANOLISA-owned
+/// roots is therefore skipped with a warning instead of failing the replay or
+/// being deleted: a forged or stale record must not turn an update/repair
+/// into an arbitrary-delete primitive. This mirrors
+/// [`RawTeardownOps::remove_owned_files`], which applies the same guard to the
+/// same recorded list on the uninstall path.
+fn remove_recorded_files(
+    layout: &FsLayout,
+    files: &[OwnedFile],
+) -> Result<StepSuccess, OwnedOpError> {
+    let mut warnings = Vec::new();
+    for file in files {
+        if let Err(boundary) = validate_owned_path(layout, &file.path) {
+            warnings.push(format!(
+                "skipped {}: outside ANOLISA-owned roots ({boundary})",
+                file.path.display()
+            ));
+            continue;
+        }
+        match fs::remove_file(&file.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(OwnedOpError(format!(
+                    "failed to remove {}: {err}",
+                    file.path.display()
+                )));
+            }
+        }
+    }
+    Ok(StepSuccess::with_warnings(warnings))
 }
 
 /// Best-effort removal of directories a file teardown emptied, walking
@@ -1641,6 +1665,108 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A forged or stale `installed.toml` entry must not turn the replay
+    /// removal step into an arbitrary-delete primitive: paths outside the
+    /// ANOLISA-owned roots are skipped with a warning, exactly as the
+    /// uninstall teardown port does for the same recorded list.
+    #[test]
+    fn replay_removal_skips_paths_outside_owned_roots() {
+        use anolisa_core::distribution::{ArtifactType, DistributionEntry};
+        use anolisa_core::owned_executor::OwnedOps;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout =
+            FsLayout::user_with_overrides(tmp.path().join("home"), None, None, None, None, None);
+        fs::create_dir_all(&layout.bin_dir).expect("mkdir bin_dir");
+        let owned = layout.bin_dir.join("tool");
+        fs::write(&owned, b"payload").expect("write owned");
+
+        // Forged entry claiming an ANOLISA-owned file outside every root.
+        let victim = tmp.path().join("victim");
+        fs::write(&victim, b"must survive").expect("write victim");
+
+        let sandbox = crate::test_support::TestSandbox::new();
+        let ctx = sandbox.context(crate::context::InstallMode::User);
+        let mut store = StateStore::empty();
+        let state_path = layout.state_dir.join("installed.toml");
+        let entry = DistributionEntry {
+            component: "tool".to_string(),
+            version: "1.0.0".to_string(),
+            channel: "stable".to_string(),
+            artifact_type: ArtifactType::TarGz,
+            backend: "raw".to_string(),
+            url: String::new(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            libc: None,
+            pkg_base: None,
+            install_modes: vec!["user".to_string()],
+            sha256: None,
+            signature: None,
+            artifact_id: None,
+            manifest_digest: None,
+            size: None,
+            signature_url: None,
+            os_version: None,
+            dependencies: Vec::new(),
+        };
+        let resolution = RawResolution {
+            component: "tool".to_string(),
+            package: "tool".to_string(),
+            entry,
+            artifact_url: String::new(),
+            base_url: String::new(),
+            warnings: Vec::new(),
+        };
+        let file_row = |path: PathBuf| OwnedFile {
+            path,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        };
+        let prior = OwnedArtifact {
+            version: "1.0.0".to_string(),
+            distribution_source: None,
+            raw_package: Some("tool".to_string()),
+            manifest_digest: None,
+            files: vec![file_row(owned.clone()), file_row(victim.clone())],
+            services: Vec::new(),
+            external_modified_files: Vec::new(),
+            provisioned_packages: Vec::new(),
+        };
+        let mut ops = RawReplayOps::new(
+            &ctx,
+            crate::test_support::raw_effects(),
+            &layout,
+            "tool".to_string(),
+            InstallationScope::System,
+            "2026-01-01T00:00:00Z".to_string(),
+            "op-test".to_string(),
+            resolution,
+            prior,
+            &mut store,
+            &state_path,
+        );
+
+        let success = ops.remove_owned_files().expect("removal must not fail");
+
+        assert!(!owned.exists(), "in-bounds recorded file must be removed");
+        assert!(
+            victim.exists(),
+            "out-of-bounds recorded path must never be deleted"
+        );
+        assert_eq!(success.warnings.len(), 1, "{:?}", success.warnings);
+        assert!(
+            success.warnings[0].contains(&victim.display().to_string())
+                && success.warnings[0].contains("outside ANOLISA-owned roots"),
+            "{:?}",
+            success.warnings
+        );
+    }
 
     #[test]
     fn rollback_capabilities_restore_only_recorded_backed_up_grants() {
