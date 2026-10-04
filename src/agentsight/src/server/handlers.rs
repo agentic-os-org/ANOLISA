@@ -2106,6 +2106,58 @@ mod tests {
     /// as a filter over originals, and an agent asking for `good` history is
     /// exactly the caller that cannot tell an empty filter from no data.
     #[actix_web::test]
+    async fn trajectory_label_typos_are_rejected() {
+        // `label=god` used to drop the unknown token and return an empty 200
+        // ("no such trajectories"), while `exclude_label=uselesss` failed
+        // open and served everything. Both must be a 400 like the reuse API.
+        let db = unique_handler_db("label-typo");
+        let tstore = Arc::new(TrajectoryStore::new_with_path(&db).unwrap());
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-label-typo");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for (uri, field) in [
+            ("/api/trajectories?label=god", "label"),
+            ("/api/trajectories?exclude_label=uselesss", "exclude_label"),
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must be rejected"
+            );
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(field),
+                "{uri}: the error must name the offending field, got {body}"
+            );
+        }
+
+        // A valid token still filters normally.
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?label=good")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
     async fn trajectory_label_filter_keeps_matches_beyond_the_newest_limit_window() {
         let db = unique_handler_db("label-filter-window");
         let tstore = TrajectoryStore::new_with_path(&db).unwrap();
@@ -2633,11 +2685,8 @@ mod tests {
             "/sessions/any/traces?start_ns=2000&end_ns=1000",
             "/skill-metrics?start_ns=2000&end_ns=1000",
         ] {
-            let rejected = awtest::call_service(
-                &app,
-                awtest::TestRequest::get().uri(uri).to_request(),
-            )
-            .await;
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
@@ -2650,7 +2699,8 @@ mod tests {
             "/sessions?start_ns=1000&end_ns=2000",
             "/timeseries?start_ns=1000&end_ns=2000&buckets=1",
         ] {
-            let ok = awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            let ok =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(ok.status(), StatusCode::OK, "{uri}");
         }
 
@@ -2681,11 +2731,8 @@ mod tests {
             "/interruptions/session-counts?start_ns=2000&end_ns=1000",
             "/interruptions/conversation-counts?start_ns=2000&end_ns=1000",
         ] {
-            let rejected = awtest::call_service(
-                &app,
-                awtest::TestRequest::get().uri(uri).to_request(),
-            )
-            .await;
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
@@ -4470,7 +4517,9 @@ pub async fn list_trajectories(
         fetch_limit,
     ) {
         Ok(mut rows) => {
-            filter_rows_by_reuse_labels(&data, &query, &mut rows);
+            if let Err(response) = filter_rows_by_reuse_labels(&data, &query, &mut rows) {
+                return response;
+            }
             rows.truncate(limit as usize);
             HttpResponse::Ok().json(rows)
         }
@@ -4500,40 +4549,60 @@ fn filter_rows_by_reuse_labels(
     data: &web::Data<AppState>,
     query: &TrajectoryQuery,
     rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
-) {
+) -> Result<(), HttpResponse> {
     if !reuse_label_filter_requested(query) {
-        return;
+        return Ok(());
     }
+    // Reject unknown tokens up front, like the reuse API: a typo used to be
+    // dropped silently, which read as "no such trajectories" for `label` and
+    // failed open (nothing excluded) for `exclude_label`.
+    let parse =
+        |field: &str, raw: &str| -> Result<Vec<crate::reuse::TrajectoryLabel>, HttpResponse> {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|token| {
+                    crate::reuse::TrajectoryLabel::parse(token).ok_or_else(|| {
+                        bad_request_response(format!(
+                            "{field} '{token}' is not a known trajectory label"
+                        ))
+                    })
+                })
+                .collect()
+        };
+    let requested = query
+        .label
+        .as_deref()
+        .map(|raw| parse("label", raw))
+        .transpose()?;
+    let excluded = query
+        .exclude_label
+        .as_deref()
+        .map(|raw| parse("exclude_label", raw))
+        .transpose()?;
+
     let Some(labels) = data.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
         // matches nothing. Serve the empty truth rather than unfiltered rows.
         if query.label.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
-        return;
+        return Ok(());
     };
-    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(crate::reuse::TrajectoryLabel::parse)
-            .collect()
-    };
-    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+    let keep: Option<std::collections::HashSet<String>> = requested.map(|parsed| {
         labels
-            .sessions_with_labels(&parse(raw))
+            .sessions_with_labels(&parsed)
             .unwrap_or_default()
             .into_iter()
             .collect()
     });
-    let drop: Option<std::collections::HashSet<String>> =
-        query.exclude_label.as_deref().map(|raw| {
-            labels
-                .sessions_with_labels(&parse(raw))
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        });
+    let drop: Option<std::collections::HashSet<String>> = excluded.map(|parsed| {
+        labels
+            .sessions_with_labels(&parsed)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
     let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
         Some(
             labels
@@ -4553,6 +4622,7 @@ fn filter_rows_by_reuse_labels(
             && drop.as_ref().is_none_or(|set| !set.contains(id))
             && backed.as_ref().is_none_or(|set| set.contains(id))
     });
+    Ok(())
 }
 
 /// GET /api/trajectories/filters
