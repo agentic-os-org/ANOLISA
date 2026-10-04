@@ -167,7 +167,10 @@ pub fn extract_response_content(
                 }
                 Some("tool_use") => {
                     let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    let arguments = block.get("input").map(|i| i.to_string()).unwrap_or_default();
+                    let arguments = block
+                        .get("input")
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
                     if !name.is_empty() {
                         tool_calls.push(format!("{name}: {arguments}"));
                         has_data = true;
@@ -799,7 +802,8 @@ mod tests {
             "index": 0,
             "delta": {"type": "thinking_delta", "thinking": "let me think"}
         });
-        let (_, reasoning, _) = extract_response_content(Some(&thinking)).expect("thinking extracts");
+        let (_, reasoning, _) =
+            extract_response_content(Some(&thinking)).expect("thinking extracts");
         assert_eq!(reasoning.as_deref(), Some("let me think"));
 
         let body = serde_json::json!({
