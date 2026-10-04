@@ -80,6 +80,21 @@ pub fn edit(svc: &MemoryService, path: &str, old_str: &str, new_str: &str) -> Re
     }
 
     let updated = body.replacen(old_str, new_str, 1);
+    // The result is caller-controlled via new_str and must honor the same
+    // per-call write cap as mem_write/mem_append — the read-side check
+    // above bounds the input file, not the size of the edited output, so
+    // without this a small in-budget file balloons past max_write_bytes
+    // (and fills the disk) in one call.
+    let cap = svc.config.memory.max_write_bytes;
+    if updated.len() as u64 > cap {
+        let err = MemoryError::InvalidArgument(format!(
+            "mem_edit content {} bytes exceeds limit {} bytes",
+            updated.len(),
+            cap
+        ));
+        svc.audit_log(AuditEntry::new(TOOL).path(rel).error(err.to_string()));
+        return Err(err);
+    }
     let bytes = match safe_fs::write(svc.mount.root_fd.as_fd(), rel_path, updated.as_bytes()) {
         Ok(n) => n,
         Err(e) => {

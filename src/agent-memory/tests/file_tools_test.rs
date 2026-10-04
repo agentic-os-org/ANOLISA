@@ -83,6 +83,18 @@ fn write_then_overwrite_requires_flag() {
     assert_eq!(svc.read("a.md").unwrap(), "v2");
 }
 
+fn setup_with_write_cap(cap: u64) -> (tempfile::TempDir, MemoryService) {
+    let tmp = tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "tester".into();
+    cfg.memory.profile = Profile::Advanced;
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg.memory.max_write_bytes = cap;
+    let svc = MemoryService::new(cfg).unwrap();
+    (tmp, svc)
+}
+
 // ---------- path sandbox ----------
 
 #[test]
@@ -148,6 +160,30 @@ fn edit_rejects_zero_or_multi_match() {
 
     let err = svc.edit("doc.md", "missing", "x").unwrap_err();
     assert!(matches!(err, MemoryError::InvalidArgument(ref m) if m.contains("not found")));
+}
+
+#[test]
+fn edit_rejects_result_exceeding_write_cap() {
+    let (_t, svc) = setup_with_write_cap(64);
+    svc.write("doc.md", "hello world", false).unwrap();
+    // new_str is caller-controlled: the read-side cap on the input file
+    // says nothing about the size of the edited result.
+    let big = "x".repeat(200);
+    let err = svc.edit("doc.md", "hello", &big).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::InvalidArgument(ref m) if m.contains("exceeds limit")),
+        "expected write limit error, got: {err}"
+    );
+    // The rejected edit must not touch the file.
+    assert_eq!(svc.read("doc.md").unwrap(), "hello world");
+}
+
+#[test]
+fn edit_allows_result_within_write_cap() {
+    let (_t, svc) = setup_with_write_cap(64);
+    svc.write("doc.md", "hello world", false).unwrap();
+    svc.edit("doc.md", "world", "there!!").unwrap();
+    assert_eq!(svc.read("doc.md").unwrap(), "hello there!!");
 }
 
 // ---------- mem_mkdir / mem_remove ----------
