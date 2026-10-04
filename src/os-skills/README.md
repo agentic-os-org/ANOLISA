@@ -20,6 +20,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### AI Tools
 - **install-claude-code** — Install and configure Claude Code IDE
+- **install-dsh** — Register the Tokenless bundle for DeepSeek Harness (dsh) profiles
 - **install-qwenpaw** — Deploy QwenPaw AI assistant with DingTalk integration
 - **install-openclaw** — Install and configure OpenClaw
 - **install-tokenless** — Install and configure Tokenless (LLM token optimization)

@@ -32,6 +32,10 @@ name = "install-claude-code"
 source = "{datadir}/skills/install-claude-code/"
 
 [[adapters.openclaw.skills]]
+name = "install-dsh"
+source = "{datadir}/skills/install-dsh/"
+
+[[adapters.openclaw.skills]]
 name = "install-qwenpaw"
 source = "{datadir}/skills/install-qwenpaw/"
 
@@ -150,6 +154,10 @@ source = "{datadir}/skills/qwenpaw-usage/"
 [[adapters.hermes.skills]]
 name = "install-claude-code"
 source = "{datadir}/skills/install-claude-code/"
+
+[[adapters.hermes.skills]]
+name = "install-dsh"
+source = "{datadir}/skills/install-dsh/"
 
 [[adapters.hermes.skills]]
 name = "install-qwenpaw"

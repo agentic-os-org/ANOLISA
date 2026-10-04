@@ -9,6 +9,14 @@
 
 ## [未发布]
 
+### 新增
+
+- 新增 `install-dsh` 技能，覆盖 DeepSeek Harness（dsh）profile 的 Tokenless
+  bundle 注册：环境预检（dsh/anolisa/tokenless CLI、Node.js >= 22）、以单条
+  `anolisa adapter enable tokenless dsh --profile ...` 命令完成完整集合语义的
+  多 profile 注册、`anolisa adapter status tokenless` 验证以及
+  `cordis.patch.yml` 配置覆盖参考。（#4865）
+
 ## [0.6.3] - 2026-08-21
 
 ### 修复

@@ -20,6 +20,7 @@
 
 ### AI 工具
 - **install-claude-code** — 安装和配置 Claude Code IDE
+- **install-dsh** — 为 DeepSeek Harness（dsh）profile 注册 Tokenless bundle
 - **install-qwenpaw** — 部署 QwenPaw AI 助手（支持钉钉集成）
 - **install-openclaw** — 安装和配置 OpenClaw
 - **install-tokenless** — 安装和配置 Tokenless（LLM token 优化）

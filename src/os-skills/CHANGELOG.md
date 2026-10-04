@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `install-dsh` skill for registering the Tokenless bundle for
+  DeepSeek Harness (dsh) profiles: preflight checks (dsh/anolisa/tokenless
+  CLIs, Node.js >= 22), complete-set multi-profile registration through a
+  single `anolisa adapter enable tokenless dsh --profile ...` command,
+  `anolisa adapter status tokenless` verification, and the
+  `cordis.patch.yml` config-override reference. (#4865)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed
