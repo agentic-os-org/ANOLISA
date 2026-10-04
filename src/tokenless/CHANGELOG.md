@@ -9,6 +9,10 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+### Changed
+
+- HTML page rendering is enabled by default; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`.
+
 ## [0.8.4] - 2026-09-22
 
 ### Added

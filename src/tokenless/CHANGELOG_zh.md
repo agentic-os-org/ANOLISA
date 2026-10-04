@@ -9,6 +9,10 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+### 变更
+
+- HTML 页面转写默认开启，通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭。
+
 ## [0.8.4] - 2026-09-22
 
 ### 新增
