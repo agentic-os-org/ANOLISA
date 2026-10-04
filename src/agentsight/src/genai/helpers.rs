@@ -226,6 +226,19 @@ static OPENCLAW_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::
     .expect("OPENCLAW_TS_RE is a valid pattern")
 });
 
+/// Whether the path is the Responses API's create endpoint.
+///
+/// `POST /v1/responses` is the inference call. The sibling endpoints —
+/// `GET /v1/responses/{id}`, `POST /v1/responses/{id}/cancel` and
+/// `GET /v1/responses/{id}/input_items` — are retrieval/control calls whose
+/// bodies repeat the stored response (including its `output` and `usage`), so
+/// treating them as inference recorded a phantom call that duplicated the real
+/// one's output and token counts. The Anthropic arm already excludes its own
+/// sub-endpoints the same way.
+pub(crate) fn is_responses_create_path(path: &str) -> bool {
+    path.contains("/v1/responses") && !path.contains("/v1/responses/")
+}
+
 impl GenAIBuilder {
     /// Path suffixes of the DashScope/Bailian **native** protocol.
     ///
@@ -259,7 +272,7 @@ impl GenAIBuilder {
             || (path.contains("/v1/messages")
                 && !path.contains("/v1/messages/count_tokens")
                 && !path.contains("/v1/messages/batches"))
-            || path.contains("/v1/responses")
+            || is_responses_create_path(path)
             || path.contains("/chat/completions")
             || path.contains("/completions")
             || path.contains("/api/v1/copilot/generate_copilot")
@@ -399,7 +412,7 @@ impl GenAIBuilder {
             Some("anthropic".to_string())
         } else if path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            || path.contains("/v1/responses")
+            || is_responses_create_path(path)
         {
             Some("openai".to_string())
         } else if path.contains("/api/v1/copilot/generate_copilot") {
@@ -903,6 +916,21 @@ mod tests {
         // The real endpoint still passes the gate.
         assert!(builder.is_llm_api_path("/v1/messages"));
         assert!(builder.is_llm_api_path("https://api.anthropic.com/v1/messages"));
+    }
+
+    /// Retrieval and control calls on a stored response are not inference.
+    #[test]
+    fn test_is_llm_api_path_rejects_responses_sub_endpoints() {
+        let builder = GenAIBuilder::new();
+        for path in [
+            "/v1/responses/resp_abc123",
+            "/v1/responses/resp_abc123/cancel",
+            "/v1/responses/resp_abc123/input_items",
+        ] {
+            assert!(!builder.is_llm_api_path(path), "{path} is not inference");
+            assert!(builder.extract_provider_from_path(path).is_none());
+        }
+        assert!(builder.is_llm_api_path("/v1/responses"));
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which

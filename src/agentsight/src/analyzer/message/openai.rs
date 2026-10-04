@@ -637,7 +637,9 @@ impl OpenAIParser {
     pub fn matches_path(path: &str) -> bool {
         path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            || path.contains("/v1/responses")
+            // Only the create endpoint is an inference call; `/v1/responses/{id}`
+            // and its cancel/input_items siblings repeat the stored response.
+            || crate::genai::is_responses_create_path(path)
     }
 }
 
@@ -837,6 +839,24 @@ mod tests {
         // bare /responses should NOT match (too broad, would catch non-LLM traffic)
         assert!(!OpenAIParser::matches_path("/responses"));
         assert!(!OpenAIParser::matches_path("/api/survey/responses"));
+    }
+
+    /// The Responses API's retrieval/control endpoints repeat the stored
+    /// response, so parsing them as completions duplicated the create call's
+    /// output and token counts.
+    #[test]
+    fn test_matches_path_rejects_responses_sub_endpoints() {
+        for path in [
+            "/v1/responses/resp_abc123",
+            "/v1/responses/resp_abc123/cancel",
+            "/v1/responses/resp_abc123/input_items",
+            "https://api.openai.com/v1/responses/resp_abc123",
+        ] {
+            assert!(!OpenAIParser::matches_path(path), "{path} is not inference");
+        }
+        // The create endpoint still matches, bare and inside a full URL.
+        assert!(OpenAIParser::matches_path("/v1/responses"));
+        assert!(OpenAIParser::matches_path("https://api.openai.com/v1/responses"));
     }
 
     #[test]

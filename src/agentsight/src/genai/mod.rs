@@ -9,6 +9,7 @@ mod call_builder;
 pub mod encrypt;
 pub mod exporter;
 mod helpers;
+pub(crate) use helpers::is_responses_create_path;
 pub mod id_resolver;
 pub mod instance_id;
 pub mod logtail;
