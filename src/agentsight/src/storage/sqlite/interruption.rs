@@ -309,7 +309,7 @@ impl InterruptionStore {
         let mut idx = 3usize;
 
         if let Some(a) = agent_name {
-            conditions.push(format!("agent_name = ?{idx}"));
+            conditions.push(format!("agent_name COLLATE NOCASE = ?{idx} COLLATE NOCASE"));
             args.push(Box::new(a.to_string()));
             idx += 1;
         }
@@ -496,17 +496,18 @@ impl InterruptionStore {
     ) -> Result<Vec<InterruptionTypeStat>, Box<dyn std::error::Error>> {
         // Two fixed statements instead of an assembled one: the storage layer
         // forbids building SQL by concatenation, so the agent filter is bound as
-        // `?N IS NULL OR agent_name = ?N` like the breakdown queries below.
+        // `?N IS NULL OR agent_name COLLATE NOCASE = ?N COLLATE NOCASE` like
+        // the breakdown queries below.
         const STATS_ALL: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
              WHERE occurred_at_ns BETWEEN ?1 AND ?2
-               AND (?3 IS NULL OR agent_name = ?3)
+               AND (?3 IS NULL OR agent_name COLLATE NOCASE = ?3 COLLATE NOCASE)
              GROUP BY interruption_type, severity
              ORDER BY cnt DESC";
         const STATS_BY_RESOLVED: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
              WHERE occurred_at_ns BETWEEN ?1 AND ?2 AND resolved = ?3
-               AND (?4 IS NULL OR agent_name = ?4)
+               AND (?4 IS NULL OR agent_name COLLATE NOCASE = ?4 COLLATE NOCASE)
              GROUP BY interruption_type, severity
              ORDER BY cnt DESC";
 
@@ -562,7 +563,7 @@ impl InterruptionStore {
              FROM interruption_events
              WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-               AND (?4 IS NULL OR agent_name = ?4)
+               AND (?4 IS NULL OR agent_name COLLATE NOCASE = ?4 COLLATE NOCASE)
              GROUP BY sid, severity, interruption_type
              ORDER BY sid, cnt DESC",
         )?;
@@ -610,7 +611,7 @@ impl InterruptionStore {
              FROM interruption_events
              WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-               AND (?5 IS NULL OR agent_name = ?5)
+               AND (?5 IS NULL OR agent_name COLLATE NOCASE = ?5 COLLATE NOCASE)
              GROUP BY sid, cid, severity, interruption_type
              ORDER BY sid, cid, cnt DESC",
         )?;
@@ -1444,6 +1445,54 @@ mod tests {
             sum(Some("AgentC")),
             0,
             "an unknown agent must not fall back to every agent"
+        );
+    }
+
+    #[test]
+    fn agent_filters_match_case_insensitively() {
+        // Every genai-store agent filter matches case-insensitively (latency
+        // #2590, agent activity #2817, token/model timeseries ad4db97c, skill
+        // metrics 87d6ca61f, token summary c8925af0f), so the same dashboard
+        // agent label must also find interruption rows: a filter spelling that
+        // differs in case from the stored agent_name returned an empty view
+        // here while every other agent-attributed view returned the rows.
+        let store = temp_store();
+        let mut e = make_event("conv-case", InterruptionType::EmptyResponse);
+        e.interruption_id = "int-case".to_string();
+        e.agent_name = Some("Qoder".to_string());
+        store.insert(&e).unwrap();
+
+        let sum = |agent: &str| -> i64 {
+            store
+                .stats(0, i64::MAX, Some(false), Some(agent))
+                .unwrap()
+                .iter()
+                .map(|s| s.count)
+                .sum()
+        };
+        assert_eq!(sum("qoder"), 1, "stats must match case-insensitively");
+        assert_eq!(sum("QODER"), 1, "both sides are collated");
+        assert_eq!(sum("codex"), 0, "a different agent still selects nothing");
+
+        let listed = store
+            .list(0, i64::MAX, Some("qoder"), None, None, None, 10)
+            .unwrap();
+        assert_eq!(listed.len(), 1, "list must match case-insensitively");
+
+        let by_session = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, Some("qoder"))
+            .unwrap();
+        assert_eq!(
+            by_session[0].3, 1,
+            "the session breakdown must match case-insensitively"
+        );
+
+        let by_conversation = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, Some("QODER"))
+            .unwrap();
+        assert_eq!(
+            by_conversation[0].4, 1,
+            "the conversation breakdown must match case-insensitively"
         );
     }
 
