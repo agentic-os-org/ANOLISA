@@ -545,12 +545,16 @@ impl GenAISqliteStore {
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT MIN(agent_name) AS agent_name
+            // Same attribution rule as every other agent-scoped view
+            // (`COALESCE(agent_name, process_name)`): a call recorded without
+            // an agent name would otherwise be missing from the filter list
+            // while the dashboard shows its sessions under that label.
+            "SELECT MIN(COALESCE(agent_name, process_name)) AS agent_name
              FROM genai_events
              WHERE event_type = 'llm_call'
-               AND agent_name IS NOT NULL
+               AND COALESCE(agent_name, process_name) IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-             GROUP BY agent_name COLLATE NOCASE
+             GROUP BY COALESCE(agent_name, process_name) COLLATE NOCASE
              ORDER BY agent_name ASC",
         )?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| row.get::<_, String>(0))?;

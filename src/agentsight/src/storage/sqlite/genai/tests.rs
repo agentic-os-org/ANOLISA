@@ -1207,6 +1207,37 @@ fn test_list_agent_names() {
 }
 
 #[test]
+fn test_list_agent_names_falls_back_to_process_name() {
+    // A call recorded without an agent name is attributed to its process by
+    // every other view; the filter list must offer that label too, or the
+    // dashboard shows sessions under an agent that cannot be selected.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_agent_names_fallback_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
+              agent_name, process_name, provider, model, event_json)
+             VALUES ('llm_call', 'complete', 'c-fallback', ?1, ?2, NULL, 'fallback-agent',
+                     'openai', 'gpt-4', '{}')",
+            params![BASE_NS, BASE_NS + STEP_NS],
+        )
+        .unwrap();
+    }
+
+    let names = store.list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS).unwrap();
+    assert_eq!(names, vec!["fallback-agent"]);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_list_agent_names_merges_case_variants() {
     // The agent-names list feeds the dashboard's agent filter, and every
     // agent-filtered query matches case-insensitively, so case variants of
