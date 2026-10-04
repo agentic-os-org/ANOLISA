@@ -979,8 +979,9 @@ impl SkillFs {
     /// Physical directory a **read** of `skill_name` must be served from:
     /// staging/pending candidates and post-publish grace paths read the
     /// live source; every other path follows the D1.1 resolver (live
-    /// source, trusted snapshot, or hidden). Shared by `access` and
-    /// `readlink` so both agree on what a read observes.
+    /// source, trusted snapshot, or hidden). Shared by `access`,
+    /// `readlink`, and the xattr read callbacks (`getxattr`/`listxattr`)
+    /// so all of them agree on what a read observes.
     pub(in crate::fs) fn flat_access_read_path(
         &self,
         skill_name: &str,

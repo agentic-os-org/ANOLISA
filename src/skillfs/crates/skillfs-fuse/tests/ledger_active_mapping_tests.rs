@@ -1015,3 +1015,310 @@ fn hidden_trusted_nested_skill_meta_readlink_reads_live_source() {
         "trusted nested `.skill-meta` readlink must serve the live source for a hidden skill"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fallback read callbacks: xattr (getxattr/listxattr)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn lset_attr(path: &Path, name: &str, value: &[u8]) -> Result<(), i32> {
+    use std::os::unix::ffi::OsStrExt;
+    let cp = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path CString");
+    let cn = std::ffi::CString::new(name).expect("name CString");
+    let rc = unsafe {
+        libc::lsetxattr(
+            cp.as_ptr(),
+            cn.as_ptr(),
+            value.as_ptr() as *const libc::c_void,
+            value.len(),
+            0,
+        )
+    };
+    if rc != 0 {
+        Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO))
+    } else {
+        Ok(())
+    }
+}
+
+fn lget_attr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
+    use std::os::unix::ffi::OsStrExt;
+    let cp = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path CString");
+    let cn = std::ffi::CString::new(name).expect("name CString");
+    let needed = unsafe { libc::lgetxattr(cp.as_ptr(), cn.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    let mut buf = vec![0u8; needed as usize];
+    let got = unsafe {
+        libc::lgetxattr(
+            cp.as_ptr(),
+            cn.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+        )
+    };
+    if got < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    buf.truncate(got as usize);
+    Ok(buf)
+}
+
+fn llist_attr(path: &Path) -> Result<Vec<Vec<u8>>, i32> {
+    use std::os::unix::ffi::OsStrExt;
+    let cp = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path CString");
+    let needed = unsafe { libc::llistxattr(cp.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    let mut buf = vec![0u8; needed as usize];
+    let got = unsafe {
+        libc::llistxattr(
+            cp.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    if got < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    buf.truncate(got as usize);
+    Ok(buf
+        .split(|b| *b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
+/// `getxattr`/`listxattr` on a ledger-fallback passthrough file must describe
+/// the snapshot the bytes are read from, not the live source. xattr reads are
+/// read-side state: serving live values while `read` returns snapshot bytes
+/// exposes metadata that the activated snapshot does not contain.
+#[test]
+fn fallback_passthrough_xattr_reads_snapshot() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let xattr_ok = std::cell::Cell::new(false);
+    let mount = LedgerMount::new(
+        |src| {
+            create_skill_dir(src, "demo");
+            std::fs::write(src.join("demo/notes.txt"), "live notes").unwrap();
+            let snap = write_snapshot(
+                src,
+                "demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: trusted snapshot\n---\n",
+                &[("notes.txt", "snapshot notes")],
+            );
+            let live_ok =
+                lset_attr(&src.join("demo/notes.txt"), "user.demo", b"live-xattr").is_ok();
+            let snap_ok =
+                lset_attr(&snap.join("notes.txt"), "user.demo", b"snapshot-xattr").is_ok();
+            xattr_ok.set(live_ok && snap_ok);
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&fallback_result("demo", "v000001.snapshot"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    if !xattr_ok.get() {
+        eprintln!("SKIP: substrate does not support user.* xattrs");
+        return;
+    }
+
+    let notes = mount.skill_dir("demo").join("notes.txt");
+    wait_for_mount_path(&notes);
+    assert_eq!(
+        std::fs::read_to_string(&notes).expect("read snapshot notes via mount"),
+        "snapshot notes",
+        "control: file bytes come from the snapshot"
+    );
+    assert_eq!(
+        lget_attr(&notes, "user.demo").expect("getxattr via mount"),
+        b"snapshot-xattr",
+        "getxattr must serve the snapshot's value"
+    );
+    assert_eq!(
+        llist_attr(&notes).expect("listxattr via mount"),
+        vec![b"user.demo".to_vec()],
+        "listxattr must describe the snapshot"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trusted `.skill-meta` xattrs: the live-source management view
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A trusted caller's `.skill-meta/**` xattr reads must keep reading the live
+/// physical source, exactly like lookup/getattr/open/access, even when the
+/// regular skill view is a ledger fallback snapshot. Applying the active
+/// mapping to the metadata namespace would join the relative path under the
+/// snapshot root and return ENOENT.
+#[test]
+fn fallback_trusted_skill_meta_xattr_reads_live_source() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let xattr_ok = std::cell::Cell::new(false);
+    let mount = LedgerMount::new_trusted(
+        |src| {
+            create_skill_dir(src, "demo");
+            let snap = write_snapshot(
+                src,
+                "demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: trusted snapshot\n---\n",
+                &[],
+            );
+            let meta = snap.join("meta.txt");
+            std::fs::write(&meta, "live metadata").expect("write metadata file");
+            xattr_ok.set(lset_attr(&meta, "user.demo", b"live-meta-xattr").is_ok());
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&fallback_result("demo", "v000001.snapshot"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    if !xattr_ok.get() {
+        eprintln!("SKIP: substrate does not support user.* xattrs");
+        return;
+    }
+
+    let meta = mount
+        .skill_dir("demo")
+        .join(".skill-meta/versions/v000001.snapshot/meta.txt");
+    wait_for_mount_path(&meta);
+    assert_eq!(
+        lget_attr(&meta, "user.demo").expect("trusted getxattr via mount"),
+        b"live-meta-xattr",
+        "trusted `.skill-meta` getxattr must serve the live source for a fallback skill"
+    );
+    assert_eq!(
+        llist_attr(&meta).expect("trusted listxattr via mount"),
+        vec![b"user.demo".to_vec()],
+        "trusted `.skill-meta` listxattr must serve the live source for a fallback skill"
+    );
+}
+
+/// A trusted caller must also keep the live `.skill-meta` xattr view for a
+/// skill the ledger has hidden: lookup/getattr/open already allow exact-path
+/// traversal, so getxattr/listxattr must not turn the same path into ENOENT.
+#[test]
+fn hidden_trusted_skill_meta_xattr_reads_live_source() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let xattr_ok = std::cell::Cell::new(false);
+    let mount = LedgerMount::new_trusted(
+        |src| {
+            create_skill_dir(src, "demo");
+            let meta_dir = src.join("demo/.skill-meta");
+            std::fs::create_dir_all(&meta_dir).expect("create .skill-meta dir");
+            let meta = meta_dir.join("meta.txt");
+            std::fs::write(&meta, "hidden metadata").expect("write metadata file");
+            xattr_ok.set(lset_attr(&meta, "user.demo", b"hidden-meta-xattr").is_ok());
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&hidden_result("demo")).unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    if !xattr_ok.get() {
+        eprintln!("SKIP: substrate does not support user.* xattrs");
+        return;
+    }
+
+    let meta = mount.skill_dir("demo").join(".skill-meta/meta.txt");
+    wait_for_mount_path(&meta);
+    assert_eq!(
+        lget_attr(&meta, "user.demo").expect("trusted getxattr via mount"),
+        b"hidden-meta-xattr",
+        "trusted `.skill-meta` getxattr must serve the live source for a hidden skill"
+    );
+    assert_eq!(
+        llist_attr(&meta).expect("trusted listxattr via mount"),
+        vec![b"user.demo".to_vec()],
+        "trusted `.skill-meta` listxattr must serve the live source for a hidden skill"
+    );
+}
+
+/// Untrusted callers must not gain access through the xattr read path: the
+/// `.skill-meta` namespace stays hidden (ENOENT), matching
+/// lookup/getattr/open.
+#[test]
+fn untrusted_skill_meta_xattr_stays_hidden() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let xattr_ok = std::cell::Cell::new(false);
+    let mount = LedgerMount::new(
+        |src| {
+            create_skill_dir(src, "demo");
+            let snap = write_snapshot(
+                src,
+                "demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: trusted snapshot\n---\n",
+                &[],
+            );
+            let meta = snap.join("meta.txt");
+            std::fs::write(&meta, "live metadata").expect("write metadata file");
+            xattr_ok.set(lset_attr(&meta, "user.demo", b"live-meta-xattr").is_ok());
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&fallback_result("demo", "v000001.snapshot"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    if !xattr_ok.get() {
+        eprintln!("SKIP: substrate does not support user.* xattrs");
+        return;
+    }
+
+    let meta = mount
+        .skill_dir("demo")
+        .join(".skill-meta/versions/v000001.snapshot/meta.txt");
+    let err = lget_attr(&meta, "user.demo")
+        .expect_err("untrusted `.skill-meta` getxattr must stay hidden");
+    assert_eq!(
+        err,
+        libc::ENOENT,
+        "untrusted metadata getxattr must surface ENOENT, got {err}"
+    );
+    let err = llist_attr(&meta).expect_err("untrusted `.skill-meta` listxattr must stay hidden");
+    assert_eq!(
+        err,
+        libc::ENOENT,
+        "untrusted metadata listxattr must surface ENOENT, got {err}"
+    );
+}
