@@ -2424,6 +2424,70 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// `limit` is passed straight into SQLite, where a negative LIMIT means
+    /// "no upper bound" and zero means "no rows". `/api/trajectories` and
+    /// `/api/trajectories/steps` already normalize the same parameter (<= 0
+    /// falls back to the documented default), so the list endpoint answering
+    /// the entire window for `limit=-1` — or nothing at all for `limit=0` — is
+    /// both an unbounded-response hazard and an inconsistent contract.
+    #[actix_web::test]
+    async fn interruption_list_normalizes_non_positive_limits() {
+        let interruption_path = unique_handler_db("interruptions-limit");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        for i in 0..250 {
+            let mut event = make_interruption_event(
+                &format!("int-limit-{i}"),
+                &format!("sess-limit-{i}"),
+                &format!("conv-limit-{i}"),
+                crate::interruption::InterruptionType::RateLimit,
+            );
+            event.occurred_at_ns = 1_700_000_000_000_000_000 + i;
+            istore.insert(&event).unwrap();
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions),
+        )
+        .await;
+
+        for limit in ["-1", "0"] {
+            let resp = awtest::call_service(
+                &app,
+                awtest::TestRequest::get()
+                    .uri(&format!(
+                        "/interruptions?start_ns=0&end_ns=9223372036854775807&limit={limit}"
+                    ))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let rows: serde_json::Value = awtest::read_body_json(resp).await;
+            assert_eq!(
+                rows.as_array().unwrap().len(),
+                200,
+                "limit={limit} must fall back to the documented default instead of \
+                 disabling (negative LIMIT) or emptying (LIMIT 0) the cap: {}",
+                rows.as_array().unwrap().len()
+            );
+        }
+
+        // Guard: a positive limit still bounds the response.
+        let bounded = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions?start_ns=0&end_ns=9223372036854775807&limit=7")
+                .to_request(),
+        )
+        .await;
+        let bounded_rows: serde_json::Value = awtest::read_body_json(bounded).await;
+        assert_eq!(bounded_rows.as_array().unwrap().len(), 7);
+
+        cleanup_db(&interruption_path);
+    }
+
     /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
     /// makes the default 24 h start wrap into a huge positive bound. The query
     /// then runs on an inverted (always empty) window and still answers 200,
@@ -3803,6 +3867,10 @@ pub struct InterruptionQuery {
     pub limit: Option<i64>,
 }
 
+/// Default and hard-cap for the interruption list `limit` parameter.
+const INTERRUPTION_DEFAULT_LIMIT: i64 = 200;
+const INTERRUPTION_MAX_LIMIT: i64 = 1000;
+
 /// GET /api/interruptions
 ///
 /// Returns a list of interruption events matching the query.
@@ -3821,7 +3889,15 @@ pub async fn list_interruptions(
         Ok(start_ns) => start_ns,
         Err(response) => return response,
     };
-    let limit = query.limit.unwrap_or(200);
+    // Normalize: <= 0 falls back to the documented default and positive values
+    // are capped. SQLite treats a negative LIMIT as "no upper bound", so a
+    // plain `.unwrap_or(200)` let `limit=-1` return the whole window while
+    // `limit=0` returned nothing — both contradicting the other list
+    // endpoints' contract (`/api/trajectories`).
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(INTERRUPTION_MAX_LIMIT),
+        _ => INTERRUPTION_DEFAULT_LIMIT,
+    };
 
     match istore.list(
         start_ns,
