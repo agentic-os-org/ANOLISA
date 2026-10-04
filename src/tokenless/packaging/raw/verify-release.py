@@ -79,6 +79,17 @@ def read_contract_frameworks(contract: Path) -> set[str]:
     return frameworks
 
 
+def _referenced_wheel_versions(text: str) -> set:
+    """Return the tokenless wheel versions referenced as wheel URLs.
+
+    Anchored on the wheel tag (cp/py) so pre-release versions such as
+    0.9.0-rc.1 are captured whole; the previous pattern stopped at the
+    first dash and truncated them, making the gate reject every
+    pre-release with a false drift.
+    """
+    return set(re.findall(r"anolisa_tokenless-(.+?)-(?:cp|py)\d", text))
+
+
 def verify_versions(root: Path, contract: Path) -> str:
     """Return the source version after checking packaged release metadata."""
     cargo_path = root / "Cargo.toml"
@@ -131,8 +142,8 @@ def verify_versions(root: Path, contract: Path) -> str:
     # stale or unstamped version there only fails inside `qwenpaw plugin install`.
     requirements = adapters / "qwenpaw" / "requirements.txt"
     text = requirements.read_text(encoding="utf-8")
-    referenced = set(re.findall(r"/tokenless/v([^/]+)/", text)) | set(
-        re.findall(r"anolisa_tokenless-([^-]+)-", text)
+    referenced = set(re.findall(r"/tokenless/v([^/]+)/", text)) | (
+        _referenced_wheel_versions(text)
     )
     if "@VERSION@" in text or referenced != {expected}:
         raise SystemExit(
