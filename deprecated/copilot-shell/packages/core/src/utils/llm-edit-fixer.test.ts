@@ -135,6 +135,58 @@ describe('FixLLMEditWithInstruction', () => {
     );
   });
 
+  it('should interpolate $-patterns in edit inputs verbatim into the user prompt', async () => {
+    mockGenerateJson.mockResolvedValue(mockApiResponse);
+    const promptId = 'test-prompt-id-dollar-patterns';
+    // Realistic edit-fixer inputs containing replace-sensitive sequences:
+    // $& (JS/Perl match idiom) in the file content and old/new strings,
+    // $' (bash ANSI quoting / Perl post-match) in the file content too.
+    const dollarMatch = 'cost[$index] = $&';
+    const postMatch = "printf $'done\\n'";
+    const specialInstruction = `Replace ${dollarMatch} in the loop`;
+    const specialOldString = `let x = '${dollarMatch}';`;
+    const specialNewString = `let x = '${postMatch}';`;
+    const specialError = `String not found: ${dollarMatch}`;
+    const specialCurrentContent = [
+      '#!/bin/bash',
+      `echo ${postMatch}`,
+      `const re = /${dollarMatch}/;`,
+      `let x = '${dollarMatch}';`,
+      'exit 0',
+    ].join('\n');
+
+    await promptIdContext.run(promptId, async () => {
+      await FixLLMEditWithInstruction(
+        specialInstruction,
+        specialOldString,
+        specialNewString,
+        specialError,
+        specialCurrentContent,
+        mockBaseLlmClient,
+        abortSignal,
+      );
+    });
+
+    const generateJsonCall = mockGenerateJson.mock.calls[0][0];
+    const userPromptContent = generateJsonCall.contents[0].parts[0].text;
+
+    // Every input must reach the prompt unmodified: String.replace
+    // replacement patterns ($&, $', $`, $$) must never be expanded.
+    expect(userPromptContent).toContain(
+      `<instruction>\n${specialInstruction}\n</instruction>`,
+    );
+    expect(userPromptContent).toContain(
+      `<search>\n${specialOldString}\n</search>`,
+    );
+    expect(userPromptContent).toContain(
+      `<replace>\n${specialNewString}\n</replace>`,
+    );
+    expect(userPromptContent).toContain(`<error>\n${specialError}\n</error>`);
+    expect(userPromptContent).toContain(
+      `<file_content>\n${specialCurrentContent}\n</file_content>`,
+    );
+  });
+
   it('should return a cached result on subsequent identical calls', async () => {
     mockGenerateJson.mockResolvedValue(mockApiResponse);
     const testPromptId = 'test-prompt-id-caching';

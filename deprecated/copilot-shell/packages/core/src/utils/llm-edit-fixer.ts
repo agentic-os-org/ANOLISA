@@ -132,11 +132,18 @@ export async function FixLLMEditWithInstruction(
   if (cachedResult) {
     return cachedResult;
   }
-  const userPrompt = EDIT_USER_PROMPT.replace('{instruction}', instruction)
-    .replace('{old_string}', old_string)
-    .replace('{new_string}', new_string)
-    .replace('{error}', error)
-    .replace('{current_content}', current_content);
+  // The function form of replace is required for every interpolation:
+  // instruction, old/new strings, error, and file content are arbitrary
+  // text, and plain replacement strings would expand $-patterns ($&, $`,
+  // $', $$) occurring in them.
+  const userPrompt = EDIT_USER_PROMPT.replace(
+    '{instruction}',
+    () => instruction,
+  )
+    .replace('{old_string}', () => old_string)
+    .replace('{new_string}', () => new_string)
+    .replace('{error}', () => error)
+    .replace('{current_content}', () => current_content);
 
   const contents: Content[] = [
     {
