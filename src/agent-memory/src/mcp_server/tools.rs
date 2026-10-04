@@ -453,15 +453,21 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Close a task (mark as done). Optional reason is appended to the task context. Returns confirmation."
+        description = "Close a task (mark as done or cancelled). Optional outcome: 'done' (default, forces progress to 100) or 'cancelled' (keeps current progress). Optional reason is appended to the task context. Returns confirmation."
     )]
     async fn memory_task_close(
         &self,
         #[tool(param)] id: String,
         #[tool(param)] reason: Option<String>,
+        #[tool(param)] outcome: Option<String>,
     ) -> ToolResult {
-        crate::tools::memory_task::memory_task_close(&self.svc, &id, reason.as_deref())
-            .map_err(|e| fmt_err("task_close failed", e))
+        crate::tools::memory_task::memory_task_close(
+            &self.svc,
+            &id,
+            reason.as_deref(),
+            outcome.as_deref(),
+        )
+        .map_err(|e| fmt_err("task_close failed", e))
     }
 
     #[tool(

@@ -548,7 +548,17 @@ pub fn memory_task_list(svc: &MemoryService, status_filter: Option<&str>) -> Res
 // ── MCP Tool: memory_task_close ─────────────────────────────────
 
 /// Mark a task as done or cancelled.
-pub fn memory_task_close(svc: &MemoryService, id: &str, reason: Option<&str>) -> Result<String> {
+///
+/// `outcome` selects the terminal status: `"done"` (the default) sets
+/// `Done` and forces progress to 100; `"cancelled"` sets `Cancelled` and
+/// leaves progress untouched — cancelling at 40% must not claim the work
+/// was completed.
+pub fn memory_task_close(
+    svc: &MemoryService,
+    id: &str,
+    reason: Option<&str>,
+    outcome: Option<&str>,
+) -> Result<String> {
     validate_task_id(id)?;
     let path = svc.mount.root.join(TASKS_DIR).join(format!("{id}.md"));
     if !path.exists() {
@@ -557,15 +567,27 @@ pub fn memory_task_close(svc: &MemoryService, id: &str, reason: Option<&str>) ->
     let content = std::fs::read_to_string(&path)?;
     let mut task = parse_task(&content)?;
 
-    task.status = TaskStatus::Done;
-    task.progress = 100;
+    let outcome = outcome.unwrap_or("done");
+    let (status, marker) = match outcome {
+        "done" => (TaskStatus::Done, "Closed"),
+        "cancelled" => (TaskStatus::Cancelled, "Cancelled"),
+        other => {
+            return Err(MemoryError::InvalidArgument(format!(
+                "unknown outcome '{other}'; expected done or cancelled"
+            )));
+        }
+    };
+    task.status = status;
+    if matches!(status, TaskStatus::Done) {
+        task.progress = 100;
+    }
     task.updated_at = Utc::now().to_rfc3339();
 
     if let Some(r) = reason {
         if !task.context.is_empty() {
             task.context.push('\n');
         }
-        task.context.push_str(&format!("**Closed**: {}\n", r));
+        task.context.push_str(&format!("**{marker}**: {r}\n",));
     }
 
     save_task(svc, &task)?;
@@ -576,7 +598,7 @@ pub fn memory_task_close(svc: &MemoryService, id: &str, reason: Option<&str>) ->
             .bytes(task.to_markdown().len() as u64),
     );
 
-    Ok(format!("task {} closed (done)", id))
+    Ok(format!("task {id} closed ({outcome})"))
 }
 
 #[cfg(test)]
@@ -679,12 +701,125 @@ mod tests {
             .next()
             .unwrap();
 
-        let close_result = memory_task_close(&svc, id, Some("All done")).unwrap();
+        let close_result = memory_task_close(&svc, id, Some("All done"), None).unwrap();
         assert!(close_result.contains("closed"));
 
         // Task should now be done.
         let list = memory_task_list(&svc, Some("done")).unwrap();
         assert!(list.contains("Task to close"));
+    }
+
+    #[test]
+    fn close_task_defaults_to_done_with_full_progress() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Default outcome",
+            None,
+            Some(40),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = result
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(" ")
+            .next()
+            .unwrap();
+
+        let close_result = memory_task_close(&svc, id, None, None).unwrap();
+        assert!(close_result.contains("closed (done)"));
+
+        let list = memory_task_list(&svc, Some("done")).unwrap();
+        assert!(list.contains("Default outcome"));
+        assert!(
+            list.contains("\"progress\": 100"),
+            "done must force progress to 100, got: {list}"
+        );
+    }
+
+    #[test]
+    fn close_task_cancelled_keeps_progress() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Task to cancel",
+            None,
+            Some(40),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = result
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(" ")
+            .next()
+            .unwrap();
+
+        let close_result =
+            memory_task_close(&svc, id, Some("obsolete"), Some("cancelled")).unwrap();
+        assert!(close_result.contains("closed (cancelled)"));
+
+        // Cancelled tasks appear under the 'cancelled' filter, not 'done'.
+        let cancelled = memory_task_list(&svc, Some("cancelled")).unwrap();
+        assert!(cancelled.contains("Task to cancel"));
+        let done = memory_task_list(&svc, Some("done")).unwrap();
+        assert_eq!(done, "[]");
+        // Cancelling is not completing — progress stays where it was.
+        assert!(
+            cancelled.contains("\"progress\": 40"),
+            "cancelled must keep progress at 40, got: {cancelled}"
+        );
+
+        // The reason is recorded with the outcome word, not "Closed".
+        let resume = memory_task_resume(&svc, id).unwrap();
+        assert!(resume.contains("**Cancelled**: obsolete"));
+    }
+
+    #[test]
+    fn close_task_rejects_unknown_outcome() {
+        let (_tmp, svc) = setup();
+        let result = memory_task_save(
+            &svc,
+            "Bad outcome",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = result
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(" ")
+            .next()
+            .unwrap();
+
+        let err = memory_task_close(&svc, id, None, Some("abandoned")).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidArgument(ref m) if m.contains("unknown outcome")),
+            "got: {err:?}"
+        );
+        // The task is untouched by the rejected close.
+        let active = memory_task_list(&svc, None).unwrap();
+        assert!(active.contains("Bad outcome"));
     }
 
     #[test]
@@ -784,7 +919,7 @@ mod tests {
                 matches!(err, MemoryError::InvalidArgument(_)),
                 "expected InvalidArgument for id {bad:?}, got {err:?}"
             );
-            let err = memory_task_close(&svc, bad, None).unwrap_err();
+            let err = memory_task_close(&svc, bad, None, None).unwrap_err();
             assert!(
                 matches!(err, MemoryError::InvalidArgument(_)),
                 "expected InvalidArgument for id {bad:?}, got {err:?}"
