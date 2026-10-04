@@ -9,6 +9,14 @@
 
 ## [未发布]
 
+### 新增
+
+- 新增 `install-opencode` 技能，覆盖 OpenCode 的 Tokenless 插件注册：opencode
+  CLI 探测（$OPENCODE_BIN 优先）、`anolisa adapter enable tokenless opencode`
+  注册（npm 直装时回退到适配器自带安装脚本）、配置目录解析
+  （OPENCODE_CONFIG_DIR / XDG_CONFIG_HOME / ~/.config/opencode）、
+  `plugins/tokenless.js` 链接验证以及重启要求。（#4869）
+
 ## [0.6.3] - 2026-08-21
 
 ### 修复

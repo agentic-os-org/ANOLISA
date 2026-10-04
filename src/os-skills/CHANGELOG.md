@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `install-opencode` skill for registering the Tokenless plugin in
+  OpenCode: opencode CLI lookup ($OPENCODE_BIN, then PATH),
+  `anolisa adapter enable tokenless opencode` registration with npm-fallback
+  to the adapter's own install script, config-directory resolution
+  (OPENCODE_CONFIG_DIR / XDG_CONFIG_HOME / ~/.config/opencode),
+  `plugins/tokenless.js` link verification, and the restart requirement. (#4869)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

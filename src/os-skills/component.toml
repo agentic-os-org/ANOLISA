@@ -42,6 +42,11 @@ source = "{datadir}/skills/install-hermes/"
 [[adapters.openclaw.skills]]
 name = "install-openclaw"
 source = "{datadir}/skills/install-openclaw/"
+
+[[adapters.openclaw.skills]]
+name = "install-opencode"
+source = "{datadir}/skills/install-opencode/"
+
 [[adapters.openclaw.skills]]
 name = "install-tokenless"
 source = "{datadir}/skills/install-tokenless/"
@@ -162,6 +167,11 @@ source = "{datadir}/skills/install-hermes/"
 [[adapters.hermes.skills]]
 name = "install-openclaw"
 source = "{datadir}/skills/install-openclaw/"
+
+[[adapters.hermes.skills]]
+name = "install-opencode"
+source = "{datadir}/skills/install-opencode/"
+
 [[adapters.hermes.skills]]
 name = "install-tokenless"
 source = "{datadir}/skills/install-tokenless/"
