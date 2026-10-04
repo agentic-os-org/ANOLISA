@@ -37,6 +37,9 @@ pub async fn list_trajectories(
     state: web::Data<LocalState>,
     query: web::Query<TrajectoryQuery>,
 ) -> impl Responder {
+    if let Err(response) = reject_unknown_label_tokens(&query) {
+        return response;
+    }
     let Some(tstore) = state.trajectory_store() else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
@@ -76,6 +79,43 @@ fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
     query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true)
 }
 
+/// Parses a comma-separated label list, rejecting unknown tokens.
+///
+/// Silently dropping a typo turned `?label=goodd` into "no label matches",
+/// which the caller cannot tell from an empty result. The Linux endpoint
+/// answers 400 for the same input; a skill must get the same answer on
+/// either platform.
+fn parse_label_tokens(
+    field: &str,
+    raw: &str,
+) -> Result<Vec<crate::reuse::TrajectoryLabel>, HttpResponse> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|token| {
+            crate::reuse::TrajectoryLabel::parse(token).ok_or_else(|| {
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": {
+                        "code": "bad_request",
+                        "message": format!("{field} '{token}' is not a known trajectory label"),
+                        "retryable": false,
+                    }
+                }))
+            })
+        })
+        .collect()
+}
+
+fn reject_unknown_label_tokens(query: &TrajectoryQuery) -> Result<(), HttpResponse> {
+    if let Some(raw) = query.label.as_deref() {
+        parse_label_tokens("label", raw)?;
+    }
+    if let Some(raw) = query.exclude_label.as_deref() {
+        parse_label_tokens("exclude_label", raw)?;
+    }
+    Ok(())
+}
+
 /// Applies the reuse-label query parameters; mirrors the Linux endpoint's
 /// filter so a skill gets the same answer on either platform.
 fn filter_rows_by_reuse_labels(
@@ -92,6 +132,8 @@ fn filter_rows_by_reuse_labels(
         }
         return;
     };
+    // Tokens were validated when the request entered the handler, so every
+    // one of them parses here.
     let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
         raw.split(',')
             .map(str::trim)
@@ -291,6 +333,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, RwLock};
 
+    use crate::config::StorageConfig;
     use crate::database::{
         DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole, DatabaseSpec,
     };
@@ -439,6 +482,38 @@ mod tests {
         assert_eq!(arr[0]["session_id"], "old-good");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_label_typos_are_rejected() {
+        // Same contract as the Linux endpoint: an unknown token is the
+        // caller's mistake, not an empty result set.
+        let state = make_state(None);
+        let app = test::init_service(
+            App::new().app_data(state).service(list_trajectories),
+        )
+        .await;
+
+        for uri in [
+            "/api/trajectories?label=goodd",
+            "/api/trajectories?exclude_label=nope",
+            "/api/trajectories?label=good&exclude_label=nope",
+        ] {
+            let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status().as_u16(), 400, "{uri} must be rejected");
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["error"]["code"], "bad_request");
+        }
+
+        // A known token still passes.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/trajectories?label=good")
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
     }
 
     #[actix_web::test]
