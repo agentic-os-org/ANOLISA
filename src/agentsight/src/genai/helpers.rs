@@ -893,7 +893,9 @@ mod tests {
         assert!(GenAIBuilder::is_llm_api_path("/v1/chat/completions"));
         assert!(GenAIBuilder::is_llm_api_path("/v1/completions"));
         assert!(GenAIBuilder::is_llm_api_path("/v1/messages"));
-        assert!(GenAIBuilder::is_llm_api_path("/api/v1/copilot/generate_copilot"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "/api/v1/copilot/generate_copilot"
+        ));
         assert!(GenAIBuilder::is_llm_api_path("/proxy/v1/chat/completions"));
         assert!(!GenAIBuilder::is_llm_api_path("/api/health"));
         assert!(!GenAIBuilder::is_llm_api_path("/v1/models"));
@@ -907,12 +909,18 @@ mod tests {
     #[test]
     fn test_is_llm_api_path_rejects_anthropic_sub_endpoints() {
         assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/count_tokens"));
-        assert!(!GenAIBuilder::is_llm_api_path("https://api.anthropic.com/v1/messages/count_tokens"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        ));
         assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/batches"));
-        assert!(!GenAIBuilder::is_llm_api_path("/v1/messages/batches/msgbatch_01ABC"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/v1/messages/batches/msgbatch_01ABC"
+        ));
         // The real endpoint still passes the gate.
         assert!(GenAIBuilder::is_llm_api_path("/v1/messages"));
-        assert!(GenAIBuilder::is_llm_api_path("https://api.anthropic.com/v1/messages"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "https://api.anthropic.com/v1/messages"
+        ));
     }
 
     /// The Responses API's per-id sub-endpoints (GET retrieve, POST cancel,
@@ -922,18 +930,25 @@ mod tests {
     /// re-records the create call's output and re-counts its usage tokens.
     #[test]
     fn test_is_llm_api_path_rejects_responses_sub_endpoints() {
-        let builder = GenAIBuilder::new();
-        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123"));
-        assert!(!builder.is_llm_api_path("https://api.openai.com/v1/responses/resp_abc123"));
-        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/cancel"));
-        assert!(!builder.is_llm_api_path("/v1/responses/resp_abc123/input_items"));
+        assert!(!GenAIBuilder::is_llm_api_path("/v1/responses/resp_abc123"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "https://api.openai.com/v1/responses/resp_abc123"
+        ));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/v1/responses/resp_abc123/cancel"
+        ));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/v1/responses/resp_abc123/input_items"
+        ));
         // The create endpoint still passes the gate, in bare-path,
         // full-URL and compatible-mode shapes.
-        assert!(builder.is_llm_api_path("/v1/responses"));
-        assert!(builder.is_llm_api_path("https://api.openai.com/v1/responses"));
-        assert!(
-            builder.is_llm_api_path("https://dashscope.aliyuncs.com/compatible-mode/v1/responses")
-        );
+        assert!(GenAIBuilder::is_llm_api_path("/v1/responses"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "https://api.openai.com/v1/responses"
+        ));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+        ));
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which
@@ -941,10 +956,16 @@ mod tests {
     /// non-streaming call was dropped at the `build_llm_call` gate.
     #[test]
     fn test_is_llm_api_path_dashscope_native() {
-        assert!(GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/text-generation/generation"));
-        assert!(GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/multimodal-generation/generation"));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "/api/v1/services/aigc/text-generation/generation"
+        ));
+        assert!(GenAIBuilder::is_llm_api_path(
+            "/api/v1/services/aigc/multimodal-generation/generation"
+        ));
         // Other aigc services (image synthesis, embeddings) stay out.
-        assert!(!GenAIBuilder::is_llm_api_path("/api/v1/services/aigc/text2image/image-synthesis"));
+        assert!(!GenAIBuilder::is_llm_api_path(
+            "/api/v1/services/aigc/text2image/image-synthesis"
+        ));
     }
 
     #[test]
