@@ -63,15 +63,25 @@ def pull_docker_image(
 ) -> None:
     """Pull an image, optionally via an alternate registry, and retag it to *image_name*."""
     pull_image_name = build_pull_image_name(image_name, pull_registry)
-    run_command(
+    pull_result = run_command(
         ["docker", "pull", pull_image_name],
         timeout=pull_timeout,
     )
+    if pull_result.returncode != 0:
+        # 静默继续会（1）把错误误归因于后续的 create/run；（2）本地存在
+        # 同名旧 tag 时对过期环境静默跑测——错误测试环境 → 错误 verdict。
+        raise RuntimeError(
+            f"docker pull failed for {pull_image_name}: {pull_result.stderr.strip()}"
+        )
     if pull_image_name != image_name:
-        run_command(
+        tag_result = run_command(
             ["docker", "tag", pull_image_name, image_name],
             timeout=30,
         )
+        if tag_result.returncode != 0:
+            raise RuntimeError(
+                f"docker tag failed for {image_name}: {tag_result.stderr.strip()}"
+            )
 
 
 def prepare_workspace_from_image(
