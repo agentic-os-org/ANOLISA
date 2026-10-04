@@ -313,6 +313,17 @@ test-claude-code-detect:
 # Python contract below. They cannot
 # go on `test-rtk-integration` instead: that target's own recipe is what fetches
 # and builds the vendored rtk, and this one runs earlier in the CI job.
+# tests/test_verify_release_versions.py guards the PEP 440 wheel-version
+# contract of packaging/raw/verify-release.py: a normalized wheel filename
+# (0.9.0rc1) must match a Cargo 0.9.0-rc.1, a filename keeping the
+# unnormalized spelling must be rejected (pip refuses to install from such a
+# URL), and genuine drift must stay rejected. The suite is stdlib-only and
+# finishes in milliseconds, but nothing executed it: the file was
+# pytest-shaped, no tokenless target or workflow calls pytest (only the
+# hermes job does), and plain `python3` on a pytest-shaped file runs zero
+# tests. It is unittest-shaped now and rides on this target beside the other
+# plain-python3 suites the Test tokenless job already runs, which is what
+# gives the raw packaging gate regression coverage in CI.
 test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup test-hook-scripts test-qwenwork-hooks
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
@@ -324,6 +335,7 @@ test-integration: test-hook-parity test-claude-code-detect test-toon-cleanup tes
 	python3 tests/test_agentscope_v1.py
 	python3 tests/test_cosh_extension_matcher.py
 	python3 tests/test_release_regression_probe.py
+	python3 tests/test_verify_release_versions.py
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
 
