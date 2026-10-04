@@ -34,17 +34,22 @@ DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError as exc:
-            logger.warning("Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s", path, line_number, exc)
-            continue
-        if isinstance(entry, dict):
-            entries.append(entry)
+    # Decode each JSONL record independently so a torn UTF-8 tail cannot
+    # prevent reconstruction of the complete records and other sessions.
+    with path.open("rb") as stream:
+        for line_number, raw_line in enumerate(stream, start=1):
+            try:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s", path, line_number, exc
+                )
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
     return entries
 
 
@@ -144,7 +149,9 @@ def _entry_parts(entry: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _text_from_parts(parts: list[dict[str, Any]]) -> str | None:
-    texts = [part.get("content") for part in parts if part.get("type") == "text" and isinstance(part.get("content"), str)]
+    texts = [
+        part.get("content") for part in parts if part.get("type") == "text" and isinstance(part.get("content"), str)
+    ]
     return "\n".join(text for text in texts if text) or None
 
 
@@ -527,9 +534,9 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
             )
             step["tool_response_chars"] = int(step.get("tool_response_chars", 0)) + metrics["tool_response_chars"]
             step["tool_response_lines"] = int(step.get("tool_response_lines", 0)) + metrics["tool_response_lines"]
-            step["tool_response_tokens_approx"] = int(step.get("tool_response_tokens_approx", 0)) + metrics[
-                "tool_response_tokens_approx"
-            ]
+            step["tool_response_tokens_approx"] = (
+                int(step.get("tool_response_tokens_approx", 0)) + metrics["tool_response_tokens_approx"]
+            )
 
     issue_id = extract_issue_id(first_user_msg) or _local_agent_id_from_session_file(path)
 

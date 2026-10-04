@@ -486,6 +486,9 @@ output/
 | `analyze-traces/trace_summary.csv` | 每个实例的汇总指标 |
 | `analyze-traces/trace_metrics/trace_metrics.csv` | 更细的 trace、工具调用和 token 指标 |
 
+OpenClaw JSONL 轨迹记录会跳过 JSON 或 UTF-8 损坏行并发出 warning，保留该会话
+的完整记录及其他会话。文件系统读取错误仍会使记录操作失败。
+
 ## 项目结构
 
 ```text

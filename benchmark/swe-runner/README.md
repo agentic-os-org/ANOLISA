@@ -496,6 +496,10 @@ Important files:
 | `analyze-traces/trace_summary.csv` | Per-instance summary metrics |
 | `analyze-traces/trace_metrics/trace_metrics.csv` | Detailed trace, tool-call, and token metrics |
 
+OpenClaw JSONL trace recording skips malformed JSON or UTF-8 lines with a
+warning while retaining complete records in the session and other sessions.
+Filesystem read errors still fail the recording operation.
+
 ## Project Structure
 
 ```text
