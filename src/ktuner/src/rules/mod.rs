@@ -1,4 +1,4 @@
-use crate::detect::{read_sysctl_u64, DiskInfo, DiskType, SystemInfo};
+use crate::detect::{read_sysctl_i64, read_sysctl_u64, DiskInfo, DiskType, SystemInfo};
 use crate::profile::WorkloadType;
 use anyhow::Result;
 
@@ -5579,24 +5579,33 @@ fn eval_perf_cpu_time_max_percent(info: &SystemInfo, recs: &mut Vec<Recommendati
     1
 }
 
+/// `kernel/hung_task.c` registers hung_task_warnings with a range of
+/// [-1, INT_MAX], where -1 means "unlimited warnings" and 0 disables them.
+/// The unsigned reader turned the legal "-1" into 0, so a host with warnings
+/// unlimited was reported as disabled and `tune` rewrote it to 10, silently
+/// capping the log. Pure so tests can force every branch.
+fn hung_task_warnings_recommendation(current: i64, recs: &mut Vec<Recommendation>) {
+    if current != 0 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "kernel.hung_task_warnings".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "10".to_string(),
+        reason: "hung task 警告被禁用，无法发现进程卡死问题，建议至少保留一定数量的告警"
+            .to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
+}
+
 fn eval_hung_task_warnings(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/hung_task_warnings";
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
-        recs.push(Recommendation {
-            param: "kernel.hung_task_warnings".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "10".to_string(),
-            reason: "hung task 警告被禁用，无法发现进程卡死问题，建议至少保留一定数量的告警"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    hung_task_warnings_recommendation(read_sysctl_i64(path), recs);
     1
 }
 
@@ -5740,7 +5749,10 @@ mod tests {
         // rather than an unsatisfiable one that fires on every check.
         let mut recs = Vec::new();
         port_range_recommendation(50_000, 60_000, &mut recs);
-        assert!(recs.is_empty(), "hardened range must not be lowered or nagged");
+        assert!(
+            recs.is_empty(),
+            "hardened range must not be lowered or nagged"
+        );
 
         // A low-but-recoverable range widens upward only: the low endpoint
         // survives verbatim, the high endpoint extends to 65535.
@@ -8557,6 +8569,25 @@ mod tests {
         if oc != 2 {
             assert!(recs.is_empty());
         }
+    }
+
+    #[test]
+    fn hung_task_warnings_unlimited_is_not_disabled() {
+        // kernel/hung_task.c registers the sysctl with a range of
+        // [-1, INT_MAX]; -1 means unlimited warnings, 0 disables them. The
+        // unsigned reader collapsed -1 to 0 and recommended "fixing" it to 10.
+        let mut recs = Vec::new();
+        hung_task_warnings_recommendation(-1, &mut recs);
+        assert!(recs.is_empty(), "-1 means unlimited, not disabled");
+
+        hung_task_warnings_recommendation(10, &mut recs);
+        assert!(recs.is_empty(), "a positive budget needs no change");
+
+        hung_task_warnings_recommendation(0, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].param, "kernel.hung_task_warnings");
+        assert_eq!(recs[0].recommended_value, "10");
+        assert_eq!(recs[0].current_value, "0");
     }
 
     #[test]

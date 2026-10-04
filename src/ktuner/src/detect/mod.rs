@@ -529,6 +529,16 @@ pub(crate) fn read_sysctl_u64(path: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Signed reader for sysctls whose legal range includes -1 (e.g.
+/// kernel.hung_task_warnings, kernel.perf_event_paranoid). The unsigned
+/// reader maps "-1" to 0, which is a different, meaningful value.
+pub(crate) fn read_sysctl_i64(path: &str) -> i64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 fn read_thp_enabled() -> String {
     let path = "/sys/kernel/mm/transparent_hugepage/enabled";
     fs::read_to_string(path).map_or_else(
@@ -1059,6 +1069,22 @@ mod tests {
         assert_eq!(sanitize_speed_mbps(1000), 1000);
         assert_eq!(sanitize_speed_mbps(10000), 10000);
         assert_eq!(sanitize_speed_mbps(25000), 25000);
+    }
+
+    #[test]
+    fn read_sysctl_i64_parses_negative_values() {
+        // "-1" is how the kernel encodes "unlimited" for several sysctls; the
+        // unsigned reader maps it to 0 (a different, meaningful value).
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_read_sysctl_i64_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        assert_eq!(read_sysctl_i64(path.to_str().unwrap()), -1);
+        std::fs::write(&path, b"2\n").unwrap();
+        assert_eq!(read_sysctl_i64(path.to_str().unwrap()), 2);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
