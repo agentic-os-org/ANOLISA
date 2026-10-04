@@ -84,6 +84,17 @@ async fn resolve_from_persisted(
             )
         })?;
 
+    // BtrfsBase restore invariant: the daemon re-detects "first btrfs mount
+    // in /proc/mounts" on every start; a foreign partition must never
+    // silently become the data root, because the reconcile inside
+    // rebuild_from_persisted would prune the persisted indexes against it.
+    // Same fail-fast contract as the BtrfsLoop image check below.
+    verify_persisted_btrfs_base_root(
+        state_file,
+        backend.as_ref(),
+        &state_dir.join(ws_ckpt_common::STATE_FILE),
+    )?;
+
     // BtrfsLoop restore invariant: img data must pre-exist somewhere. Either the
     // canonical FHS path or the pre-FHS legacy path counts — backend creation has
     // already attempted migration / fallback, so this only catches the truly
@@ -122,6 +133,73 @@ async fn resolve_from_persisted(
     );
     state.mark_bootstrapped();
     Ok(state)
+}
+
+/// Fail fast when the freshly detected BtrfsBase data root does not match
+/// the one recorded in state.json.
+///
+/// BtrfsBase picks "first writable btrfs mount in /proc/mounts" on every
+/// start (`find_available_btrfs_partition`), so a newly attached btrfs
+/// disk — or a temporarily unmounted real one — silently rebases the
+/// daemon onto a foreign partition. Bootstrap then CREATES
+/// `<foreign>/ws-ckpt-data`, and the startup reconcile prunes every
+/// unpinned snapshot record from the persisted indexes (state lives under
+/// /var/lib/ws-ckpt, partition-independent), destroying messages/lineage
+/// that the real partition still holds. This is the BtrfsBase counterpart
+/// of the BtrfsLoop image invariant: persisted paths are an identity
+/// contract, not a suggestion.
+fn verify_persisted_btrfs_base_root(
+    state_file: &ws_ckpt_common::persist::DaemonStateFile,
+    backend: &dyn ws_ckpt_common::backend::StorageBackend,
+    state_json_path: &Path,
+) -> anyhow::Result<()> {
+    use ws_ckpt_common::backend::BackendType;
+    use ws_ckpt_common::persist::BackendPaths;
+    // Only guard the persisted-type == effective-type case: a config
+    // override to btrfs-loop is a deliberate migration with its own
+    // invariant below.
+    if state_file.backend.backend_type != BackendType::BtrfsBase
+        || backend.backend_type() != BackendType::BtrfsBase
+    {
+        return Ok(());
+    }
+    let BackendPaths::BtrfsBase {
+        data_root: persisted,
+        ..
+    } = &state_file.paths
+    else {
+        return Ok(()); // persisted loop paths with a base backend: override case
+    };
+    let detected = backend.data_root();
+
+    // Tolerate textual differences that resolve to the same directory
+    // (symlinked mount points) before refusing.
+    let same_root = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        // One side unresolvable: fall back to the textual comparison so a
+        // missing persisted root is still reported as a mismatch below.
+        _ => a == b,
+    };
+    if same_root(persisted, detected) {
+        return Ok(());
+    }
+    let persisted_exists = persisted.exists();
+    anyhow::bail!(
+        "Persisted BtrfsBase data root {:?} does not match the detected \
+         btrfs partition's data root {:?} (persisted root {} on disk). \
+         Auto-cleanup reconciliation would prune the persisted snapshot \
+         indexes against the wrong partition. Mount the recorded btrfs \
+         partition (or pin the right one and edit [backend] type in \
+         /etc/ws-ckpt/config.toml), or remove {:?} to reset all state.",
+        persisted,
+        detected,
+        if persisted_exists {
+            "still exists"
+        } else {
+            "is missing"
+        },
+        state_json_path
+    );
 }
 
 /// Fresh start: detect backend, bootstrap, optionally migrate legacy indexes.
@@ -193,4 +271,175 @@ async fn resolve_fresh(
     state.mark_bootstrapped();
 
     Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::btrfs_base::{BtrfsBaseBackend, BtrfsBaseScenario};
+    use std::path::PathBuf;
+    use ws_ckpt_common::persist::{BackendIdentity, BackendPaths, DaemonStateFile};
+
+    /// A persisted BtrfsBase state file whose data root lives under
+    /// `mount` (the shape write_manifest persists on every save).
+    fn base_state_file(mount: &Path) -> DaemonStateFile {
+        let data_root = mount.join("ws-ckpt-data");
+        DaemonStateFile::new(
+            ws_ckpt_common::persist::DAEMON_STATE_VERSION,
+            BackendIdentity {
+                backend_type: ws_ckpt_common::backend::BackendType::BtrfsBase,
+                selection_method: "auto-detect".to_string(),
+                selected_at: chrono::Utc::now(),
+            },
+            BackendPaths::BtrfsBase {
+                mount_path: mount.to_path_buf(),
+                snapshots_root: data_root.join("snapshots"),
+                data_root,
+            },
+            vec![],
+        )
+    }
+
+    fn state_json(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join("state.json")
+    }
+
+    #[test]
+    fn restart_refuses_a_foreign_btrfs_base_partition() {
+        let real = tempfile::tempdir().unwrap();
+        let persisted = base_state_file(real.path());
+        // The recorded root exists and holds snapshot data.
+        let snap = real.path().join("ws-ckpt-data/snapshots/ws-1/snap-a");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("canary"), "real data").unwrap();
+
+        let foreign = tempfile::tempdir().unwrap();
+        let backend =
+            BtrfsBaseBackend::new(foreign.path().to_path_buf(), BtrfsBaseScenario::CrossDisk);
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = verify_persisted_btrfs_base_root(&persisted, &backend, &state_json(&tmp))
+            .expect_err("a foreign partition must refuse to start");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("does not match"), "{msg}");
+        assert!(msg.contains("state.json"), "remediation must name state.json: {msg}");
+        // Fail-safe: nothing was created or pruned on either side.
+        assert!(snap.join("canary").exists());
+        assert!(!foreign.path().join("ws-ckpt-data").exists());
+    }
+
+    #[test]
+    fn restart_accepts_a_matching_btrfs_base_partition() {
+        let real = tempfile::tempdir().unwrap();
+        let persisted = base_state_file(real.path());
+        let backend =
+            BtrfsBaseBackend::new(real.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+        let tmp = tempfile::tempdir().unwrap();
+        verify_persisted_btrfs_base_root(&persisted, &backend, &state_json(&tmp))
+            .expect("the recorded partition must pass");
+    }
+
+    #[test]
+    fn restart_refuses_when_the_persisted_data_root_is_missing() {
+        // The recorded partition is temporarily unmounted: the persisted
+        // root does not exist, detection picked another mount. This is the
+        // "reboot while A is unmounted" shape — still a refusal, with the
+        // "is missing" wording.
+        let real = tempfile::tempdir().unwrap();
+        let persisted = base_state_file(real.path());
+        // NOTE: real's tempdir exists but ws-ckpt-data under it does not.
+        let foreign = tempfile::tempdir().unwrap();
+        let backend =
+            BtrfsBaseBackend::new(foreign.path().to_path_buf(), BtrfsBaseScenario::CrossDisk);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = verify_persisted_btrfs_base_root(&persisted, &backend, &state_json(&tmp))
+            .expect_err("a missing recorded root must refuse");
+        assert!(format!("{err:#}").contains("is missing"));
+    }
+
+    #[test]
+    fn btrfs_loop_and_override_states_bypass_the_guard() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Persisted BtrfsLoop paths: the loop invariant owns this case.
+        let loop_file = DaemonStateFile::new(
+            ws_ckpt_common::persist::DAEMON_STATE_VERSION,
+            BackendIdentity {
+                backend_type: ws_ckpt_common::backend::BackendType::BtrfsLoop,
+                selection_method: "auto-detect".to_string(),
+                selected_at: chrono::Utc::now(),
+            },
+            BackendPaths::BtrfsLoop {
+                mount_path: tmp.path().join("mnt"),
+                data_root: tmp.path().join("mnt/ws-ckpt-data"),
+                snapshots_root: tmp.path().join("mnt/ws-ckpt-data/snapshots"),
+                loop_img: None,
+            },
+            vec![],
+        );
+        let foreign = tempfile::tempdir().unwrap();
+        let base_backend =
+            BtrfsBaseBackend::new(foreign.path().to_path_buf(), BtrfsBaseScenario::CrossDisk);
+        verify_persisted_btrfs_base_root(&loop_file, &base_backend, &state_json(&tmp))
+            .expect("loop-persisted state is not this guard's scope");
+
+        // Persisted BtrfsBase + effective BtrfsLoop (config override): a
+        // deliberate migration, guarded by the loop invariant instead.
+        let base_file = base_state_file(foreign.path());
+        let loop_backend_mount = tempfile::tempdir().unwrap();
+        let loop_backend = crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+            loop_backend_mount.path().to_path_buf(),
+            loop_backend_mount.path().join("image"),
+        );
+        verify_persisted_btrfs_base_root(&base_file, &loop_backend, &state_json(&tmp))
+            .expect("an override to btrfs-loop is a deliberate migration");
+    }
+
+    /// The amplifier the guard closes: reconcile pointed at a foreign (empty)
+    /// snapshot bucket prunes unpinned records and would persist the pruned
+    /// index. Passes on main — it documents why the guard must exist.
+    #[tokio::test]
+    async fn foreign_root_reconcile_prunes_unpinned_records() {
+        let real = tempfile::tempdir().unwrap();
+        let ws_snap = real.path().join("ws-ckpt-data/snapshots/ws-amp");
+        let mut index = ws_ckpt_common::SnapshotIndex::new(ws_snap.clone());
+        let now = chrono::Utc::now();
+        for (id, pinned, off) in [
+            ("snap-pinned", true, 30i64),
+            ("snap-old", false, 20),
+            ("snap-new", false, 10),
+        ] {
+            let meta_dir = ws_snap.join(id);
+            std::fs::create_dir_all(&meta_dir).unwrap();
+            index.snapshots.insert(
+                id.to_string(),
+                ws_ckpt_common::SnapshotMeta {
+                    message: Some(id.to_string()),
+                    metadata: None,
+                    pinned,
+                    created_at: now - chrono::Duration::seconds(off),
+                    missing: false,
+                    parent_id: None,
+                    child_ids: Vec::new(),
+                },
+            );
+        }
+
+        let foreign = tempfile::tempdir().unwrap();
+        let foreign_ws = foreign.path().join("ws-ckpt-data/snapshots/ws-amp");
+        std::fs::create_dir_all(&foreign_ws).unwrap();
+
+        let changed = crate::index_store::reconcile_from_fs(&foreign_ws, &mut index)
+            .await
+            .expect("reconcile over the foreign root");
+        assert!(changed, "the prune must be reported so the caller persists it");
+        assert!(
+            !index.snapshots.contains_key("snap-old")
+                && !index.snapshots.contains_key("snap-new"),
+            "unpinned records are pruned against the foreign root"
+        );
+        let pinned = index.snapshots.get("snap-pinned").expect("pinned survives");
+        assert!(pinned.missing, "the pinned record is flagged missing");
+        // The real partition still holds everything.
+        assert!(ws_snap.join("snap-old").exists());
+    }
 }
