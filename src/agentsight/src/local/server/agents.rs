@@ -412,7 +412,15 @@ fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
         })
         .collect();
 
-    agents.sort_by_key(|agent| std::cmp::Reverse(agent.process_count));
+    // The agents were collected from a HashMap, so a count-only sort left
+    // equally loaded agents in the map's randomized iteration order and the
+    // list order changed between requests. Ties break by agent id, the way
+    // 947a9bde2 broke them for the audit and token aggregates.
+    agents.sort_by(|a, b| {
+        b.process_count
+            .cmp(&a.process_count)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     agents
 }
 
@@ -589,5 +597,39 @@ mod tests {
         assert!(summary.total_running <= summary.agents.len() || summary.agents.is_empty());
         assert!(summary.scanned_at > 0);
         assert!(!summary.hostname.is_empty());
+    }
+
+    #[test]
+    fn match_agents_count_ties_are_stable() {
+        // Four agents with one process each: the counts tie, and the order
+        // used to follow the HashMap iteration order, changing between
+        // requests over the same system.
+        let procs = vec![
+            make_proc(1, "claude", "claude"),
+            make_proc(2, "codex", "codex"),
+            make_proc(3, "gemini", "gemini"),
+            make_proc(4, "aider", "aider"),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let ids: Vec<String> = match_agents(&procs).into_iter().map(|a| a.id).collect();
+            seen.insert(ids);
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the order of equally loaded agents must not change between calls"
+        );
+        let order = seen.into_iter().next().unwrap();
+        assert_eq!(
+            order,
+            vec![
+                "aider".to_string(),
+                "claude-code".to_string(),
+                "codex".to_string(),
+                "gemini-cli".to_string()
+            ],
+            "count ties break by agent id"
+        );
     }
 }
