@@ -207,14 +207,24 @@ impl GenAIBuilder {
             return None;
         }
 
-        let tools = obj
-            .get("tools")
+        // DashScope/Bailian native requests nest their sampling parameters
+        // under "parameters" (the OpenAI-compatible spelling is top level), and
+        // that protocol has no typed parser, so this fallback is the only place
+        // that can read them. Without it the output cap is invisible to the
+        // token-limit interruption rules and the request telemetry.
+        let parameters = obj.get("parameters").and_then(|v| v.as_object());
+        let param = |key: &str| {
+            obj.get(key)
+                .or_else(|| parameters.and_then(|params| params.get(key)))
+        };
+
+        let tools = param("tools")
             .and_then(|v| v.as_array())
             .map(|arr| arr.to_vec());
 
         Some(LLMRequest {
             messages,
-            temperature: obj.get("temperature").and_then(|v| v.as_f64()),
+            temperature: param("temperature").and_then(|v| v.as_f64()),
             // The output cap has three spellings: the legacy chat
             // `max_tokens`, the newer chat `max_completion_tokens` (the only
             // one the o-series accepts), and the Responses API
@@ -223,15 +233,15 @@ impl GenAIBuilder {
             // `gen_ai.request.max_tokens` telemetry keep working.
             max_tokens: ["max_tokens", "max_completion_tokens", "max_output_tokens"]
                 .iter()
-                .find_map(|key| obj.get(*key))
+                .find_map(|key| param(key))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32),
-            frequency_penalty: obj.get("frequency_penalty").and_then(|v| v.as_f64()),
-            presence_penalty: obj.get("presence_penalty").and_then(|v| v.as_f64()),
-            top_p: obj.get("top_p").and_then(|v| v.as_f64()),
-            top_k: obj.get("top_k").and_then(|v| v.as_f64()),
-            seed: obj.get("seed").and_then(|v| v.as_i64()),
-            stop_sequences: obj.get("stop").and_then(|v| {
+            frequency_penalty: param("frequency_penalty").and_then(|v| v.as_f64()),
+            presence_penalty: param("presence_penalty").and_then(|v| v.as_f64()),
+            top_p: param("top_p").and_then(|v| v.as_f64()),
+            top_k: param("top_k").and_then(|v| v.as_f64()),
+            seed: param("seed").and_then(|v| v.as_i64()),
+            stop_sequences: param("stop").and_then(|v| {
                 v.as_array().map(|arr| {
                     arr.iter()
                         .filter_map(|s| s.as_str().map(String::from))
@@ -1146,6 +1156,42 @@ mod tests {
         }"#;
         let req = GenAIBuilder::parse_request_body(body).unwrap();
         assert_eq!(req.max_tokens, Some(2048));
+    }
+
+    /// The DashScope/Bailian native protocol nests its sampling parameters
+    /// under `parameters`; reading only top level left the output cap and every
+    /// other parameter empty for that traffic.
+    #[test]
+    fn test_parse_request_body_dashscope_native_parameters() {
+        let body = r#"{
+            "model": "qwen-plus",
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "parameters": {
+                "result_format": "message",
+                "max_tokens": 1024,
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "seed": 42,
+                "stop": ["END"]
+            }
+        }"#;
+
+        let req = GenAIBuilder::parse_request_body(body).expect("native body parses");
+        assert_eq!(req.max_tokens, Some(1024));
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.8));
+        assert_eq!(req.seed, Some(42));
+        assert_eq!(req.stop_sequences, Some(vec!["END".to_string()]));
+
+        // A top-level value still wins over the nested one.
+        let body = r#"{
+            "model": "qwen-plus",
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "max_tokens": 7,
+            "parameters": {"max_tokens": 1024}
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+        assert_eq!(req.max_tokens, Some(7));
     }
 
     #[test]
