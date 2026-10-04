@@ -239,7 +239,15 @@ pub(in crate::hooks::linux_memory) fn is_sudo_option_token(
     {
         return true;
     }
-    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+    // Byte-wise prefix comparison: `token[..2]` would panic when the second
+    // byte starts a multi-byte character (e.g. `sudo 中文`), and the option
+    // names themselves are pure ASCII.
+    if token.len() > 2
+        && matches!(
+            &token.as_bytes()[..2],
+            b"-u" | b"-g" | b"-h" | b"-p" | b"-C" | b"-T"
+        )
+    {
         return true;
     }
     token

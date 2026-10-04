@@ -164,7 +164,16 @@ fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
     {
         return true;
     }
-    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+    // Compare the two-byte option prefix as bytes: `token[..2]` is a string
+    // slice whose end may fall inside a multi-byte character (e.g. the
+    // argument `中文` after `sudo`), which panics. The byte slice is
+    // boundary-free and matches exactly the same ASCII option names.
+    if token.len() > 2
+        && matches!(
+            &token.as_bytes()[..2],
+            b"-u" | b"-g" | b"-h" | b"-p" | b"-C" | b"-T"
+        )
+    {
         return true;
     }
     token
@@ -435,6 +444,25 @@ mod tests {
     #[test]
     fn first_program_token_env_only() {
         assert_eq!(first_program_token("FOO=bar"), "");
+    }
+
+    /// Regression: a `sudo` argument whose second byte starts a multi-byte
+    /// character (any CJK word, accented letter, emoji) used to panic the
+    /// classification path with `byte index 2 is not a char boundary`
+    /// (`&token[..2]`), crashing the interactive shell whenever such a
+    /// command finished (hook evaluation and failure classification both
+    /// call `first_program_token`).
+    #[test]
+    fn first_program_token_survives_multibyte_sudo_arguments() {
+        assert_eq!(first_program_token("sudo 中文"), "中文");
+        assert_eq!(first_program_token("sudo 日本語"), "日本語");
+        assert_eq!(first_program_token("sudo -é cmd"), "-é");
+        assert_eq!(first_program_token("sudo '中文 文件.sh'"), "'中文");
+        assert_eq!(first_program_token("sudo a中"), "a中");
+        // Recognized ASCII sudo options keep their existing arity handling.
+        assert_eq!(first_program_token("sudo -u root ls"), "ls");
+        assert_eq!(first_program_token("sudo -u中文 ls"), "ls");
+        assert_eq!(first_program_token("sudo -uroot ls"), "ls");
     }
 
     #[test]

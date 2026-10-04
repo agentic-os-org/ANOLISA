@@ -1037,6 +1037,20 @@ fn env_wrapper_options_are_supported_fail_closed() {
     assert_eq!(memory_target_program("env echo top -b -n1"), "echo");
 }
 
+/// Regression: a multi-byte `sudo` argument (`sudo 中文`, `sudo -é`, any CJK
+/// or accented word) used to panic the memory-hook command parser with
+/// `byte index 2 is not a char boundary` (`&token[..2]`), so a finished
+/// command crashed hook evaluation in the interactive shell.
+#[test]
+fn memory_target_program_survives_multibyte_sudo_arguments() {
+    assert_eq!(memory_target_program("sudo 中文"), "中文");
+    assert_eq!(memory_target_program("sudo -é free -m"), "-é");
+    assert_eq!(memory_target_program("sudo '中文 文件.sh'"), "'中文");
+    // Recognized ASCII option forms keep their existing arity handling.
+    assert_eq!(memory_target_program("sudo -u中文 free -m"), "free");
+    assert_eq!(memory_target_program("sudo -u root free -m"), "free");
+}
+
 #[test]
 fn malformed_outputs_miss() {
     assert!(parse_ps_process_rows("hello\nworld\n").is_empty());
