@@ -53,8 +53,12 @@ def _compat(prompt, model, size, key, base):
     req = urllib.request.Request(f"{base}/images/generations",json.dumps(body).encode(),h,method="POST")
     try:
         with urllib.request.urlopen(req,timeout=120) as r: res = json.loads(r.read())
-    except urllib.error.HTTPError:
-        return _wanx(prompt, model, size, key)
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 405):
+            return _wanx(prompt, model, size, key)
+        detail = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        print(f"ERROR: HTTP {e.code} {detail}", file=sys.stderr)
+        sys.exit(1)
     d = res.get("data",[])
     if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
