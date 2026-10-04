@@ -396,6 +396,10 @@ mod tests {
         assert!(MessageParser::is_llm_api_path("/v1/completions"));
         assert!(!MessageParser::is_llm_api_path("/v1/embeddings"));
         assert!(!MessageParser::is_llm_api_path("/health"));
+        // Anthropic's count-tokens / Batch sub-endpoints are not inference
+        // calls; they must not pass the gate (phantom llm_call rows).
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/count_tokens"));
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/batches"));
     }
 
     #[test]

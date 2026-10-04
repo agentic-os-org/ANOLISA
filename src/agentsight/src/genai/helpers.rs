@@ -250,7 +250,15 @@ impl GenAIBuilder {
     pub(super) fn is_llm_api_path(&self, path: &str) -> bool {
         path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            || path.contains("/v1/messages")
+            // Anthropic's /v1/messages/count_tokens (token counting) and
+            // /v1/messages/batches* (Batch API) share the inference prefix
+            // but are not inference calls; the OpenAI arms have no such
+            // sub-endpoints. Must stay in lockstep with
+            // AnthropicParser::matches_path so a count-tokens call neither
+            // creates a row (this gate) nor gets deep-parsed (that gate).
+            || (path.contains("/v1/messages")
+                && !path.contains("/v1/messages/count_tokens")
+                && !path.contains("/v1/messages/batches"))
             || path.contains("/v1/responses")
             || path.contains("/chat/completions")
             || path.contains("/completions")
@@ -860,6 +868,23 @@ mod tests {
         assert!(builder.is_llm_api_path("/proxy/v1/chat/completions"));
         assert!(!builder.is_llm_api_path("/api/health"));
         assert!(!builder.is_llm_api_path("/v1/models"));
+    }
+
+    /// Anthropic's count-tokens and Batch sub-endpoints share the inference
+    /// prefix but are not inference calls — admitting them at this gate
+    /// creates a phantom llm_call row per count (same conversation_id, zero
+    /// tokens, no output) that inflates call counts and consumes
+    /// preference-window slots.
+    #[test]
+    fn test_is_llm_api_path_rejects_anthropic_sub_endpoints() {
+        let builder = GenAIBuilder::new();
+        assert!(!builder.is_llm_api_path("/v1/messages/count_tokens"));
+        assert!(!builder.is_llm_api_path("https://api.anthropic.com/v1/messages/count_tokens"));
+        assert!(!builder.is_llm_api_path("/v1/messages/batches"));
+        assert!(!builder.is_llm_api_path("/v1/messages/batches/msgbatch_01ABC"));
+        // The real endpoint still passes the gate.
+        assert!(builder.is_llm_api_path("/v1/messages"));
+        assert!(builder.is_llm_api_path("https://api.anthropic.com/v1/messages"));
     }
 
     /// DashScope/Bailian native protocol endpoints end in `/generation`, which

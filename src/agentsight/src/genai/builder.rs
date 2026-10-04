@@ -907,6 +907,29 @@ mod tests {
     }
 
     #[test]
+    fn test_build_pending_from_request_count_tokens_is_skipped() {
+        // The drain path must not persist a pending row for an interrupted
+        // count-tokens call either: same conversation as the real turn, no
+        // max_tokens, no usage — a phantom interrupted llm_call.
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Long document"}]}"#;
+        let req = make_request("/v1/messages/count_tokens", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        assert!(
+            builder
+                .build_pending_from_request(
+                    &req,
+                    &ConnectionId { pid: 1, ssl_ptr: 2 },
+                    &mapper,
+                    &cache
+                )
+                .is_none(),
+            "count_tokens must not create a pending row"
+        );
+    }
+
+    #[test]
     fn test_build_pending_from_request_evicts_conversation_anchor() {
         // build_pending_from_request 只在中断场景（进程崩溃或空闲超时）下被
         // 调用，因此总是会驱逐 conversation 锚点：固定文本先通过正常路径

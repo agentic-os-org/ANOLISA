@@ -429,7 +429,17 @@ impl AnthropicParser {
     /// # Returns
     /// * `true` if the path matches Anthropic endpoints
     pub fn matches_path(path: &str) -> bool {
+        // POST /v1/messages/count_tokens (and the Batch API's
+        // /v1/messages/batches*) share the /v1/messages prefix but are not
+        // inference calls: the count-tokens request carries the same
+        // conversation the real call will send, so recording it as an
+        // llm_call doubles per-conversation call counts with zero-token
+        // rows and consumes preference-window slots. Exclude the
+        // documented sub-paths.
+        // https://docs.anthropic.com/en/api/counting-tokens
         path.contains("/v1/messages")
+            && !path.contains("/v1/messages/count_tokens")
+            && !path.contains("/v1/messages/batches")
     }
 }
 
@@ -627,6 +637,28 @@ mod tests {
         ));
         assert!(!AnthropicParser::matches_path("/v1/chat/completions"));
         assert!(!AnthropicParser::matches_path("/v1/completions"));
+    }
+
+    #[test]
+    fn test_matches_path_rejects_count_tokens_and_batches() {
+        // Token counting and the Batch API share the /v1/messages prefix but
+        // are not inference calls; the count-tokens request carries the
+        // same conversation the real call will send, so admitting it would
+        // double per-conversation call counts with zero-token rows.
+        assert!(!AnthropicParser::matches_path("/v1/messages/count_tokens"));
+        assert!(!AnthropicParser::matches_path(
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        ));
+        assert!(!AnthropicParser::matches_path("/v1/messages/batches"));
+        assert!(!AnthropicParser::matches_path(
+            "/v1/messages/batches/msgbatch_01ABC"
+        ));
+        // The real inference endpoint keeps matching, in both bare-path and
+        // full-URL shapes.
+        assert!(AnthropicParser::matches_path("/v1/messages"));
+        assert!(AnthropicParser::matches_path(
+            "https://api.anthropic.com/v1/messages"
+        ));
     }
 
     #[test]

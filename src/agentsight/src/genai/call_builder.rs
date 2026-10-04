@@ -947,6 +947,30 @@ mod tests {
         assert!(build_call(&builder, &[AnalysisResult::Http(http)]).is_none());
     }
 
+    #[test]
+    fn test_build_llm_call_returns_none_for_count_tokens() {
+        // A real count-tokens request: the same conversation the real
+        // /v1/messages call will send, but no max_tokens (the typed Anthropic
+        // parser refuses it) and a bare {"input_tokens": N} response with no
+        // usage object. Before the gate narrowing this built a phantom
+        // llm_call row per count — same conversation_id as the real turn,
+        // zero tokens, no output — doubling call counts and consuming
+        // preference-window slots.
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/messages/count_tokens",
+            Some(
+                r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Summarize this long document"}],"system":"You are helpful"}"#
+                    .to_string(),
+            ),
+            Some(r#"{"input_tokens":1256}"#.to_string()),
+        );
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "count_tokens is not an inference call and must not build an llm_call"
+        );
+    }
+
     // ── Verification: HTTPS-fallback trigger for unparsable LLM traffic ──
     //
     // An LLM API path whose body cannot be parsed into semantic messages must
