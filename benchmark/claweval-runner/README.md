@@ -122,6 +122,12 @@ claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
 └── batch_summary.json     # Aggregate summary
 ```
 
+Grading stages the complete UTF-8 trace beside the destination before replacing
+it. Serialization, write or replacement failures leave the previous trace intact
+and report an error so grading can be retried. Existing permissions and symlink
+targets are preserved. This provides atomic visibility on local filesystems;
+it does not guarantee power-loss durability or coordinate concurrent graders.
+
 ## Architecture: MCP Tool Injection & Anti-Cheat Isolation
 
 ce-runner uses openclaw's native MCP runtime (stdio) to expose task-specific tools to the agent. The key challenge is ensuring the agent can **only** access its own task's tools and cannot read host files (e.g. `grader.py`) to cheat.
