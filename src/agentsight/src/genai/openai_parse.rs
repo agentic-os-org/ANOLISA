@@ -178,6 +178,14 @@ impl GenAIBuilder {
                 }
             }
 
+            // Legacy function_call (pre-tool_calls spelling of a tool request).
+            if let Some(part) = msg
+                .get("function_call")
+                .and_then(Self::parse_legacy_function_call)
+            {
+                parts.push(part);
+            }
+
             // tool_calls (role=assistant 发起的 tool calls)
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
@@ -368,6 +376,15 @@ impl GenAIBuilder {
             }
         }
 
+        // Legacy function_call: the same tool request in the older spelling.
+        if let Some(part) = m
+            .function_call
+            .as_ref()
+            .and_then(Self::parse_legacy_function_call)
+        {
+            parts.push(part);
+        }
+
         InputMessage {
             role,
             parts,
@@ -409,6 +426,15 @@ impl GenAIBuilder {
             }
         }
 
+        // Legacy function_call: the same tool request in the older spelling.
+        if let Some(part) = m
+            .function_call
+            .as_ref()
+            .and_then(Self::parse_legacy_function_call)
+        {
+            parts.push(part);
+        }
+
         OutputMessage {
             role,
             parts,
@@ -429,6 +455,31 @@ impl GenAIBuilder {
         });
         Some(MessagePart::ToolCall {
             id,
+            name,
+            arguments,
+        })
+    }
+
+    /// Legacy `function_call` payload, the pre-`tool_calls` spelling that
+    /// older models (and clients replaying their history) still use:
+    /// `{"name": "…", "arguments": "{…}"}`. Without this the tool request was
+    /// dropped from the semantic model, so tool-use metrics saw a plain text
+    /// turn where the model had actually asked to run a tool.
+    pub(super) fn parse_legacy_function_call(value: &serde_json::Value) -> Option<MessagePart> {
+        if value.get("function").is_some() {
+            // Already in the modern nesting.
+            return Self::parse_openai_tool_call_value(value);
+        }
+        let name = value.get("name")?.as_str()?.to_string();
+        if name.is_empty() {
+            return None;
+        }
+        let arguments = value.get("arguments").and_then(|v| match v {
+            serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+            other => Some(other.clone()),
+        });
+        Some(MessagePart::ToolCall {
+            id: None,
             name,
             arguments,
         })
@@ -1127,6 +1178,56 @@ mod tests {
         assert_eq!(req.temperature, Some(0.7));
         assert_eq!(req.max_tokens, Some(1024));
         assert!(req.stream);
+    }
+
+    /// Legacy `function_call` payloads (finish_reason `function_call`) carry the
+    /// tool request in the pre-`tool_calls` spelling; dropping them made the
+    /// turn look like plain text.
+    #[test]
+    fn legacy_function_call_becomes_a_tool_call_part() {
+        let body = r#"{
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "user", "content": "weather in Beijing?"},
+                {"role": "assistant", "content": null,
+                 "function_call": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+        match &req.messages[1].parts[0] {
+            MessagePart::ToolCall {
+                name, arguments, ..
+            } => {
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments
+                        .as_ref()
+                        .and_then(|a| a.get("city"))
+                        .and_then(|c| c.as_str()),
+                    Some("Beijing")
+                );
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+
+        // The typed response converter does the same.
+        let output = serde_json::from_value::<crate::analyzer::message::OpenAIResponse>(serde_json::json!({
+            "id": "chatcmpl-legacy",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-3.5-turbo",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": null,
+                            "function_call": {"name": "get_weather", "arguments": "{}"}},
+                "finish_reason": "function_call"
+            }]
+        }))
+        .expect("response parses");
+        let msg = &output.choices[0].message;
+        let parts =
+            GenAIBuilder::openai_msg_to_output(msg, output.choices[0].finish_reason.as_deref());
+        assert!(matches!(parts.parts[0], MessagePart::ToolCall { .. }));
     }
 
     #[test]
