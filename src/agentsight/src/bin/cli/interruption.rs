@@ -554,9 +554,12 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 }
 
 /// Truncate a string ID for table display, appending "..." if needed.
+/// Counts and cuts by character, not byte: stored ids are free text and a
+/// byte-index cut can land inside a multi-byte character and panic.
 fn truncate_id(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+    if s.chars().count() > max_len {
+        let kept: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{kept}...")
     } else {
         s.to_string()
     }
@@ -653,6 +656,23 @@ fn print_json<T: serde::Serialize>(value: &T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_id_cuts_on_char_boundaries() {
+        // 16 chars / 48 bytes: a byte-index cut at 11 lands inside a character
+        // and panics. The limit is a character budget.
+        let id = "会话会话会话会话会话会话会话会话";
+        let out = truncate_id(id, 14);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.chars().count(), 14);
+
+        // Short multi-byte ids pass through untouched.
+        assert_eq!(truncate_id("会话", 14), "会话");
+
+        // ASCII behaviour is unchanged.
+        assert_eq!(truncate_id("abcdefghij", 14), "abcdefghij");
+        assert_eq!(truncate_id("abcdefghijklmnop", 14), "abcdefghijk...");
+    }
 
     #[test]
     fn time_range_never_inverts_for_absurd_last() {
