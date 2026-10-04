@@ -496,6 +496,12 @@ Important files:
 | `analyze-traces/trace_summary.csv` | Per-instance summary metrics |
 | `analyze-traces/trace_metrics/trace_metrics.csv` | Detailed trace, tool-call, and token metrics |
 
+Batch timing metadata is merged across calls to the output store. Concurrent
+metadata writers using the same local output directory are serialized, and
+readers see a complete old or new `run_metadata.json`. This guarantee covers
+metadata only; use separate output directories for independent run results.
+See [metadata storage](docs/design/RUN_METADATA_STORAGE.md) for the boundary.
+
 ## Project Structure
 
 ```text

@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 import threading
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from filelock import FileLock
 
 from swe_runner.common.models import InstanceResult, Prediction
 from swe_runner.run.io.instance_result_summary import build_instance_result_summary
@@ -70,8 +74,21 @@ class RunOutputStore:
     def write_run_metadata(self, snapshot: RunMetadataSnapshot) -> Path:
         """Write batch-level run timing metadata for later trace export."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        payload = merge_run_metadata(self._load_existing_run_metadata(), snapshot.to_payload())
-        self.run_metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Lock a stable sidecar: the metadata inode changes on atomic replacement.
+        with FileLock(str(self.output_dir / ".run_metadata.lock")):
+            payload = merge_run_metadata(self._load_existing_run_metadata(), snapshot.to_payload())
+            temporary_path = self.output_dir / f".run_metadata.{uuid4().hex}.tmp"
+            created = False
+            try:
+                with temporary_path.open("x", encoding="utf-8") as stream:
+                    created = True
+                    json.dump(payload, stream, indent=2)
+                if self.run_metadata_path.exists():
+                    temporary_path.chmod(stat.S_IMODE(self.run_metadata_path.stat().st_mode))
+                temporary_path.replace(self.run_metadata_path)
+            finally:
+                if created:
+                    temporary_path.unlink(missing_ok=True)
         logger.info(
             "OUTPUT_WRITE_RUN_METADATA file=%s started_at_ns=%s ended_at_ns=%s instances=%s runs=%s",
             self.run_metadata_path,
