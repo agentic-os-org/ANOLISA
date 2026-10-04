@@ -1449,11 +1449,25 @@ fn extract_guarded_paths(dsl: &str) -> Vec<String> {
                     // domain).  Rules with other labels (e.g. "if CREDENTIAL")
                     // or with "unless" conditions cannot be faithfully evaluated
                     // by the fast path and must be excluded.
-                    let line_rest = rest[end + 1..].split('\n').next().unwrap_or("");
-                    let has_unless = line_rest.contains("unless");
-                    let has_non_standard_label = line_rest.contains(" if ")
-                        && !line_rest.contains("if AGENT")
-                        && !line_rest.contains("if COMMAND");
+                    //
+                    // The DSL ignores newlines, so a clause can wrap and the
+                    // label may sit on its own line: examine the clause text —
+                    // up to the next clause verb or `because` — as tokens. A
+                    // line-based check treated a wrapped `if SECRET` as an
+                    // unlabelled AGENT rule and guarded its path for every
+                    // process in the domain.
+                    let clause_rest = &rest[end + 1..];
+                    let clause_end = ["because", "block ", "notify ", "kill ", "rule ", "source ", "label "]
+                        .iter()
+                        .filter_map(|marker| clause_rest.find(marker))
+                        .min()
+                        .unwrap_or(clause_rest.len());
+                    let clause = &clause_rest[..clause_end];
+                    let words: Vec<&str> = clause.split_whitespace().collect();
+                    let has_unless = words.contains(&"unless");
+                    let has_non_standard_label = words
+                        .windows(2)
+                        .any(|pair| pair[0] == "if" && pair[1] != "AGENT" && pair[1] != "COMMAND");
                     if !has_unless && !has_non_standard_label {
                         paths.push(path.to_string());
                     }
@@ -1524,6 +1538,33 @@ fn userspace_dev_to_kernel(dev: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+
+    /// The inode guard fast path only knows "the process is in a domain", so
+    /// only clauses gated on AGENT/COMMAND may use it. The DSL ignores
+    /// newlines, so the label can sit on its own line — a line-based check
+    /// treated a wrapped `if SECRET` as an unlabelled rule and guarded its path
+    /// for every process in the domain.
+    #[test]
+    fn guarded_paths_skip_wrapped_non_agent_labels() {
+        let wrapped = "source SECRET = file \"/tmp/secret\"\nrule r:\n  block unlink file \"/data/important\"\n    if SECRET\n  because \"x\"\n";
+        assert!(
+            extract_guarded_paths(wrapped).is_empty(),
+            "a SECRET-gated clause must not be fast-pathed"
+        );
+
+        let unless = "rule r:\n  block unlink file \"/data/important\" unless AGENT\n  because \"x\"\n";
+        assert!(extract_guarded_paths(unless).is_empty());
+
+        let agent = "rule r:\n  block unlink file \"/data/important\" if AGENT\n  because \"x\"\n";
+        assert_eq!(
+            extract_guarded_paths(agent),
+            vec!["/data/important".to_string()]
+        );
+
+        // A following clause's label must not leak onto the earlier path.
+        let two_clauses = "rule r:\n  block unlink file \"/a\" if AGENT\n  block write file \"/b\" if SECRET\n  because \"x\"\n";
+        assert_eq!(extract_guarded_paths(two_clauses), vec!["/a".to_string()]);
+    }
 
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationScope, Effect,
