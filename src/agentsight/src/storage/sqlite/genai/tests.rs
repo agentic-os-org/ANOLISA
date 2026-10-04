@@ -1531,6 +1531,175 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     cleanup_db(&path);
 }
 
+/// A completion whose parsed request carries no messages must not erase the
+/// evidence the pending row captured: the request view is the only record of
+/// what the caller sent when the semantic parse failed.
+#[test]
+fn test_complete_pending_keeps_captured_request_evidence() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_pending_evidence_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let info = PendingCallInfo {
+        call_id: "captured-1".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-evidence".to_string()),
+        session_id: Some("s-evidence".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(r#"[{"role":"user","content":"what changed in this file?"}]"#.to_string()),
+        system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
+        user_query: Some("what changed in this file?".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: Some("match-evidence".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+
+    // The completing event carries no parsed request messages.
+    let mut call = LLMCall::new(
+        "captured-1".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "it changed".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "captured-1".to_string());
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let (input, system): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT input_messages, system_instructions FROM genai_events WHERE call_id = 'captured-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            input.as_deref().is_some_and(|v| v.contains("what changed in this file?")),
+            "the captured request view must survive a completion without parsed messages, got {input:?}"
+        );
+        assert!(
+            system.as_deref().is_some_and(|v| v.contains("be terse")),
+            "the captured system instructions must survive too, got {system:?}"
+        );
+    }
+
+    // A completion that does carry messages still replaces them.
+    let info = PendingCallInfo {
+        call_id: "captured-2".to_string(),
+        ..info
+    };
+    store.insert_pending(&info).unwrap();
+    let mut call = LLMCall::new(
+        "captured-2".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![crate::genai::semantic::InputMessage {
+                role: "system".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "new system".to_string(),
+                }],
+                name: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "done".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "captured-2".to_string());
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let system: Option<String> = conn
+            .query_row(
+                "SELECT system_instructions FROM genai_events WHERE status = 'complete' AND provider = 'anthropic' AND system_instructions LIKE '%new system%'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert!(system.is_some(), "a parsed system prompt must still be written");
+    }
+
+    cleanup_db(&path);
+}
+
 /// Regression: `complete_pending` must backfill `is_sse` from the observed
 /// metadata value so that protocols whose streaming switch lives in request
 /// headers (e.g. DashScope native `X-DashScope-SSE: enable`) instead of the
