@@ -1088,7 +1088,9 @@ impl SkillFs {
 
         // 3. Handle uid/gid (chown)
         if uid.is_some() || gid.is_some() {
-            let c_path = match std::ffi::CString::new(physical.to_string_lossy().into_owned()) {
+            // Raw OS bytes, not a lossy UTF-8 view: `chown` must address the
+            // exact physical path even when it contains non-UTF-8 bytes.
+            let c_path = match crate::sys::cstring_from_os_str(physical.as_os_str()) {
                 Ok(p) => p,
                 Err(_) => {
                     reply.error(libc::EINVAL);
@@ -1108,7 +1110,8 @@ impl SkillFs {
 
         // 4. Handle atime/mtime (utimensat)
         if atime.is_some() || mtime.is_some() {
-            let c_path = match std::ffi::CString::new(physical.to_string_lossy().into_owned()) {
+            // Same raw-byte path requirement as the chown branch above.
+            let c_path = match crate::sys::cstring_from_os_str(physical.as_os_str()) {
                 Ok(p) => p,
                 Err(_) => {
                     reply.error(libc::EINVAL);

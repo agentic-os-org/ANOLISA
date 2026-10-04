@@ -921,7 +921,11 @@ impl SkillFs {
     }
     pub(in crate::fs) fn statfs_impl(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
         let source = self.source_base();
-        let c_path = match std::ffi::CString::new(source.to_string_lossy().into_owned()) {
+        // Build the syscall path from the raw OS bytes: a lossy UTF-8
+        // conversion would make `statvfs` address a different (usually
+        // nonexistent) path whenever the source root contains a byte that is
+        // not valid UTF-8.
+        let c_path = match crate::sys::cstring_from_os_str(source.as_os_str()) {
             Ok(p) => p,
             Err(_) => return reply.error(libc::EINVAL),
         };
