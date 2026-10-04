@@ -14,6 +14,17 @@ fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
     }
 }
 
+/// Abort a mount startup whose PID file was already written.
+///
+/// Every failure after the PID file is written must remove it again: the
+/// file advertises `kill -TERM $(cat <pid>)` for this process, and a
+/// leftover file for an exited pid later aims that workflow at a dead —
+/// or once recycled, unrelated — process.
+fn abort_after_pid_file(pid_file: &Option<PathBuf>, message: String) -> Box<dyn std::error::Error> {
+    cleanup_pid_file(pid_file);
+    message.into()
+}
+
 use clap::{CommandFactory, Parser, Subcommand};
 use skillfs_core::store::SkillStore;
 use skillfs_core::views::ViewsConfig;
@@ -2433,8 +2444,15 @@ async fn cmd_mount(
             .and_then(|c| c.post_publish_write_patterns()),
     ) {
         (Some(ms), Some(patterns)) => {
-            let parsed = skillfs_fuse::security::validate_post_publish_patterns(patterns)
-                .map_err(|e| format!("invalid install.post_publish_write_patterns: {e}"))?;
+            let parsed = match skillfs_fuse::security::validate_post_publish_patterns(patterns) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return Err(abort_after_pid_file(
+                        &pid_file,
+                        format!("invalid install.post_publish_write_patterns: {e}"),
+                    ));
+                }
+            };
             info!(
                 post_publish_grace_ms = ms,
                 patterns = parsed.len(),
@@ -2480,10 +2498,15 @@ async fn cmd_mount(
             resolver: active_resolver.clone(),
             protocol_event_writer: Some(protocol_event_writer.clone()),
         };
-        let handle = server
-            .with_context(ctx)
-            .start()
-            .map_err(|e| format!("failed to start control socket server: {e}"))?;
+        let handle = match server.with_context(ctx).start() {
+            Ok(handle) => handle,
+            Err(e) => {
+                return Err(abort_after_pid_file(
+                    &pid_file,
+                    format!("failed to start control socket server: {e}"),
+                ));
+            }
+        };
         info!(
             socket = %handle.socket_path().display(),
             "control socket server started"
@@ -3434,5 +3457,110 @@ mod tests {
         }
 
         ctrl.shutdown();
+    }
+
+    /// A scratch dir outside /tmp (which the security-mode daemon cannot
+    /// see under PrivateTmp) for mounts driven into late failures.
+    fn daemon_visible_base(tag: &str) -> PathBuf {
+        let root = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let dir = root.join(format!("skillfs-cli-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create base dir");
+        dir
+    }
+
+    #[test]
+    fn abort_after_pid_file_removes_the_pid_file() {
+        let base = tempfile::tempdir().expect("temp");
+        let pid_file = base.path().join("skillfs.pid");
+        std::fs::write(&pid_file, "123\n").expect("write pid file");
+
+        let err = abort_after_pid_file(&Some(pid_file.clone()), "boom".into());
+        assert_eq!(
+            err.to_string(),
+            "boom",
+            "the abort message must be preserved"
+        );
+        assert!(
+            !pid_file.exists(),
+            "an abort after the PID file was written must remove it"
+        );
+
+        // Mounts without --pid-file abort without panicking.
+        let err = abort_after_pid_file(&None, "no pid file".into());
+        assert_eq!(err.to_string(), "no pid file");
+    }
+
+    /// Drive a security-mode mount into the control-socket startup failure,
+    /// which happens after the PID file is written.
+    async fn mount_until_control_socket_abort(
+        base: &Path,
+        socket_path: PathBuf,
+        pid_file: PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = base.join("source");
+        std::fs::create_dir_all(&source).expect("create source");
+        cmd_mount(
+            source,
+            None,
+            base.join("mountpoint"),
+            false,
+            false,
+            None,
+            false,
+            Some(pid_file),
+            None,
+            1024,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some("file".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(socket_path),
+            Some(std::env::current_exe().expect("test binary")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn late_control_socket_abort_removes_the_pid_file() {
+        // The control socket server starts after the PID file is written.
+        // Failing to bind used to leave the PID file behind, so the
+        // documented `kill -TERM $(cat <pid>)` workflow targeted a dead
+        // (or once recycled, unrelated) pid.
+        let base = daemon_visible_base("ctrl-abort");
+        let socket_path = base.join("control.sock");
+        let _occupied =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("occupy socket path");
+        let pid_file = base.join("skillfs.pid");
+
+        let err = mount_until_control_socket_abort(&base, socket_path, pid_file.clone()).await;
+        let err = err.expect_err("occupied socket path must abort the mount");
+        let pid_file_left = pid_file.exists();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            err.to_string()
+                .contains("failed to start control socket server"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !pid_file_left,
+            "a post-PID-write abort must remove the PID file"
+        );
     }
 }
