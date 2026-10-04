@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execSync } from 'node:child_process';
+import { TextDecoder } from 'node:util';
 import * as os from 'node:os';
 import { detect as chardetDetect } from 'chardet';
 
@@ -56,7 +57,10 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(windowsCodePageToEncoding(65001)).toBe('utf-8');
       expect(windowsCodePageToEncoding(1252)).toBe('windows-1252');
       expect(windowsCodePageToEncoding(932)).toBe('shift_jis');
-      expect(windowsCodePageToEncoding(936)).toBe('gb2312');
+      // CP936 is the Windows code page for Simplified Chinese and covers the
+      // full GBK repertoire (gb2312 is a strict subset); mapping it to
+      // gb2312 mangles GBK-extension bytes on decode.
+      expect(windowsCodePageToEncoding(936)).toBe('gbk');
       expect(windowsCodePageToEncoding(949)).toBe('euc-kr');
       expect(windowsCodePageToEncoding(950)).toBe('big5');
       expect(windowsCodePageToEncoding(1200)).toBe('utf-16le');
@@ -442,6 +446,47 @@ describe('Shell Command Processor - Encoding Functions', () => {
       // Still should be only one call to execSync
       expect(mockedExecSync).toHaveBeenCalledTimes(1);
       expect(result3).toBe('utf-32');
+    });
+  });
+
+  describe('production TextDecoder path', () => {
+    // The shell execution service feeds the label returned by
+    // getCachedEncodingForBuffer straight into Node's WHATWG TextDecoder
+    // (shellExecutionService.ts:305 and :604), so the contract that
+    // matters is: the label must be accepted by TextDecoder and the
+    // decoded CP936 bytes must come back unmangled.
+    beforeEach(() => {
+      mockedOsPlatform.mockReturnValue('win32');
+    });
+
+    it('decodes GBK-extension bytes from CP936 output through the decoder the shell service uses', () => {
+      mockedExecSync.mockReturnValue('Active code page: 936');
+      // GBK bytes beyond the gb2312 subset plus the CP936-only
+      // single-byte euro sign: e9 46 -> U+9555 (镕), 88 d2 -> U+5803
+      // (堃), 80 -> U+20AC (€).
+      const cp936Buffer = Buffer.from([0xe9, 0x46, 0x88, 0xd2, 0x80]);
+
+      const encoding = getCachedEncodingForBuffer(cp936Buffer);
+      const decoder = new TextDecoder(encoding);
+
+      expect(decoder.encoding).toBe('gbk');
+      expect(decoder.decode(cp936Buffer)).toBe('镕堃€');
+    });
+
+    it('keeps decoding valid when the buffer is re-detected per chunk', () => {
+      mockedExecSync.mockReturnValue('Active code page: 936');
+      // chardet is consulted per buffer when the system encoding is not
+      // UTF-8; a non-UTF-8 verdict must still leave the CP936 label in
+      // place for the TextDecoder.
+      mockedChardetDetect.mockReturnValue('GB18030');
+      // GBK bytes for "价格: " (价 = bc db, 格 = b8 f1).
+      const cp936Buffer = Buffer.from([0xbc, 0xdb, 0xb8, 0xf1, 0x3a, 0x20]);
+
+      const encoding = getCachedEncodingForBuffer(cp936Buffer);
+      const decoder = new TextDecoder(encoding);
+
+      expect(() => decoder.decode(cp936Buffer)).not.toThrow();
+      expect(decoder.decode(cp936Buffer)).toBe('价格: ');
     });
   });
 
