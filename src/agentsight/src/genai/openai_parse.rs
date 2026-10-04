@@ -44,6 +44,52 @@ impl GenAIBuilder {
         }
 
         for msg in &raw_messages {
+            // Responses API items carry no `role`: the `type` identifies them.
+            // A replayed conversation sends the assistant's tool request as
+            // `function_call` and the tool output as `function_call_output`;
+            // skipping them dropped the whole tool interaction from the
+            // request event.
+            if msg.get("role").is_none() {
+                match msg.get("type").and_then(|v| v.as_str()) {
+                    Some("function_call_output") => {
+                        messages.push(InputMessage {
+                            role: "tool".to_string(),
+                            parts: vec![MessagePart::ToolCallResponse {
+                                id: msg
+                                    .get("call_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                response: msg
+                                    .get("output")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null),
+                            }],
+                            name: None,
+                        });
+                        continue;
+                    }
+                    Some("function_call") => {
+                        messages.push(InputMessage {
+                            role: "assistant".to_string(),
+                            parts: vec![MessagePart::ToolCall {
+                                id: msg
+                                    .get("call_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                name: msg
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                arguments: msg.get("arguments").cloned(),
+                            }],
+                            name: None,
+                        });
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
             let Some(role) = msg.get("role").and_then(|v| v.as_str()).map(String::from) else {
                 continue;
             };
@@ -956,6 +1002,40 @@ mod tests {
         // Empty instructions should be skipped, so only the input message remains.
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, "user");
+    }
+
+    #[test]
+    fn test_parse_request_body_responses_tool_items_without_role() {
+        // /v1/responses replays the conversation as typed items; the tool
+        // request and its output carry no role, so they must be classified
+        // by `type` instead of being dropped.
+        let body = r#"{
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "list /tmp"},
+                {"type": "function_call", "call_id": "call_1", "name": "list_dir", "arguments": "{\"path\":\"/tmp\"}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "a.txt"}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).unwrap();
+        assert_eq!(req.messages.len(), 3);
+
+        match &req.messages[1].parts[0] {
+            MessagePart::ToolCall { id, name, arguments } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "list_dir");
+                assert_eq!(arguments.as_ref().unwrap().as_str(), Some(r#"{"path":"/tmp"}"#));
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+
+        match &req.messages[2].parts[0] {
+            MessagePart::ToolCallResponse { id, response } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(response.as_str(), Some("a.txt"));
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
     }
 
     #[test]
