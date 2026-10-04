@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::atif::{observation_result_is_error, AtifStep, AtifTrajectory};
+use crate::atif::{AtifStep, AtifTrajectory, observation_result_is_error};
 use crate::types::{
     CostFinding, CostHeadroom, CostRatioMetrics, CostSegment, CostStats, LlmCall,
     RedundantCallGroup, TurnLedgerRow, WasteCandidate, WasteCandidateSet,
@@ -200,7 +200,16 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             }
         })
         .collect();
-    redundant_calls.sort_by_key(|group| std::cmp::Reverse(group.count));
+    // `tool_sig_counts` is a HashMap, whose iteration order is randomized per
+    // map instance, so groups tying on count kept the map's random order and
+    // the waste table reordered between runs of the same trajectory. Break
+    // ties by signature, the way 947a9bde2 broke aggregate ties by name.
+    redundant_calls.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.cmd_sig.cmp(&b.cmd_sig))
+    });
 
     // Generate findings. Reserved for data-quality warnings only (degraded
     // capture, below) — heuristic insights (tool dominance, redundant calls,
@@ -1120,7 +1129,7 @@ pub(crate) fn extract_waste_candidates_from(
     // inputs. The agent-step ordinal is the replay step index. (Backtrack
     // signals live in the turn ledger, keyed by the same ordinal.)
     let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
-                                                                            // (first replay turn, replays, tokens, snippet)
+    // (first replay turn, replays, tokens, snippet)
     let mut user_inputs: Vec<(usize, usize, usize, String)> = Vec::new();
 
     let mut turn_idx: i64 = -1;
@@ -1495,6 +1504,50 @@ mod tests {
         assert_eq!(cost.total_events, 0);
         assert_eq!(cost.total_chars, 0);
         assert!(cost.breakdown.is_empty());
+    }
+
+    #[test]
+    fn redundant_calls_break_count_ties_by_signature() {
+        // Two tools called the same number of times: the counts map is a
+        // HashMap, whose iteration order is randomized per map instance, so a
+        // count-only sort could list the waste table in either order.
+        let mut steps = String::new();
+        for (id, name, cmd) in [
+            ("c1", "Bash", "ls -la /tmp"),
+            ("c2", "Bash", "ls -la /tmp"),
+            ("c3", "Bash", "ls -la /tmp"),
+            ("c4", "Grep", "pattern TODO"),
+            ("c5", "Grep", "pattern TODO"),
+            ("c6", "Grep", "pattern TODO"),
+        ] {
+            steps.push_str(&format!(
+                r#",{{"step_id":0,"source":"agent","tool_calls":[{{"tool_call_id":"{id}","function_name":"{name}","arguments":{{"command":"{cmd}"}}}}]}}"#
+            ));
+        }
+        let t = traj(&format!(
+            r#"[{{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"}}{steps}]"#
+        ));
+
+        let first: Vec<String> = compute_cost(&t)
+            .unwrap()
+            .redundant_calls
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
+        assert_eq!(first.len(), 2, "both groups reach the waste table");
+        for _ in 0..16 {
+            let names: Vec<String> = compute_cost(&t)
+                .unwrap()
+                .redundant_calls
+                .iter()
+                .map(|g| g.name.clone())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["Bash".to_string(), "Grep".to_string()],
+                "a count tie must not follow the map's iteration order"
+            );
+        }
     }
 
     #[test]

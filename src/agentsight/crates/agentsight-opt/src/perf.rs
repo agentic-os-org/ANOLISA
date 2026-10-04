@@ -250,10 +250,15 @@ fn compute_tool_agg(tool_calls: &[ToolCallRecord]) -> Vec<ToolAggStats> {
             max_secs: max,
         })
         .collect();
+    // The aggregation map is a HashMap, whose iteration order is randomized
+    // per map instance, so tools tying on total_secs kept the map's random
+    // order and the per-tool table reordered between runs of the same trace.
+    // Break ties by name.
     agg.sort_by(|a, b| {
         b.total_secs
             .partial_cmp(&a.total_secs)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
     });
     agg
 }
@@ -308,6 +313,40 @@ mod tests {
                 "agent":{{"name":"a","version":"1","model_name":"m1"}},"steps":{steps_json}}}"#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn tool_agg_breaks_total_secs_ties_by_name() {
+        // The aggregation map is a HashMap, whose iteration order is
+        // randomized per map instance, so a duration-only sort could list
+        // equally slow tools in either order.
+        fn call(name: &str, dur: f64, i: usize) -> crate::types::ToolCallRecord {
+            crate::types::ToolCallRecord {
+                name: name.into(),
+                call_id: format!("{name}-{i}"),
+                start: 0.0,
+                dur,
+                cmd: String::new(),
+                err: false,
+                target: None,
+                result_tokens: None,
+            }
+        }
+        let calls = vec![
+            call("zeta", 1.0, 1),
+            call("alpha", 1.0, 2),
+            call("mid", 2.0, 3),
+        ];
+
+        for _ in 0..16 {
+            let agg = compute_tool_agg(&calls);
+            let names: Vec<&str> = agg.iter().map(|a| a.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["mid", "alpha", "zeta"],
+                "a total_secs tie must not follow the map's iteration order"
+            );
+        }
     }
 
     #[test]

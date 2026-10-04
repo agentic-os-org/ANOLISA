@@ -108,7 +108,12 @@ impl ExperienceLibraryStrategy {
             .into_iter()
             .filter(|(_, (n, _))| *n >= REPEAT_MIN)
             .collect();
-        clusters.sort_by_key(|&(_, (n, _))| std::cmp::Reverse(n));
+        // `counts` is a HashMap, whose iteration order is randomized per map
+        // instance, so clusters tying on repeat count kept the map's random
+        // order; the signal list fed to the LLM (and any lesson derived from
+        // it) then differed between runs of the same trace. Break ties by
+        // cluster key.
+        clusters.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
         for ((name, cmd), (n, first_id)) in clusters {
             let cmd_short: String = cmd.chars().take(80).collect();
             signals.push(Signal {
@@ -257,6 +262,50 @@ impl Detector for ExperienceLibraryStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(name: &str, cmd: &str, i: usize) -> crate::types::ToolCallRecord {
+        crate::types::ToolCallRecord {
+            name: name.into(),
+            call_id: format!("{name}-{i}"),
+            start: i as f64,
+            dur: 1.0,
+            cmd: cmd.into(),
+            err: false,
+            target: None,
+            result_tokens: None,
+        }
+    }
+
+    #[test]
+    fn repeat_cluster_signals_break_count_ties_by_key() {
+        // Two clusters with the same repeat count: the counts map is a
+        // HashMap, whose iteration order is randomized per map instance, so
+        // a count-only sort could emit the clusters' signals in either
+        // order.
+        let calls: Vec<crate::types::ToolCallRecord> = [("zeta", "grep z"), ("alpha", "grep a")]
+            .iter()
+            .flat_map(|(name, cmd)| (0..3).map(move |i| call(name, cmd, i)))
+            .collect();
+
+        for _ in 0..16 {
+            let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+            let repeat_ids: Vec<&str> = signals
+                .iter()
+                .filter(|s| s.id.starts_with("repeat_cluster:"))
+                .map(|s| s.id.as_str())
+                .collect();
+            assert_eq!(
+                repeat_ids.len(),
+                2,
+                "both clusters are signalled: {repeat_ids:?}"
+            );
+            assert!(
+                repeat_ids[0].starts_with("repeat_cluster:alpha:")
+                    && repeat_ids[1].starts_with("repeat_cluster:zeta:"),
+                "a count tie must not follow the map's iteration order: {repeat_ids:?}"
+            );
+        }
+    }
 
     fn make_call(name: &str, cmd: &str, start: f64, err: bool) -> ToolCallRecord {
         ToolCallRecord {
