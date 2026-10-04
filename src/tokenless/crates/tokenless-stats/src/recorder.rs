@@ -298,7 +298,13 @@ impl StatsRecorder {
 
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM stats ORDER BY timestamp DESC LIMIT ?",
+            // Newest-first by the instant a timestamp denotes, not its text:
+            // rfc3339 strings only sort chronologically while their UTC
+            // offset is constant, so a session spanning an offset change
+            // would otherwise let older-text records displace genuinely
+            // newer ones from a limited window.
+            "SELECT {} FROM stats \
+             ORDER BY COALESCE(julianday(timestamp), 1e308) DESC, id DESC LIMIT ?",
             Self::SELECT_COLS
         ))?;
         let rows = stmt.query_map([n as i64], Self::row_to_record)?;
@@ -349,7 +355,11 @@ impl StatsRecorder {
 
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM stats WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
+            // Same instant ordering as all_records: a limited window must
+            // keep the newest records even when their stored rfc3339 text
+            // spans more than one UTC offset.
+            "SELECT {} FROM stats WHERE session_id = ? \
+             ORDER BY COALESCE(julianday(timestamp), 1e308) DESC, id DESC LIMIT ?",
             Self::SELECT_COLS
         ))?;
         let rows = stmt.query_map(rusqlite::params![session_id, n as i64], Self::row_to_record)?;
@@ -404,6 +414,18 @@ impl StatsRecorder {
 
     fn records_for_session_diff(&self, session_id: &str) -> StatsResult<DiffRecords> {
         let conn = self.lock_conn();
+        // Order by the instant a timestamp denotes, not by its text: an
+        // rfc3339 string carries a UTC offset, so a session that spans an
+        // offset change (DST fall-back, travel, a moved machine) persists
+        // text that no longer sorts in chronological order. The link flags
+        // this query computes describe adjacent rows under this ordering,
+        // and `build_chains` re-sorts the same rows by their parsed instant
+        // before consuming the flags — the two orderings must agree or real
+        // compression chains split apart. `julianday` normalizes the offset
+        // (real UTC offsets are whole minutes, far above its microsecond
+        // resolution, so distinct offsets never tie); its `id` tie-break then
+        // matches the Rust comparator. Unparseable timestamps sort last,
+        // preserving the direction of `row_to_record`'s now() substitution.
         let query = "
             WITH newest AS (
                 SELECT id
@@ -421,7 +443,8 @@ impl StatsRecorder {
                     stats.stash_errors, stats.stash_size,
                     LAG(stats.id) OVER (
                         PARTITION BY stats.tool_use_id
-                        ORDER BY stats.timestamp, stats.id
+                        ORDER BY COALESCE(julianday(stats.timestamp), 1e308),
+                                 stats.id
                     ) AS previous_id
                 FROM stats
                 INNER JOIN newest ON newest.id = stats.id
@@ -471,7 +494,7 @@ impl StatsRecorder {
             FROM ordered
             INNER JOIN stats AS current ON current.id = ordered.id
             LEFT JOIN stats AS previous ON previous.id = ordered.previous_id
-            ORDER BY ordered.timestamp, ordered.id
+            ORDER BY COALESCE(julianday(ordered.timestamp), 1e308), ordered.id
         ";
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map(
