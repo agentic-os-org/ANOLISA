@@ -189,7 +189,7 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/configure_openclaw.py` | Configure openclaw settings for ce-runner |
 | `scripts/run_integration_test.py` | End-to-end integration test with timestamp & score checks |
 | `scripts/run_task_compare.py` | Run a task in native + ce-runner modes for comparison |
-| `scripts/list_tasks.py` | List tasks grouped by prefix (T/M/C) and difficulty |
+| `scripts/list_tasks.py` | List tasks grouped by prefix (T/M/C) and difficulty, or export JSON / one-per-line name inventories (`--tasks-dir`, `--format grouped\|json\|names`) |
 | `scripts/debug_task.py` | Single-task interactive debug with verbose output |
 | `scripts/analyze.py` | Analyze batch trace artifacts |
 | `scripts/summarize_results.py` | Summarize batch results across runs |

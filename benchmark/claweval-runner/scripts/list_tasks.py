@@ -20,15 +20,24 @@ Usage:
     python scripts/list_tasks.py
     python scripts/list_tasks.py --prefix T
     python scripts/list_tasks.py --difficulty hard
+    python scripts/list_tasks.py --tasks-dir /path/to/tasks --format json
+    python scripts/list_tasks.py --format names > tasks.txt
+
+Formats:
+    grouped  (default) human-readable grouping by prefix and difficulty
+    json     one JSON array of task metadata objects (includes directory_name)
+    names    selected directory names, one per line, for batch --tasks-file
 """
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = REPO_ROOT / "claw-eval" / "tasks"
+FORMAT_CHOICES = ("grouped", "json", "names")
 
 
 def _load_yaml_simple(path: Path) -> dict:
@@ -57,15 +66,17 @@ def _load_yaml_simple(path: Path) -> dict:
     return result
 
 
-def scan_tasks(prefix_filter: str | None = None,
+def scan_tasks(tasks_dir: Path | None = None,
+               prefix_filter: str | None = None,
                difficulty_filter: str | None = None) -> list[dict]:
     """Scan task directories and return list of task info dicts."""
-    if not TASKS_DIR.exists():
-        print(f"ERROR: tasks directory not found: {TASKS_DIR}", file=sys.stderr)
+    root = Path(tasks_dir) if tasks_dir is not None else TASKS_DIR
+    if not root.exists():
+        print(f"ERROR: tasks directory not found: {root}", file=sys.stderr)
         sys.exit(1)
 
     tasks = []
-    for d in sorted(TASKS_DIR.iterdir()):
+    for d in sorted(root.iterdir()):
         if not d.is_dir():
             continue
         task_yaml = d / "task.yaml"
@@ -85,6 +96,7 @@ def scan_tasks(prefix_filter: str | None = None,
 
         tasks.append({
             "task_id": task_id,
+            "directory_name": d.name,
             "task_name": meta.get("task_name", ""),
             "difficulty": difficulty,
             "prefix": prefix,
@@ -137,6 +149,17 @@ def print_grouped(tasks: list[dict]):
     print(f"{'='*60}\n")
 
 
+def print_json(tasks: list[dict]):
+    """Print task metadata as a machine-readable JSON array."""
+    print(json.dumps(tasks, indent=2, ensure_ascii=False))
+
+
+def print_names(tasks: list[dict]):
+    """Print selected directory names, one per line, for batch --tasks-file."""
+    for task in tasks:
+        print(task["directory_name"])
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="List and group claw-eval tasks by prefix and difficulty",
@@ -146,10 +169,25 @@ def main():
     parser.add_argument("--difficulty",
                         choices=["simple", "easy", "medium", "hard", "expert"],
                         help="Filter by difficulty")
+    parser.add_argument("--tasks-dir", default=TASKS_DIR,
+                        help=f"Task root directory (default: {TASKS_DIR})")
+    parser.add_argument("--format", dest="output_format",
+                        choices=FORMAT_CHOICES, default="grouped",
+                        help="Output format: grouped (default), json, or names")
 
     args = parser.parse_args()
 
-    tasks = scan_tasks(prefix_filter=args.prefix, difficulty_filter=args.difficulty)
+    tasks = scan_tasks(tasks_dir=args.tasks_dir,
+                       prefix_filter=args.prefix,
+                       difficulty_filter=args.difficulty)
+
+    if args.output_format == "json":
+        print_json(tasks)
+        return
+    if args.output_format == "names":
+        print_names(tasks)
+        return
+
     if not tasks:
         print("No tasks found matching the filters.")
         return

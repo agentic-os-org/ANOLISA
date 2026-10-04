@@ -189,7 +189,7 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/configure_openclaw.py` | 为 ce-runner 配置 openclaw 设置 |
 | `scripts/run_integration_test.py` | 端到端集成测试,含时间戳与分数校验 |
 | `scripts/run_task_compare.py` | 以原生 + ce-runner 两种模式运行任务做对比 |
-| `scripts/list_tasks.py` | 按前缀(T/M/C)和难度列出任务 |
+| `scripts/list_tasks.py` | 按前缀(T/M/C)和难度列出任务,或导出 JSON / 每行一个任务名的清单(`--tasks-dir`、`--format grouped\|json\|names`) |
 | `scripts/debug_task.py` | 单任务交互式调试,输出详细信息 |
 | `scripts/analyze.py` | 分析批量 trace 产物 |
 | `scripts/summarize_results.py` | 汇总多次运行的批量结果 |
