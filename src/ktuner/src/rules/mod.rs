@@ -3678,20 +3678,43 @@ fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
     } else {
         0
     };
+    let dirty_bytes = read_sysctl_u64("/proc/sys/vm/dirty_bytes");
+    dirty_background_bytes_recommendation(info.memory_total_gb, bytes, ratio, dirty_bytes, recs);
+    1
+}
+
+/// Value-driven core of the dirty-background-bytes rule, separated so
+/// tests can force the `bytes == 0 && ratio > 5` branch on any host (the
+/// sysctls are read from the live /proc, which a test cannot control).
+fn dirty_background_bytes_recommendation(
+    memory_total_gb: u64,
+    bytes: u64,
+    ratio: u64,
+    dirty_bytes: u64,
+    recs: &mut Vec<Recommendation>,
+) {
     if bytes == 0 && ratio > 5 {
-        let dirty_bytes = read_sysctl_u64("/proc/sys/vm/dirty_bytes");
         recs.push(Recommendation {
             param: "vm.dirty_background_bytes".to_string(),
-            current_value: format!("0 (ratio={ratio}%)"),
+            // current_value feeds the rollback ledger's `previous` field,
+            // which is written back verbatim on `ktuner rollback`. A
+            // human-readable annotation here would be rejected by the
+            // kernel as EINVAL, making the param permanently unrestorable.
+            // The ratio detail already appears in the reason.
+            current_value: "0".to_string(),
+            // Keep the background threshold strictly below the dirty
+            // limit in effect after tuning (400d0105f): the kernel
+            // silently halves a background threshold that reaches the
+            // dirty threshold, so a larger value would not mean what it
+            // says.
             recommended_value: dirty_background_bytes_target(dirty_bytes).to_string(),
             reason: format!("{}GB 内存 dirty_background_ratio {}% = {}GB 脏页才开始后台刷盘，用 bytes 可精确控制",
-                info.memory_total_gb, ratio, info.memory_total_gb * ratio / 100),
+                memory_total_gb, ratio, memory_total_gb * ratio / 100),
             confidence: Confidence::Medium,
             category: Category::Performance,
             writable: true,
         });
     }
-    1
 }
 
 fn eval_hardlockup_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3988,24 +4011,32 @@ fn eval_tcp_orphan_retries(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    orphan_retries_recommendation(read_sysctl_u64(path), recs);
+    1
+}
+
+/// Value-driven core of the orphan-retries rule, separated so tests can
+/// force the `current == 0 || current > 3` branch on any host.
+fn orphan_retries_recommendation(current: u64, recs: &mut Vec<Recommendation>) {
     if current == 0 || current > 3 {
+        // Plain numeric current_value: rollback writes it back verbatim,
+        // and the kernel-default-of-8 note for `0` belongs in the reason.
+        let reason = if current == 0 {
+            "孤儿连接重试次数为 0（内核实际按默认 8 次处理），显式收紧到 2 可加速资源回收"
+                .to_string()
+        } else {
+            "孤儿连接（对端无响应）重试次数过多，占用资源时间过长，减少可加速资源回收".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_orphan_retries".to_string(),
-            current_value: if current == 0 {
-                "0 (默认8)".to_string()
-            } else {
-                current.to_string()
-            },
+            current_value: current.to_string(),
             recommended_value: "2".to_string(),
-            reason: "孤儿连接（对端无响应）重试次数过多，占用资源时间过长，减少可加速资源回收"
-                .to_string(),
+            reason,
             confidence: Confidence::Medium,
             category: Category::Performance,
             writable: true,
         });
     }
-    1
 }
 
 fn eval_tcp_early_retrans(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5494,11 +5525,20 @@ fn eval_conntrack_tcp_timeout_established(
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    conntrack_timeout_recommendation(read_sysctl_u64(path), recs);
+    1
+}
+
+/// Value-driven core of the conntrack-timeout rule, separated so tests can
+/// force the `current > 86400` branch on any host (the sysctl is read from
+/// the live /proc, which a test cannot control).
+fn conntrack_timeout_recommendation(current: u64, recs: &mut Vec<Recommendation>) {
     if current > 86400 {
         recs.push(Recommendation {
             param: "net.netfilter.nf_conntrack_tcp_timeout_established".to_string(),
-            current_value: format!("{} ({}天)", current, current / 86400),
+            // Plain numeric: rollback writes this back verbatim; the
+            // days annotation belongs in the reason, not the value.
+            current_value: current.to_string(),
             recommended_value: "86400".to_string(),
             reason: "conntrack 已建立连接的超时默认 5 天太长，高并发下大量条目占满表导致丢包，缩短到 1 天".to_string(),
             confidence: Confidence::Medium,
@@ -5506,7 +5546,6 @@ fn eval_conntrack_tcp_timeout_established(
             writable: true,
         });
     }
-    1
 }
 
 fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -6498,6 +6537,79 @@ mod tests {
             !has_ratio,
             "large-RAM host should use dirty_bytes, not dirty_ratio"
         );
+    }
+
+    #[test]
+    fn test_current_values_stay_kernel_writable() {
+        // Unconditional regression for the rollback ledger: current_value
+        // is written back to the kernel verbatim by `ktuner rollback`, so
+        // every annotated form ("0 (ratio=..%)" / "432000 (5天)" /
+        // "0 (默认8)") made its param permanently unrestorable with EINVAL.
+        // The value-driven rule cores are invoked directly so the branches
+        // fire on any host, independent of the live /proc contents.
+
+        // vm.dirty_background_bytes: bytes == 0 && ratio > 5 fires. The
+        // dirty limit input exercises #4454's target computation: with
+        // vm.dirty_bytes at 0 (the common ratio-form host), the target is
+        // clamped to half of the 256MiB dirty limit.
+        let mut recs = Vec::new();
+        dirty_background_bytes_recommendation(128, 0, 10, 0, &mut recs);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "vm.dirty_background_bytes")
+            .expect("forced branch must produce the recommendation");
+        assert_eq!(
+            rec.current_value.parse::<u64>().ok(),
+            Some(0),
+            "current_value must be the bare kernel-writable number"
+        );
+        assert_eq!(
+            rec.recommended_value,
+            dirty_background_bytes_target(0).to_string(),
+            "the extracted core must keep #4454's below-the-limit target"
+        );
+
+        // conntrack timeout: current > 86400 fires.
+        let mut recs = Vec::new();
+        conntrack_timeout_recommendation(432_000, &mut recs);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "net.netfilter.nf_conntrack_tcp_timeout_established")
+            .expect("forced branch must produce the recommendation");
+        assert_eq!(
+            rec.current_value.parse::<u64>().ok(),
+            Some(432_000),
+            "current_value must be the bare kernel-writable number"
+        );
+
+        // tcp_orphan_retries: both the 0 (kernel default) and > 3 arms.
+        for current in [0_u64, 8] {
+            let mut recs = Vec::new();
+            orphan_retries_recommendation(current, &mut recs);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_orphan_retries")
+                .unwrap_or_else(|| panic!("current={current} must produce the recommendation"));
+            assert_eq!(
+                rec.current_value.parse::<u64>().ok(),
+                Some(current),
+                "current={current} must stay a bare number (the old code annotated 0 as \"0 (默认8)\")"
+            );
+        }
+    }
+
+    #[test]
+    fn test_value_cores_do_not_recommend_when_optimal() {
+        // Boundary: at or below the thresholds nothing is recommended.
+        let mut recs = Vec::new();
+        dirty_background_bytes_recommendation(128, 268_435_456, 10, 0, &mut recs);
+        assert!(recs.is_empty(), "bytes already set: no rec");
+
+        conntrack_timeout_recommendation(86_400, &mut recs);
+        assert!(recs.is_empty(), "timeout already 1 day: no rec");
+
+        orphan_retries_recommendation(2, &mut recs);
+        assert!(recs.is_empty(), "retries already 2: no rec");
     }
 
     #[test]
@@ -8482,6 +8594,10 @@ mod tests {
 
     #[test]
     fn test_conntrack_tcp_timeout_established() {
+        // Host-dependent path check only; the kernel-writability of
+        // current_value is pinned unconditionally by
+        // test_current_values_stay_kernel_writable through the extracted
+        // value-driven core.
         let info = make_test_info();
         let mut recs = Vec::new();
         let checked = eval_conntrack_tcp_timeout_established(&info, &mut recs);
