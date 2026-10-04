@@ -445,16 +445,25 @@ export async function handleConfig(
         return { text: "workspace requires a path value", isError: true };
       }
       const oldWs = pluginState.resolvedConfig.workspace;
-      pluginState.resolvedConfig.workspace = value;
       const schedules = pluginState.resolvedConfig.cronSchedules ?? [];
-      const warnings = await CrontabManager.migrate(oldWs, value, schedules);
+      // Persist FIRST: a rejected save must not pivot the live workspace (every
+      // later checkpoint/rollback follows it) or migrate crontab entries to a
+      // path config storage never recorded. Same ordering rule the hermes
+      // plugin applies to its workspace/cron updates.
       const persistErr = persistConfig({ workspace: value });
+      if (persistErr) {
+        return {
+          text: `Failed to persist config: ${persistErr}. Workspace unchanged (${oldWs}).`,
+          isError: true,
+        };
+      }
+      pluginState.resolvedConfig.workspace = value;
+      const warnings = await CrontabManager.migrate(oldWs, value, schedules);
       // Re-initialize manager with new workspace so subsequent commands use it
       if (pluginState.manager) {
         await pluginState.manager.ensureWorkspace(value);
       }
       let msg = `Config updated: workspace = ${value}`;
-      if (persistErr) msg += `\n\nWARNING: Failed to persist config: ${persistErr}. Change is in-memory only.`;
       if (warnings.length > 0) msg += "\n\n" + warnings.join("\n");
       return { text: msg, isError: false };
     }
