@@ -266,6 +266,11 @@ impl HttpConnectionAggregator {
         if let Some((evicted_key, evicted_state)) = self.connections.push(key, state) {
             if evicted_key != key {
                 self.eviction_count = self.eviction_count.saturating_add(1);
+                self.sse_continuation_buffers.pop(&evicted_key);
+                self.last_appended_src_ptr.pop(&evicted_key);
+                // The side caches are keyed by connection as well. Their own LRU
+                // would eventually drop these entries, but until then they hold
+                // up to 1 MiB of continuation buffer per evicted connection.
                 log::warn!(
                     "[HttpAggregator] LRU evicted conn={:?} state={} | capacity={}",
                     evicted_key,
@@ -3103,6 +3108,28 @@ mod tests {
         assert_eq!(metrics.pending_connection_count, 0);
         assert_eq!(metrics.pending_connection_bytes, 0);
         assert_eq!(metrics.eviction_count, 1);
+    }
+
+    #[test]
+    fn test_capacity_eviction_releases_the_side_caches() {
+        let mut agg = HttpConnectionAggregator::with_capacity(1);
+        let conn_a = ConnectionId { pid: 1, ssl_ptr: 1 };
+        let conn_b = ConnectionId { pid: 1, ssl_ptr: 2 };
+
+        agg.insert(conn_a, ConnectionState::Idle);
+        agg.sse_continuation_buffers
+            .push(conn_a, vec![0u8; 1024]);
+        agg.last_appended_src_ptr.push(conn_a, 7);
+
+        // A second connection evicts the first by capacity.
+        agg.insert(conn_b, ConnectionState::Idle);
+
+        assert!(agg.connections.peek(&conn_a).is_none());
+        assert!(
+            agg.sse_continuation_buffers.peek(&conn_a).is_none(),
+            "the evicted connection's continuation buffer must be released with it"
+        );
+        assert!(agg.last_appended_src_ptr.peek(&conn_a).is_none());
     }
 
     #[test]
