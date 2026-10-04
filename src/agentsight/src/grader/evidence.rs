@@ -7,9 +7,15 @@ use crate::storage::sqlite::genai::TraceEventDetail;
 
 pub(super) fn has_usable_output(event: &TraceEventDetail) -> bool {
     if let Some(raw) = event.output_messages.as_deref() {
-        return raw_contains_content(raw);
+        if raw_contains_content(raw) {
+            return true;
+        }
     }
 
+    // Text is not the only kind of output: a turn that only requests tool
+    // calls serializes as tool_call parts, which this helper does not
+    // recognize. A recorded output-token count still says the model
+    // produced something, so it stays as the fallback.
     event.output_tokens > 0
 }
 
@@ -262,6 +268,33 @@ mod tests {
         );
 
         assert!(looks_like_tool_failure(&event));
+    }
+
+    #[test]
+    fn tool_call_only_output_counts_as_usable() {
+        // The model's turn consists of tool calls; there is no text part to
+        // find, but the call produced output tokens.
+        let event = event(
+            Some(r#"[{"role":"user","content":"list the files"}]"#),
+            Some(
+                r#"[{"role":"assistant","parts":[{"tool_call":{"id":"c1","name":"list_dir","arguments":"{}"}}]}]"#,
+            ),
+            None,
+        );
+
+        assert!(has_usable_output(&event));
+    }
+
+    #[test]
+    fn empty_output_without_tokens_is_not_usable() {
+        let mut event = event(
+            Some(r#"[{"role":"user","content":"list the files"}]"#),
+            Some("[]"),
+            None,
+        );
+        event.output_tokens = 0;
+
+        assert!(!has_usable_output(&event));
     }
 
     #[test]
