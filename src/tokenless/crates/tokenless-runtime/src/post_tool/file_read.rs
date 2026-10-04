@@ -5,7 +5,8 @@
 //! it is source the agent may edit.
 
 /// Programs that only print their operands; `sed` qualifies separately when it
-/// runs in `-n` mode with a print-only script such as `sed -n '1,80p' page.html`.
+/// runs in quiet mode (`-n`, or GNU `--quiet` / `--silent`) with a print-only
+/// script such as `sed -n '1,80p' page.html`.
 const PRINT_PROGRAMS: [&str; 7] = ["cat", "head", "tail", "nl", "less", "more", "bat"];
 
 /// Returns whether `command` is a plain invocation that only prints local files.
@@ -45,7 +46,9 @@ pub(crate) fn prints_local_files(command: &str) -> bool {
     let (options, operands): (Vec<&str>, Vec<&str>) =
         rest.iter().partition(|word| word.starts_with('-'));
     if *program == "sed" {
-        return options.contains(&"-n")
+        return options
+            .iter()
+            .any(|&o| o == "-n" || o == "--quiet" || o == "--silent")
             && !options
                 .iter()
                 .any(|option| option.starts_with("-i") || option.starts_with("--in-place"))
@@ -190,5 +193,27 @@ mod tests {
         assert_eq!(split_words("a\\ b"), Some(vec!["a b".into()]));
         assert_eq!(split_words("a\\"), None);
         assert_eq!(split_words("\"a\\"), None);
+    }
+
+    /// GNU sed spells `-n` as `--quiet` or `--silent`; both long forms
+    /// qualify a print-only script the same way, or a printed page is
+    /// compressed as command output instead of kept verbatim.
+    #[test]
+    fn sed_long_quiet_spellings_qualify() {
+        for command in [
+            "sed --quiet '1,80p' page.html",
+            "sed --silent '1,80p' page.html",
+            "sed --quiet -e 5p page.html",
+            "sed --silent --quiet '1,80p' page.html",
+        ] {
+            assert!(prints_local_files(command), "{command:?}");
+        }
+        // Without a quiet option sed also prints its default output, so the
+        // command is not a pure file print.
+        assert!(!prints_local_files("sed '1,80p' page.html"));
+        // In-place editing stays excluded with the long spelling too.
+        assert!(!prints_local_files(
+            "sed --quiet --in-place '1,80p' page.html"
+        ));
     }
 }
