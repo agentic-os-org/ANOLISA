@@ -125,15 +125,30 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   const [evaluationLookupFailed, setEvaluationLookupFailed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setPage(0);
+    // A previous failure must not survive a successful reload: the render
+    // branch keys on `error`, so a transient failure would pin the error
+    // panel even after the next fetch returns rows. Guarding the responses
+    // also keeps a slow older request from overwriting a newer one.
+    setError(null);
     setEvaluations(new Map());
     setEvaluationLookupDone(new Set());
     setEvaluationLookupFailed(new Set());
     fetchTraces(sessionId, startNs, endNs)
-      .then(setTraces)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+      .then((rows) => {
+        if (!cancelled) setTraces(rows);
+      })
+      .catch((e: Error) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId, startNs, endNs]);
 
   const totalPages = Math.max(1, Math.ceil(traces.length / PAGE_SIZE));

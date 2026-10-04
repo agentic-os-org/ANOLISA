@@ -166,6 +166,26 @@ test('conversation-list: query and agent-name loaders drop stale responses', () 
     ],
     'ConversationList.loadAgentNames',
   );
+
+  // The trace sub-table re-fetches whenever the expanded session or the time
+  // range changes. Its render branch keys on `error`, so a transient failure
+  // used to pin the error panel even after a later fetch returned rows, and an
+  // older response could land after a newer one.
+  assert.match(
+    source,
+    /setError\(null\);[\s\S]{0,400}fetchTraces\(sessionId, startNs, endNs\)/,
+    'ConversationList.TraceSubTable: the previous failure must be cleared before the next fetch',
+  );
+  assert.match(
+    source,
+    /fetchTraces\(sessionId, startNs, endNs\)[\s\S]{0,400}if \(!cancelled\) setTraces\(rows\);/,
+    'ConversationList.TraceSubTable: the trace write must be gated on the effect cleanup flag',
+  );
+  assert.match(
+    source,
+    /fetchTraces\(sessionId, startNs, endNs\)[\s\S]{0,600}if \(!cancelled\) setLoading\(false\);/,
+    'ConversationList.TraceSubTable: the loading flag must belong to the newest request',
+  );
 });
 
 test('atif-viewer: the document loader drops stale responses', () => {
