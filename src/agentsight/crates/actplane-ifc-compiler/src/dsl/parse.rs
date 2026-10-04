@@ -17,9 +17,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
     let mut i = 0;
     let mut out = Vec::new();
     while i < b.len() {
-        let c = b[i] as char;
+        // Decode by character, not by byte: `0x85` and `0xA0` are UTF-8
+        // continuation bytes for characters Unicode classifies as whitespace
+        // (`\u{85}`, `\u{a0}`), so byte-wise `is_whitespace` broke the word
+        // mid-character and the `src[start..i]` slice panicked.
+        let c = char_at(src, i);
         if c.is_whitespace() {
-            i += 1;
+            i += c.len_utf8();
         } else if c == '#' {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
@@ -44,16 +48,21 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
         } else {
             let start = i;
             while i < b.len() {
-                let d = b[i] as char;
+                let d = char_at(src, i);
                 if d.is_whitespace() || d == '"' || d == ':' || d == '=' {
                     break;
                 }
-                i += 1;
+                i += d.len_utf8();
             }
             out.push(Tok::Word(src[start..i].to_string()));
         }
     }
     Ok(out)
+}
+
+/// The character starting at byte offset `i` of `src`.
+fn char_at(src: &str, i: usize) -> char {
+    src[i..].chars().next().unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
 struct P {
@@ -362,4 +371,30 @@ pub fn parse(src: &str) -> Result<Policy, String> {
         }
     }
     Ok(pol)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Non-ASCII words must lex, not panic: `0x85` and `0xA0` are UTF-8
+    /// continuation bytes for characters Unicode classifies as whitespace, so
+    /// a byte-wise scan used to break the word mid-character and slice
+    /// `src[start..i]` across a character boundary.
+    #[test]
+    fn lexer_handles_non_ascii_words() {
+        assert_eq!(lex("caf\u{e9}").unwrap(), vec![Tok::Word("caf\u{e9}".into())]);
+        assert_eq!(
+            lex("a\u{a0}b").unwrap(),
+            vec![Tok::Word("a".into()), Tok::Word("b".into())]
+        );
+        assert_eq!(
+            lex("rule \u{e0}:\n").unwrap(),
+            vec![
+                Tok::Word("rule".into()),
+                Tok::Word("\u{e0}".into()),
+                Tok::Colon
+            ]
+        );
+    }
 }
