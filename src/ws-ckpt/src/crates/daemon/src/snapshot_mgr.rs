@@ -201,6 +201,40 @@ pub async fn ensure_index_dir(dir: &PathBuf, label: &str) -> bool {
     true
 }
 
+/// Final-shutdown flush of every workspace's `index.json`.
+///
+/// Ordering contract: run only after the scheduler has been cancelled and
+/// joined (`SchedulerHandle::shutdown`). Each workspace is additionally
+/// flushed under its mutation mutex so that a cleanup pass which overran
+/// the shutdown bound (or any future background writer) serializes with
+/// this save exactly like a runtime `checkpoint`/`cleanup` would — the
+/// pre-fix flush held only a read lock and could interleave with
+/// `persist_index_after_cleanup` inside `persist::atomic_write`'s shared
+/// `index.json.tmp`, tearing the file and bricking the next start
+/// (`rebuild_from_persisted` hard-fails on parse).
+pub async fn flush_workspace_indexes(state: &DaemonState) {
+    tracing::info!("Flushing workspace indexes...");
+    for ws_arc in state.all_workspaces() {
+        let Some((ws_id, _mutation_guard)) =
+            state.lock_workspace_mutation_if_current(&ws_arc).await
+        else {
+            // Unregistered between snapshot and lock: nothing to flush.
+            continue;
+        };
+        let (ws_dir, index) = {
+            let ws = ws_arc.read().await;
+            (state.index_dir(&ws_id), ws.index.clone())
+        };
+        if let Err(e) = tokio::fs::create_dir_all(&ws_dir).await {
+            tracing::error!("Failed to create index directory {:?}: {}", ws_dir, e);
+            continue;
+        }
+        if let Err(e) = index_store::save(&ws_dir, &index).await {
+            tracing::error!("Failed to save index for {}: {:#}", ws_id, e);
+        }
+    }
+}
+
 fn workspace_not_found(workspace: &str) -> Response {
     Response::Error {
         code: ErrorCode::WorkspaceNotFound,
@@ -2956,5 +2990,149 @@ mod tests {
             1,
             "missing entries must not be re-cleaned on every pass"
         );
+    }
+
+    // ── flush_workspace_indexes (final-shutdown flush) ────────────────
+
+    #[tokio::test]
+    async fn shutdown_flush_blocks_behind_inflight_cleanup() {
+        // The pre-fix flush held only a read lock and could interleave with
+        // a cleanup pass's persist inside atomic_write's shared .tmp name.
+        // The gated backend parks cleanup_snapshots holding the mutation
+        // mutex; the flush must stay pending until the pass completes, then
+        // persist the post-cleanup index.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_root = tmp.path().join("flush-data");
+        let cleanup_started = Arc::new(tokio::sync::Semaphore::new(0));
+        let cleanup_release = Arc::new(tokio::sync::Semaphore::new(0));
+        let backend = Arc::new(
+            PartialFailBackend::new(data_root.clone(), std::iter::empty())
+                .with_cleanup_gate(cleanup_started.clone(), cleanup_release.clone()),
+        );
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            tmp.path().join("state"),
+        ));
+
+        let ws_id = "ws-flush";
+        let subvol = data_root.join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("content"), b"non-empty").unwrap();
+        let ws_path = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_path.clone(),
+                chain_index(&ws_path, ws_id, 3),
+            )
+            .unwrap();
+
+        let cleanup_state = state.clone();
+        let cleanup =
+            tokio::spawn(async move { cleanup_snapshots(&cleanup_state, ws_id, Some(1)).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleanup_started.acquire())
+            .await
+            .expect("cleanup did not reach backend")
+            .unwrap()
+            .forget();
+
+        // While the cleanup pass parks inside the backend (holding the
+        // mutation mutex), the flush must not complete: race it against a
+        // generous bound. The pre-fix read-lock-only flush finished here
+        // and could interleave with the cleanup's persist inside
+        // atomic_write's shared .tmp name.
+        let flush_state = state.clone();
+        let mut flush_op = Box::pin(flush_workspace_indexes(&flush_state));
+        let flush_finished =
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut flush_op)
+                .await
+                .is_ok();
+        assert!(
+            !flush_finished,
+            "the flush must queue behind the in-flight cleanup pass"
+        );
+
+        cleanup_release.add_permits(1);
+        assert!(matches!(
+            cleanup.await.unwrap().unwrap(),
+            Response::CleanupOk { .. }
+        ));
+        flush_op.await;
+
+        let on_disk = crate::index_store::load(&state.index_dir(ws_id))
+            .await
+            .expect("flushed index must parse");
+        // keep=1: only the newest snapshot survives.
+        assert_eq!(on_disk.snapshots.len(), 1);
+        assert!(on_disk.snapshots.contains_key("snap-3"));
+    }
+
+    #[tokio::test]
+    async fn flush_writes_every_registered_index_and_creates_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            tmp.path().join("state"),
+        ));
+        for ws_id in ["ws-a", "ws-b"] {
+            let dir = tmp.path().join(ws_id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let ws_path = tmp.path().join(format!("{ws_id}-link"));
+            std::os::unix::fs::symlink(&dir, &ws_path).unwrap();
+            state
+                .register_workspace(
+                    ws_id.to_string(),
+                    ws_path.clone(),
+                    chain_index(&ws_path, ws_id, 2),
+                )
+                .unwrap();
+        }
+
+        flush_workspace_indexes(&state).await;
+
+        for ws_id in ["ws-a", "ws-b"] {
+            let idx_dir = state.index_dir(ws_id);
+            assert!(idx_dir.join("index.json").exists(), "{ws_id}");
+            assert!(
+                !idx_dir.join("index.json.tmp").exists(),
+                "{ws_id}: no tmp residue"
+            );
+            let on_disk = crate::index_store::load(&idx_dir)
+                .await
+                .expect("{ws_id} index must round-trip");
+            assert_eq!(on_disk.snapshots.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_skips_workspaces_unregistered_midway() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            tmp.path().join("state"),
+        ));
+        let dir = tmp.path().join("dead");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws_path = tmp.path().join("dead-link");
+        std::os::unix::fs::symlink(&dir, &ws_path).unwrap();
+        state
+            .register_workspace(
+                "ws-dead".to_string(),
+                ws_path.clone(),
+                chain_index(&ws_path, "ws-dead", 1),
+            )
+            .unwrap();
+
+        // Unregister AFTER registration so all_workspaces() would still have
+        // been snapshotted by an earlier call — the flush must skip the arc
+        // whose registration is gone without erroring.
+        state.unregister_workspace("ws-dead").await;
+        flush_workspace_indexes(&state).await;
+
+        assert!(!state.index_dir("ws-dead").join("index.json").exists());
     }
 }

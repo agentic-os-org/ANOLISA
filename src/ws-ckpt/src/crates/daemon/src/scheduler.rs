@@ -3,12 +3,44 @@
 use std::sync::Arc;
 
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::snapshot_mgr::{delete_snapshots_locked, ensure_index_dir, persist_index_after_cleanup};
 use crate::state::DaemonState;
 use ws_ckpt_common::backend::StorageBackend;
 use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
+
+/// Handle to the background scheduler tasks. Dropping it does NOT stop the
+/// tasks; call [`SchedulerHandle::shutdown`] so the final index flush in
+/// `run_daemon` never runs concurrently with an in-flight cleanup pass
+/// (both write the same `index.json` through `atomic_write`'s fixed
+/// `.tmp` name, which is atomic against crashes, not against concurrent
+/// callers).
+pub struct SchedulerHandle {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl SchedulerHandle {
+    /// Cancel and await both loops (bounded, mirroring the listener drain).
+    ///
+    /// A cleanup pass already inside `auto_cleanup` runs to completion by
+    /// design — it holds each workspace's mutation mutex, and the shutdown
+    /// flush takes that same mutex, so the two serialize even if the pass
+    /// overruns the bound.
+    pub async fn shutdown(self) {
+        for handle in self.tasks {
+            // Each loop selects on the token, so this returns promptly; the
+            // bound only guards against a wedged backend call.
+            if tokio::time::timeout(Duration::from_secs(10), handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!("scheduler task did not stop within 10s; aborting it");
+            }
+        }
+    }
+}
 
 /// Start background scheduler tasks: periodic auto-cleanup and health checks.
 ///
@@ -18,20 +50,28 @@ use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 /// polling design — loops never wake up "just to check", and a disabled task
 /// (`auto_cleanup = false` or `*_interval_secs == 0`) blocks on the notify
 /// at zero CPU cost until a reload re-enables it.
-pub fn start_scheduler(state: Arc<DaemonState>) {
+///
+/// `cancel` stops both loops; the returned handle lets `run_daemon` join
+/// them before the final index flush.
+pub fn start_scheduler(state: Arc<DaemonState>, cancel: CancellationToken) -> SchedulerHandle {
     // Periodic auto-cleanup: reacts to `ReloadConfig` via `config_notify`.
     let state_clone = state.clone();
-    tokio::spawn(async move {
-        auto_cleanup_loop(state_clone).await;
+    let cancel_cleanup = cancel.clone();
+    let cleanup_task = tokio::spawn(async move {
+        auto_cleanup_loop(state_clone, cancel_cleanup).await;
     });
 
     // Periodic health check: same notify-driven pattern.
     let state_clone2 = state.clone();
-    tokio::spawn(async move {
-        health_check_loop(state_clone2).await;
+    let cancel_health = cancel.clone();
+    let health_task = tokio::spawn(async move {
+        health_check_loop(state_clone2, cancel_health).await;
     });
 
     info!("Background scheduler started");
+    SchedulerHandle {
+        tasks: vec![cleanup_task, health_task],
+    }
 }
 
 /// Auto-cleanup loop: each iteration re-reads `auto_cleanup`,
@@ -44,7 +84,11 @@ pub fn start_scheduler(state: Arc<DaemonState>) {
 /// config read and registration, we build the `Notified` future and
 /// `enable()` it (registers immediately) **before** reading config. Any
 /// `notify_waiters()` issued afterwards is then captured by this waiter.
-async fn auto_cleanup_loop(state: Arc<DaemonState>) {
+///
+/// The shutdown token is a select arm at EVERY wait site, including the
+/// parked branch — a parked loop that only awaits `notified` would
+/// otherwise ignore cancellation forever.
+async fn auto_cleanup_loop(state: Arc<DaemonState>, cancel: CancellationToken) {
     loop {
         let notified = state.config_notify.notified();
         tokio::pin!(notified);
@@ -56,7 +100,11 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
         // skip all workspaces.
         let park = interval == 0 || !state.any_ws_has_effective_cleanup().await;
         if park {
-            notified.await;
+            // Parked (cleanup disabled): wake for reload OR shutdown.
+            tokio::select! {
+                _ = notified => {}
+                _ = cancel.cancelled() => return,
+            }
             continue;
         }
         tokio::select! {
@@ -66,6 +114,7 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
             _ = notified.as_mut() => {
                 // Config changed mid-sleep: skip this cleanup pass and re-read.
             }
+            _ = cancel.cancelled() => return,
         }
     }
 }
@@ -73,7 +122,7 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
 /// Health-check loop. Same push-based pattern as `auto_cleanup_loop`, keyed
 /// off `health_check_interval_secs`. See that function's comment for why
 /// `enable()` is called before the config read.
-async fn health_check_loop(state: Arc<DaemonState>) {
+async fn health_check_loop(state: Arc<DaemonState>, cancel: CancellationToken) {
     loop {
         let notified = state.config_notify.notified();
         tokio::pin!(notified);
@@ -81,7 +130,10 @@ async fn health_check_loop(state: Arc<DaemonState>) {
 
         let interval = state.config_snapshot().health_check_interval_secs;
         if interval == 0 {
-            notified.await;
+            tokio::select! {
+                _ = notified => {}
+                _ = cancel.cancelled() => return,
+            }
             continue;
         }
         tokio::select! {
@@ -89,6 +141,7 @@ async fn health_check_loop(state: Arc<DaemonState>) {
                 health_check(&state).await;
             }
             _ = notified.as_mut() => {}
+            _ = cancel.cancelled() => return,
         }
     }
 }
@@ -278,6 +331,7 @@ async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLin
 mod tests {
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
+    use super::*;
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
 
     fn cfg(global_on: bool, keep: CleanupRetention) -> DaemonConfig {
@@ -670,5 +724,92 @@ mod tests {
             }
             other => panic!("expected Error line, got {:?}", other),
         }
+    }
+
+    // ── Scheduler cancellation (shutdown ordering) ────────────────────
+
+    fn scheduler_state(state_dir: &std::path::Path) -> std::sync::Arc<crate::state::DaemonState> {
+        let mut backend = UsageProbeBackend::new(Ok((1, 10)), Ok(vec![]));
+        // Keep the backend storage disjoint from the workspace tempdirs so
+        // registration anchors are user paths, not internal ones.
+        backend.data_root = state_dir.join("backend-data");
+        backend.snapshots_root = state_dir.join("backend-snapshots");
+        std::sync::Arc::new(crate::state::DaemonState::new(
+            DaemonConfig::default(),
+            std::sync::Arc::new(backend)
+                as std::sync::Arc<dyn ws_ckpt_common::backend::StorageBackend>,
+            state_dir.to_path_buf(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn scheduler_loops_exit_on_cancellation() {
+        // Both the parked branch (cleanup disabled, interval 0) and the
+        // live-interval branch must return on cancel. The pre-fix loops had
+        // no token arm at all and only ever exited with the process.
+        for (cleanup_interval, health_interval) in [(0u64, 0u64), (3600, 3600)] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = scheduler_state(dir.path());
+            {
+                let mut cfg = state.config.write().unwrap();
+                cfg.auto_cleanup_interval_secs = cleanup_interval;
+                cfg.health_check_interval_secs = health_interval;
+            }
+            let token = tokio_util::sync::CancellationToken::new();
+            let handle = start_scheduler(state, token.clone());
+            token.cancel();
+            // The internal 10s bound guarantees this cannot wedge CI even
+            // if a regression reintroduces an uncancellable arm.
+            tokio::time::timeout(std::time::Duration::from_secs(15), handle.shutdown())
+                .await
+                .expect("both loops must stop on cancellation");
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_does_not_run_a_new_cleanup_pass() {
+        // Cancel must return from the select, not fall through into
+        // auto_cleanup: the shutdown flush would otherwise race the very
+        // pass it is waiting to avoid. A cleanup pass always ends in
+        // persist_index_after_cleanup → save_manifest, so a fresh
+        // state_dir with no state.json after cancel+shutdown proves no
+        // pass ran.
+        let dir = tempfile::tempdir().unwrap();
+        let state = scheduler_state(dir.path());
+        {
+            let mut cfg = state.config.write().unwrap();
+            cfg.auto_cleanup = true;
+            cfg.auto_cleanup_interval_secs = 3600;
+        }
+        // Register one workspace with an effective cleanup policy so the
+        // loop takes the live branch (not the parked one).
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws_path = ws_dir.path().join("ws");
+        std::fs::create_dir(&ws_path).unwrap();
+        let policy = ws_ckpt_common::WorkspacePolicy {
+            auto_cleanup: Some(true),
+            ..ws_ckpt_common::WorkspacePolicy::default()
+        };
+        state
+            .register_workspace_with_policy(
+                "ws-sched".to_string(),
+                ws_path.clone(),
+                ws_ckpt_common::SnapshotIndex::new(ws_path),
+                policy,
+                false,
+            )
+            .unwrap();
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let handle = start_scheduler(state.clone(), token.clone());
+        // Let the loops reach their select arms.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        token.cancel();
+        handle.shutdown().await;
+
+        assert!(
+            !state.state_dir.join("state.json").exists(),
+            "a cleanup pass ran after cancellation (save_manifest wrote state.json)"
+        );
     }
 }
