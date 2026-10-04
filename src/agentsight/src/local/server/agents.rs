@@ -185,6 +185,7 @@ pub(crate) struct AgentInfo {
     pub(crate) uptime_secs: u64,
     pub(crate) cmdline_preview: String,
     pub(crate) cwd: String,
+    pub(crate) exe_path: String,
 }
 
 #[derive(Serialize)]
@@ -205,6 +206,7 @@ struct ProcessInfo {
     mem_mb: f64,
     uptime_secs: u64,
     cwd: String,
+    exe_path: String,
 }
 
 /// Check if `haystack` contains `needle` as a whole word.
@@ -311,6 +313,11 @@ fn scan_processes() -> Vec<ProcessInfo> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        let exe_path = process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         let cpu_percent = process.cpu_usage() as f64;
         let mem_mb = process.memory() as f64 / (1024.0 * 1024.0);
 
@@ -329,6 +336,7 @@ fn scan_processes() -> Vec<ProcessInfo> {
             mem_mb,
             uptime_secs,
             cwd,
+            exe_path,
         });
     }
 
@@ -394,6 +402,10 @@ fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
                 })
                 .unwrap_or_default();
             let cwd = procs.first().map(|p| p.cwd.clone()).unwrap_or_default();
+            let exe_path = procs
+                .first()
+                .map(|p| p.exe_path.clone())
+                .unwrap_or_default();
 
             Some(AgentInfo {
                 id: sig.id.to_string(),
@@ -408,6 +420,7 @@ fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
                 uptime_secs: max_uptime,
                 cmdline_preview,
                 cwd,
+                exe_path,
             })
         })
         .collect();
@@ -470,6 +483,7 @@ mod tests {
             mem_mb: 100.0,
             uptime_secs: 60,
             cwd: String::new(),
+            exe_path: String::new(),
         }
     }
 

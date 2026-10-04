@@ -240,20 +240,8 @@ async fn agent_process_health() -> impl Responder {
         Ok(summary) => {
             let mut rows = Vec::new();
             for agent in summary.agents {
-                for pid in agent.pids {
-                    rows.push(serde_json::json!({
-                        "pid": pid,
-                        "agent_name": agent.name,
-                        "category": agent.category,
-                        "exe_path": agent.cwd,
-                        "ports": [],
-                        "status": "no_port",
-                        "last_check_time": summary.scanned_at * 1000,
-                        "latency_ms": null,
-                        "error_message": "Local process discovered; HTTP health check is unavailable in local viewer mode",
-                        "role": "gateway",
-                        "has_crash": false
-                    }));
+                for pid in agent.pids.iter().copied() {
+                    rows.push(agent_health_row(&agent, pid, summary.scanned_at));
                 }
             }
             HttpResponse::Ok().json(serde_json::json!({
@@ -266,6 +254,30 @@ async fn agent_process_health() -> impl Responder {
             "error": format!("Process scan failed: {e}")
         })),
     }
+}
+
+/// One `/api/agent-process-health` row for a discovered agent process.
+///
+/// `exe_path` is the executable and `workspace_path` the working directory,
+/// matching the Linux endpoint and the dashboard's `AgentHealthStatus`: the
+/// cwd used to be reported as `exe_path`, so the page showed a directory
+/// where it expects a binary and had no default protection directory (it
+/// reads `workspace_path`).
+fn agent_health_row(agent: &agents::AgentInfo, pid: u32, scanned_at: u64) -> serde_json::Value {
+    serde_json::json!({
+        "pid": pid,
+        "agent_name": agent.name,
+        "category": agent.category,
+        "exe_path": agent.exe_path,
+        "workspace_path": agent.cwd,
+        "ports": [],
+        "status": "no_port",
+        "last_check_time": scanned_at * 1000,
+        "latency_ms": null,
+        "error_message": "Local process discovered; HTTP health check is unavailable in local viewer mode",
+        "role": "gateway",
+        "has_crash": false
+    })
 }
 
 /// GET /api/export/atif/* — eBPF export is unavailable in local mode.
@@ -803,6 +815,36 @@ mod tests {
             .service(export_atif_unavailable)
             .service(api_fallback)
             .service(serve_frontend)
+    }
+
+    #[test]
+    fn agent_health_rows_carry_exe_and_workspace_paths() {
+        let agent = agents::AgentInfo {
+            id: "qoder".to_string(),
+            name: "Qoder".to_string(),
+            icon: "q".to_string(),
+            category: "coding".to_string(),
+            status: "running".to_string(),
+            pids: vec![42],
+            process_count: 1,
+            cpu_percent: 1.0,
+            mem_mb: 2.0,
+            uptime_secs: 3,
+            cmdline_preview: "qoder --serve".to_string(),
+            cwd: "/Users/dev/project".to_string(),
+            exe_path: "/Applications/Qoder.app/Contents/MacOS/Qoder".to_string(),
+        };
+
+        let row = agent_health_row(&agent, 42, 1_700_000_000);
+
+        assert_eq!(
+            row["exe_path"],
+            "/Applications/Qoder.app/Contents/MacOS/Qoder"
+        );
+        assert_eq!(
+            row["workspace_path"], "/Users/dev/project",
+            "the working directory belongs in workspace_path, which is what the dashboard reads"
+        );
     }
 
     #[actix_web::test]
