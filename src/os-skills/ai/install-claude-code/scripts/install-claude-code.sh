@@ -255,6 +255,8 @@ write_config() {
   if [[ -f "$settings_file" ]]; then
     local backup="$settings_file.bak.$(date +%s)"
     cp "$settings_file" "$backup"
+    # The previous file also holds the API token; keep the copy owner-only.
+    chmod 600 "$backup" 2>/dev/null || true
     info "Existing settings backed up to $backup"
   fi
 
@@ -268,6 +270,10 @@ write_config() {
   }
 }
 JSONEOF
+
+  # settings.json contains the API token in cleartext; never leave it
+  # group/world-readable (best effort on filesystems without POSIX modes).
+  chmod 600 "$settings_file" 2>/dev/null || true
 
   ok "Configuration written to $settings_file"
 }
