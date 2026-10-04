@@ -483,6 +483,15 @@ fn validate_snapshot_target(raw: &str) -> Result<PathBuf, LedgerError> {
             reason: "must be non-empty".to_string(),
         });
     }
+    // The sibling activation validator rejects NUL too; a NUL can never be
+    // part of a path the consumer can open, and accepting it here would let
+    // the two validators disagree on the same vocabulary.
+    if raw.contains('\0') {
+        return Err(LedgerError::InvalidField {
+            field: "target",
+            reason: "must not contain NUL".to_string(),
+        });
+    }
     let path = Path::new(raw);
     if path.is_absolute() {
         return Err(LedgerError::InvalidField {
@@ -1355,6 +1364,8 @@ mod tests {
             "../escape/v000001.snapshot",
             ".skill-meta/versions/../../etc/passwd",
             ".skill-meta/versions/./.",
+            // JSON-escaped NUL: the parser hands the validator a real NUL.
+            ".skill-meta/versions/v1\\u0000.snapshot",
             "",
         ] {
             let json = format!(
