@@ -119,55 +119,55 @@ pub fn parse_skill_file_with_limit(path: &Path, max_size: usize) -> Result<Skill
 // ---------------------------------------------------------------------------
 
 fn extract_frontmatter(content: &str) -> (String, String) {
-    if !content.starts_with("---") {
+    // The opening fence must be the entire first line: `---` plus at most
+    // trailing whitespace (a `\r` from CRLF files, or spaces an editor
+    // left behind). A longer dash run (`----`, `-----`) is a Markdown
+    // thematic break and `---text` is ordinary content — neither opens
+    // frontmatter. This mirrors the sec-core scanner's
+    // `line.trim() == "---"` rule so both components agree on what a
+    // fence is; the previous prefix match treated a file opening with a
+    // thematic break as frontmatter and silently dropped everything
+    // between it and the next `---`-prefixed line out of the body.
+    let (first_line, rest) = match content.split_once('\n') {
+        Some((first, rest)) => (first, rest),
+        None => (content, ""),
+    };
+    if first_line.trim_end() != "---" {
         return (String::new(), content.to_string());
     }
 
-    // Find the closing "---" after the opening one. The newline following
-    // the opening fence is kept: an immediately-closing fence
-    // ("---\n---\n<body>") must match at offset 0, otherwise both fences
-    // leak into the body.
-    let after_open = &content[3..];
-
-    if let Some(close_pos) = after_open.find("\n---") {
-        // close_pos points at the newline preceding the closing fence; the
-        // frontmatter lives between the opening fence's newline and it.
-        // The opening fence's newline (LF or CRLF) is skipped by its byte
-        // length rather than a fixed byte index: a char right after the
-        // opener that is not a newline (e.g. a multi-byte "---é\n…") makes
-        // fixed indices land mid-UTF-8 and panic, and without a newline
-        // after the opener there is no frontmatter to extract, so yaml
-        // stays empty. close_pos can also sit inside the skipped prefix
-        // ("---\r\n---…" matches at 1), which likewise means empty yaml.
-        let open_newline_len = if after_open.starts_with("\r\n") {
-            Some(2)
-        } else if after_open.starts_with('\n') {
-            Some(1)
-        } else {
-            None
-        };
-        let yaml = match (open_newline_len, close_pos) {
-            (Some(len), n) if n >= len => after_open[len..n].to_string(),
-            _ => String::new(),
-        };
-        let rest_start = close_pos + 4; // skip "\n---"
-        let body = if rest_start < after_open.len() {
-            let rest = &after_open[rest_start..];
-            rest.strip_prefix("\r\n")
-                .or_else(|| rest.strip_prefix('\n'))
-                .unwrap_or(rest)
-                .to_string()
-        } else {
-            String::new()
-        };
-        (yaml, body)
-    } else if after_open.ends_with("---") && !after_open.contains('\n') {
-        // Edge case: "---\n---" with no content
-        (String::new(), String::new())
-    } else {
-        // No closing ---, treat entire content as body
-        (String::new(), content.to_string())
+    // Find the first line of `rest` that is exactly `---` (trailing
+    // whitespace tolerated, leading whitespace not — an indented `---` is
+    // content). A line that merely *starts* with `---` (`----`, `---text`)
+    // must NOT close the frontmatter: the previous prefix match landed the
+    // body slice mid-line and leaked the remainder (a stray `-`, a space,
+    // or the text) into the body.
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let bare = line.strip_suffix('\n').unwrap_or(line);
+        if bare.trim_end() == "---" {
+            // yaml spans from the start of `rest` to this line, minus the
+            // newline that terminates the last yaml line (byte-compatible
+            // with the previous `after_open[len..close_pos]` region).
+            let yaml = rest[..offset]
+                .strip_suffix('\n')
+                .map(|s| s.strip_suffix('\r').unwrap_or(s))
+                .unwrap_or(&rest[..offset])
+                .to_string();
+            // The body starts after the closer line's own newline; when
+            // the closer is the last line there is no body.
+            return (yaml, rest[offset + line.len()..].to_string());
+        }
+        offset += line.len();
     }
+
+    // No closing fence: treat the entire content as body, a bare opener
+    // included (`"---"`, `"--- \n"`, `"---\r\n"` — the pre-rewrite code's
+    // `after_open.ends_with("---")` arm never matched an empty remainder,
+    // so these inputs always fell through to whole-content). The sec-core
+    // scanner reports this shape as an unclosed-fence finding; skillfs
+    // degrades to "missing frontmatter".
+    (String::new(), content.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -559,14 +559,19 @@ Search the web.
 
     #[test]
     fn test_parse_non_ascii_after_frontmatter_opener() {
-        // The char right after the opening fence is multi-byte; slicing the
-        // remainder from a fixed byte index would land mid-UTF-8 and panic.
+        // `---é` is not a fence line under the exact-line rule (mirroring
+        // the sec-core scanner's `line.trim() == "---"`), so the whole
+        // file is ordinary content: the body keeps every line instead of
+        // being truncated after the `---`-prefixed one. The rewrite uses
+        // no fixed-index byte slicing (split_once / split_inclusive /
+        // strip_suffix are char-boundary safe), so multi-byte characters
+        // right after a dash run cannot panic.
         let content = "---é\n---\nbody";
 
         let entry = parse_skill_md(content, "demo");
 
         assert_eq!(entry.metadata.name, "demo");
-        assert!(!entry.body.contains("---"));
+        assert_eq!(entry.body, "---é\n---\nbody");
         assert!(entry.parse_status.is_degraded()); // no usable frontmatter
     }
 
@@ -1021,5 +1026,139 @@ Body.
         let entry = parse_skill_md(content, "test");
 
         assert_eq!(entry.metadata.name, "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // Fence Exactness Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_thematic_break_opener_is_not_frontmatter() {
+        // A 4-dash horizontal rule is a valid Markdown construct, not a
+        // frontmatter fence (the fence is exactly three dashes on their
+        // own line, per CommonMark/Jekyll/Hugo and the sec-core scanner).
+        // The old prefix match treated it as an opener and dropped
+        // everything up to the next `---`-prefixed line out of the body.
+        let content = "----\n# My Skill\n\nIntro paragraph.\n\n---\n\nDetails.\n";
+
+        let entry = parse_skill_md(content, "my-skill");
+
+        assert!(entry.parse_status.is_degraded()); // no usable frontmatter
+        assert!(
+            entry.body.contains("# My Skill")
+                && entry.body.contains("Intro paragraph.")
+                && entry.body.contains("Details."),
+            "a thematic-break opener must not truncate the body: {:?}",
+            entry.body
+        );
+        // The description fallback is derived from the full body now; the
+        // old code computed it from the truncated body, whose first
+        // paragraph was "Details." (everything before the `---` line had
+        // been dropped).
+        assert_ne!(
+            entry.metadata.description, "Details.",
+            "the description fallback must not come from a truncated body"
+        );
+    }
+
+    #[test]
+    fn test_longer_dash_opener_is_not_frontmatter() {
+        let content = "-----\nA\n---\nB\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_degraded());
+        assert!(
+            entry.body.contains('A') && entry.body.contains('B'),
+            "body must keep content on both sides of the `---` line: {:?}",
+            entry.body
+        );
+    }
+
+    #[test]
+    fn test_closer_requires_exact_fence_line() {
+        // A typo'd 4-dash closer is not a fence: the old prefix match
+        // landed the body slice on the fourth dash and parsed the skill
+        // as Ok with a stray `-` line leaking into the body.
+        let content = "---\nname: demo\ndescription: d\n----\n\n# Body\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(
+            entry.parse_status.is_degraded(),
+            "a frontmatter block closed by `----` is unclosed, not Ok: {:?}",
+            entry.parse_status
+        );
+        assert!(
+            entry.body.contains("name: demo") && entry.body.contains("# Body"),
+            "the whole file must be the body when no exact closer exists: {:?}",
+            entry.body
+        );
+    }
+
+    #[test]
+    fn test_closer_with_trailing_space_still_closes() {
+        // Trailing whitespace after a fence is an editor artifact, not
+        // content: it must not leak into the body.
+        let content = "---\nname: demo\ndescription: d\n--- \n\nbody\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(
+            entry.body, "\nbody\n",
+            "the trailing space must not leak into the body"
+        );
+    }
+
+    #[test]
+    fn test_opener_with_trailing_space_still_opens() {
+        let content = "--- \nname: demo\ndescription: d\n---\n\nbody\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert_eq!(
+            entry.body, "\nbody\n",
+            "the opener's trailing space must not push the file into the no-frontmatter path"
+        );
+    }
+
+    #[test]
+    fn bare_opener_without_closer_preserves_the_whole_content() {
+        // Review regression: a fence-shaped opener with NO closing fence
+        // keeps the entire content as the body — including the opener
+        // line itself — exactly like the pre-rewrite code (its
+        // `after_open.ends_with("---")` arm never matched an empty
+        // remainder, so these shapes always fell through to
+        // whole-content). Trailing whitespace on the opener and either
+        // line ending are covered.
+        for content in ["---", "--- \n", "---\r\n"] {
+            let entry = parse_skill_md(content, "demo");
+            assert!(
+                entry.parse_status.is_degraded(),
+                "{content:?}: no usable frontmatter"
+            );
+            assert_eq!(
+                entry.body, content,
+                "{content:?}: the whole input must stay in the body"
+            );
+        }
+    }
+
+    #[test]
+    fn test_body_thematic_break_after_frontmatter_is_preserved() {
+        // The closer search stops at the FIRST exact fence line; thematic
+        // breaks later in the body are body content and must survive.
+        let content = "---\nname: demo\ndescription: d\n---\n\nA\n\n----\n\nB\n";
+
+        let entry = parse_skill_md(content, "demo");
+
+        assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        assert!(
+            entry.body.contains("----"),
+            "a body thematic break must be preserved: {:?}",
+            entry.body
+        );
     }
 }

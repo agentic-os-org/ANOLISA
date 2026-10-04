@@ -189,6 +189,49 @@ fn flat_layout_uses_directory_basename_not_frontmatter_name() {
 }
 
 #[test]
+fn thematic_break_opener_keeps_body_sections() {
+    let source_dir = tempfile::tempdir().unwrap();
+
+    // A SKILL.md that opens with a 4-dash thematic break (a valid
+    // Markdown horizontal rule, not a frontmatter fence) and contains a
+    // Parameters contract section before a later `---` rule. The old
+    // prefix-based fence matching treated the thematic break as an
+    // opening fence and silently dropped everything up to the `---` rule
+    // — including the Parameters section — from the parsed body, so the
+    // structured contract vanished from the store's view of the skill.
+    add_skill(
+        source_dir.path(),
+        "thematic-break-skill",
+        concat!(
+            "----\n\n",
+            "Some intro text.\n\n",
+            "## Parameters\n\n",
+            "- `query` (string, required): The search query\n\n",
+            "---\n\n",
+            "Trailing prose.\n",
+        ),
+    );
+
+    let (store, _errors) = load_store(source_dir.path());
+
+    let entry = store
+        .get("thematic-break-skill")
+        .expect("degraded entries still load into the store");
+    assert!(
+        entry.body.contains("## Parameters"),
+        "the Parameters section must survive in the body: {:?}",
+        entry.body
+    );
+    assert_eq!(
+        entry.parameters.len(),
+        1,
+        "the parameter before the `---` rule must be extracted, not dropped"
+    );
+    assert_eq!(entry.parameters[0].name, "query");
+    assert!(entry.parse_status.is_degraded()); // still no usable frontmatter
+}
+
+#[test]
 fn categorized_layout_uses_directory_basename_not_frontmatter_name() {
     let source_dir = tempfile::tempdir().unwrap();
 
