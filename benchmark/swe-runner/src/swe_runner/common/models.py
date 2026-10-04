@@ -146,13 +146,24 @@ class DatasetConfig(BaseModel):
         if self.slice_range is None:
             return None
 
+        # cli_commands 引用本模块的模型，顶层互导会循环——用法错误类型就地导入
+        from swe_runner.cli_commands import CommandUsageError
+
         parts = self.slice_range.split(":")
         if len(parts) != 2:
-            return None
+            # 段数错误与非数字段统一走用法校验错误，不再静默当作无切片
+            raise CommandUsageError(
+                f"slice must be 'start:end' with integer bounds, got: {self.slice_range!r}"
+            )
 
         start_str, end_str = parts
-        start = int(start_str) if start_str else 0
-        end = int(end_str) if end_str else -1
+        try:
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else -1
+        except ValueError as exc:
+            raise CommandUsageError(
+                f"slice must be 'start:end' with integer bounds, got: {self.slice_range!r}"
+            ) from exc
 
         return (start, end)
 

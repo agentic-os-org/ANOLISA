@@ -100,6 +100,22 @@ class TestDatasetConfig:
         config = DatasetConfig()
         assert config.get_slice() is None
 
+    def test_dataset_config_slice_malformed_values(self) -> None:
+        """非数字段要么统一走校验错误，不得一半裸崩一半静默忽略。
+
+        修复前："0:abc" 在 int("abc") 抛裸 ValueError 穿透 CLI
+        （只捕 CommandUsageError）；"1:2:3:4" 却被静默当作无切片。
+        """
+        import pytest
+
+        from swe_runner.cli_commands import CommandUsageError
+
+        with pytest.raises(CommandUsageError, match="slice"):
+            DatasetConfig(slice_range="0:abc").get_slice()
+
+        with pytest.raises(CommandUsageError, match="slice"):
+            DatasetConfig(slice_range="1:2:3:4").get_slice()
+
 
 class TestOutputConfig:
     """Tests for OutputConfig."""
