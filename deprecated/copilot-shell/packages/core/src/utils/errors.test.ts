@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isAbortError, isNodeError } from './errors.js';
+import { isAbortError, isNodeError, toFriendlyError } from './errors.js';
 
 describe('isAbortError', () => {
   it('should return true for DOMException-style AbortError', () => {
@@ -87,5 +87,27 @@ describe('isNodeError', () => {
     expect(isNodeError({ code: 'ENOENT' })).toBe(false);
     expect(isNodeError('string')).toBe(false);
     expect(isNodeError(null)).toBe(false);
+  });
+});
+
+describe('toFriendlyError', () => {
+  it('should not throw when the HTTP error body is not JSON', () => {
+    // Gateways and proxies commonly return HTML or plain text error pages.
+    const error = { response: { data: '<html>502 Bad Gateway</html>' } };
+
+    expect(() => toFriendlyError(error)).not.toThrow();
+    // The original error must survive so callers can report its status/message.
+    expect(toFriendlyError(error)).toBe(error);
+  });
+
+  it('should still map JSON error bodies', () => {
+    const error = {
+      response: {
+        data: JSON.stringify({ error: { code: 401, message: 'nope' } }),
+      },
+    };
+
+    expect(toFriendlyError(error)).not.toBe(error);
+    expect((toFriendlyError(error) as Error).message).toBe('nope');
   });
 });
