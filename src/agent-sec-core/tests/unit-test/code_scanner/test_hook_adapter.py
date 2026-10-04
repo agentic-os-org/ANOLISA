@@ -511,9 +511,33 @@ class TestExtractInlineCode:
         """N2: mybash is not a valid interpreter."""
         assert extract_inline_code('mybash -c "code"') is None
 
-    def test_interpreter_in_path_no_match(self) -> None:
-        """N3: /usr/bin/python3 — path prefix should not match."""
-        assert extract_inline_code('/usr/bin/python3 -c "code"') is None
+    def test_interpreter_abs_path_matches(self) -> None:
+        """N3: /usr/bin/python3 -c — an absolute interpreter path must match.
+
+        Previously pinned as no-match, but that lets a payload escape its
+        language rule pack by invoking the interpreter by absolute path
+        (e.g. /usr/bin/python3 -c 'from Crypto.Cipher import DES; ...'
+        stays bash and py-weak-crypto never runs). The interpreter path is
+        unambiguous here: it must end with "/" and be followed by a known
+        interpreter plus -c and a quoted payload.
+        """
+        result = extract_inline_code('/usr/bin/python3 -c "code"')
+        assert result is not None
+        code, lang = result
+        assert code == "code"
+        assert lang == Language.PYTHON
+
+    def test_interpreter_abs_path_bash_matches(self) -> None:
+        """N3b: /bin/bash -c extracts as bash."""
+        result = extract_inline_code('/bin/bash -c "rm -rf /"')
+        assert result is not None
+        code, lang = result
+        assert code == "rm -rf /"
+        assert lang == Language.BASH
+
+    def test_quoted_path_interpreter_no_match(self) -> None:
+        """N3c: a quoted path cannot hide an interpreter from the rule pack."""
+        assert extract_inline_code('"/usr/bin/python3" -c "code"') is None
 
     # --- O. Escaped quote as sole content ---
 
