@@ -1289,6 +1289,65 @@ mod tests {
         );
     }
 
+    /// The username-only severed credential in the raw error chain (review of
+    /// this PR): `file://deploy-token/@nas.example/…` leaves a colon-free
+    /// `deploy-token` where the file authority's host belongs, so no colon
+    /// requirement can flag it and the label must fail closed instead of
+    /// echoing the URL — token included — verbatim.
+    #[test]
+    fn index_fetch_error_fails_closed_on_username_only_file_tokens() {
+        for url in [
+            "file://deploy-token/@nas.example/share/repo/v1/index.toml",
+            "file://deploy-token?@nas.example/share/repo/v1/index.toml",
+            "file://deploy-token#@nas.example/share/repo/v1/index.toml",
+        ] {
+            let err = DownloadError::MalformedUrl {
+                url: url.to_string(),
+                reason: "file:// URL must have an empty host and absolute path".to_string(),
+            };
+            let CliError::Runtime { reason, .. } = index_fetch_error(url, err, None) else {
+                panic!("expected runtime error for {url}");
+            };
+            assert!(
+                !reason.contains("deploy-token")
+                    && !reason.contains("deploy")
+                    && !reason.contains("token"),
+                "the username-only token leaked into the raw index error for {url}: {reason}"
+            );
+            assert!(
+                !reason.contains("nas.example"),
+                "the tail behind a severed credential must not be echoed either for {url}: {reason}"
+            );
+            assert!(
+                reason.contains("<repository>"),
+                "the label must fail closed to the opaque form for {url}: {reason}"
+            );
+        }
+    }
+
+    /// The same shape driven through the real fetch chain: a `file://` URL
+    /// with a non-empty host is rejected by the downloader itself, and the
+    /// failure surfaces through `fetch_raw_index` — the path every raw
+    /// index fetch takes — with the label failing closed.
+    #[test]
+    fn fetch_raw_index_error_label_fails_closed_on_username_only_file_tokens() {
+        let cache = tempdir().unwrap();
+        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let err = fetch_raw_index(&dl, "file://deploy-token/@nas.example/share/repo", None)
+            .expect_err("a file URL with a non-empty host cannot be fetched");
+        let CliError::Runtime { reason, .. } = err else {
+            panic!("expected runtime error");
+        };
+        assert!(
+            !reason.contains("deploy-token") && !reason.contains("deploy"),
+            "the username-only token leaked into the raw index error: {reason}"
+        );
+        assert!(
+            reason.contains("<repository>"),
+            "the label must fail closed to the opaque form: {reason}"
+        );
+    }
+
     /// Target-specific metadata is the point of the sibling-first order: the
     /// macOS contract sits beside the macOS artifact, while the version root
     /// holds whichever target the publisher made version-wide.
