@@ -18,6 +18,36 @@ use crate::ns::{MountPoint, Namespace};
 use crate::session::{EndAction, SessionBase, SessionId, SessionLogService};
 use crate::tools::{GrepHit, GrepOptions, ListEntry, ListOptions};
 
+/// Run `f` while holding the `consolidating` flag; `None` when the flag is
+/// already held.
+///
+/// The claim is a single `compare_exchange` (not a load-then-store pair), so
+/// concurrent callers can never both run the body — each side of a race
+/// either wins the CAS or observes the held flag. The release is a drop
+/// guard, so every exit path clears the flag, including unwinds: a panic
+/// inside `consolidate()` must not leave the flag latched `true`, which
+/// would silently disable incremental consolidation for the rest of the
+/// process lifetime.
+pub(crate) fn run_under_consolidation_guard<F: FnOnce() -> usize>(
+    flag: &std::sync::atomic::AtomicBool,
+    f: F,
+) -> Option<usize> {
+    if flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    struct ReleaseGuard<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for ReleaseGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _release = ReleaseGuard(flag);
+    Some(f())
+}
+
 /// MemoryService is the top-level entry point used by both the MCP server and
 /// the CLI. It owns the namespace mount, audit logger, and (for P3+) a
 /// per-process Session Log scratch area, plus (for P4+) a background index,
@@ -271,11 +301,12 @@ impl MemoryService {
             let prev = self.audit_counter.fetch_add(1, Ordering::AcqRel);
             if prev + 1 >= interval {
                 self.audit_counter.store(0, Ordering::Release);
-                self.consolidating.store(true, Ordering::Release);
-                let n = self.consolidate();
-                self.consolidating.store(false, Ordering::Release);
-                if n > 0 {
-                    tracing::info!("incremental consolidation: {n} facts written");
+                if let Some(n) =
+                    run_under_consolidation_guard(&self.consolidating, || self.consolidate())
+                {
+                    if n > 0 {
+                        tracing::info!("incremental consolidation: {n} facts written");
+                    }
                 }
             }
         }
@@ -1218,5 +1249,72 @@ mod session_base_tests {
             session_base_candidates(configured),
             candidates_for_host_uid(configured, crate::host::host_uid())
         );
+    }
+}
+
+#[cfg(test)]
+mod consolidation_guard_tests {
+    use super::run_under_consolidation_guard;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn concurrent_callers_cannot_both_enter() {
+        // Two MCP calls arriving while `consolidating` is being set must not
+        // both run the guarded body: the claim has to be a single atomic
+        // compare-and-swap, not a load-then-store pair.
+        const N: usize = 8;
+        let flag = AtomicBool::new(false);
+        let entered = AtomicUsize::new(0);
+        let attempted = AtomicUsize::new(0);
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..N)
+                .map(|_| {
+                    s.spawn(|| {
+                        attempted.fetch_add(1, Ordering::SeqCst);
+                        run_under_consolidation_guard(&flag, || {
+                            entered.fetch_add(1, Ordering::SeqCst);
+                            // Hold the guard until every thread has made its
+                            // attempt, so a second entry would be observed.
+                            while attempted.load(Ordering::SeqCst) < N {
+                                std::thread::yield_now();
+                            }
+                            7
+                        })
+                    })
+                })
+                .collect();
+            let mut winners = 0;
+            for h in handles {
+                if matches!(h.join(), Ok(Some(_))) {
+                    winners += 1;
+                }
+            }
+            assert_eq!(winners, 1, "exactly one caller must enter the guard");
+            assert_eq!(entered.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn refuses_to_enter_while_flag_is_held() {
+        let flag = AtomicBool::new(true);
+        assert_eq!(run_under_consolidation_guard(&flag, || 1), None);
+    }
+
+    #[test]
+    fn panic_in_guarded_body_releases_the_latch() {
+        // A panic inside consolidate() must not leave `consolidating` stuck
+        // at true forever (which would permanently disable incremental
+        // consolidation for the rest of the process lifetime).
+        let flag = AtomicBool::new(false);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_under_consolidation_guard(&flag, || panic!("consolidation exploded"))
+        }));
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "guard must be released after a panic in the body"
+        );
+        // The latch is free, so a subsequent call still runs.
+        assert_eq!(run_under_consolidation_guard(&flag, || 42), Some(42));
     }
 }
