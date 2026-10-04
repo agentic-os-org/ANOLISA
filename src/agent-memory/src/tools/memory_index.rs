@@ -15,6 +15,8 @@
 //! and truncated when limits are reached. Run `mem_index_refresh` after
 //! bulk writes to rebuild the index.
 
+use std::os::fd::AsFd;
+
 use walkdir::WalkDir;
 
 use crate::audit::AuditEntry;
@@ -155,8 +157,15 @@ pub fn write_index(svc: &MemoryService, entries: &[IndexEntry]) -> Result<()> {
         content.push('\n');
     }
 
-    let index_path = svc.mount.root.join(INDEX_FILE);
-    std::fs::write(&index_path, &content)?;
+    // Anchor the write to the mount's root_fd like every other content write
+    // (openat2 RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS): a symlink planted at
+    // MEMORY.md must fail with PathOutsideMount instead of truncating and
+    // overwriting the link target outside the sandbox.
+    crate::safe_fs::write(
+        svc.mount.root_fd.as_fd(),
+        std::path::Path::new(INDEX_FILE),
+        content.as_bytes(),
+    )?;
 
     svc.audit_log(
         AuditEntry::new("mem_index_refresh")
