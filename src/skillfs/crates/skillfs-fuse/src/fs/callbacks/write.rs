@@ -745,14 +745,24 @@ impl SkillFs {
             return;
         }
 
-        // Only Passthrough leaves under an ordinary skill can host a
-        // freshly created FIFO. Virtual paths (Root, SkillsDir, SkillDir,
-        // SkillMd, Invalid) are rejected before any physical I/O.
+        // Passthrough leaves under an ordinary skill — flat or Hermes
+        // nested — can host a freshly created FIFO. Virtual paths (Root,
+        // SkillsDir, SkillDir, SkillMd, Invalid) are rejected before any
+        // physical I/O. The nested case is identified by its hermes id so
+        // the skill-discover and observe paths below stay unchanged.
         let (skill_name, _relative_path) = match &path_type {
             PathType::Passthrough {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.ro_warn("mknod", &path_str);
                 self.emit_op_event(

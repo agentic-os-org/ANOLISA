@@ -995,3 +995,292 @@ fn test_lutimes_on_symlink_does_not_touch_target() {
         "the symlink target's mtime nanoseconds must be untouched"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes nested passthrough leaves
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_hermes_nested_fifo_and_hardlink_allowed() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::in_place_hermes(|dir| {
+        let skill = dir.join("apple").join("apple-notes");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: apple-notes\ndescription: notes\n---\nbody\n",
+        )
+        .unwrap();
+    });
+
+    let nested = fx.mountpoint().join("apple").join("apple-notes");
+
+    // mkfifo / symlink on a Hermes nested passthrough leaf: the flat leaf
+    // accepts both, so the categorized (nested) leaf must too.
+    let fifo = nested.join("pipe");
+    let c_fifo = CString::new(fifo.as_os_str().as_bytes()).expect("CString");
+    let rc = unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o644) };
+    assert_eq!(
+        rc,
+        0,
+        "mkfifo under a Hermes nested skill must succeed: {}",
+        std::io::Error::last_os_error()
+    );
+    let meta = std::fs::symlink_metadata(&fifo).expect("lstat nested fifo");
+    assert!(meta.file_type().is_fifo(), "expected a FIFO, got {meta:?}");
+
+    // Hardlink between two leaves of the same nested skill.
+    let target = nested.join("target.txt");
+    std::fs::write(&target, b"nested").expect("seed nested target");
+    let hard = nested.join("hard.txt");
+    std::fs::hard_link(&target, &hard).expect("hardlink inside a Hermes nested skill");
+    let hard_meta = std::fs::symlink_metadata(&hard).expect("lstat nested hardlink");
+    assert!(
+        hard_meta.nlink() >= 2,
+        "nested hardlink must share the inode, nlink={}",
+        hard_meta.nlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hard).expect("read nested hardlink"),
+        "nested"
+    );
+
+    // user.* xattr on a nested leaf (flat leaves already support it).
+    let c_hard = CString::new(hard.as_os_str().as_bytes()).expect("CString");
+    let xname = CString::new("user.skillfs-nested").expect("CString");
+    let value = b"v";
+    let rc = unsafe {
+        libc::lsetxattr(
+            c_hard.as_ptr(),
+            xname.as_ptr(),
+            value.as_ptr() as *const libc::c_void,
+            value.len(),
+            0,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "setxattr under a Hermes nested skill must succeed: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut buf = [0u8; 8];
+    let n = unsafe {
+        libc::lgetxattr(
+            c_hard.as_ptr(),
+            xname.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+        )
+    };
+    assert_eq!(n, 1, "getxattr must return the value length");
+    assert_eq!(&buf[..1], b"v");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hidden gating after a Current→Hidden flip
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A held directory inode / file fd must not keep serving mutations after
+/// the ledger flips the skill Current→Hidden: mkfifoat, linkat and
+/// fsetxattr are refused with ENOENT and the backend data is unchanged,
+/// while get/list xattr on the held inode answer ENOENT too.
+#[test]
+fn test_hermes_nested_ops_refused_after_hidden_flip() {
+    skip_if_no_fuse!();
+
+    use std::os::unix::io::AsRawFd;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use skillfs_core::store::SkillStore;
+    use skillfs_core::{ParseConfig, SharedSkillStore};
+    use skillfs_fuse::security::{ActiveSkillResolver, ActiveTarget};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let notes = source.path().join("apple/apple-notes");
+    std::fs::create_dir_all(&notes).expect("seed nested skill");
+    std::fs::write(
+        notes.join("SKILL.md"),
+        "---\nname: apple-notes\ndescription: nested\n---\nbody\n",
+    )
+    .expect("seed SKILL.md");
+    std::fs::write(notes.join("notes.txt"), b"nested notes").expect("seed notes");
+    let other = source.path().join("apple/other-skill");
+    std::fs::create_dir_all(&other).expect("seed second skill");
+    std::fs::write(
+        other.join("SKILL.md"),
+        "---\nname: other-skill\ndescription: other\n---\nbody\n",
+    )
+    .expect("seed second SKILL.md");
+    std::fs::write(other.join("src.txt"), b"other").expect("seed second file");
+
+    // A resolver the test controls, seeded empty (Current/live) for the
+    // mount, flipped to Hidden after the fds are held.
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    // The ledger is authoritative: a skill with no resolver entry reads as
+    // hidden, so seed both skills Current before the mount serves anything.
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: notes.clone(),
+        },
+    );
+    resolver.set(
+        "apple/other-skill",
+        ActiveTarget::Current {
+            source_dir: other.clone(),
+        },
+    );
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        false, // normal mode: the source stays directly checkable
+        MountConfig {
+            active_resolver: Some(resolver.clone()),
+            skill_layout: Some(SkillLayout::Hermes),
+            ..MountConfig::default()
+        },
+    )
+    .expect("mount_background_configured");
+
+    let nested = mountpoint.path().join("skills/apple/apple-notes");
+    let mut ready = false;
+    for _ in 0..100 {
+        if std::fs::symlink_metadata(nested.join("notes.txt")).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(ready, "mounted view never served the nested leaf");
+
+    // Hold the directory inode and the file fd BEFORE the flip — exactly
+    // the state a client is left with when the ledger hides the skill.
+    let held_dir = std::fs::File::open(&nested).expect("open nested dir before flip");
+    let held_file = std::fs::File::open(nested.join("notes.txt")).expect("open file before flip");
+
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Hidden {
+            reason: "test: current->hidden flip".to_string(),
+        },
+    );
+
+    // mkfifoat through the held directory fd: refused, backend unchanged.
+    let c_pipe = CString::new("pipe").expect("CString");
+    let rc = unsafe { libc::mkfifoat(held_dir.as_raw_fd(), c_pipe.as_ptr(), 0o644) };
+    let err = std::io::Error::last_os_error();
+    assert_eq!(rc, -1, "mkfifoat into a hidden skill must fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "mkfifoat must answer ENOENT, got {err}"
+    );
+    assert!(
+        !notes.join("pipe").exists(),
+        "the backend must not gain a FIFO from a refused mkfifoat"
+    );
+
+    // linkat with the destination resolved through the held directory fd:
+    // refused before the link is made, backend unchanged.
+    let c_src = CString::new(
+        mountpoint
+            .path()
+            .join("skills/apple/other-skill/src.txt")
+            .as_os_str()
+            .as_bytes(),
+    )
+    .expect("CString");
+    let c_hard = CString::new("hard.txt").expect("CString");
+    let rc = unsafe {
+        libc::linkat(
+            libc::AT_FDCWD,
+            c_src.as_ptr(),
+            held_dir.as_raw_fd(),
+            c_hard.as_ptr(),
+            0,
+        )
+    };
+    let err = std::io::Error::last_os_error();
+    assert_eq!(rc, -1, "linkat into a hidden skill must fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "linkat must answer ENOENT, got {err}"
+    );
+    assert!(
+        !notes.join("hard.txt").exists(),
+        "the backend must not gain a hardlink from a refused linkat"
+    );
+
+    // fsetxattr through the held file fd: refused, backend unchanged.
+    let c_xname = CString::new("user.hidden-probe").expect("CString");
+    let rc = unsafe {
+        libc::fsetxattr(
+            held_file.as_raw_fd(),
+            c_xname.as_ptr(),
+            b"x".as_ptr() as *const libc::c_void,
+            1,
+            0,
+        )
+    };
+    let err = std::io::Error::last_os_error();
+    assert_eq!(rc, -1, "fsetxattr on a hidden skill's file must fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "fsetxattr must answer ENOENT, got {err}"
+    );
+    let c_src_notes =
+        CString::new(notes.join("notes.txt").as_os_str().as_bytes()).expect("CString");
+    let rc = unsafe {
+        libc::lgetxattr(
+            c_src_notes.as_ptr(),
+            c_xname.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(rc, -1, "the backend file must not gain the refused xattr");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENODATA),
+        "the backend xattr must still be absent"
+    );
+
+    // get/list xattr on the held inode: the hidden skill's metadata is no
+    // longer served.
+    let rc = unsafe {
+        libc::fgetxattr(
+            held_file.as_raw_fd(),
+            c_xname.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let err = std::io::Error::last_os_error();
+    assert_eq!(rc, -1, "fgetxattr on a hidden skill's file must fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "fgetxattr must answer ENOENT, got {err}"
+    );
+    let rc = unsafe { libc::flistxattr(held_file.as_raw_fd(), std::ptr::null_mut(), 0) };
+    let err = std::io::Error::last_os_error();
+    assert_eq!(rc, -1, "flistxattr on a hidden skill's file must fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "flistxattr must answer ENOENT, got {err}"
+    );
+}

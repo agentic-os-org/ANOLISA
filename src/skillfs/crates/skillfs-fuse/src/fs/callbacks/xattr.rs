@@ -65,6 +65,37 @@ impl SkillFs {
                     },
                 }
             }
+            // Hermes nested counterpart: the trusted `.skill-meta` view is
+            // decided *before* the activation mapping, so a trusted caller
+            // keeps reading management metadata from the live nested source
+            // even while the skill is hidden — the same order readlink,
+            // lookup and open apply. Ordinary content follows the nested
+            // read directory, which yields nothing for a hidden skill.
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&npt, req) {
+                    Some(false) => return reply.error(libc::ENOENT),
+                    Some(true) => self
+                        .hermes_skill_physical_dir(category, skill_name)
+                        .join(relative_path),
+                    None => match self.nested_access_read_path(
+                        category,
+                        skill_name,
+                        Some(relative_path),
+                    ) {
+                        Some(p) => p,
+                        None => return reply.error(libc::ENOENT),
+                    },
+                }
+            }
             _ => return reply.error(libc::EOPNOTSUPP),
         };
 
@@ -119,6 +150,32 @@ impl SkillFs {
                     Some(false) => return reply.error(libc::ENOENT),
                     Some(true) => self.skill_physical_dir(skill_name).join(relative_path),
                     None => match self.flat_access_read_path(skill_name, Some(relative_path)) {
+                        Some(p) => p,
+                        None => return reply.error(libc::ENOENT),
+                    },
+                }
+            }
+            // Nested counterpart of the arm above, trusted view first.
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&npt, req) {
+                    Some(false) => return reply.error(libc::ENOENT),
+                    Some(true) => self
+                        .hermes_skill_physical_dir(category, skill_name)
+                        .join(relative_path),
+                    None => match self.nested_access_read_path(
+                        category,
+                        skill_name,
+                        Some(relative_path),
+                    ) {
                         Some(p) => p,
                         None => return reply.error(libc::ENOENT),
                     },

@@ -276,7 +276,9 @@ impl SkillFs {
         // Only Passthrough leaves under an ordinary skill may host a new
         // symlink. Virtual paths keep their existing virtual semantics,
         // which means SymlinkDir / SymlinkMd / Root / SkillsDir / Invalid
-        // remain EROFS as in S0.
+        // remain EROFS as in S0. (Hermes nested leaves are not accepted yet:
+        // `classify_symlink_target` compares the first path component, a
+        // flat-skill model that would misclassify a nested sibling.)
         let (skill_name, relative_path) = match &path_type {
             PathType::Passthrough {
                 skill_name,
@@ -584,12 +586,20 @@ impl SkillFs {
         };
         let source_path_type = self.parse_fuse_path(Path::new(&source_path_str));
 
-        // Destination must be a passthrough leaf.
+        // Destination must be a passthrough leaf (flat or Hermes nested).
         let (dst_skill, dst_rel) = match &new_path_type {
             PathType::Passthrough {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.ro_warn("link", &new_path_str);
                 self.emit_event(
@@ -616,6 +626,14 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.emit_event(
                     SkillEvent::new(SkillEventKind::HardlinkAttempt)
@@ -648,6 +666,53 @@ impl SkillFs {
                     )),
             );
             reply.error(libc::EROFS);
+            return;
+        }
+
+        // I4/H3: reject hardlinks whose source or destination belongs
+        // to a hidden skill unless grace-allowed — the same gate the
+        // other mutating callbacks apply, so a hidden skill cannot be
+        // given new directory entries (or have its files linked out)
+        // through `link`. A held directory inode routes linkat past
+        // lookup, so both endpoints are re-checked here against the
+        // CURRENT ledger state, flat or Hermes nested. This runs before
+        // the cross-skill check: a hidden endpoint must answer ENOENT
+        // like every other hidden-skill operation instead of leaking
+        // its existence through the cross-skill EACCES.
+        let hidden_endpoint = |path_type: &PathType| match path_type {
+            PathType::Passthrough {
+                skill_name,
+                relative_path,
+            } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => self.should_reject_hermes_nested_hidden_write(
+                category,
+                skill_name,
+                Some(relative_path),
+            ),
+            _ => false,
+        };
+        let hidden_src = hidden_endpoint(&source_path_type);
+        let hidden_dst = hidden_endpoint(&new_path_type);
+        if hidden_src || hidden_dst {
+            let rejecting_side = if hidden_dst {
+                &new_path_type
+            } else {
+                &source_path_type
+            };
+            self.emit_op_event_with_detail(
+                req,
+                rejecting_side,
+                SkillEventKind::HardlinkAttempt,
+                SkillEventAction::Rejected,
+                Some(libc::ENOENT),
+                None,
+                Some("class=hidden_skill".to_string()),
+            );
+            reply.error(libc::ENOENT);
             return;
         }
 
@@ -707,32 +772,6 @@ impl SkillFs {
             Some(format!("dst={}", new_path_str)),
         ) {
             reply.error(errno);
-            return;
-        }
-
-        // I4/H3: reject hardlinks whose source or destination belongs
-        // to a hidden skill unless grace-allowed — the same gate the
-        // other mutating callbacks apply, so a hidden skill cannot be
-        // given new directory entries (or have its files linked out)
-        // through `link`.
-        let hidden_src = self.should_reject_hidden_write(&src_skill, Some(&src_rel));
-        let hidden_dst = self.should_reject_hidden_write(&dst_skill, Some(&dst_rel));
-        if hidden_src || hidden_dst {
-            let rejecting_side = if hidden_dst {
-                &new_path_type
-            } else {
-                &source_path_type
-            };
-            self.emit_op_event_with_detail(
-                req,
-                rejecting_side,
-                SkillEventKind::HardlinkAttempt,
-                SkillEventAction::Rejected,
-                Some(libc::ENOENT),
-                None,
-                Some("class=hidden_skill".to_string()),
-            );
-            reply.error(libc::ENOENT);
             return;
         }
 
