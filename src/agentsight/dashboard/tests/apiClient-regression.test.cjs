@@ -608,3 +608,16 @@ test('fillTokenBuckets passes data through for a degenerate window', () => {
   // Zero-width range: bucketNs floors to 0 and the data is returned as-is.
   assert.equal(fillTokenBuckets(data, 5, 5, 30), data);
 });
+
+test('formatDurationSecs never renders 60 seconds inside a minute field', () => {
+  const { formatDurationSecs } = require(process.env.AGENTSIGHT_FORMAT_DURATION_BUILD);
+
+  assert.equal(formatDurationSecs(12.34), '12.3s');
+  assert.equal(formatDurationSecs(59.4), '59.4s');
+  // Rounding happened after the minute split before, yielding "60.0s",
+  // "1m 60s" and "59m 60s".
+  assert.equal(formatDurationSecs(59.96), '1m 0s');
+  assert.equal(formatDurationSecs(119.6), '2m 0s');
+  assert.equal(formatDurationSecs(3599.7), '60m 0s');
+  assert.equal(formatDurationSecs(125), '2m 5s');
+});

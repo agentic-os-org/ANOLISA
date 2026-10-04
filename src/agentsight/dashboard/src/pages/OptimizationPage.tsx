@@ -9,6 +9,7 @@ import {
 } from '../utils/apiClient';
 import type { OptimizeHistoryEntry } from '../utils/apiClient';
 import { copyText } from '../components/CopyButton';
+import { formatDurationSecs as formatSecs } from '../utils/formatDuration';
 import type {
   AccIssue,
   AccuracyResult,
@@ -68,15 +69,6 @@ const H = (s: string) => (
     dangerouslySetInnerHTML={{ __html: s }}
   />
 );
-
-function formatSecs(s: number): string {
-  if (s >= 60) {
-    const m = Math.floor(s / 60);
-    const sec = Math.round(s % 60);
-    return `${m}m ${sec}s`;
-  }
-  return `${s.toFixed(1)}s`;
-}
 
 function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
