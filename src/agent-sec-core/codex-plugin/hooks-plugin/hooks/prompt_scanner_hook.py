@@ -105,6 +105,11 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # JSON null/arrays/scalars parse but are not hook-input objects; treat them
+    # like unparseable input instead of crashing on the first .get call.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Extract user prompt text
     prompt_text = input_data.get("prompt", "")
     if not prompt_text or not isinstance(prompt_text, str) or not prompt_text.strip():

@@ -101,6 +101,11 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # JSON null/arrays/scalars parse but are not hook-input objects; treat them
+    # like unparseable input instead of crashing on the first .get call.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Extract command from tool_input
     #    Codex normalizes all shell tools to tool_name="Bash",
     #    tool_input={"command": "..."}

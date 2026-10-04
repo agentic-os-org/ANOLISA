@@ -386,6 +386,11 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # JSON null/arrays/scalars parse but are not hook-input objects; treat them
+    # like unparseable input instead of crashing on the first .get call.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Extract user prompt text
     prompt = input_data.get("prompt", "")
     if not prompt or not isinstance(prompt, str) or not prompt.strip():
@@ -398,6 +403,10 @@ def main() -> None:
 
     # 4. Resolve mentions to installed skill directories via catalog
     cwd = input_data.get("cwd", ".")
+    if not isinstance(cwd, str) or not cwd:
+        # A malformed cwd must not reach Path(cwd) as a non-string: fall back
+        # to the same default used when the field is absent.
+        cwd = "."
     catalog = _build_skill_catalog(cwd)
     skills_to_check: list[tuple[str, str]] = []  # (name, dir_path)
     for skill_name in mentions:
