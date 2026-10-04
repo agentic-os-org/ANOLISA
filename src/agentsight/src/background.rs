@@ -482,7 +482,10 @@ mod tests {
                 path: "/new.log".to_string()
             }
         );
-        assert!(flag.load(Ordering::SeqCst), "an active exporter stays active");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "an active exporter stays active"
+        );
 
         // First activation still needs the uid, and a deferred activation must
         // not leave the flag set.
