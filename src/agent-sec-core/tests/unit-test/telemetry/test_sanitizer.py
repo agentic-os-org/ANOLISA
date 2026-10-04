@@ -80,6 +80,39 @@ def test_agent_name_accepts_only_approved_products() -> None:
         assert agent_name_value(invalid) == ""
 
 
+def test_qwen_code_alias_maps_to_approved_name() -> None:
+    """The qwen-code-extension hooks send "qwen-code"; telemetry keeps it.
+
+    Without the alias the allowlist silently drops the attribution (the
+    e2e suites hand-inject "qwencode", so they never catch the drift).
+    """
+    assert agent_name_value("qwen-code") == "qwencode"
+    assert agent_name_value(" qwen-code ") == "qwencode"
+    # Unknown hyphenated names are still rejected.
+    assert agent_name_value("future-agent-runtime") == ""
+
+
+def test_qwen_hook_payload_keeps_attribution_end_to_end() -> None:
+    """The real hook's --trace-context payload must survive the allowlist."""
+    import importlib.util
+    from pathlib import Path
+
+    hook_path = (
+        Path(__file__).resolve().parents[2]
+        / ".." / "qwen-code-extension" / "hooks" / "trace_context.py"
+    ).resolve()
+    spec = importlib.util.spec_from_file_location("qwen_trace_context", hook_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    from agent_sec_cli.correlation_context import parse_trace_context_payload
+
+    payload = module.trace_context({"session_id": "s-1"})
+    trace_ctx = parse_trace_context_payload(payload)
+    assert trace_ctx.agent_name == "qwen-code"
+    assert agent_name_value(trace_ctx.agent_name) == "qwencode"
+
+
 def test_enum_value_requires_an_approved_exact_string() -> None:
     allowed = frozenset({"pass", "warn"})
 
