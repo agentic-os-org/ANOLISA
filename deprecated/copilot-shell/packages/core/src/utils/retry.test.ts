@@ -283,6 +283,49 @@ describe('retryWithBackoff', () => {
       expect(d).toBeLessThanOrEqual(100 * 1.3);
     });
   });
+
+  it('should return the last response when content retries are exhausted', async () => {
+    const badResponse = { candidates: [] } as any;
+    const mockFn = vi.fn(async () => badResponse);
+    const shouldRetryOnContent = (content: any) =>
+      (content.candidates?.length ?? 0) === 0;
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      shouldRetryOnContent: shouldRetryOnContent as any,
+    });
+
+    await vi.runAllTimersAsync();
+
+    // Exhausting content retries must surface the last response, not
+    // discard it behind a generic 'Retry attempts exhausted' error.
+    const result = await promise;
+    expect(mockFn).toHaveBeenCalledTimes(3);
+    expect(result).toBe(badResponse);
+  });
+
+  it('should retry on content and return the first acceptable response', async () => {
+    const badResponse = { candidates: [] } as any;
+    const goodResponse = { candidates: [{ content: {} }] } as any;
+    const responses = [badResponse, goodResponse];
+    let call = 0;
+    const mockFn = vi.fn(async () => responses[call++]);
+    const shouldRetryOnContent = (content: any) =>
+      (content.candidates?.length ?? 0) === 0;
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      shouldRetryOnContent: shouldRetryOnContent as any,
+    });
+
+    await vi.runAllTimersAsync();
+
+    const result = await promise;
+    expect(mockFn).toHaveBeenCalledTimes(2);
+    expect(result).toBe(goodResponse);
+  });
 });
 
 describe('getErrorStatus', () => {

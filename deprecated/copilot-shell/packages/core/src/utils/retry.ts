@@ -90,6 +90,12 @@ export async function retryWithBackoff<T>(
         shouldRetryOnContent &&
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
+        // Content retries exhausted: the call itself succeeded, so surface
+        // the last response rather than discarding it behind a generic
+        // error. This mirrors the error path rethrowing the last error.
+        if (attempt >= maxAttempts) {
+          return result;
+        }
         const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
         const delayWithJitter = Math.max(0, currentDelay + jitter);
         await delay(delayWithJitter);
