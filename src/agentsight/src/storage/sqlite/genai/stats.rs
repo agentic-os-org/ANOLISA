@@ -162,6 +162,12 @@ mod latency_tests {
             assert!((ttft_p50 - 0.000015).abs() < 1e-12);
         }
 
+        // The unfiltered view must agree: one agent, one summary.
+        let all = store.get_latency_metrics(50, 250, None).unwrap();
+        assert_eq!(all.len(), 1, "case variants split into {} rows", all.len());
+        assert_eq!(all[0].call_count, 2);
+        assert_eq!(all[0].streaming_call_count, 1);
+
         drop(store);
         let _ = std::fs::remove_file(path);
     }
@@ -353,16 +359,22 @@ impl GenAISqliteStore {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let mut grouped = std::collections::BTreeMap::<Option<String>, Vec<CallMetrics>>::new();
+        // Group case-insensitively, like the filtered query (COLLATE NOCASE)
+        // and every other agent-attributed view: "Qoder" and "qoder" are one
+        // agent, not two. The first name seen labels the group.
+        let mut grouped =
+            std::collections::BTreeMap::<Option<String>, (Option<String>, Vec<CallMetrics>)>::new();
         for call in calls {
+            let key = call.agent_name.as_deref().map(|name| name.to_lowercase());
             grouped
-                .entry(call.agent_name.clone())
-                .or_default()
+                .entry(key)
+                .or_insert_with(|| (call.agent_name.clone(), Vec::new()))
+                .1
                 .push(call);
         }
         Ok(grouped
             .into_iter()
-            .map(|(agent_name, calls)| LatencyMetricsSummary {
+            .map(|(_, (agent_name, calls))| LatencyMetricsSummary {
                 agent_name,
                 call_count: calls.len(),
                 streaming_call_count: calls.iter().filter(|call| call.is_sse).count(),
