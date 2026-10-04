@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `install-codex` skill for installing the OpenAI Codex CLI from
+  npm and wiring the Tokenless plugin into it: node/npm/python3 preflight,
+  codex lookup across the adapter's standard paths, tokenless CLI readiness
+  check, `anolisa adapter enable tokenless codex` registration with
+  npm-fallback to the adapter's own install script, and `codex plugin list`
+  verification. (#1293)
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

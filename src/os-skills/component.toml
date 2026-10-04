@@ -36,6 +36,10 @@ name = "install-qwenpaw"
 source = "{datadir}/skills/install-qwenpaw/"
 
 [[adapters.openclaw.skills]]
+name = "install-codex"
+source = "{datadir}/skills/install-codex/"
+
+[[adapters.openclaw.skills]]
 name = "install-hermes"
 source = "{datadir}/skills/install-hermes/"
 
@@ -154,6 +158,10 @@ source = "{datadir}/skills/install-claude-code/"
 [[adapters.hermes.skills]]
 name = "install-qwenpaw"
 source = "{datadir}/skills/install-qwenpaw/"
+
+[[adapters.hermes.skills]]
+name = "install-codex"
+source = "{datadir}/skills/install-codex/"
 
 [[adapters.hermes.skills]]
 name = "install-hermes"

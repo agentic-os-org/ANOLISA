@@ -9,6 +9,13 @@
 
 ## [未发布]
 
+### 新增
+
+- 新增 `install-codex` 技能，覆盖 OpenAI Codex CLI 安装与 Tokenless 插件接入：
+  npm 官方包安装、node/npm/python3 预检、适配器标准路径探测 codex、tokenless
+  CLI 就绪检查、`anolisa adapter enable tokenless codex` 注册（npm 直装时回退
+  到适配器自带安装脚本）以及 `codex plugin list` 验证。（#1293）
+
 ## [0.6.3] - 2026-08-21
 
 ### 修复
