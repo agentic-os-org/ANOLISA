@@ -29,8 +29,14 @@ fn save_index_sync(ws_dir: &Path, index: &SnapshotIndex) -> anyhow::Result<()> {
 /// Migrate old position index.json files to the new state_dir/indexes/ directory.
 ///
 /// When state.json does not exist (upgrade scenario), scan old position and migrate.
+/// `selection_method` records how the backend was chosen (e.g. "config" or
+/// "auto-detect") in the generated state.json's `BackendIdentity`.
 /// Returns true if a migration occurred.
-pub fn migrate_legacy_indexes(backend: &dyn StorageBackend, state_dir: &Path) -> bool {
+pub fn migrate_legacy_indexes(
+    backend: &dyn StorageBackend,
+    state_dir: &Path,
+    selection_method: &str,
+) -> bool {
     let snapshots_root = backend.snapshots_root().to_path_buf();
 
     let read_dir = match fs::read_dir(&snapshots_root) {
@@ -140,7 +146,7 @@ pub fn migrate_legacy_indexes(backend: &dyn StorageBackend, state_dir: &Path) ->
             version: DAEMON_STATE_VERSION,
             backend: BackendIdentity {
                 backend_type: backend.backend_type(),
-                selection_method: "auto-detect".to_string(),
+                selection_method: selection_method.to_string(),
                 selected_at: chrono::Utc::now(),
             },
             paths: match backend.backend_type() {
@@ -258,7 +264,11 @@ mod tests {
             data_root: snap_dir.path().to_path_buf(),
             snapshots_root: snap_dir.path().to_path_buf(),
         };
-        assert!(!migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(!migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
         assert!(!state_dir.path().join(crate::STATE_FILE).exists());
     }
 
@@ -273,7 +283,11 @@ mod tests {
             data_root: snap_dir.path().to_path_buf(),
             snapshots_root: snap_dir.path().to_path_buf(),
         };
-        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
 
         // New index exists
         let new_path = state_dir
@@ -310,7 +324,11 @@ mod tests {
             data_root: snap_dir.path().to_path_buf(),
             snapshots_root: snap_dir.path().to_path_buf(),
         };
-        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
 
         let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
         assert_eq!(sf.workspaces.len(), 2);
@@ -326,7 +344,11 @@ mod tests {
             data_root: snap_dir.path().to_path_buf(),
             snapshots_root: snap_dir.path().to_path_buf(),
         };
-        assert!(!migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(!migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
     }
 
     #[test]
@@ -339,7 +361,11 @@ mod tests {
             data_root: snap_dir.path().to_path_buf(),
             snapshots_root: snap_dir.path().to_path_buf(),
         };
-        assert!(!migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(!migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
     }
 
     #[test]
@@ -359,11 +385,54 @@ mod tests {
             data_root: snap_dir.path().to_path_buf(),
             snapshots_root: snap_dir.path().to_path_buf(),
         };
-        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
 
         let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
         assert_eq!(sf.workspaces.len(), 1);
         assert_eq!(sf.workspaces[0].ws_id, "ws-good");
+    }
+
+    #[test]
+    fn migrate_records_requested_selection_method() {
+        // When the backend came from a config override, the migrated
+        // state.json must record the override method, not a hardcoded
+        // "auto-detect".
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        write_old_index(snap_dir.path(), "ws-a3f2b1", &make_index("/p"));
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(migrate_legacy_indexes(&backend, state_dir.path(), "config"));
+
+        let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
+        assert_eq!(sf.backend.selection_method, "config");
+    }
+
+    #[test]
+    fn migrate_records_auto_detect_selection_method() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        write_old_index(snap_dir.path(), "ws-a3f2b1", &make_index("/p"));
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(migrate_legacy_indexes(
+            &backend,
+            state_dir.path(),
+            "auto-detect"
+        ));
+
+        let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
+        assert_eq!(sf.backend.selection_method, "auto-detect");
     }
 
     #[test]

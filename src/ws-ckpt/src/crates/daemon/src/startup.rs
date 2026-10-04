@@ -149,8 +149,11 @@ async fn resolve_fresh(
 
     // Attempt to migrate old position index (synchronous call)
     let backend_ref = &detect_result.backend;
-    let migrated =
-        ws_ckpt_common::migration::migrate_legacy_indexes(backend_ref.as_ref(), state_dir);
+    let migrated = ws_ckpt_common::migration::migrate_legacy_indexes(
+        backend_ref.as_ref(),
+        state_dir,
+        &detect_result.method,
+    );
 
     let state = if migrated {
         // Migrated — reconstruct from state_dir
@@ -162,7 +165,7 @@ async fn resolve_fresh(
                     config.clone(),
                     detect_result.backend,
                     state_dir.to_path_buf(),
-                    "auto-detect",
+                    &detect_result.method,
                 )
                 .await
                 .context("Failed to rebuild daemon state after legacy migration")?,
