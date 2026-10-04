@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- Fresh-login fail-open guard: when cosh is the login shell and the very first interactive session cannot start (`shell.integration` misconfigured, host/relay initialization error, or a panic before the first prompt), the session falls back to a clean native `bash -l` via the invocation-transparency exec semantics instead of locking the user out; after the first prompt (`ShellReady`) failures keep exiting with an error because effects may already have been dispatched, and non-login invocations behave exactly as before (#3389)
+
 ## [0.26.0] — 2026-09-23
 
 ### Added

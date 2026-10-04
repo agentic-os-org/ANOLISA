@@ -1,5 +1,7 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::approval::handoff::trust_key_from_command;
@@ -79,6 +81,129 @@ fn integration_for_launch(resume_active: bool, configured: ShellIntegration) -> 
     }
 }
 
+// #3389 fresh-login fail-open: when cosh is the login shell and the very
+// first interactive session cannot start, the user must not be locked out
+// of the machine — hand the session to a clean native login shell instead.
+//
+// The guard is deliberately narrow and stateless:
+//
+// - Only a *fresh* login falls back: once `ShellReady` (the first real
+//   prompt) has been observed, effects may already have been dispatched,
+//   and a second shell could replay or duplicate them, so post-ready
+//   failures keep exiting with an error.
+// - No counting, no crash-loop threshold: each fresh login independently
+//   retries cosh, and a failure falls back exactly once for that session,
+//   which cannot loop.
+// - Non-login invocations keep today's behaviour untouched.
+
+/// Hand the process over to a clean native login shell.
+///
+/// Reuses the invocation-transparency contract's [`exec_shell`] semantics
+/// (argv0 handling, `COSH_SHELL_DEFAULT_SHELL` resolution, SIGPIPE state,
+/// shell-shaped exec-failure wording) with no marker install and no `ENV`
+/// injection: the user lands in the shell they would have had without cosh.
+fn exec_native_login_shell() -> i32 {
+    crate::runtime::invocation::exec_shell(crate::runtime::invocation::ExecPlan {
+        shell_override: None,
+        arg0: OsString::from("bash"),
+        args: vec![OsString::from("-l")],
+        isolated: false,
+    })
+}
+
+/// Test-only fault injection point for the fail-open regression tests
+/// (`tests/raw_cli/failopen.rs`): `pre-ready` panics before the relay
+/// starts, `post-ready` panics on the first event batch that carries
+/// `ShellReady`, and `post-ready-err` makes the relay callback return
+/// `Err` on that batch (staging the relay-I/O error-after-ready shape).
+/// The seam exists because neither failure can be staged deterministically
+/// from a spawned binary otherwise; same pattern as `COSH_POC_PS1`.
+///
+/// The env read is compiled only into debug-assertion builds — integration
+/// tests build the binary under the dev/test profile, which keeps the seam
+/// live for them. Production (release) binaries compile the read out
+/// entirely, so `COSH_FAILOPEN_TEST_PANIC` can never panic or fail a
+/// shipped cosh: `failopen_fault_env_is_ignored_in_release_builds` pins
+/// that from the release test profile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FailOpenFault {
+    None,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    PreReady,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    PostReady,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    PostReadyErr,
+}
+
+impl FailOpenFault {
+    #[cfg(debug_assertions)]
+    fn from_env() -> Self {
+        match std::env::var("COSH_FAILOPEN_TEST_PANIC").as_deref() {
+            Ok("pre-ready") => Self::PreReady,
+            Ok("post-ready") => Self::PostReady,
+            Ok("post-ready-err") => Self::PostReadyErr,
+            _ => Self::None,
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn from_env() -> Self {
+        Self::None
+    }
+}
+
+#[cfg(all(test, not(debug_assertions)))]
+mod release_tests {
+    use super::FailOpenFault;
+
+    /// Production builds must ignore `COSH_FAILOPEN_TEST_PANIC`: the env
+    /// read is compiled out of release binaries, so the fault seam can
+    /// never panic or fail-open a shipped cosh. This test only exists in
+    /// the release test profile (`cargo test --release`); the debug
+    /// profile proves the live seam in `tests/raw_cli/failopen.rs`.
+    #[test]
+    fn failopen_fault_env_is_ignored_in_release_builds() {
+        std::env::set_var("COSH_FAILOPEN_TEST_PANIC", "pre-ready");
+        assert_eq!(FailOpenFault::from_env(), FailOpenFault::None);
+        std::env::set_var("COSH_FAILOPEN_TEST_PANIC", "post-ready");
+        assert_eq!(FailOpenFault::from_env(), FailOpenFault::None);
+        std::env::set_var("COSH_FAILOPEN_TEST_PANIC", "post-ready-err");
+        assert_eq!(FailOpenFault::from_env(), FailOpenFault::None);
+        std::env::remove_var("COSH_FAILOPEN_TEST_PANIC");
+    }
+}
+
+/// Record the first-prompt boundary (#3389): after `ShellReady` the
+/// session is no longer "fresh", so failures must stop falling back.
+///
+/// Test seam: the debug-only `post-ready` fault panics on the first
+/// `ShellReady` batch, and `post-ready-err` surfaces the same boundary as
+/// a relay `Err` instead, staging the relay-I/O error-after-ready shape
+/// the fail-open contract must survive. Returns `Ok(())` always outside
+/// the debug seam.
+fn observe_fault_after_first_prompt(
+    events: &[ShellEvent],
+    reached_ready: &AtomicBool,
+    fault: FailOpenFault,
+) -> std::io::Result<()> {
+    if events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ShellReady)
+    {
+        reached_ready.store(true, Ordering::Relaxed);
+        if fault == FailOpenFault::PostReady {
+            panic!("fail-open fault injection: post-ready");
+        }
+        if fault == FailOpenFault::PostReadyErr {
+            return Err(std::io::Error::other(
+                "fail-open fault injection: post-ready relay error",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn run_raw(
     adapter_name: &str,
     shell_kind: RawShellKind,
@@ -129,6 +254,24 @@ pub(crate) fn run_raw(
     // passed). Sole writer mirroring CoshConfig. Only fires for login +
     // Enhanced + non-isolated sessions (BashAdapter::uses_login_identity_inject).
     config.login_identity = cosh_config.login_identity;
+    // Explicit CLI misuse keeps its dedicated exit code; it is reported on
+    // stderr before any session exists, so it is not a lock-out scenario.
+    // Validated *before* the integration fail-open decision: an invalid
+    // `--shell` argument together with an invalid integration must keep the
+    // promised exit 2 instead of silently entering the native login
+    // fallback.
+    match &shell_kind {
+        RawShellKind::MissingShellValue => {
+            eprintln!("missing value for --shell; supported shells: bash, zsh");
+            return 2;
+        }
+        RawShellKind::Unsupported(shell) => {
+            let shell = crate::evidence::redact_sensitive_text(shell).0;
+            eprintln!("unsupported raw shell: {shell}; supported shells: bash, zsh");
+            return 2;
+        }
+        RawShellKind::Bash | RawShellKind::Zsh => {}
+    }
     let Some(configured_integration) =
         ShellIntegration::parse_config(&cosh_config.shell_integration)
     else {
@@ -136,6 +279,14 @@ pub(crate) fn run_raw(
             "invalid shell integration; expected shell.integration or \
              COSH_SHELL_INTEGRATION to be native or enhanced"
         );
+        // #3389 S1: a fresh interactive login must not be locked out by a
+        // mis-set configuration — the failure happens before the first
+        // prompt, so nothing has been dispatched and the native login
+        // shell takes over.
+        if login {
+            eprintln!("cosh: falling back to a native login shell");
+            return exec_native_login_shell();
+        }
         return 2;
     };
     // Resume is an explicit Agent action. It needs the ShellReady boundary
@@ -310,23 +461,74 @@ pub(crate) fn run_raw(
     apply_readonly_config(&cosh_config);
     inline_state.hooks.engine = load_hook_engine(&cosh_config);
 
-    let raw_result = match shell_kind {
-        RawShellKind::Bash => {
-            run_raw_interactive_bash_with_event_view(&config, |events, output| {
-                render_raw_inline_event_view(events, output, &adapter, "bash", &mut inline_state)
-            })
+    // #3389: the first prompt (`ShellReady`) is the fail-open boundary.
+    let reached_ready = AtomicBool::new(false);
+    let failopen_fault = FailOpenFault::from_env();
+    // #3389 S2: a render/startup panic must not strand a fresh login
+    // outside the machine, so the relay call is guarded. `AssertUnwindSafe`
+    // is honest here: after a caught panic `inline_state` may be mid-update,
+    // and the code below only runs best-effort shutdown plus the fail-open
+    // decision — it must not keep interpreting half-rendered state.
+    let raw_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if failopen_fault == FailOpenFault::PreReady {
+            panic!("fail-open fault injection: pre-ready");
         }
-        RawShellKind::Zsh => run_raw_interactive_zsh_with_event_view(&config, |events, output| {
-            render_raw_inline_event_view(events, output, &adapter, "zsh", &mut inline_state)
-        }),
-        RawShellKind::MissingShellValue => {
-            eprintln!("missing value for --shell; supported shells: bash, zsh");
-            return 2;
+        match shell_kind {
+            RawShellKind::Bash => {
+                run_raw_interactive_bash_with_event_view(&config, |view, output| {
+                    observe_fault_after_first_prompt(
+                        view.events(),
+                        &reached_ready,
+                        failopen_fault,
+                    )?;
+                    render_raw_inline_event_view(view, output, &adapter, "bash", &mut inline_state)
+                })
+            }
+            RawShellKind::Zsh => {
+                run_raw_interactive_zsh_with_event_view(&config, |view, output| {
+                    observe_fault_after_first_prompt(
+                        view.events(),
+                        &reached_ready,
+                        failopen_fault,
+                    )?;
+                    render_raw_inline_event_view(view, output, &adapter, "zsh", &mut inline_state)
+                })
+            }
+            RawShellKind::MissingShellValue | RawShellKind::Unsupported(_) => {
+                unreachable!("handled before the guarded relay call")
+            }
         }
-        RawShellKind::Unsupported(shell) => {
-            let shell = crate::evidence::redact_sensitive_text(&shell).0;
-            eprintln!("unsupported raw shell: {shell}; supported shells: bash, zsh");
-            return 2;
+    })) {
+        Ok(result) => result,
+        Err(panic) => {
+            crate::auth::ecs_poll::shutdown(&mut inline_state);
+            config.clear_shell_environment_observer();
+            config.clear_shell_history_file_observer();
+            inline_state.personalization.poll_ready();
+            if let Some(cancellation) = inline_state.personalization.analyzer_cancellation.as_ref()
+            {
+                cancellation.cancel_current();
+            }
+            if let Some(mut writer) = inline_state.personalization.writer.take() {
+                let _ = writer.shutdown(now_hour_bucket(), std::time::Duration::from_millis(100));
+            }
+            inline_state.shell_rewrite.shutdown();
+            if !login {
+                // Outside the fresh-login contract the previous behaviour is
+                // preserved: the panic keeps unwinding with its payload.
+                std::panic::resume_unwind(panic);
+            }
+            if !reached_ready.load(Ordering::Relaxed) {
+                // Nothing was dispatched (dispatch requires a prompt), so
+                // the native login shell can safely take over.
+                eprintln!("cosh: runtime failed before the first prompt");
+                eprintln!("cosh: falling back to a native login shell");
+                return exec_native_login_shell();
+            }
+            // Post-ready a second shell could duplicate dispatched effects,
+            // so the failure is reported instead of papered over.
+            eprintln!("runtime panicked after session start");
+            return 1;
         }
     };
 
@@ -347,6 +549,22 @@ pub(crate) fn run_raw(
         Err(err) => {
             let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
             eprintln!("raw shell failed: {err}");
+            // #3389 S1: the relay failed before the first prompt (host
+            // initialization, spawn, relay I/O). On a fresh login nothing
+            // has been dispatched yet, so the native login shell takes
+            // over instead of stranding the user; other invocations keep
+            // reporting the failure with exit code 1. A relay `Err` that
+            // arrives *after* `ShellReady` follows the post-ready panic
+            // contract instead: effects may already have been dispatched,
+            // so a second shell is never started and the failure keeps
+            // exit code 1.
+            if login && !reached_ready.load(Ordering::Relaxed) {
+                eprintln!("cosh: falling back to a native login shell");
+                return exec_native_login_shell();
+            }
+            if login {
+                eprintln!("cosh: raw shell failed after session start");
+            }
             1
         }
     }
