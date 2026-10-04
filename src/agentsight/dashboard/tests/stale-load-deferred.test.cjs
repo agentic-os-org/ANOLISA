@@ -875,9 +875,9 @@ test('causal attribution: a run superseded by a round switch must discard its re
 
 // ─── AgentSessionsPage: unchanged poll must not repeat the paid search ───────
 //
-// Hook-slot map: 0 merged · 6 search · 7 semanticEnabled · 11 autoRefresh ·
-// 12 loadRequestIdRef. Effects per render: [loadData, auto-refresh,
-// optimize-config, clear-semantic, debounce, reset-page].
+// Hook-slot map: 0 merged · 6 search · 7 semanticEnabled · 10 semanticError ·
+// 12 autoRefresh · 13 loadRequestIdRef. Effects per render: [loadData,
+// auto-refresh, optimize-config, clear-semantic, debounce, reset-page].
 
 const sameDeps = (a, b) =>
   a.length === b.length && a.every((dep, i) => Object.is(dep, b[i]));
@@ -942,8 +942,8 @@ test('agent sessions: an unchanged 10 s poll must not re-issue the semantic sear
 
   let rendered = driver.render(page);
   assert.equal(driver.slots[6].value, '', 'slot 6 must be the search input');
-  assert.equal(driver.slots[11].value, false, 'slot 11 must be autoRefresh');
-  assert.equal(typeof driver.slots[12].value.current, 'number', 'slot 12 must be a request-id ref');
+  assert.equal(driver.slots[12].value, false, 'slot 12 must be autoRefresh');
+  assert.equal(typeof driver.slots[13].value.current, 'number', 'slot 13 must be a request-id ref');
   reactRunEffects(rendered);
 
   // The initial load resolves with a fixed session set.
@@ -969,7 +969,7 @@ test('agent sessions: an unchanged 10 s poll must not re-issue the semantic sear
   reactRunEffects(rendered);
 
   // Turn on auto-refresh: the interval callback becomes tickable by hand.
-  driver.slots[11].setter(true);
+  driver.slots[12].setter(true);
   rendered = driver.render(page);
   reactRunEffects(rendered);
   assert.equal(intervals.length, 1, 'auto-refresh must register one interval');

@@ -87,6 +87,7 @@ export const AgentSessionsPage: React.FC = () => {
   const [semanticEnabled, setSemanticEnabled] = useState(false);
   const [semanticLoading, setSemanticLoading] = useState(false);
   const [semanticMatches, setSemanticMatches] = useState<Record<string, SemanticSearchResult>>({});
+  const [semanticError, setSemanticError] = useState(false);
   const [page, setPage] = useState(1);
   const [autoRefresh, setAutoRefresh] = useState(false);
   // Filter changes re-issue `loadData` immediately and the 10 s auto-refresh
@@ -190,6 +191,7 @@ export const AgentSessionsPage: React.FC = () => {
     const query = search.trim();
     if (!query || !semanticEnabled) {
       setSemanticMatches({});
+      setSemanticError(false);
       setSemanticLoading(false);
       return;
     }
@@ -209,6 +211,7 @@ export const AgentSessionsPage: React.FC = () => {
         project: s.project,
       }));
 
+      setSemanticError(false);
       setSemanticLoading(true);
       semanticSearchSessions({ query, candidates })
         .then((res) => {
@@ -223,7 +226,11 @@ export const AgentSessionsPage: React.FC = () => {
           setSemanticMatches(next);
         })
         .catch(() => {
-          if (!cancelled) setSemanticMatches({});
+          if (cancelled) return;
+          // A failed search is not an empty result: without this the table
+          // reported "no matching sessions" for a backend that never answered.
+          setSemanticMatches({});
+          setSemanticError(true);
         })
         .finally(() => {
           if (!cancelled) setSemanticLoading(false);
@@ -360,6 +367,8 @@ export const AgentSessionsPage: React.FC = () => {
           <div className="p-10 text-center text-gray-500 text-sm">
             {semanticLoading
               ? t('as.semanticSearching')
+              : semanticError && search
+              ? t('as.semanticSearchFailed')
               : search
               ? semanticEnabled
                 ? t('as.noMatchingSessions')
