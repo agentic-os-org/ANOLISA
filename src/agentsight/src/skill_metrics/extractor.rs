@@ -246,7 +246,7 @@ pub fn extract_tool_function_names(event: &TraceEventDetail) -> Vec<String> {
 fn extract_system_text(event: &TraceEventDetail) -> String {
     if let Some(json_str) = &event.system_instructions {
         // Try parsing as Vec<InputMessage> first
-        if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json_str) {
+        if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json_str) {
             let mut text = String::new();
             for msg in &msgs {
                 if msg.role == "system" {

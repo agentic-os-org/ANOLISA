@@ -359,7 +359,7 @@ fn extract_system_prompt(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> 
 
     // Strategy 2: from system_instructions column (JSON array of InputMessage)
     if let Some(ref json) = event.system_instructions {
-        if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json) {
+        if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
             let text = extract_text_from_input_messages(&msgs, "system");
             if !text.is_empty() {
                 return Some(text);
@@ -395,7 +395,7 @@ fn extract_user_query(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Opt
 
     // Strategy 3: from input_messages column
     if let Some(ref json) = event.input_messages {
-        if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json) {
+        if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
             let text = extract_last_user_text_from_input(&msgs);
             if let Some(t) = text {
                 return Some(t);
@@ -629,7 +629,7 @@ fn build_observation(
     // Strategy 3: from input_messages column (already incremental — latest round)
     if results.is_empty() {
         if let Some(ref json) = next_event.input_messages {
-            if let Ok(msgs) = serde_json::from_str::<Vec<InputMessage>>(json) {
+            if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
                 collect_tool_responses(&msgs, &tc_ids, &mut results, &mut matched_by_id);
             }
         }
@@ -1153,6 +1153,41 @@ pub(crate) mod tests {
             name: None,
         }];
         assert_eq!(extract_last_user_text(&messages), None);
+    }
+
+    /// A row that never completed keeps the raw protocol messages the crash
+    /// drain copied from the request body; its tool result must still become an
+    /// observation instead of being dropped by the strict parse.
+    #[test]
+    fn raw_shaped_columns_still_yield_the_tool_result() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-raw".into()),
+                name: "list_dir".into(),
+                arguments: Some(serde_json::json!({})),
+            }],
+            name: None,
+            finish_reason: Some("tool_calls".into()),
+        }];
+        let mut replayed = call_event(2, 3_000_000_000, None, None, None);
+        replayed.input_messages =
+            Some(r#"[{"role":"tool","tool_call_id":"tc-raw","content":"raw-a.txt"}]"#.to_string());
+        replayed.system_instructions = None;
+
+        let events = vec![
+            call_event(1, 1_000_000_000, Some(agent_turn), None, Some("list it")),
+            replayed,
+        ];
+
+        let doc = convert_trace_to_atif("trace-raw", events).unwrap();
+        let results = &doc.steps[2]
+            .observation
+            .as_ref()
+            .expect("raw-shaped columns must still produce an observation")
+            .results;
+        assert_eq!(results[0].source_call_id.as_deref(), Some("tc-raw"));
+        assert_eq!(results[0].content.as_ref().and_then(|c| c.as_str()), Some("raw-a.txt"));
     }
 
     #[test]
