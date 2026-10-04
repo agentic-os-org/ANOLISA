@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -892,6 +892,14 @@ pub struct VerifyResult {
     pub degraded: Vec<String>,
 }
 
+/// Compare the before/after bench runs metric by metric and report which
+/// ones degraded. Pairing is by `BenchResult.name`, never by position: bench
+/// suites emit results in completion order, so a re-run may reorder the
+/// vectors, and index-pairing would compare a throughput against a latency
+/// and flag both — with `ROLLBACK_MIN_DEGRADED == 2` that spuriously rolls
+/// back a fully improved system. A before-metric with no after-partner, or a
+/// change that cannot be graded (`b.value <= 0.0`, non-finite `a.value`),
+/// counts as degraded: unverifiable is never silently clean.
 pub fn verify_and_report(before: &[BenchResult], after: &[BenchResult]) -> VerifyResult {
     println!("  {}", "性能对比 (before → after)".bold());
     println!(
@@ -902,16 +910,39 @@ pub fn verify_and_report(before: &[BenchResult], after: &[BenchResult]) -> Verif
 
     let mut degraded = Vec::new();
 
-    for (b, a) in before.iter().zip(after.iter()) {
-        let change = if b.value > 0.0 {
-            (a.value - b.value) / b.value * 100.0
-        } else {
-            0.0
+    let after_by_name: HashMap<&str, &BenchResult> =
+        after.iter().map(|a| (a.name.as_str(), a)).collect();
+
+    for b in before {
+        let Some(a) = after_by_name.get(b.name.as_str()) else {
+            // The after-run lost this metric (bench error, partial run). zip
+            // truncation used to drop it from the comparison entirely; a
+            // metric that cannot be verified must be surfaced instead.
+            degraded.push(b.name.clone());
+            let before_val = format!("{:>8.2} {:<10}", b.value, b.unit);
+            let after_val = format!("{:>8} {:<10}", "—", "");
+            println!(
+                "  {:<24} {}  {} {}",
+                b.name,
+                before_val,
+                after_val,
+                "无法验证 ⚠".red()
+            );
+            continue;
         };
+
+        let change = (a.value - b.value) / b.value * 100.0;
+
+        // NaN (and the infinities a `b.value == 0.0` division produces)
+        // compare false against BOTH thresholds, so without this guard a
+        // NaN after-value passes as clean and renders as "↓NaN%".
+        let unverifiable = !change.is_finite() || b.value <= 0.0;
 
         let is_latency = b.unit.contains("ns") || b.unit.contains("μs");
 
-        let is_degraded = if is_latency {
+        let is_degraded = if unverifiable {
+            true
+        } else if is_latency {
             change > DEGRADATION_THRESHOLD
         } else {
             change < -DEGRADATION_THRESHOLD
@@ -921,7 +952,7 @@ pub fn verify_and_report(before: &[BenchResult], after: &[BenchResult]) -> Verif
             degraded.push(b.name.clone());
         }
 
-        let change_display = if change.abs() < 1.0 {
+        let change_display = if unverifiable || change.abs() < 1.0 {
             "—".dimmed().to_string()
         } else if is_latency {
             if change < 0.0 {
@@ -2077,5 +2108,91 @@ mod tests {
             assert!(message.contains("inspect and repair"), "{message}");
             assert!(message.contains("rerun the command"), "{message}");
         }
+    }
+
+    fn bench(name: &str, value: f64, unit: &str) -> BenchResult {
+        BenchResult {
+            name: name.to_string(),
+            value,
+            unit: unit.to_string(),
+        }
+    }
+
+    #[test]
+    fn verify_pairs_by_name_so_reordering_cannot_flip_the_verdict() {
+        // Same host, both metrics genuinely improved (latency 500→80 ns,
+        // throughput 100→600 MB/s), but the after-run finished in swapped
+        // order. Index-pairing compared seq_read against 80 "MB/s" and
+        // io_latency against 600 "ns", flagged BOTH degraded — enough to
+        // trigger auto_rollback_on_degradation on a fully improved system.
+        let before = vec![
+            bench("seq_read", 100.0, "MB/s"),
+            bench("io_latency", 500.0, "ns"),
+        ];
+        let after = vec![
+            bench("io_latency", 80.0, "ns"),
+            bench("seq_read", 600.0, "MB/s"),
+        ];
+        let result = verify_and_report(&before, &after);
+        assert!(
+            result.degraded.is_empty(),
+            "every metric improved, yet flagged degraded: {:?}",
+            result.degraded
+        );
+    }
+
+    #[test]
+    fn verify_surfaces_a_before_metric_missing_from_the_after_run() {
+        // zip truncation used to shrink the comparison to the metrics both
+        // runs share, so a bench that silently lost fsync reported a clean
+        // tune. A metric that cannot be verified must never be silently
+        // clean.
+        let before = vec![
+            bench("seq_read", 100.0, "MB/s"),
+            bench("fsync", 500.0, "ns"),
+        ];
+        let after = vec![bench("seq_read", 200.0, "MB/s")];
+        let result = verify_and_report(&before, &after);
+        assert_eq!(result.degraded, vec!["fsync".to_string()]);
+    }
+
+    #[test]
+    fn verify_marks_non_finite_changes_degraded_instead_of_clean() {
+        // NaN compares false against both thresholds, so it used to pass as
+        // clean and rendered as "↓NaN%". A degenerate before-value is the
+        // same problem from the other side (0.0 divides into ±inf).
+        let result = verify_and_report(
+            &[
+                bench("seq_read", 100.0, "MB/s"),
+                bench("io_latency", 500.0, "ns"),
+            ],
+            &[
+                bench("seq_read", f64::NAN, "MB/s"),
+                bench("io_latency", 500.0, "ns"),
+            ],
+        );
+        assert_eq!(result.degraded, vec!["seq_read".to_string()]);
+
+        let result = verify_and_report(
+            &[bench("seq_read", 0.0, "MB/s")],
+            &[bench("seq_read", 200.0, "MB/s")],
+        );
+        assert_eq!(result.degraded, vec!["seq_read".to_string()]);
+    }
+
+    #[test]
+    fn verify_same_order_pairing_keeps_today_grading() {
+        // Unchanged, aligned runs must grade exactly as before: improved
+        // throughput is clean, a >10% latency regression is degraded.
+        let before = vec![
+            bench("seq_read", 100.0, "MB/s"),
+            bench("io_latency", 500.0, "ns"),
+        ];
+        let after = vec![
+            bench("seq_read", 200.0, "MB/s"),
+            bench("io_latency", 600.0, "ns"),
+        ];
+        let result = verify_and_report(&before, &after);
+        assert_eq!(result.degraded, vec!["io_latency".to_string()]);
     }
 }
