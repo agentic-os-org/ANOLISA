@@ -304,6 +304,26 @@ fn ollama_from_env() -> Result<OllamaClient, ModelServiceError> {
     ))
 }
 
+/// Fingerprint of the effective client configuration, for cache keys.
+///
+/// Resolves the same environment variables [`create_client`] reads, through
+/// the same defaults and the same tolerant timeout fallback, and flattens
+/// them into one comparable string.  A long-lived caller (the embedded
+/// daemon) can key a client-reuse cache on this fingerprint: an environment
+/// change yields a different fingerprint and therefore a fresh entry, so
+/// reuse never pins a stale configuration, while the unchanged case costs
+/// three env reads instead of a full client rebuild.
+///
+/// Validation is deliberately not performed here — an invalid value maps to
+/// the fingerprint of the configuration a retry would effectively use, and
+/// [`create_client`] stays the component that rejects it.
+pub fn env_fingerprint() -> String {
+    let backend = env_or(ENV_BACKEND, DEFAULT_BACKEND);
+    let base_url = env_or(ENV_BASE_URL, DEFAULT_BASE_URL);
+    let timeout_secs = timeout_secs_or_default(std::env::var(ENV_TIMEOUT).ok());
+    format!("{backend}|{base_url}|{timeout_secs}s")
+}
+
 /// Reject a base URL that is unparseable, whose scheme is not `http://` or
 /// `https://`, or which targets a host other than loopback.
 ///
@@ -561,6 +581,35 @@ mod tests {
                 "{raw:?} must fall back to the default timeout"
             );
         }
+    }
+
+    #[test]
+    fn env_fingerprint_tracks_the_effective_configuration() {
+        // The only test in this binary that mutates these variables, so the
+        // process-wide environment stays consistent for every other test.
+        std::env::set_var(ENV_BACKEND, "ollama");
+        std::env::set_var(ENV_BASE_URL, "http://127.0.0.1:11434");
+        std::env::set_var(ENV_TIMEOUT, "45");
+        assert_eq!(
+            env_fingerprint(),
+            "ollama|http://127.0.0.1:11434|45s",
+            "set values must appear verbatim in the fingerprint"
+        );
+        // Out-of-range timeouts resolve exactly like the client does.
+        std::env::set_var(ENV_TIMEOUT, (MAX_TIMEOUT_SECS + 1).to_string());
+        assert_eq!(
+            env_fingerprint(),
+            format!("ollama|http://127.0.0.1:11434|{DEFAULT_TIMEOUT_SECS}s"),
+            "an ignored timeout must fingerprint as its effective value"
+        );
+        std::env::remove_var(ENV_BACKEND);
+        std::env::remove_var(ENV_BASE_URL);
+        std::env::remove_var(ENV_TIMEOUT);
+        assert_eq!(
+            env_fingerprint(),
+            format!("{DEFAULT_BACKEND}|{DEFAULT_BASE_URL}|{DEFAULT_TIMEOUT_SECS}s"),
+            "unset variables must fingerprint as their defaults"
+        );
     }
 
     #[test]

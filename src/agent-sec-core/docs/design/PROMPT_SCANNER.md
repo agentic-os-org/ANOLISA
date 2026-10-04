@@ -15,6 +15,7 @@
 - [自定义规则](#自定义规则)
 - [审计日志](#审计日志)
 - [L2 模型与 Ollama 配置](#l2-模型与-ollama-配置)
+- [高频调用与实例复用](#高频调用与实例复用)
 - [已知限制](#已知限制)
 
 ---
@@ -750,6 +751,32 @@ agent-sec-cli scan-prompt warmup
 ```
 
 模型缺失时返回 `verdict: error` 并提示对应的 `ollama pull` 命令。
+
+---
+
+## 高频调用与实例复用
+
+安全中间件的 `prompt_scan` 后端在 daemon 进程内以**每 prompt 一次**的频率调用
+`agent_sec_cli._native`。#2496 对该热路径的构造开销分析如下：
+
+| 构造期工作 | 是否已摊销 | 说明 |
+|------------|-----------|------|
+| L1 规则正则编译 | 进程内一次 | `rule_engine.rs` 的 `shared_rules()` 用 `OnceLock` 缓存整个编译后规则集 |
+| 模型服务环境解析 | 修复前：每次 | `create_client()` 每次重读 `AGENT_SEC_MODEL_SERVICE_*` 并做 URL 校验 |
+| HTTP agent（连接池）构造 | 修复前：每次 | 每次扫描新建 ureq agent，连接池随实例丢弃，跨扫描无法复用 keep-alive 连接 |
+| `multi_turn` 就绪探测 | 修复前：每次 | `PromptScanner::new` 经 `is_available()` → `check_ready()` 对 Ollama 做一次网络探测 |
+
+修复方式：`_native` 层按 `(mode, model, 模型服务环境指纹)` 缓存已构建的
+`Arc<PromptScanner>`（`ScannerCache`）。scanner 构建后不可变（`scan` 接收
+`&self`），因此同 key 的所有线程可安全共用一个实例：
+
+- **命中路径**只做三次环境变量读取（指纹）加一次哈希表查找；
+- **指纹**（`model_service::env_fingerprint()`）按与 `create_client()` 相同的默认值与容错规则解析，环境变化产生新 key，不会固化过期配置；
+- **失败不缓存**：`multi_turn` 模式下 Ollama 重启期间构造失败会在下一次扫描重试，而非毒化该 key；
+- `scan-prompt warmup` 预热的正是后续扫描复用的实例，冷启动成本真实被摊销；
+- `engine_init_ms` 语义不变：一次性构造成本记在进程内第一次经过该实例的扫描上，此后为 `0.0`。
+
+一次性 CLI（`agent-sec-cli scan-prompt`，每进程一次扫描）不受影响：每进程各有一份缓存，行为与原先一致。
 
 ---
 

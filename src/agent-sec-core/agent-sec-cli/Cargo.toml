@@ -46,5 +46,8 @@ pyo3 = { workspace = true }
 # Installs the `log` implementation for the whole extension; without it every
 # log::warn! in the dependency tree is a no-op.
 pyo3-log = { workspace = true }
+# Only for `env_fingerprint`, so the scanner-reuse cache keys on the same
+# effective model-service configuration the detectors' clients are built from.
+model-service = { path = "crates/model-service" }
 prompt-scanner = { path = "crates/prompt-scanner" }
 serde_json = { workspace = true }
