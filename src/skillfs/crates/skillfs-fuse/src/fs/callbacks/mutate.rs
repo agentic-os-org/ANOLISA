@@ -971,9 +971,11 @@ impl SkillFs {
         // is renamed to a skill directory, validate the target name
         // against sensitive namespaces and invalid skill name shapes.
         // Flat layout: SkillDir → SkillDir.
-        // Hermes layout: NestedSkillDir → NestedSkillDir (same category),
-        // and top-level staging roots classified by NAME (see the H3 arm
-        // below for why the type pairs alone cannot enumerate them).
+        // Hermes layout: NestedSkillDir → NestedSkillDir (any category
+        // pair — the guard is the old side's leaf name, not the scope),
+        // and staging roots in EITHER scope heading for a top-level
+        // target, classified by NAME (see the H3 arm below for why the
+        // type pairs alone cannot enumerate them).
         let is_staging_rename = if let Some(ref matcher) = self.staging_matcher {
             match (&old_path_type, &new_path_type) {
                 (
@@ -1008,17 +1010,23 @@ impl SkillFs {
                     }
                     true
                 }
-                // H3: Hermes intra-category staging rename.
+                // H3: Hermes nested staging rename, any category pair.
+                // The staging contract is keyed on the old side's leaf
+                // name, so an intra-category move and a cross-category
+                // move must be validated identically: requiring
+                // old_cat == new_cat let `mv /apple/.openclaw-install-stage-x
+                // /banana/.skill-meta` bypass the target validation
+                // entirely.
                 (
                     PathType::NestedSkillDir {
-                        category: old_cat,
                         skill_name: old_skill,
+                        ..
                     },
                     PathType::NestedSkillDir {
-                        category: new_cat,
                         skill_name: new_skill,
+                        ..
                     },
-                ) if old_cat == new_cat && matcher.is_staging_root(old_skill) => {
+                ) if matcher.is_staging_root(old_skill) => {
                     if !crate::security::install::is_valid_staging_rename_target(new_skill, matcher)
                     {
                         warn!(
@@ -1049,26 +1057,45 @@ impl SkillFs {
                 // SKILL.md yet — an interrupted install) and as a SkillDir
                 // once the manifest has been written. The rename target
                 // parses as a CategoryDir (non-in-place mount, or a name
-                // that already exists as a directory) or as a HermesMeta
+                // that already exists as a directory), as a HermesMeta
                 // (in-place mount, fresh name: the depth-1 in-place
                 // rewrite classifies not-yet-existing entries as
-                // top-level files). A (SkillDir, SkillDir) pair is already
-                // validated by the flat arm above, so this arm observes
-                // every other combination. Without it the validation — and
-                // the install-completion notify below — could be bypassed
-                // by choosing the mount mode or the manifest timing: a
-                // top-level staging rename onto `.skill-meta` silently
-                // succeeded, and a completed install never notified.
+                // top-level files), or as a NestedSkillDir (root →
+                // category scope crossing: `/.openclaw-install-stage-x` →
+                // `/apple/<name>`). A (SkillDir, SkillDir) pair is already
+                // validated by the flat arm above and a nested → nested
+                // pair by the arm above this one, so this arm observes
+                // every other combination — including the category → root
+                // crossing, where the SOURCE parses as a NestedSkillDir
+                // under one of the three top-level target shapes:
+                // `mv /apple/.openclaw-install-stage-x /.skill-meta`
+                // matched no arm and let a sensitive name land at the
+                // root, while a valid category → root completion never
+                // received its install-complete signal. The staging
+                // contract follows the old side's leaf name whatever
+                // scope it lives in, so the nested source is validated
+                // against the bare top-level target name and notified
+                // with the bare top-level skill id (the notify match
+                // below already keys CategoryDir/HermesMeta/SkillDir
+                // targets on the bare name).
                 (
                     PathType::SkillDir {
                         skill_name: old_name,
                     }
-                    | PathType::CategoryDir { category: old_name },
+                    | PathType::CategoryDir { category: old_name }
+                    | PathType::NestedSkillDir {
+                        skill_name: old_name,
+                        ..
+                    },
                     PathType::SkillDir {
                         skill_name: new_name,
                     }
                     | PathType::CategoryDir { category: new_name }
-                    | PathType::HermesMeta { name: new_name },
+                    | PathType::HermesMeta { name: new_name }
+                    | PathType::NestedSkillDir {
+                        skill_name: new_name,
+                        ..
+                    },
                 ) if self.skill_layout == crate::path::SkillLayout::Hermes
                     && matcher.is_staging_root(old_name) =>
                 {
@@ -1311,7 +1338,8 @@ impl SkillFs {
                         PathType::SkillDir {
                             skill_name: new_name,
                         } => Some(new_name.clone()),
-                        // H3: Hermes intra-category staging rename.
+                        // H3: Hermes nested staging rename — intra- or
+                        // cross-category (the root → category completion).
                         PathType::NestedSkillDir {
                             category,
                             skill_name,
@@ -1320,7 +1348,9 @@ impl SkillFs {
                         // top-level skill id is the bare name, whether the
                         // target parsed as a category, as a HermesMeta
                         // (in-place fresh name), or as an existing
-                        // top-level Skill. Matches
+                        // top-level Skill, and whether the staging root
+                        // came from the mount root or from a category
+                        // (the category → root completion). Matches
                         // enumerate_hermes_top_level_skills and the
                         // resolver key used for mixed-layout skills.
                         PathType::CategoryDir { category } => Some(category.clone()),
