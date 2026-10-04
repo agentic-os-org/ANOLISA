@@ -179,7 +179,7 @@ fn get_imdsv2_token(agent: &ureq::Agent, base_url: &str) -> Option<String> {
     // trailing `meta-data` segment.
     let token_url = base_url
         .strip_suffix("/meta-data")
-        .map(|prefix| format!("{prefix}/api/{TOKEN_PATH}"))
+        .map(|prefix| format!("{prefix}/{TOKEN_PATH}"))
         .unwrap_or_else(|| format!("{base_url}/{TOKEN_PATH}"));
 
     agent
@@ -197,6 +197,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     fn sample_metadata() -> EcsMetadata {
         EcsMetadata {
@@ -255,6 +256,8 @@ mod tests {
         listener: TcpListener,
         /// Base URL for the metadata API (e.g. `http://127.0.0.1:PORT/latest/meta-data`)
         meta_base: String,
+        /// Request lines observed by the handler thread.
+        requests: Arc<Mutex<Vec<String>>>,
     }
 
     impl MockServer {
@@ -266,6 +269,7 @@ mod tests {
             Self {
                 listener,
                 meta_base,
+                requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -273,6 +277,7 @@ mod tests {
         /// Handles both PUT (token) and GET (metadata) requests.
         fn serve_metadata(self, fields: Vec<(&'static str, &'static str)>) {
             let listener = self.listener;
+            let requests = Arc::clone(&self.requests);
             std::thread::spawn(move || {
                 // Accept up to 8 connections (token + 4 fields * IMDSv1+IMDSv2 fallback)
                 for _ in 0..8 {
@@ -294,6 +299,11 @@ mod tests {
                             break;
                         }
                     }
+
+                    requests
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(request_line.clone());
 
                     let is_put = request_line.starts_with("PUT");
 
@@ -323,6 +333,31 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// The IMDSv2 token endpoint is `/latest/api/token`, a sibling of the
+    /// metadata tree. It was requested at `/latest/api/api/token`, which real
+    /// hosts answer with 404, so every probe silently fell back to IMDSv1 (and
+    /// failed outright where IMDSv1 is disabled). The mock used to answer any
+    /// PUT, which is why the wrong path went unnoticed.
+    #[test]
+    fn imdsv2_token_is_requested_from_the_documented_path() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        let requests = Arc::clone(&server.requests);
+        server.serve_metadata(vec![("instance-id", "i-test123")]);
+
+        let agent = metadata_agent(Duration::from_secs(2));
+        let token = get_imdsv2_token(&agent, &base);
+        assert_eq!(token.as_deref(), Some("mock-token-abc"));
+
+        let lines = requests.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("PUT /latest/api/token ")),
+            "the token endpoint must be /latest/api/token, got {lines:?}"
+        );
     }
 
     #[test]
