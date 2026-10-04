@@ -297,8 +297,12 @@ def convert_session_to_trace(
 
         result_body = tc_info.get("result", "")
         is_error = tc_info.get("is_error", False)
-        # If mcporter returned an error, mark as error
-        if "Error:" in result_body or "unknown" in result_body.lower():
+        # If mcporter returned an error, mark as error. Match only mcporter's
+        # own error marker: successful tool bodies legitimately contain the
+        # word "unknown" (e.g. unknown@example.com in a gmail listing), and a
+        # substring match here would record a 500 for a successful call,
+        # which compute_robustness then counts against the run.
+        if "Error:" in result_body:
             is_error = True
 
         return {
