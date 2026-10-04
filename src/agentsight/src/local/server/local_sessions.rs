@@ -141,28 +141,34 @@ fn is_safe_session_path(path: &str) -> bool {
     };
 
     // Must be under $HOME/<known-session-root>
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return false,
-    };
-
-    let known_roots = [
-        ".claude/projects",
-        ".qoder/projects",
-        ".qoderwork/projects",
-        ".codex/sessions",
-        ".codex/archived_sessions",
-        ".cursor/projects",
-    ];
-
-    for root in &known_roots {
-        let base = home.join(root);
-        if canonical.starts_with(&base) {
-            return true;
-        }
+    match dirs::home_dir() {
+        Some(home) => is_under_known_session_root(&canonical, &home),
+        None => false,
     }
+}
 
-    false
+/// Session roots whose files the local viewer may open, relative to `home`.
+const KNOWN_SESSION_ROOTS: [&str; 6] = [
+    ".claude/projects",
+    ".qoder/projects",
+    ".qoderwork/projects",
+    ".codex/sessions",
+    ".codex/archived_sessions",
+    ".cursor/projects",
+];
+
+/// Whether a canonicalized path belongs to one of the known session roots.
+///
+/// The candidate path is canonicalized, so a root that is itself a symlink (a
+/// dotdir kept on another disk) would never match its unresolved form and every
+/// session in it was answered with 400. Canonicalize the root too, falling back
+/// to the literal path when it does not exist yet.
+fn is_under_known_session_root(canonical: &std::path::Path, home: &std::path::Path) -> bool {
+    KNOWN_SESSION_ROOTS.iter().any(|root| {
+        let base = home.join(root);
+        let base = base.canonicalize().unwrap_or(base);
+        canonical.starts_with(&base)
+    })
 }
 
 #[cfg(test)]
@@ -183,6 +189,40 @@ mod tests {
         // /tmp is not under any known session root
         assert!(!is_safe_session_path("/tmp/session.jsonl"));
         assert!(!is_safe_session_path("/etc/passwd.json"));
+    }
+
+    #[test]
+    fn session_roots_that_are_symlinks_keep_their_files_readable() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight-session-root-symlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // The dotdir lives elsewhere and is linked into $HOME.
+        let real_root = tmp.join("real").join("projects");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let session = real_root.join("session.jsonl");
+        std::fs::write(&session, "{}").unwrap();
+
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&real_root, home.join(".claude").join("projects")).unwrap();
+
+        let canonical = session.canonicalize().unwrap();
+        assert!(
+            is_under_known_session_root(&canonical, &home),
+            "a session under a symlinked root must stay readable"
+        );
+
+        // A file outside every root is still refused.
+        let outside = tmp.join("outside.jsonl");
+        std::fs::write(&outside, "{}").unwrap();
+        assert!(!is_under_known_session_root(
+            &outside.canonicalize().unwrap(),
+            &home
+        ));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
