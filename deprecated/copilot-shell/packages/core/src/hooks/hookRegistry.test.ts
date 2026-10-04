@@ -397,6 +397,62 @@ describe('HookRegistry', () => {
       expect(registry.getAllHooks()).toHaveLength(1);
     });
 
+    it('should allow hooks with same name but different command', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo first',
+                name: 'my-hook',
+              },
+              {
+                type: HookType.Command,
+                command: 'echo second',
+                name: 'my-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      const allHooks = registry.getAllHooks();
+      expect(allHooks).toHaveLength(2);
+      expect(new Set(allHooks.map((h) => h.config.command)).size).toBe(2);
+    });
+
+    it('should skip duplicate hooks with same name and command', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'dup-hook',
+              },
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'dup-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      expect(registry.getAllHooks()).toHaveLength(1);
+    });
+
     it('should allow hooks with same name but different matcher', async () => {
       const hooksConfig = {
         [HookEventName.PreToolUse]: [

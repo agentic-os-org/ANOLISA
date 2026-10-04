@@ -307,6 +307,7 @@ please review the project settings (.qwen/settings.json) and remove them.`;
             existing.eventName === eventName &&
             existing.source === source &&
             this.getHookName(existing) === hookName &&
+            existing.config.command === hookConfig.command &&
             existing.matcher === definition.matcher &&
             existing.sequential === definition.sequential,
         );
