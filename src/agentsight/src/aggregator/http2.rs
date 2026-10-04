@@ -467,8 +467,17 @@ impl Http2Stream {
         // normally arrives early and returns; an algorithm redesign is out of scope here.
         for frame in &self.response_data_frames {
             body.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
-            let Ok(body_str) = std::str::from_utf8(&body) else {
-                continue;
+            // A frame boundary can split a multi-byte character, which makes the
+            // tail of the buffer undecodable. Decode the valid prefix instead of
+            // skipping the frame: an event that completed before the split
+            // produced its output in *this* frame, and attributing it to the next
+            // frame reports a later time to first output than really happened.
+            let body_str = match std::str::from_utf8(&body) {
+                Ok(text) => text,
+                Err(error) => match std::str::from_utf8(&body[..error.valid_up_to()]) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                },
             };
             let parsed = SSEParser::parse_stream(body_str);
 
@@ -1574,6 +1583,37 @@ mod tests {
         // Re-parsing the accumulated body after frame 2 must attribute the
         // first complete meaningful event to frame 2, not the metadata frame.
         assert_eq!(stream.first_output_timestamp_ns(), Some(400));
+    }
+
+    #[test]
+    fn first_output_timestamp_keeps_the_frame_that_completed_the_event() {
+        // The frame boundary splits a multi-byte character, which used to make
+        // the whole frame undecodable. The meaningful event was complete before
+        // the split, so this frame carries the time to first output.
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        let mut first_payload =
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n".to_vec();
+        // First byte of 'é' (0xC3 0xA9) arrives here, the second in frame 2.
+        first_payload.push(0xC3);
+        let second_payload = vec![0xA9, b'\n'];
+
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            first_payload,
+            create_test_event(1234, 0x1000, 0, 200),
+        ));
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            second_payload,
+            create_test_event(1234, 0x1000, 0, 400),
+        ));
+
+        assert_eq!(stream.first_output_timestamp_ns(), Some(200));
     }
 
     #[test]
