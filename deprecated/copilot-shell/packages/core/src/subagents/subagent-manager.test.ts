@@ -8,7 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { SubagentManager } from './subagent-manager.js';
+import { SubagentManager, loadSubagentFromDir } from './subagent-manager.js';
 import { type SubagentConfig, SubagentError } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
@@ -191,6 +191,36 @@ You are a helpful assistant.
       expect(config.systemPrompt).toBe('You are a helpful assistant.');
       expect(config.level).toBe('project');
       expect(config.filePath).toBe(validConfig.filePath);
+    });
+
+    it('should parse markdown content with CRLF line endings', () => {
+      const crlfMarkdown = validMarkdown.replace(/\n/g, '\r\n');
+
+      const config = manager.parseSubagentContent(
+        crlfMarkdown,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.name).toBe('test-agent');
+      expect(config.description).toBe('A test subagent');
+      expect(config.systemPrompt).toBe('You are a helpful assistant.');
+      expect(config.level).toBe('project');
+    });
+
+    it('should parse CRLF and LF content identically', () => {
+      const crlfConfig = manager.parseSubagentContent(
+        validMarkdown.replace(/\n/g, '\r\n'),
+        validConfig.filePath!,
+        'project',
+      );
+      const lfConfig = manager.parseSubagentContent(
+        validMarkdown,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect({ ...crlfConfig }).toEqual({ ...lfConfig });
     });
 
     it('should parse content with tools', () => {
@@ -378,6 +408,21 @@ You are a helpful assistant.
       expect(consoleSpy).not.toHaveBeenCalled();
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('loadSubagentFromDir', () => {
+    it('should discover agents from definition files with CRLF line endings', async () => {
+      const crlfContent = validMarkdown.replace(/\n/g, '\r\n');
+      vi.mocked(fs.readdir).mockResolvedValue(['crlf-agent.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(crlfContent as never);
+
+      const agents = await loadSubagentFromDir('/ext/agents');
+
+      expect(agents).toHaveLength(1);
+      expect(agents[0].name).toBe('test-agent');
+      expect(agents[0].description).toBe('A test subagent');
+      expect(agents[0].systemPrompt).toBe('You are a helpful assistant.');
     });
   });
 

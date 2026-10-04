@@ -905,9 +905,17 @@ function parseSubagentContent(
   validator: SubagentValidator,
 ): SubagentConfig {
   try {
+    // Strip UTF-8 BOM and normalize line endings so subagent files authored
+    // on Windows (CRLF) parse identically to LF files — the same
+    // normalization the skills loader applies before parsing frontmatter.
+    const normalized = content
+      .replace(/^\uFEFF/, '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
+
     // Split frontmatter and content
     const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-    const match = content.match(frontmatterRegex);
+    const match = normalized.match(frontmatterRegex);
 
     if (!match) {
       throw new Error('Invalid format: missing YAML frontmatter');
