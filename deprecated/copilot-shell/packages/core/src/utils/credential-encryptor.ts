@@ -29,23 +29,62 @@ const SALT_LENGTH = 32;
 let cachedKey: Buffer | null = null;
 
 /**
+ * Thrown when the persisted encryption salt exists but cannot be used
+ * (wrong length or unreadable). Never silently regenerate the salt in this
+ * situation: a fresh salt would make every previously `enc:`-encrypted
+ * credential permanently undecryptable.
+ */
+export class CorruptSaltError extends Error {
+  constructor(saltPath: string, reason: string) {
+    super(
+      `The credential encryption salt at ${saltPath} cannot be used: ${reason}. ` +
+        'A new salt would make every existing "enc:" credential permanently ' +
+        'undecryptable, so none was generated. Restore the salt file from a ' +
+        'backup to recover existing credentials; if you have none to ' +
+        'preserve, delete the file and try again.',
+    );
+    this.name = 'CorruptSaltError';
+  }
+}
+
+/**
  * Read or create the persisted random salt at ~/.copilot-shell/.encryption-salt.
  * The salt is 32 raw bytes stored with mode 0o600.
+ *
+ * A missing salt file (ENOENT) is the normal first-run case and a new salt
+ * is created. An existing-but-corrupt or unreadable salt file is a hard
+ * error: overwriting it would silently destroy all stored credentials.
+ *
+ * Shared by every consumer of the salt file (credential encryption and MCP
+ * OAuth token storage, see `FileTokenStorage`): since the same salt backs
+ * both, no consumer may regenerate it silently — a replacement salt would
+ * invalidate the other consumers' data as well.
  */
-function getOrCreateSalt(): Buffer {
+export function getOrCreateSalt(): Buffer {
   const configDir = Storage.getGlobalQwenDir();
   const saltPath = path.join(configDir, '.encryption-salt');
 
+  let existing: Buffer | null = null;
   try {
-    const existing = fs.readFileSync(saltPath);
-    if (existing.length === SALT_LENGTH) {
-      return existing;
-    }
+    existing = fs.readFileSync(saltPath);
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
     if (err.code !== 'ENOENT') {
-      // Unexpected error — proceed to create a new salt
+      throw new CorruptSaltError(
+        saltPath,
+        `reading it failed (${err.message})`,
+      );
     }
+  }
+
+  if (existing !== null) {
+    if (existing.length === SALT_LENGTH) {
+      return existing;
+    }
+    throw new CorruptSaltError(
+      saltPath,
+      `expected ${SALT_LENGTH} bytes, found ${existing.length}`,
+    );
   }
 
   const salt = crypto.randomBytes(SALT_LENGTH);
@@ -82,10 +121,12 @@ export function encryptCredential(plaintext: string): string {
 }
 
 /**
- * Decrypt a credential value. Handles three cases:
+ * Decrypt a credential value. Handles these cases:
  * - No "enc:" prefix → returns the value as-is (backward compat with plaintext)
  * - Valid encrypted value → decrypts and returns plaintext
  * - Decryption failure → returns `undefined` (graceful degradation)
+ * - Corrupt/unreadable salt file → throws {@link CorruptSaltError} so the
+ *   operator can recover the salt instead of silently losing credentials
  */
 export function decryptCredential(value: string): string | undefined {
   if (!isEncryptedCredential(value)) {
@@ -109,8 +150,13 @@ export function decryptCredential(value: string): string | undefined {
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
     return decrypted;
-  } catch {
-    // Decryption failed — salt changed, data tampered, etc.
+  } catch (error) {
+    if (error instanceof CorruptSaltError) {
+      // The salt itself is unusable — surface it instead of silently
+      // returning undefined, which hides the data-loss cause.
+      throw error;
+    }
+    // Decryption failed — data tampered, wrong key, etc.
     return undefined;
   }
 }

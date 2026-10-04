@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { BaseTokenStorage } from './base-token-storage.js';
 import type { OAuthCredentials } from './types.js';
+import { getOrCreateSalt } from '../../utils/credential-encryptor.js';
 
 export class FileTokenStorage extends BaseTokenStorage {
   private readonly tokenFilePath: string;
@@ -22,36 +23,19 @@ export class FileTokenStorage extends BaseTokenStorage {
     this.tokenFilePath = path.join(this.configDir, 'mcp-oauth-tokens-v2.json');
   }
 
-  /**
-   * Get or create a persisted random salt file. This replaces the previous
-   * hostname-dependent salt, which broke decryption when the hostname changed.
-   */
-  private async getOrCreateSalt(): Promise<Buffer> {
-    const saltPath = path.join(this.configDir, '.encryption-salt');
-    try {
-      const existing = await fs.readFile(saltPath);
-      if (existing.length === 32) {
-        return existing;
-      }
-    } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException;
-      if (err.code !== 'ENOENT') {
-        // Unexpected error — log but continue to create a new salt
-        console.warn('Failed to read encryption salt file:', error);
-      }
-    }
-    // Generate and persist a new random salt
-    const salt = crypto.randomBytes(32);
-    await fs.mkdir(this.configDir, { recursive: true, mode: 0o700 });
-    await fs.writeFile(saltPath, salt, { mode: 0o600 });
-    return salt;
-  }
-
   private async ensureEncryptionKey(): Promise<Buffer> {
     if (this.encryptionKey) {
       return this.encryptionKey;
     }
-    const salt = await this.getOrCreateSalt();
+    // The salt loader is shared with the credential encryptor: the same
+    // .encryption-salt backs both MCP OAuth tokens and enc:-encrypted
+    // credentials, so a wrong-length or unreadable salt must never be
+    // regenerated here — overwriting it would invalidate the other
+    // consumers' data too. The shared loader throws CorruptSaltError
+    // instead; only ENOENT (first run) still creates a fresh salt. This
+    // replaces the previous hostname-dependent salt, which broke
+    // decryption when the hostname changed.
+    const salt = getOrCreateSalt();
     this.encryptionKey = crypto.scryptSync('qwen-code-oauth', salt, 32);
     return this.encryptionKey;
   }

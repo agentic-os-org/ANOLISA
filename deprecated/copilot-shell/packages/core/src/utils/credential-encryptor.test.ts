@@ -107,7 +107,7 @@ describe('credential-encryptor', () => {
       expect(writtenSalt.length).toBe(32);
     });
 
-    it('should recreate salt when file has wrong length', async () => {
+    it('should throw and NOT overwrite the salt file when it has wrong length', async () => {
       vi.resetModules();
       vi.clearAllMocks();
 
@@ -126,11 +126,64 @@ describe('credential-encryptor', () => {
       mockMkdirSync.mockReturnValue(undefined);
 
       const mod = await import('./credential-encryptor.js');
-      mod.encryptCredential('test');
+      expect(() => mod.encryptCredential('test')).toThrow(/salt/i);
+      // The corrupted salt file must not be silently replaced: regenerating
+      // it would make every previously enc:-encrypted credential
+      // permanently undecryptable.
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
 
-      expect(mockWriteFileSync).toHaveBeenCalled();
-      const writtenSalt = mockWriteFileSync.mock.calls[0][1] as Buffer;
-      expect(writtenSalt.length).toBe(32);
+    it('should throw (not return undefined) from decryptCredential when the salt file is corrupt', async () => {
+      vi.resetModules();
+      vi.clearAllMocks();
+
+      const fsModule = await import('node:fs');
+      mockReadFileSync = fsModule.readFileSync as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      mockWriteFileSync = fsModule.writeFileSync as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      mockMkdirSync = fsModule.mkdirSync as unknown as ReturnType<typeof vi.fn>;
+
+      mockReadFileSync.mockReturnValue(Buffer.alloc(16)); // corrupt salt
+      mockWriteFileSync.mockReturnValue(undefined);
+      mockMkdirSync.mockReturnValue(undefined);
+
+      const mod = await import('./credential-encryptor.js');
+      expect(() =>
+        mod.decryptCredential(
+          'enc:61616161616161616161616161616161:62626262626262626262626262626262:aabbcc',
+        ),
+      ).toThrow(/salt/i);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should throw and NOT overwrite the salt file when it cannot be read (EACCES)', async () => {
+      vi.resetModules();
+      vi.clearAllMocks();
+
+      const fsModule = await import('node:fs');
+      mockReadFileSync = fsModule.readFileSync as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      mockWriteFileSync = fsModule.writeFileSync as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      mockMkdirSync = fsModule.mkdirSync as unknown as ReturnType<typeof vi.fn>;
+
+      const eacces = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      mockReadFileSync.mockImplementation(() => {
+        throw eacces;
+      });
+      mockWriteFileSync.mockReturnValue(undefined);
+      mockMkdirSync.mockReturnValue(undefined);
+
+      const mod = await import('./credential-encryptor.js');
+      expect(() => mod.encryptCredential('test')).toThrow(/salt/i);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
     });
   });
 

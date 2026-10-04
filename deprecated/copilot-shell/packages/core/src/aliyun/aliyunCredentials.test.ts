@@ -13,6 +13,10 @@ import {
   hasAliyunCredentials,
   getAliyunCredsPath,
 } from './aliyunCredentials.js';
+import {
+  CorruptSaltError,
+  decryptCredential,
+} from '../utils/credential-encryptor.js';
 import { loadCoshNgAuth } from '../config/coshNgAuth.js';
 
 vi.mock('node:fs', () => ({
@@ -30,20 +34,29 @@ vi.mock('../config/coshNgAuth.js', () => ({
   loadCoshNgAuth: vi.fn(),
 }));
 
-vi.mock('../utils/credential-encryptor.js', () => ({
-  encryptCredential: vi.fn((v: string) => `enc:mock:mock:${v}`),
-  decryptCredential: vi.fn((v: string) => {
-    if (v.startsWith('enc:mock:mock:')) {
-      return v.slice('enc:mock:mock:'.length);
+vi.mock('../utils/credential-encryptor.js', () => {
+  class CorruptSaltError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'CorruptSaltError';
     }
-    if (v.startsWith('enc:')) {
-      // Simulate decryption failure for unknown encrypted values
-      return undefined;
-    }
-    // Plaintext passthrough
-    return v;
-  }),
-}));
+  }
+  return {
+    CorruptSaltError,
+    encryptCredential: vi.fn((v: string) => `enc:mock:mock:${v}`),
+    decryptCredential: vi.fn((v: string) => {
+      if (v.startsWith('enc:mock:mock:')) {
+        return v.slice('enc:mock:mock:'.length);
+      }
+      if (v.startsWith('enc:')) {
+        // Simulate decryption failure for unknown encrypted values
+        return undefined;
+      }
+      // Plaintext passthrough
+      return v;
+    }),
+  };
+});
 
 const mockFs = fs as unknown as {
   readFile: ReturnType<typeof vi.fn>;
@@ -147,6 +160,26 @@ describe('aliyunCredentials', () => {
 
       const result = await loadAliyunCredentials();
       expect(result).toBeNull();
+    });
+
+    it('should rethrow CorruptSaltError instead of reporting invalid credentials', async () => {
+      // An unusable salt is an operator-recoverable condition with its own
+      // restore-or-delete guidance; swallowing it into status 'invalid'
+      // would only report the credentials as missing.
+      mockFs.readFile.mockResolvedValue(
+        `enc:mock:mock:${JSON.stringify(testCredentials)}`,
+      );
+      const saltError = new CorruptSaltError(
+        '/home/test/.copilot-shell/.encryption-salt',
+        'expected 32 bytes, found 16',
+      );
+      vi.mocked(decryptCredential).mockImplementationOnce(() => {
+        throw saltError;
+      });
+
+      await expect(loadAliyunCredentials()).rejects.toBe(saltError);
+      // No cosh-ng identity fallback after a salt failure either.
+      expect(loadCoshNgAuth).not.toHaveBeenCalled();
     });
   });
 

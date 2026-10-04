@@ -6,9 +6,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { FileTokenStorage } from './file-token-storage.js';
+import { CorruptSaltError } from '../../utils/credential-encryptor.js';
 import type { OAuthCredentials } from './types.js';
 
 vi.mock('node:fs', () => ({
@@ -18,6 +20,10 @@ vi.mock('node:fs', () => ({
     unlink: vi.fn(),
     mkdir: vi.fn(),
   },
+  // The shared salt loader (getOrCreateSalt) uses the synchronous API.
+  readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
 }));
 
 vi.mock('node:os', () => ({
@@ -63,6 +69,11 @@ describe('FileTokenStorage', () => {
     writeFile: ReturnType<typeof vi.fn>;
     unlink: ReturnType<typeof vi.fn>;
     mkdir: ReturnType<typeof vi.fn>;
+  };
+  const mockFsSync = fsSync as unknown as {
+    readFileSync: ReturnType<typeof vi.fn>;
+    writeFileSync: ReturnType<typeof vi.fn>;
+    mkdirSync: ReturnType<typeof vi.fn>;
   };
 
   // A fixed 32-byte salt for deterministic test encryption
@@ -123,6 +134,17 @@ describe('FileTokenStorage', () => {
     vi.clearAllMocks();
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue(undefined);
+    mockFsSync.mkdirSync.mockReturnValue(undefined);
+    // The shared salt loader reads the salt synchronously; by default every
+    // test sees the deterministic 32-byte test salt.
+    mockFsSync.readFileSync.mockImplementation((filePath: string) => {
+      if (filePath === saltPath) {
+        return testSalt;
+      }
+      const err = new Error('ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    });
     storage = new FileTokenStorage('test-storage');
   });
 
@@ -413,11 +435,11 @@ describe('FileTokenStorage', () => {
 
   describe('getOrCreateSalt', () => {
     it('should create a new salt when salt file does not exist', async () => {
-      mockFs.readFile.mockImplementation((filePath: string) => {
-        if (filePath === saltPath) {
-          return Promise.reject({ code: 'ENOENT' });
-        }
-        return Promise.reject({ code: 'ENOENT' });
+      setupReadFileMock({ code: 'ENOENT' });
+      mockFsSync.readFileSync.mockImplementation(() => {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
       });
 
       // Trigger salt creation via setCredentials (which handles missing token file)
@@ -428,14 +450,59 @@ describe('FileTokenStorage', () => {
       };
       await storage.setCredentials(credentials);
 
-      // Salt file should have been written
-      const saltWriteCall = mockFs.writeFile.mock.calls.find(
+      // Salt file should have been written by the shared salt loader
+      const saltWriteCall = mockFsSync.writeFileSync.mock.calls.find(
         (call: unknown[]) => call[0] === saltPath,
       );
       expect(saltWriteCall).toBeDefined();
       expect(saltWriteCall![1]).toBeInstanceOf(Buffer);
       expect((saltWriteCall![1] as Buffer).length).toBe(32);
       expect(saltWriteCall![2]).toEqual({ mode: 0o600 });
+    });
+
+    it('should refuse to replace a wrong-length salt', async () => {
+      // A truncated salt (16 bytes instead of 32) must never be silently
+      // regenerated: the same file also derives the credential-encryptor
+      // key, so overwriting it would make every stored enc: credential
+      // and MCP token permanently undecryptable.
+      const shortSalt = crypto.randomBytes(16);
+      mockFsSync.readFileSync.mockImplementation((filePath: string) => {
+        if (filePath === saltPath) {
+          return shortSalt;
+        }
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      });
+      setupReadFileMock('corrupted-data');
+
+      await expect(storage.getCredentials('test-server')).rejects.toThrow(
+        CorruptSaltError,
+      );
+      expect(mockFsSync.writeFileSync).not.toHaveBeenCalled();
+      expect(mockFsSync.mkdirSync).not.toHaveBeenCalled();
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should refuse to replace the salt when reading it fails with EACCES', async () => {
+      mockFsSync.readFileSync.mockImplementation((filePath: string) => {
+        if (filePath === saltPath) {
+          const err = new Error('permission denied') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      });
+      setupReadFileMock('corrupted-data');
+
+      await expect(storage.getCredentials('test-server')).rejects.toThrow(
+        CorruptSaltError,
+      );
+      expect(mockFsSync.writeFileSync).not.toHaveBeenCalled();
+      expect(mockFsSync.mkdirSync).not.toHaveBeenCalled();
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
     });
   });
 });

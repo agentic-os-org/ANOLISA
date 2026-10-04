@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import {
   encryptCredential,
   decryptCredential,
+  CorruptSaltError,
 } from '../utils/credential-encryptor.js';
 import { Storage } from '../config/storage.js';
 import { loadCoshNgAuth } from '../config/coshNgAuth.js';
@@ -177,6 +178,12 @@ async function loadNativeAliyunCredentials(): Promise<NativeAliyunCredentialsRes
 
     return { status: 'loaded', credentials };
   } catch (error: unknown) {
+    if (error instanceof CorruptSaltError) {
+      // The salt itself is unusable. Degrading to 'invalid' here would
+      // report the credentials as merely missing and hide the
+      // restore-or-delete guidance the error carries.
+      throw error;
+    }
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
       // File doesn't exist
       return { status: 'absent' };
