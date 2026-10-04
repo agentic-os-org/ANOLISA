@@ -298,7 +298,19 @@ fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> Str
 
 /// Shell tokens that may precede the command being invoked without changing
 /// what it is.
-const TRANSPARENT_PREFIXES: &[&str] = &["sudo", "doas", "env", "nohup", "exec", "command"];
+const TRANSPARENT_PREFIXES: &[&str] = &[
+    "sudo", "doas", "env", "nohup", "exec", "command", "timeout", "nice", "time", "setsid",
+];
+
+/// Transparent prefixes that consume leading bare arguments before the
+/// command they run: `timeout` takes its duration as the first bare word
+/// (`timeout 30 pip install`), so that word is not the command.
+fn prefix_leading_bare_args(prefix: &str) -> usize {
+    match prefix {
+        "timeout" => 1,
+        _ => 0,
+    }
+}
 
 /// Options of transparent prefixes that consume a separate value token
 /// (`sudo -u root cmd`), so the value is not mistaken for the command word.
@@ -312,6 +324,8 @@ fn prefix_option_consumes_value(prefix: &str, option: &str) -> bool {
             "-u" | "-g" | "-p" | "-C" | "-R" | "-T" | "-U" | "-h"
         ) | ("doas" | "env", "-u" | "-C")
             | ("exec", "-a")
+            | ("timeout", "-s" | "-k" | "--signal" | "--kill-after")
+            | ("nice", "-n" | "--adjustment")
     )
 }
 
@@ -326,7 +340,29 @@ fn prefix_option_is_valueless(prefix: &str, option: &str) -> bool {
             | ("env", "-i" | "-0" | "-v")
             | ("exec", "-c" | "-l")
             | ("command", "-p")
+            | (
+                "timeout",
+                "--foreground" | "--preserve-status" | "-v" | "--verbose"
+            )
+            | ("time", "-p")
+            | ("setsid", "-c" | "-w" | "--ctty" | "--wait")
     )
+}
+
+/// Short options that consume a value may carry it attached — `nice -n10`,
+/// `timeout -sKILL` — making the option and its value one self-contained
+/// token.
+fn prefix_short_option_carries_value(prefix: &str, token: &str) -> bool {
+    if !token.starts_with('-') || token.starts_with("--") || token.len() <= 2 {
+        return false;
+    }
+    // The option letter must be ASCII: with a multi-byte letter (`-é`)
+    // byte 2 falls inside the character, and a slice there would panic.
+    // Such a token is not a short option this table knows.
+    if !token.as_bytes()[1].is_ascii() {
+        return false;
+    }
+    prefix_option_consumes_value(prefix, &token[..2])
 }
 
 /// `NAME=VALUE` environment assignment. Option-like tokens (`--key=value`)
@@ -343,17 +379,20 @@ fn is_assignment(token: &str) -> bool {
 /// before it — back to the nearest unquoted command boundary (`&&`, `|`,
 /// `;`, `$(`, backtick) — may only be environment assignments (`FOO=1`),
 /// transparent execution prefixes (`sudo`, `env`, ...), possibly chained
-/// (`sudo env FOO=1`, `env nohup`), and their options/value tokens
-/// (`sudo -u root`). An argument or subcommand of another command
+/// (`sudo env FOO=1`, `env nohup`), their options/value tokens
+/// (`sudo -u root`), and the bare arguments a prefix consumes before the
+/// command (`timeout 30`). An argument or subcommand of another command
 /// (`echo sudo virtualenv`, `pip install virtualenv`, `pyenv virtualenv`) is
 /// not; a match inside a larger token (`VENV_TOOL=virtualenv`) or an option
 /// value with no following token (`sudo -u virtualenv id`) is not either.
 ///
 /// Quote- and escape-aware: separators inside quotes (`LABEL='a; b'`) are
-/// not boundaries, and quoted runs stay inside their token. When the prefix
-/// ends inside an unterminated quote or escape, or hits an unrecognized
-/// option, the position cannot be determined and the caller keeps the
-/// original text.
+/// not boundaries, and quoted runs stay inside their token. Wrapper options
+/// are recognized in their separate-value (`sudo -u root`), attached-value
+/// (`nice -n10`, `timeout -sKILL`), self-contained `--key=value`, and
+/// end-of-options (`timeout -- 30 cmd`) forms. When the prefix ends inside
+/// an unterminated quote or escape, or hits an unrecognized option, the
+/// position cannot be determined and the caller keeps the original text.
 fn is_command_position(line: &str, pos: usize) -> bool {
     let prefix = &line[..pos];
     if let Some(last_char) = prefix.chars().next_back() {
@@ -367,6 +406,8 @@ fn is_command_position(line: &str, pos: usize) -> bool {
         return false; // unterminated quote/escape: position unknowable
     };
     let mut chain: Option<&str> = None; // None: waiting for the command word
+    let mut leading_bare_args = 0usize;
+    let mut past_options = false; // saw `--`: no more option tokens
     let mut tokens = tokens.into_iter();
     while let Some(token) = tokens.next() {
         match chain {
@@ -376,6 +417,7 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                 }
                 if TRANSPARENT_PREFIXES.contains(&token) {
                     chain = Some(token);
+                    leading_bare_args = prefix_leading_bare_args(token);
                     continue;
                 }
                 return false; // the command word is already present; the match is its argument
@@ -384,9 +426,18 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                 if is_assignment(token) {
                     continue; // `env FOO=1 cmd`
                 }
-                if token.starts_with('-') {
+                if !past_options && token == "--" {
+                    // End of the prefix's options (`timeout -- 30 cmd`,
+                    // `sudo -- cmd`): every later token is positional.
+                    past_options = true;
+                    continue;
+                }
+                if !past_options && token.starts_with('-') {
                     let self_contained_long = token.starts_with("--") && token.contains('=');
-                    if prefix_option_consumes_value(current, token) {
+                    if prefix_short_option_carries_value(current, token) {
+                        // `nice -n10`, `timeout -sKILL`: the value rides
+                        // attached to the option, one self-contained token.
+                    } else if prefix_option_consumes_value(current, token) {
                         if tokens.next().is_none() {
                             // No value token left in the prefix: the match
                             // itself is the option's value
@@ -402,6 +453,15 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                 }
                 if TRANSPARENT_PREFIXES.contains(&token) {
                     chain = Some(token); // `sudo env ...`, `env FOO=1 nohup ...`
+                    leading_bare_args = prefix_leading_bare_args(token);
+                    // A new wrapper restarts option recognition: a `--` in
+                    // an earlier layer (`sudo -- nice -n10 npm install`)
+                    // closed only that layer's options.
+                    past_options = false;
+                    continue;
+                }
+                if leading_bare_args > 0 {
+                    leading_bare_args -= 1; // `timeout 30 cmd`: the duration
                     continue;
                 }
                 return false; // a bare word ends the prefix chain: it is the command
@@ -915,6 +975,43 @@ mod tests {
     }
 
     #[test]
+    fn test_heuristic_pip_through_timeout_and_nice() {
+        let env = env_darwin_uv();
+        let input = concat!(
+            "timeout 30 pip install requests\n",
+            "timeout 30s pip3 install requests\n",
+            "nice -n 10 pip install requests\n",
+            "nice pip install requests\n",
+            "time pip install requests\n",
+            "setsid pip install requests\n",
+            "sudo timeout 30 pip install requests\n",
+            "env FOO=1 timeout 30 pip install requests\n",
+            "TIME=5 timeout 30 pip install requests\n",
+            "timeout --foreground 30 pip install requests\n",
+            "timeout -s KILL 30 pip install requests\n",
+            "nice --adjustment=5 pip3 install requests\n",
+        );
+        let expected = concat!(
+            "timeout 30 uv pip install requests\n",
+            "timeout 30s uv pip install requests\n",
+            "nice -n 10 uv pip install requests\n",
+            "nice uv pip install requests\n",
+            "time uv pip install requests\n",
+            "setsid uv pip install requests\n",
+            "sudo timeout 30 uv pip install requests\n",
+            "env FOO=1 timeout 30 uv pip install requests\n",
+            "TIME=5 timeout 30 uv pip install requests\n",
+            "timeout --foreground 30 uv pip install requests\n",
+            "timeout -s KILL 30 uv pip install requests\n",
+            "nice --adjustment=5 uv pip install requests\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+        assert_eq!(compile(input, &env_linux_no_uv()), input);
+    }
+
+    #[test]
     fn test_heuristic_virtualenv_arguments_untouched() {
         let env = env_darwin_uv();
         // `virtualenv` in argument or word-interior position stays; the pip
@@ -930,6 +1027,122 @@ mod tests {
             compile("pip install virtualenv\n", &env),
             "uv pip install virtualenv\n"
         );
+    }
+
+    #[test]
+    fn test_heuristic_timeout_and_nice_keep_arguments() {
+        let env = env_darwin_uv();
+        // A match that is an argument of another command — including the
+        // command run *by* timeout or nice — is not an invocation.
+        let unchanged = concat!(
+            "echo timeout 30 pip install requests\n",
+            "timeout 30 echo pip install requests\n",
+            "nice -n 10 echo pip install requests\n",
+            "timeout --unknown 30 pip install requests\n",
+            "nice -u root pip install requests\n",
+            "time -x pip install requests\n",
+            "setsid -q pip install requests\n",
+            "timeout 30 pip installable requests\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+    }
+
+    #[test]
+    fn test_heuristic_npm_through_timeout() {
+        let env = env_node_pnpm();
+        let input = concat!("timeout 60 npm install\n", "nice -n 5 npm test\n",);
+        let expected = concat!("timeout 60 pnpm install\n", "nice -n 5 pnpm test\n",);
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+    }
+
+    #[test]
+    fn test_heuristic_npm_through_wrapper_option_forms() {
+        // Legal invocations of the wrappers in their attached-value,
+        // long-alias, and end-of-options forms must still rewrite.
+        let env = env_node_pnpm();
+        let input = concat!(
+            "timeout -sKILL 30 npm install\n",
+            "nice -n10 npm install\n",
+            "setsid --wait npm install\n",
+            "timeout -- 30 npm install\n",
+        );
+        let expected = concat!(
+            "timeout -sKILL 30 pnpm install\n",
+            "nice -n10 pnpm install\n",
+            "setsid --wait pnpm install\n",
+            "timeout -- 30 pnpm install\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+    }
+
+    #[test]
+    fn test_heuristic_non_ascii_short_option_is_kept_verbatim() {
+        // A short option whose letter is multi-byte (`-é`: byte 2 of the
+        // token falls inside the character) is not a wrapper option this
+        // table knows. Reading its two-byte prefix must not panic — the
+        // compile-never-fails contract — and the line is kept verbatim.
+        let env = env_darwin_uv();
+        let input = concat!(
+            "nice -é pip install requests\n",
+            "timeout -π 30 pip install requests\n",
+        );
+        assert_eq!(compile(input, &env), input);
+    }
+
+    #[test]
+    fn test_heuristic_end_of_options_resets_per_wrapper() {
+        // A `--` ends one wrapper's options, not every wrapper that
+        // follows: the inner `nice` still recognizes its own `-n10`, so the
+        // command after it rewrites as in the single-wrapper forms.
+        let env = env_node_pnpm();
+        let input = concat!(
+            "sudo -- nice -n10 npm install\n",
+            "timeout -- 30 nice -n10 npm install\n",
+        );
+        let expected = concat!(
+            "sudo -- nice -n10 pnpm install\n",
+            "timeout -- 30 nice -n10 pnpm install\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+    }
+
+    #[test]
+    fn test_heuristic_virtualenv_through_timeout() {
+        let env = env_darwin_uv();
+        let input = "timeout 30 virtualenv myenv\n";
+        let expected = "timeout 30 uv venv myenv\n";
+        assert_eq!(compile(input, &env), expected);
+        assert_eq!(compile(&compile(input, &env), &env), expected);
+    }
+
+    #[test]
+    fn test_heuristic_venv_through_timeout_and_nice() {
+        // The venv rewrite became position-checked (like pip and npm), so a
+        // wrapped `python -m venv` needs the wrapper to be transparent for
+        // the same reason the pip and virtualenv forms above do.
+        let env = env_darwin_uv();
+        let input = concat!(
+            "timeout 30 python -m venv .venv\n",
+            "nice -n 5 python3 -m venv /opt/venv\n",
+            "time python -m venv .venv\n",
+            "setsid python -m venv .venv\n",
+        );
+        let expected = concat!(
+            "timeout 30 uv venv .venv\n",
+            "nice -n 5 uv venv /opt/venv\n",
+            "time uv venv .venv\n",
+            "setsid uv venv .venv\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+        assert_eq!(compile(input, &env_linux_no_uv()), input);
     }
 
     #[test]
