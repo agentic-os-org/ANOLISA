@@ -1263,6 +1263,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.sse_continuation_buffers.pop(&key);
+                self.last_appended_src_ptr.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
                 match state {
@@ -1325,6 +1327,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in dead_keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.sse_continuation_buffers.pop(&key);
+                self.last_appended_src_ptr.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
                 match state {
@@ -3108,6 +3112,56 @@ mod tests {
         assert_eq!(metrics.pending_connection_count, 0);
         assert_eq!(metrics.pending_connection_bytes, 0);
         assert_eq!(metrics.eviction_count, 1);
+    }
+
+    /// The per-connection SSE side caches are released on insert, on LRU
+    /// eviction and on SSE completion, but the two PID drain paths (crash
+    /// detection and the periodic dead-PID sweep) only released the
+    /// connection, activity and snapshot maps — so a dead process's
+    /// continuation buffer stayed resident and a later connection reusing the
+    /// same (pid, ssl_ptr) key appended onto the stale bytes.
+    #[test]
+    fn test_pid_drains_release_the_side_caches() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 4242,
+            ssl_ptr: 0x9000,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+            reassembled_body: None,
+        };
+        agg.connections.push(
+            conn_id,
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len: Some(4096),
+                body_buffer: Vec::new(),
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+        agg.sse_continuation_buffers
+            .push(conn_id, b"stale".to_vec());
+        agg.last_appended_src_ptr.push(conn_id, 42);
+
+        agg.drain_connections_for_pid(conn_id.pid);
+
+        assert!(agg.connections.peek(&conn_id).is_none());
+        assert!(
+            agg.sse_continuation_buffers.peek(&conn_id).is_none(),
+            "the crash drain must not leave the continuation buffer behind"
+        );
+        assert!(
+            agg.last_appended_src_ptr.peek(&conn_id).is_none(),
+            "the crash drain must not leave the append cursor behind"
+        );
     }
 
     #[test]
