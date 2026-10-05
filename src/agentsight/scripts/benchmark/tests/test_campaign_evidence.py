@@ -817,18 +817,21 @@ def test_campaign_audit_rejects_partial_evidence() -> None:
     assert "full Rust regression gates were not recorded" in issues
 
 
-def test_campaign_audit_accepts_only_complete_formal_evidence() -> None:
+@pytest.mark.parametrize("repetitions", [1, 3])
+def test_campaign_audit_accepts_only_complete_formal_evidence(
+    repetitions: int,
+) -> None:
     campaign_data = {
-        "capacity": {"qps_resolution": 50, "confirm_repetitions": 3},
+        "capacity": {"qps_resolution": 50, "confirm_repetitions": repetitions},
         "matrix": {
             "qps": [100, 200, 300, 400, 500],
-            "repetitions": 3,
+            "repetitions": repetitions,
             "warmup_seconds": 180,
             "duration_seconds": 900,
         },
         "soak": {"warmup_seconds": 600, "duration_seconds": 14400},
         "recovery": {
-            "repetitions": 3,
+            "repetitions": repetitions,
             "stable_seconds": 600,
             "overload_seconds": 300,
             "recover_seconds": 900,
@@ -842,8 +845,8 @@ def test_campaign_audit_accepts_only_complete_formal_evidence() -> None:
             "safety_limit_reached": False,
             "boundary_confirmed": True,
             "confirmation": {
-                "500": ["PASS", "PASS", "PASS"],
-                "550": ["FAIL", "FAIL", "FAIL"],
+                "500": ["PASS"] * repetitions,
+                "550": ["FAIL"] * repetitions,
             },
         }
         for version in campaign_evidence.VERSIONS
@@ -851,7 +854,7 @@ def test_campaign_audit_accepts_only_complete_formal_evidence() -> None:
     items = []
     for version in campaign_evidence.VERSIONS:
         for qps in campaign_data["matrix"]["qps"]:
-            for repetition in range(1, 4):
+            for repetition in range(1, repetitions + 1):
                 items.append(
                     (
                         Path(f"/{version}/{qps}/{repetition}/run-result.json"),
@@ -881,7 +884,7 @@ def test_campaign_audit_accepts_only_complete_formal_evidence() -> None:
                 },
             )
         )
-        for repetition in range(1, 4):
+        for repetition in range(1, repetitions + 1):
             for label, qps, duration in (
                 ("stable", 400, 600),
                 ("overload", 550, 300),
@@ -918,7 +921,7 @@ def test_campaign_audit_accepts_only_complete_formal_evidence() -> None:
     recovery = {
         (version, repetition): {"verdict": "PASS"}
         for version in campaign_evidence.VERSIONS
-        for repetition in range(1, 4)
+        for repetition in range(1, repetitions + 1)
     }
     faults = {version: {"verdict": "PASS"} for version in campaign_evidence.VERSIONS}
     regression = {

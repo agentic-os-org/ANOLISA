@@ -26,6 +26,18 @@ while true; do
     RELOAD=0
     start_workers
 
+    # A signal delivered while the workers were starting has already run its
+    # trap but cannot wake the not-yet-entered wait -n; consume the pending
+    # state here instead of blocking on it.
+    if [ "$TERMINATE" -eq 1 ]; then
+        stop_workers
+        exit 0
+    fi
+    if [ "$RELOAD" -eq 1 ]; then
+        stop_workers
+        continue
+    fi
+
     # Wait for any worker to exit; a trapped signal also interrupts wait.
     wait -n
     exit_code=$?
