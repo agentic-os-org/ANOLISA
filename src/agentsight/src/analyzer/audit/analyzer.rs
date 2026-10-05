@@ -67,10 +67,25 @@ impl AuditAnalyzer {
             .as_ref()
             .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok());
 
-        // Extract model from request body if available
+        // Extract model. The request body is the primary source (the name the
+        // caller asked for), but not every protocol puts it there: Gemini
+        // embeds the model in the URL path (`/models/{model}:generateContent`)
+        // and its request body carries contents/generationConfig only. When
+        // the body never arrived (truncated capture), the paired token record
+        // still holds the model the server reported — the provider resolution
+        // below already treats it as a source.
         let model = request_json
             .as_ref()
-            .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()));
+            .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()))
+            .or_else(|| {
+                crate::analyzer::message::MessageParser::gemini_model_from_path(&http_record.path)
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                token_record
+                    .and_then(|t| t.model.clone())
+                    .filter(|m| !m.is_empty())
+            });
 
         // Provider resolution: the parsed token usage is authoritative; fall
         // back to the endpoint path (compatible-mode completion paths still
@@ -380,5 +395,75 @@ mod tests {
         let record = make_http_record("/v1/messages", true, None);
         let audit = analyzer.analyze_http(&record, None).unwrap();
         assert_eq!(audit.session_id, None);
+    }
+
+    #[test]
+    fn test_analyze_http_labels_gemini_streams_from_the_path() {
+        // A Gemini streamGenerateContent call: the model rides in the URL
+        // path and the request body carries contents/generationConfig only,
+        // so neither the body `model` read nor the three-parser path set can
+        // label the row.
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            true,
+            None,
+        );
+        record.request_body = Some(
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{}}"#
+                .to_string(),
+        );
+        let audit = analyzer.analyze_http(&record, None).unwrap();
+        if let AuditExtra::LlmCall {
+            provider, model, ..
+        } = &audit.extra
+        {
+            assert_eq!(provider.as_deref(), Some("gemini"));
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_analyze_http_gemini_model_prefers_the_requested_name() {
+        // The token record carries the server-reported `modelVersion`
+        // snapshot; the audit row describes the call the client made, so the
+        // requested name from the path wins.
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+            true,
+            None,
+        );
+        record.request_body =
+            Some(r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#.to_string());
+        let token = TokenRecord::new(1, "test".into(), "gemini".into(), 120, 34)
+            .with_model("gemini-2.5-pro-002");
+        let audit = analyzer.analyze_http(&record, Some(&token)).unwrap();
+        if let AuditExtra::LlmCall { model, .. } = &audit.extra {
+            assert_eq!(model.as_deref(), Some("gemini-2.5-pro"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_analyze_http_model_falls_back_to_the_token_record() {
+        // The request body never arrived (truncated capture) but the response
+        // chunks carried `model`; the paired token record is the only
+        // remaining model source, and the provider resolution in this very
+        // function already trusts it.
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record("/v1/chat/completions", true, None);
+        record.request_body = None;
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 10, 5)
+            .with_model("qwen3-coder-plus");
+        let audit = analyzer.analyze_http(&record, Some(&token)).unwrap();
+        if let AuditExtra::LlmCall { model, .. } = &audit.extra {
+            assert_eq!(model.as_deref(), Some("qwen3-coder-plus"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
     }
 }
