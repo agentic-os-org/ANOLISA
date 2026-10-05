@@ -247,6 +247,61 @@ pub fn extract_response_content(
     None
 }
 
+/// Merge the assistant output of one SSE capture into
+/// `(content, reasoning, tool_call_fragments)`.
+///
+/// [`extract_response_content`] returns the whole answer for the closing
+/// `response.output_text.done` and `response.output_item.done` events in
+/// addition to every `response.output_text.delta`, so a plain fold over a
+/// complete capture counts the answer two or three times. Deltas are always
+/// counted; a closing event is read only when no delta carried text, which
+/// keeps late-joined captures (only the closing events present) working.
+pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, Vec<String>) {
+    // An empty delta carries no text, so it must not suppress the closing
+    // event's full-text fallback.
+    let saw_text_delta = chunks.iter().any(|chunk| {
+        chunk.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta")
+            && chunk
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .is_some_and(|delta| !delta.is_empty())
+    });
+    let repeats_full_text = |chunk: &Value| {
+        matches!(
+            chunk.get("type").and_then(|t| t.as_str()),
+            Some("response.output_text.done") | Some("response.output_item.done")
+        )
+    };
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls = Vec::new();
+    for chunk in chunks {
+        if saw_text_delta && repeats_full_text(chunk) {
+            continue;
+        }
+        if let Some((chunk_content, chunk_reasoning, chunk_tool_calls)) =
+            extract_response_content(Some(chunk))
+        {
+            if !chunk_content.is_empty() {
+                content.push_str(&chunk_content);
+            }
+            if let Some(reasoning_chunk) = chunk_reasoning {
+                if !reasoning_chunk.is_empty() {
+                    reasoning.push_str(&reasoning_chunk);
+                }
+            }
+            for tool_call in chunk_tool_calls {
+                if !tool_call.is_empty() {
+                    tool_calls.push(tool_call);
+                }
+            }
+        }
+    }
+
+    (content, reasoning, tool_calls)
+}
+
 /// Extract role and content from OpenAI message JSON
 fn extract_message(msg: &Value) -> Option<(String, String)> {
     let role = msg.get("role").and_then(|r| r.as_str())?;
@@ -472,6 +527,62 @@ mod tests {
         let (content, _, _) =
             extract_response_content(Some(&chunk)).expect("should extract item content");
         assert_eq!(content, "first second");
+    }
+
+    /// The closing `*.done` events replay the whole answer; merging must count
+    /// the deltas once and read the closing events only as a late-join
+    /// fallback.
+    #[test]
+    fn test_merge_response_output_text_counts_deltas_once() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hello "}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "there"}),
+            serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "message", "content": [{"text": "hello there"}]}}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "hello there");
+        assert!(reasoning.is_empty());
+        assert!(tool_calls.is_empty());
+    }
+
+    /// A capture that joined late only has the closing events; they must still
+    /// provide the answer. An empty delta carries no text and must not
+    /// suppress that fallback.
+    #[test]
+    fn test_merge_response_output_text_falls_back_to_closing_events() {
+        let only_done =
+            vec![serde_json::json!({"type": "response.output_text.done", "text": "hello there"})];
+        assert_eq!(merge_response_output_text(&only_done).0, "hello there");
+
+        let only_item_done = vec![serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "message", "content": [{"text": "hello there"}]}})];
+        assert_eq!(merge_response_output_text(&only_item_done).0, "hello there");
+
+        let empty_delta = vec![
+            serde_json::json!({"type": "response.output_text.delta", "delta": ""}),
+            serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
+        ];
+        assert_eq!(merge_response_output_text(&empty_delta).0, "hello there");
+    }
+
+    /// Reasoning and tool fragments pass through the same merge unchanged.
+    #[test]
+    fn test_merge_response_output_text_keeps_reasoning_and_tool_fragments() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "think "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "again"}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "answer"}),
+            serde_json::json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"path\":"}}),
+            serde_json::json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "\"/tmp/a\"}"}}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "answer");
+        assert_eq!(reasoning, "think again");
+        assert_eq!(tool_calls, vec!["{\"path\":", "\"/tmp/a\"}"]);
     }
 
     #[test]

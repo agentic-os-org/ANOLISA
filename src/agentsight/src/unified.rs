@@ -2129,31 +2129,19 @@ impl AgentSight {
                                     }
                                     // ── output tokens ──
                                     if enrichment.output_tokens.is_none() {
-                                        use crate::analyzer::token::extract_response_content;
-                                        let mut all_content = String::new();
-                                        let mut all_reasoning = String::new();
-                                        let mut all_tool_calls = Vec::new();
-                                        for ev in &sse_events {
-                                            if let Some(chunk) = ev.json_body() {
-                                                if let Some((content, reasoning, tool_calls)) =
-                                                    extract_response_content(Some(&chunk))
-                                                {
-                                                    if !content.is_empty() {
-                                                        all_content.push_str(&content);
-                                                    }
-                                                    if let Some(r) = reasoning {
-                                                        if !r.is_empty() {
-                                                            all_reasoning.push_str(&r);
-                                                        }
-                                                    }
-                                                    for tc in tool_calls {
-                                                        if !tc.is_empty() {
-                                                            all_tool_calls.push(tc);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        // The shared merge counts each delta
+                                        // once and reads the Responses closing
+                                        // events only as a fallback, so a
+                                        // complete capture is not counted
+                                        // two or three times.
+                                        let chunks: Vec<serde_json::Value> = sse_events
+                                            .iter()
+                                            .filter_map(|ev| ev.json_body())
+                                            .collect();
+                                        let (all_content, all_reasoning, all_tool_calls) =
+                                            crate::analyzer::token::merge_response_output_text(
+                                                &chunks,
+                                            );
                                         let mut total = 0usize;
                                         if !all_reasoning.is_empty() {
                                             let wrapped =

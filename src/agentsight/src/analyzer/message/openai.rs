@@ -262,7 +262,16 @@ impl OpenAIParser {
                     let mut msg = item.clone();
                     if let Some(parts) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
                         for part in parts.iter_mut() {
-                            if part.get("type").and_then(|t| t.as_str()) == Some("input_text") {
+                            // A replayed turn carries `input_text` for user
+                            // items and `output_text` for assistant items; the
+                            // typed content reader only knows the chat tag
+                            // "text", so both must be renamed. This mirrors
+                            // the raw parser, which accepts any block with a
+                            // `text` field whatever its type.
+                            if matches!(
+                                part.get("type").and_then(|t| t.as_str()),
+                                Some("input_text") | Some("output_text")
+                            ) {
                                 part["type"] = serde_json::json!("text");
                             }
                         }
@@ -1154,6 +1163,35 @@ mod tests {
         assert_eq!(req.model, "gpt-4.1");
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, MessageRole::User);
+    }
+
+    /// A replayed assistant turn in a Responses request carries `output_text`
+    /// parts. Normalization renamed only `input_text`, so the typed content
+    /// reader skipped the unmodeled part and stored the assistant message
+    /// empty — contradicting the raw parser, which accepts any block with a
+    /// `text` field whatever its type.
+    #[test]
+    fn test_parse_request_responses_assistant_output_text_is_kept() {
+        let json = serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "question"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "prior answer"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]}
+            ]
+        });
+
+        let req = OpenAIParser::parse_request(&json).expect("Responses request must parse");
+        assert_eq!(req.messages.len(), 3);
+        assert_eq!(
+            req.messages[1]
+                .content
+                .as_ref()
+                .expect("assistant content")
+                .as_text(),
+            "prior answer",
+            "a replayed output_text part must survive typed normalization"
+        );
     }
 
     #[test]

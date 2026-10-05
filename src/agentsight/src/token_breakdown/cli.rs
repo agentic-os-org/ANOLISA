@@ -721,6 +721,45 @@ mod tests {
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
+    /// The Responses API repeats the whole answer in `*.done` events; folding
+    /// every captured event through `extract_response_content` used to count
+    /// it once per event. `merge_response_output_text` must count the deltas
+    /// once and use the closing events only when no delta carried text.
+    #[test]
+    fn responses_done_events_do_not_double_count_the_answer() {
+        // The fixture tokenizer is WordLevel with a whitespace pre-tokenizer,
+        // so duplicated words are observable in the count.
+        let tokenizer = fixture_tokenizer();
+        let chunks = vec![
+            json!({"type": "response.output_text.delta", "delta": "hello "}),
+            json!({"type": "response.output_text.delta", "delta": "there"}),
+            json!({"type": "response.output_text.done", "text": "hello there"}),
+            json!({"type": "response.output_item.done", "item": {"content": [{"text": "hello there"}]}}),
+        ];
+
+        let merged = crate::analyzer::token::merge_response_output_text(&chunks);
+        assert_eq!(
+            merged.0, "hello there",
+            "the deltas must win over the closing replay, got {:?}",
+            merged.0
+        );
+
+        let count =
+            crate::analyzer::count_response_tokens(&chunks, &tokenizer).expect("response counts");
+        let once = tokenizer.count("hello there").expect("fixture counts");
+        assert_eq!(
+            count.total_tokens, once,
+            "the answer must be counted once: {:?}",
+            count.by_type
+        );
+
+        // A capture that only got the closing event still counts it.
+        let only_done = vec![json!({"type": "response.output_text.done", "text": "hello there"})];
+        let count = crate::analyzer::count_response_tokens(&only_done, &tokenizer)
+            .expect("response counts");
+        assert_eq!(count.total_tokens, once);
+    }
+
     #[test]
     fn breakdown_reports_the_model_the_command_was_given() {
         // `ChatMLTokenBreakdown::model_name` is documented as the model name

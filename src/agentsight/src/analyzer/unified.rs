@@ -21,7 +21,7 @@
 //! ```
 
 use crate::aggregator::AggregatedResult;
-use crate::analyzer::token::extract_response_content;
+use crate::analyzer::token::merge_response_output_text;
 use crate::parser::sse::{ParsedSseEvent, SSEParser};
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
@@ -234,28 +234,10 @@ pub fn count_response_tokens(
     let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut per_block: Vec<OutputTokenCount> = Vec::new();
 
-    // Accumulate content from all SSE chunks
-    let mut all_content = String::new();
-    let mut all_reasoning = String::new();
-    let mut all_tool_calls = Vec::new();
-
-    for chunk in response_jsons {
-        if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(chunk)) {
-            if !content.is_empty() {
-                all_content.push_str(&content);
-            }
-            if let Some(r) = reasoning {
-                if !r.is_empty() {
-                    all_reasoning.push_str(&r);
-                }
-            }
-            for tc in tool_calls {
-                if !tc.is_empty() {
-                    all_tool_calls.push(tc);
-                }
-            }
-        }
-    }
+    // Accumulate content from all SSE chunks. The shared merge counts each
+    // delta once and reads the Responses closing events only as a fallback,
+    // so a complete capture is not counted two or three times.
+    let (all_content, all_reasoning, all_tool_calls) = merge_response_output_text(response_jsons);
 
     let mut has_content = false;
 
@@ -931,31 +913,12 @@ impl Analyzer {
             0
         };
 
-        // Count output tokens from SSE events content
+        // Count output tokens from SSE events content. The shared merge counts
+        // each delta once and reads the Responses closing events only as a
+        // fallback, so a complete capture is not counted two or three times.
         let output_tokens = {
-            let mut all_content = String::new();
-            let mut all_reasoning = String::new();
-            let mut all_tool_calls = Vec::new();
-
-            for chunk in &sse_chunks {
-                if let Some((content, reasoning, tool_calls)) =
-                    extract_response_content(Some(chunk))
-                {
-                    if !content.is_empty() {
-                        all_content.push_str(&content);
-                    }
-                    if let Some(r) = reasoning {
-                        if !r.is_empty() {
-                            all_reasoning.push_str(&r);
-                        }
-                    }
-                    for tc in tool_calls {
-                        if !tc.is_empty() {
-                            all_tool_calls.push(tc);
-                        }
-                    }
-                }
-            }
+            let (all_content, all_reasoning, all_tool_calls) =
+                merge_response_output_text(&sse_chunks);
 
             let mut total = 0u64;
 
