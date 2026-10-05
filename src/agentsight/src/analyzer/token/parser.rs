@@ -174,13 +174,23 @@ impl TokenParser {
             }
         }
 
-        // 4. Check for usage object directly (OpenAI and compatible APIs)
+        // 4. Gemini: usage rides under `usageMetadata` with camelCase counters
+        // (`promptTokenCount`/`candidatesTokenCount`), never under `usage`, and
+        // the model under `modelVersion`. The endpoint detector already knows
+        // generativelanguage.googleapis.com, but without this branch the
+        // parser never read the metadata, so every Gemini stream produced no
+        // token record at all.
+        if let Some(usage) = json.get("usageMetadata").filter(|u| u.is_object()) {
+            return extract_usage_object(usage, LLMProvider::Gemini, json);
+        }
+
+        // 5. Check for usage object directly (OpenAI and compatible APIs)
         if let Some(usage) = json.get("usage") {
             let provider = detect_provider_from_usage(usage);
             return extract_usage_object(usage, provider, json);
         }
 
-        // 5. Responses API: usage nested in the terminal response event —
+        // 6. Responses API: usage nested in the terminal response event —
         // `response.completed`, or `response.incomplete` when the output cap
         // cut the stream. The terminal event carries the final usage either
         // way (the live message parser reads both, e534bec1b). The event
@@ -304,6 +314,48 @@ mod tests {
         );
         assert_eq!(usage.output_tokens, 382);
         assert_eq!(usage.total_tokens(), 1643, "reconciles with total_tokens");
+    }
+
+    /// Gemini `streamGenerateContent` chunks carry usage under
+    /// `usageMetadata` with camelCase counters — never under `usage` — and the
+    /// model under `modelVersion`. Shape from generativelanguage.googleapis.com
+    /// traffic; the endpoint detector already recognizes that host, but the
+    /// parser never read the metadata, so every Gemini stream produced no
+    /// token record at all.
+    #[test]
+    fn test_parse_gemini_usage_metadata() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "candidates": [
+                {"content": {"parts": [{"text": "Hello"}], "role": "model"},
+                 "finishReason": "STOP", "index": 0}
+            ],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5,
+                              "totalTokenCount": 15, "cachedContentTokenCount": 3},
+            "modelVersion": "gemini-2.0-flash-001"
+        }"#;
+        let usage = parser
+            .parse_data(data)
+            .expect("gemini usage must be parsed");
+        assert_eq!(usage.provider, LLMProvider::Gemini);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_input_tokens, Some(3));
+        assert_eq!(usage.model.as_deref(), Some("gemini-2.0-flash-001"));
+    }
+
+    /// Streaming chunks that only carry a text delta have no
+    /// `usageMetadata`; they must not yield a usage record (the caller merges
+    /// every parseable chunk and takes the max of each cumulative counter).
+    #[test]
+    fn test_parse_gemini_chunk_without_usage_metadata_yields_no_usage() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "candidates": [
+                {"content": {"parts": [{"text": "Hel"}], "role": "model"}, "index": 0}
+            ]
+        }"#;
+        assert!(parser.parse_data(data).is_none());
     }
 
     /// Regression guard from **real captured traffic**: Anthropic-protocol

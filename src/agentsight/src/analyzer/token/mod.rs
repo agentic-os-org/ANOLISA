@@ -162,9 +162,16 @@ pub fn extract_usage_object(
             (input.unwrap_or(0), output.unwrap_or(0))
         }
         LLMProvider::Gemini => {
-            let input = usage.get("prompt_token_count").and_then(|v| v.as_u64())?;
+            // The wire format is camelCase (`promptTokenCount` /
+            // `candidatesTokenCount` under `usageMetadata`); keep the
+            // snake_case spellings as a gateway fallback.
+            let input = usage
+                .get("promptTokenCount")
+                .or_else(|| usage.get("prompt_token_count"))
+                .and_then(|v| v.as_u64())?;
             let output = usage
-                .get("candidates_token_count")
+                .get("candidatesTokenCount")
+                .or_else(|| usage.get("candidates_token_count"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             (input, output)
@@ -214,6 +221,9 @@ pub fn extract_usage_object(
     // may surface them at the top level as `cached_tokens`.
     // DashScope also nests `cache_creation_input_tokens` under
     // `prompt_tokens_details`, so we fall back there as well.
+    // Gemini reports hits as `cachedContentTokenCount`; like the OpenAI
+    // billing model the cached prefix is already inside `promptTokenCount`,
+    // so it is recorded but never added on top (TokenRecord::billed_input_tokens).
     let cache_creation_input_tokens = usage
         .get("cache_creation_input_tokens")
         .and_then(|v| v.as_u64())
@@ -238,12 +248,18 @@ pub fn extract_usage_object(
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(|v| v.as_u64())
         })
+        .or_else(|| {
+            usage
+                .get("cachedContentTokenCount")
+                .and_then(|v| v.as_u64())
+        })
         .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()));
 
-    // Extract model name
+    // Extract model name. Gemini chunks carry it as `modelVersion`.
     let model = full_json
         .get("model")
         .and_then(|v| v.as_str())
+        .or_else(|| full_json.get("modelVersion").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
 
     Some(TokenUsage {
