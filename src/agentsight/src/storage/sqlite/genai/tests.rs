@@ -3030,3 +3030,71 @@ fn agent_activity_summaries_group_names_and_aggregate_calls() {
     drop(store);
     cleanup_size_test_db(&path);
 }
+
+/// A `genai_events` table created before the `conversation_id` column existed
+/// must be migrated before the index batch that references it. SQLite resolves
+/// column names when it prepares `CREATE INDEX`, so with the old ordering the
+/// batch aborted with "no such column: conversation_id" and the store never
+/// initialized (same defect as the interruption store's issue #3314).
+#[test]
+fn legacy_db_without_conversation_id_is_migrated_before_index_creation() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_legacy_conversation_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // Shape written by the release before conversation_id was added:
+        // every column the first index batch references except conversation_id.
+        conn.execute_batch(
+            "CREATE TABLE genai_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                call_id TEXT,
+                trace_id TEXT,
+                session_id TEXT,
+                instance TEXT,
+                start_timestamp_ns INTEGER NOT NULL,
+                pid INTEGER,
+                model TEXT,
+                provider TEXT,
+                event_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+    }
+
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .expect("store must initialize on a pre-conversation_id database");
+
+    let conn = store.conn.lock().unwrap();
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('genai_events')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        columns.iter().any(|c| c == "conversation_id"),
+        "migration must add conversation_id, got {columns:?}"
+    );
+    let indexes: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        indexes.iter().any(|i| i == "idx_genai_conversation_id"),
+        "the conversation_id index must exist, got {indexes:?}"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+}
