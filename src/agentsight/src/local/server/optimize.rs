@@ -41,6 +41,7 @@ impl OptLlmConfig {
     }
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
+        preserve_unparseable_config(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -98,6 +99,40 @@ impl OptLlmConfig {
             }
         })
     }
+}
+
+/// Back up a config file this process could not parse before `save` replaces it.
+///
+/// [`OptLlmConfig::load`] treats a file that does not deserialize into the
+/// typed config — truncated JSON *or* valid JSON with a wrong field type — as
+/// an empty configuration, so its settings — including the stored API key —
+/// never enter memory: the next save would overwrite them without a trace.
+/// Keep a copy first, mirroring the Linux server's settings path
+/// (`server::optimize::preserve_unparseable_config`, which follows the same
+/// backup discipline as `config.rs::ensure_default_agents_config`, issue
+/// #1502).
+fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        // Absent or unreadable: there is nothing this process is about to lose.
+        return Ok(());
+    };
+    // Validating against the typed struct, not just `serde_json::Value`, is
+    // what makes a file like `{"search_timeout_secs": "60"}` unparseable here
+    // too: `load` drops it to the default config, so its contents are just as
+    // lost as truncated JSON if `save` overwrites it unpreserved.
+    if serde_json::from_str::<OptLlmConfig>(&content).is_ok() {
+        return Ok(());
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.bak.{ts}"));
+    std::fs::copy(path, &backup)?;
+    log::warn!(
+        "Kept the unparseable optimization config at {backup:?} before overwriting {path:?}"
+    );
+    Ok(())
 }
 
 pub struct OptimizeState {
@@ -619,6 +654,123 @@ mod tests {
         assert_eq!(loaded.base_url.as_deref(), Some("https://test.api.com"));
         assert_eq!(loaded.model.as_deref(), Some("test-model"));
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    fn config_backups(dir: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(".bak."))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_opt_llm_config_save_keeps_a_typed_invalid_config() {
+        // Valid JSON that does not deserialize into `OptLlmConfig` (here
+        // `search_timeout_secs` is a string) is folded into the default config
+        // by `load` exactly like truncated JSON, dropping the stored API key
+        // and every other setting. `save` must keep a copy before overwriting
+        // it — the same guard the Linux server's settings path applies.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_typed_invalid_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+        let typed_invalid = r#"{"api_key":"sk-live","model":"qwen","search_timeout_secs":"60"}"#;
+        std::fs::write(&path, typed_invalid).unwrap();
+
+        let config = OptLlmConfig {
+            model: Some("gpt-4o".to_string()),
+            ..OptLlmConfig::default()
+        };
+        config.save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(
+            backups.len(),
+            1,
+            "a config that fails OptLlmConfig deserialization must be kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&backups[0]).unwrap(),
+            typed_invalid,
+            "the backup must hold the file exactly as it was"
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the new config is written: {stored}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opt_llm_config_save_keeps_a_truncated_config() {
+        // Truncated JSON is the other shape `load` folds into the default:
+        // the file holds a sealed-looking key and no closing brace. Losing it
+        // to an overwrite would destroy the only copy of the key.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_truncated_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+        let truncated = r#"{"api_key":"sk-live","model":"qwen""#;
+        std::fs::write(&path, truncated).unwrap();
+
+        OptLlmConfig::default().save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(backups.len(), 1, "a truncated config must be kept");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), truncated);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opt_llm_config_save_keeps_no_backup_when_parseable() {
+        // Control: a config that parses round-trips through `load`, so its
+        // values are not about to be lost — `save` must not litter the
+        // settings directory with copies.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_parseable_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+
+        OptLlmConfig {
+            api_key: Some("sk-first".to_string()),
+            ..OptLlmConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+        OptLlmConfig {
+            model: Some("gpt-4o".to_string()),
+            ..OptLlmConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        assert!(
+            config_backups(&dir).is_empty(),
+            "a parseable config needs no backup"
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the latest config is written: {stored}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
