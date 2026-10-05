@@ -220,12 +220,12 @@ test('optimization: a dimension result must not land in another session', () => 
   // requests run for tens of seconds while the route param can change.
   assert.match(
     body,
-    /if \(activeSessionRef\.current === sessionId\) apply\(data\);/,
+    /if \(isCurrent\(\)\) apply\(data\);/,
     'OptimizationPage: dimension results must be gated on the active session',
   );
   assert.match(
     body,
-    /if \(activeSessionRef\.current !== sessionId\) return;\s*handleDimError\(e\);/,
+    /if \(!isCurrent\(\)\) return;\s*handleDimError\(e\);/,
     'OptimizationPage: dimension failures must be gated on the active session',
   );
   const guarded = body.match(/forSession<[A-Za-z]+>\(/g) ?? [];

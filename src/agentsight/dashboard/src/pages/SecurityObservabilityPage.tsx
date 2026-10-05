@@ -112,6 +112,7 @@ export const SecurityObservabilityPage: React.FC = () => {
   // race, and if A's response resolves last the drawer shows B's header with
   // A's body. Only the newest click may write the detail state.
   const eventDetailRequestIdRef = useRef(0);
+  const statusRequestIdRef = useRef(0);
 
   const isAvailable = isSecurityAvailableState(status?.state);
   const rangeParams: SecurityTimeRangeParams = useMemo(() => ({
@@ -124,18 +125,21 @@ export const SecurityObservabilityPage: React.FC = () => {
   );
 
   const loadStatus = useCallback(async () => {
+    const requestId = ++statusRequestIdRef.current;
     setStatusLoading(true);
     setStatusError(null);
     try {
       const nextStatus = await fetchSecurityStatus();
+      if (requestId !== statusRequestIdRef.current) return null;
       setStatus(nextStatus);
       return nextStatus;
     } catch (error) {
+      if (requestId !== statusRequestIdRef.current) return null;
       setStatus(null);
       setStatusError(errorMessage(error, t));
       return null;
     } finally {
-      setStatusLoading(false);
+      if (requestId === statusRequestIdRef.current) setStatusLoading(false);
     }
   }, [t]);
 
@@ -282,6 +286,9 @@ export const SecurityObservabilityPage: React.FC = () => {
 
   useEffect(() => {
     loadStatus();
+    return () => {
+      ++statusRequestIdRef.current;
+    };
   }, [loadStatus]);
 
   useEffect(() => {

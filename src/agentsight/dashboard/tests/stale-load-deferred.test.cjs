@@ -189,8 +189,224 @@ function renderSecurityPage() {
   // loaders close over the available state.
   driver.slots[3].setter({ state: 'daemon_reachable', data: {} });
   const rendered = driver.render(page);
-  return { calls, driver, rendered };
+  return { calls, driver, rendered, page };
 }
+
+const DIMENSIONS = ['summary', 'perf', 'perfIssues', 'cost', 'costWaste', 'accuracy'];
+const WIRE_DIMENSIONS = ['summary', 'perf', 'perf-issues', 'cost', 'cost-waste', 'accuracy'];
+
+function dimensionPayload(dim, marker) {
+  return dim === 'accuracy'
+    ? { extraction: { final_answer: marker }, failures: [], issues: [] }
+    : { marker };
+}
+
+function storedReport(marker) {
+  return Object.fromEntries([
+    ['summary', dimensionPayload('summary', marker)],
+    ['perf', dimensionPayload('perf', marker)],
+    ['perf_issues', dimensionPayload('perfIssues', marker)],
+    ['cost', dimensionPayload('cost', marker)],
+    ['cost_waste', dimensionPayload('costWaste', marker)],
+    ['accuracy', dimensionPayload('accuracy', marker)],
+  ]);
+}
+
+function renderOptimizationPage() {
+  const driver = createHooksDriver();
+  const { calls, stubs } = deferredFetchStubs(['fetchOptimizeResults', 'runOptimizeDimension']);
+  class ApiRequestError extends Error {
+    constructor() {
+      super('LLM not configured');
+      this.status = 400;
+      this.body = { error: 'llm_not_configured' };
+    }
+  }
+  const module = loadPageModule(
+    'src/pages/OptimizationPage.tsx',
+    {
+      'react-router-dom': {
+        useParams: () => ({ sessionId: 'session-a' }),
+        useNavigate: () => () => {},
+      },
+      recharts: {},
+      '../utils/apiClient': { ...stubs, ApiRequestError },
+      '../components/CopyButton': {},
+      '../utils/formatDuration': {},
+      '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en' },
+      '../utils/accuracyAttribution': {},
+      '../components/TokenFlameChart': {},
+    },
+    driver,
+  );
+  // Obtain the actual private session component from the exported route's
+  // element, without injecting exports or replacing production functions.
+  const page = driver.render(module.OptimizationPage).element.type;
+  let cleanup;
+  async function visit(sessionId, history = storedReport('current')) {
+    if (cleanup) cleanup();
+    const rendered = driver.render(page, { sessionId });
+    cleanup = rendered.effects[0]();
+    calls.fetchOptimizeResults.at(-1).resolve(history);
+    await settle();
+    return driver.render(page, { sessionId });
+  }
+  return { driver, calls, page, visit, unmount: () => cleanup(), ApiRequestError };
+}
+
+for (const fails of [false, true]) {
+  test(`optimization: A-B-A drops every old dimension ${fails ? 'failure' : 'result'}`, async () => {
+    const probe = renderOptimizationPage();
+    const initial = await probe.visit('session-a');
+    initial.callbacks[1](DIMENSIONS);
+    assert.deepEqual(
+      probe.calls.runOptimizeDimension.map((call) => call.args),
+      WIRE_DIMENSIONS.map((dim) => ['session-a', dim]),
+    );
+    await probe.visit('session-b');
+    await probe.visit('session-a');
+    const report = probe.driver.slots[0].value;
+    const progress = probe.driver.slots[1].value;
+    for (const [index, call] of probe.calls.runOptimizeDimension.entries()) {
+      if (fails) call.reject(new probe.ApiRequestError());
+      else call.resolve(dimensionPayload(DIMENSIONS[index], 'old'));
+    }
+    await settle();
+    assert.deepEqual(probe.driver.slots[0].value, report, 'the current report must survive');
+    assert.deepEqual(
+      probe.driver.slots[1].value,
+      progress,
+      'current completion flags must survive',
+    );
+    assert.equal(probe.driver.slots[3].value, false, 'old configuration errors must be ignored');
+    assert.equal(probe.driver.slots[4].value, null, 'old accuracy errors must be ignored');
+  });
+}
+
+test('optimization: ordinary A-B navigation still drops old results', async () => {
+  const probe = renderOptimizationPage();
+  const initial = await probe.visit('session-a');
+  initial.callbacks[1](DIMENSIONS);
+  await probe.visit('session-b');
+  const report = probe.driver.slots[0].value;
+  probe.calls.runOptimizeDimension.forEach((call, index) =>
+    call.resolve(dimensionPayload(DIMENSIONS[index], 'old')),
+  );
+  await settle();
+  assert.deepEqual(probe.driver.slots[0].value, report);
+});
+
+for (const fails of [false, true]) {
+  test(`optimization: a new analysis supersedes the previous ${fails ? 'failure' : 'result'}`, async () => {
+    const probe = renderOptimizationPage();
+    let rendered = await probe.visit('session-a');
+    rendered.callbacks[2]();
+    rendered = probe.driver.render(probe.page, { sessionId: 'session-a' });
+    rendered.callbacks[2]();
+    const calls = probe.calls.runOptimizeDimension;
+    assert.equal(calls.length, 12);
+    calls
+      .slice(6)
+      .forEach((call, index) => call.resolve(dimensionPayload(DIMENSIONS[index], 'new-run')));
+    await settle();
+    const report = probe.driver.slots[0].value;
+    calls.slice(0, 6).forEach((call, index) => {
+      if (fails) call.reject(new probe.ApiRequestError());
+      else call.resolve(dimensionPayload(DIMENSIONS[index], 'old-run'));
+    });
+    await settle();
+    assert.deepEqual(probe.driver.slots[0].value, report);
+    assert.ok(Object.values(probe.driver.slots[1].value).every((value) => value === 'done'));
+    assert.equal(probe.driver.slots[3].value, false);
+    assert.equal(probe.driver.slots[4].value, null);
+  });
+}
+
+test('optimization: automatic analysis only fills missing dimensions', async () => {
+  const probe = renderOptimizationPage();
+  const history = storedReport('stored');
+  delete history.summary;
+  delete history.cost_waste;
+  const rendered = await probe.visit('session-a', history);
+  rendered.effects[1]();
+  assert.deepEqual(
+    probe.calls.runOptimizeDimension.map((call) => call.args[1]),
+    ['summary', 'cost-waste'],
+  );
+  const perf = probe.driver.slots[0].value.perf;
+  probe.calls.runOptimizeDimension[0].resolve(dimensionPayload('summary', 'fresh'));
+  probe.calls.runOptimizeDimension[1].resolve(dimensionPayload('costWaste', 'fresh'));
+  await settle();
+  assert.deepEqual(probe.driver.slots[0].value.perf, perf);
+  assert.equal(probe.driver.slots[0].value.summary.marker, 'fresh');
+  assert.equal(probe.driver.slots[0].value.cost_waste.marker, 'fresh');
+  assert.ok(Object.values(probe.driver.slots[1].value).every((value) => value === 'done'));
+});
+
+test('optimization: unmount invalidates dimensions and current failures remain visible', async () => {
+  const probe = renderOptimizationPage();
+  const rendered = await probe.visit('session-a');
+  rendered.callbacks[1](['summary', 'accuracy']);
+  probe.calls.runOptimizeDimension[0].reject(new probe.ApiRequestError());
+  await settle();
+  assert.equal(probe.driver.slots[1].value.summary, 'error');
+  assert.equal(probe.driver.slots[3].value, true);
+  const report = probe.driver.slots[0].value;
+  const progress = probe.driver.slots[1].value;
+  probe.unmount();
+  probe.calls.runOptimizeDimension[1].resolve(dimensionPayload('accuracy', 'unmounted'));
+  await settle();
+  assert.deepEqual(probe.driver.slots[0].value, report);
+  assert.deepEqual(probe.driver.slots[1].value, progress);
+});
+
+for (const fails of [false, true]) {
+  test(`security status: locale reload drops the older ${fails ? 'failure' : 'response'}`, async () => {
+    const { calls, driver, rendered, page } = renderSecurityPage();
+    const cleanup = rendered.effects[0]();
+    const next = driver.render(page); // i18n stub supplies the new locale's t
+    if (cleanup) cleanup();
+    next.effects[0]();
+    assert.equal(calls.fetchSecurityStatus.length, 2);
+    calls.fetchSecurityStatus[1].resolve({ state: 'daemon_reachable', data: { marker: 'new' } });
+    await settle();
+    if (fails) calls.fetchSecurityStatus[0].reject(new Error('old failure'));
+    else calls.fetchSecurityStatus[0].resolve({ state: 'daemon_unreachable', data: {} });
+    await settle();
+    assert.equal(driver.slots[3].value?.data?.marker, 'new');
+    assert.equal(driver.slots[4].value, false);
+    assert.equal(driver.slots[5].value, null);
+  });
+}
+
+test('security status: old finally does not clear the newer loading flag', async () => {
+  const { calls, driver, rendered } = renderSecurityPage();
+  const first = rendered.callbacks[0]();
+  const second = rendered.callbacks[0]();
+  calls.fetchSecurityStatus[0].reject(new Error('old failure'));
+  await first;
+  assert.equal(driver.slots[4].value, true);
+  assert.equal(driver.slots[5].value, null);
+  calls.fetchSecurityStatus[1].reject(new Error('current failure'));
+  await second;
+  assert.equal(driver.slots[3].value, null);
+  assert.equal(driver.slots[4].value, false);
+  assert.equal(driver.slots[5].value, 'current failure');
+});
+
+test('security status: unmount invalidates pending success and failure', async () => {
+  for (const fails of [false, true]) {
+    const { calls, driver, rendered } = renderSecurityPage();
+    const cleanup = rendered.effects[0]();
+    const status = driver.slots[3].value;
+    if (cleanup) cleanup();
+    if (fails) calls.fetchSecurityStatus[0].reject(new Error('after unmount'));
+    else calls.fetchSecurityStatus[0].resolve({ state: 'daemon_unreachable', data: {} });
+    await settle();
+    assert.deepEqual(driver.slots[3].value, status);
+    assert.equal(driver.slots[5].value, null);
+  }
+});
 
 test('security sessions: an older loadSessions response must not survive a newer overview batch', async () => {
   const { calls, driver, rendered } = renderSecurityPage();
