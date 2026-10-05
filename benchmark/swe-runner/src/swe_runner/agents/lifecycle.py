@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,6 +50,21 @@ class PreparedAgentRun:
                 callback()
             except Exception:
                 logger.exception("AGENT_CLEANUP_FAILED instance=%s", self.instance.instance_id)
+
+    def cleanup_after_abort(self) -> None:
+        """Release remaining resources without replacing an existing execution exception."""
+        while True:
+            remaining = len(self.cleanup_callbacks)
+            try:
+                self.cleanup()
+                return
+            except BaseException:
+                with suppress(BaseException):
+                    logger.exception("AGENT_ABORT_CLEANUP_FAILED instance=%s", self.instance.instance_id)
+                # cleanup pops before invocation; continue after an interrupted
+                # callback only while the stack makes progress toward completion.
+                if not self.cleanup_callbacks or len(self.cleanup_callbacks) >= remaining:
+                    return
 
 
 class AgentAdapter(ABC):

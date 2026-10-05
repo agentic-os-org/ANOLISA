@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import swe_runner.run.workspace.patches as patches
 from swe_runner.agents import PreparedAgentRun
@@ -71,4 +72,7 @@ def finalize_instance_result(
             success=False,
         )
     finally:
-        prepared.cleanup()
+        if sys.exception() is None:
+            prepared.cleanup()
+        else:
+            prepared.cleanup_after_abort()
