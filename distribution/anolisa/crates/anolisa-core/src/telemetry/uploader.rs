@@ -442,32 +442,73 @@ impl Uploader {
                 // recycled for the new `.jsonl.1`, so the offset must also
                 // land just past a newline in that handle (see
                 // [`offset_starts_after_newline`]).
+                //
+                // A read failure must never silently drop the residue
+                // either: the healthy lines behind the failure point would
+                // be lost forever once logrotate deletes the rotated file.
+                // On failure at the stored offset the drain logs the error
+                // and retries from the start of the same open file;
+                // re-shipping a few already-uploaded lines (deduplicated
+                // downstream by telemetry_id + content) beats losing the
+                // rest of the generation. Unreadable even from byte 0, the
+                // loss is surfaced on stderr and the fresh file still
+                // uploads.
                 let rotated = self.rotated_path(component);
                 if let Ok(rotated) = File::open(&rotated) {
                     let mut rotated = rotated;
                     let rotated_inode = inode_of(&rotated.metadata()?);
-                    let drain_from = if rotated_inode == o.inode
+                    let mut drain_from = if rotated_inode == o.inode
                         && offset_starts_after_newline(&mut rotated, o.offset)
                     {
                         o.offset
                     } else {
                         0
                     };
-                    if let Ok((mut residue, res_consumed)) =
-                        read_from_handle(rotated, drain_from, MAX_LINES_PER_ROUND)
-                    {
-                        lines.append(&mut residue);
-                        if lines.len() >= MAX_LINES_PER_ROUND {
-                            // Cap hit: keep the offset on the rotated file so
-                            // the remainder is drained next round instead of
-                            // being skipped.
-                            return Ok(Some((
-                                lines,
-                                FileOffset {
-                                    inode: rotated_inode,
-                                    offset: drain_from + res_consumed,
-                                },
-                            )));
+                    // Each attempt reads through a dup of the handle so the
+                    // retries keep describing the same open file (a fresh
+                    // path open could race another rotation swap); the dup
+                    // shares the file offset, but every read seeks first.
+                    loop {
+                        let drained = rotated
+                            .try_clone()
+                            .and_then(|h| read_from_handle(h, drain_from, MAX_LINES_PER_ROUND));
+                        match drained {
+                            Ok((mut residue, res_consumed)) => {
+                                lines.append(&mut residue);
+                                if lines.len() >= MAX_LINES_PER_ROUND {
+                                    // Cap hit: keep the offset on the rotated
+                                    // file so the remainder is drained next
+                                    // round instead of being skipped.
+                                    return Ok(Some((
+                                        lines,
+                                        FileOffset {
+                                            inode: rotated_inode,
+                                            offset: drain_from + res_consumed,
+                                        },
+                                    )));
+                                }
+                                break;
+                            }
+                            Err(read_err) if drain_from != 0 => {
+                                eprintln!(
+                                    "[anolisa] telemetry: draining rotated residue for \
+                                     `{component}` at byte {drain_from} failed ({read_err}); \
+                                     retrying the drain from the start of the file"
+                                );
+                                drain_from = 0;
+                            }
+                            Err(read_err) => {
+                                // Unreadable even from byte 0 (e.g. an I/O
+                                // error on the underlying storage): surface
+                                // the loss instead of swallowing it, and
+                                // still upload whatever the fresh file holds.
+                                eprintln!(
+                                    "[anolisa] telemetry: draining rotated residue for \
+                                     `{component}` failed ({read_err}); the rotated \
+                                     residue was not shipped"
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -721,6 +762,15 @@ fn read_from(path: &Path, offset: u64, max_lines: usize) -> io::Result<(Vec<Stri
 /// Handle-based counterpart of [`read_from`]: the caller opens the file and
 /// supplies the metadata used to pick `offset`, so both refer to the same
 /// inode even if the path is swapped underneath (e.g. by logrotate).
+///
+/// Lines are read as bytes and decoded lossily: the ops `.jsonl` files are
+/// pre-created `0666` for multi-writer access, so any writer can leave a
+/// line that is not valid UTF-8. A hard `InvalidData` here would fail the
+/// whole component round without advancing its offset, and every later
+/// round would re-fail at the same byte — permanently blocking upload of
+/// the valid lines behind it (mirroring the query side's lossy tolerance).
+/// A malformed line instead flows through `build_body`'s raw fallback and
+/// the tail advances past it.
 fn read_from_handle(
     mut file: File,
     offset: u64,
@@ -732,20 +782,21 @@ fn read_from_handle(
 
     let mut lines = Vec::new();
     let mut consumed: u64 = 0;
-    let mut raw = String::new();
+    let mut raw: Vec<u8> = Vec::new();
     loop {
         raw.clear();
-        let n = reader.read_line(&mut raw)?;
+        let n = reader.read_until(b'\n', &mut raw)?;
         if n == 0 {
             break; // EOF
         }
         // Only complete lines (terminated by '\n') are consumed; a trailing
         // partial line is left for the next round.
-        if !raw.ends_with('\n') {
+        if !raw.ends_with(b"\n") {
             break;
         }
         consumed += n as u64;
-        let trimmed = raw.trim_end_matches(['\n', '\r']);
+        let line = String::from_utf8_lossy(&raw);
+        let trimmed = line.trim_end_matches(['\n', '\r']);
         if !trimmed.is_empty() {
             lines.push(trimmed.to_string());
         }
@@ -1078,6 +1129,224 @@ mod tests {
         let (lines, consumed) = read_from(&path, 0, 0).unwrap();
         assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(consumed, 4); // "a\nb\n"
+    }
+
+    #[test]
+    fn test_read_from_decodes_invalid_utf8_lossily() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.jsonl");
+        // The ops jsonl files are world-writable (multi-writer), so a single
+        // non-UTF-8 byte in one line must not fail the whole read.
+        let mut bytes = b"{\"a\":1}\n".to_vec();
+        bytes.extend_from_slice(b"\xff\xfe poison\n");
+        bytes.extend_from_slice(b"{\"b\":2}\n");
+        fs::write(&path, bytes).unwrap();
+        let (lines, consumed) = read_from(&path, 0, 0).unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "{\"a\":1}");
+        // Invalid bytes decode to the replacement character, not an error.
+        assert!(lines[1].contains("poison"), "got {:?}", lines[1]);
+        assert_eq!(lines[2], "{\"b\":2}");
+        assert_eq!(consumed as usize, 8 + 10 + 8); // every byte consumed
+    }
+
+    #[test]
+    fn test_run_once_ships_lines_behind_a_poison_utf8_line() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let mut bytes = b"{\"a\":1}\n".to_vec();
+        bytes.extend_from_slice(b"\xff\xfe poison\n");
+        bytes.extend_from_slice(b"{\"b\":2}\n");
+        fs::write(&path, bytes).unwrap();
+
+        // Round 1 must not wedge: the poison line is consumed (via the raw
+        // fallback in build_body) and the valid line behind it ships.
+        let mut bodies = Vec::new();
+        up.run_once_with_post(|_, body| {
+            bodies.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bodies.len(), 1, "one POST carrying every line");
+        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0]["a"], "1");
+        assert_eq!(logs[2]["b"], "2");
+        // The malformed line itself travels as raw content, not an error.
+        assert!(logs[1]["raw"].as_str().unwrap().contains("poison"));
+
+        // The offset advanced past the poison byte: a later round only ships
+        // lines appended after it.
+        let mut appended = OpenOptions::new().append(true).open(&path).unwrap();
+        appended.write_all(b"{\"c\":3}\n").unwrap();
+        let mut later = Vec::new();
+        up.run_once_with_post(|_, body| {
+            later.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(later.len(), 1);
+        let parsed: Value = serde_json::from_str(&later[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["c"], "3");
+        let stored = up.load_offsets();
+        assert_eq!(
+            stored["cosh"].offset as usize,
+            8 + 10 + 8 + 8,
+            "offset covers every consumed byte including the poison line"
+        );
+    }
+
+    #[test]
+    fn poison_stalls_then_rotation_drops_healthy_residue() {
+        // The audit shape end to end: a poisoned (non-UTF-8) line once wedged
+        // every round at the same byte, and once a rotation moved the poison
+        // into `.jsonl.1` the drain's read error was swallowed, dropping the
+        // entire rotated residue — the healthy line behind the poison
+        // included — so only the fresh file's first line ever shipped. With
+        // lossy decoding the drain must consume the poison line via the raw
+        // fallback and ship the healthy residue after it.
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+
+        // Round 1 consumes the healthy head of file A.
+        write_lines(&path, "{\"v\":\"h1\"}\n");
+        up.run_once_with_post(|_, _| Ok(())).unwrap();
+        let stored = up.load_offsets()["cosh"].clone();
+        assert_eq!(stored.offset as usize, "{\"v\":\"h1\"}\n".len());
+
+        // While the uploader is not looking, a poison line and a healthy
+        // line land behind the consumed offset, then logrotate strikes.
+        let mut bytes = b"\xff\xfe poison\n".to_vec();
+        bytes.extend_from_slice(b"{\"v\":\"h2\"}\n");
+        let mut a = OpenOptions::new().append(true).open(&path).unwrap();
+        a.write_all(&bytes).unwrap();
+        fs::rename(&path, up.rotated_path("cosh")).unwrap();
+        write_lines(&path, "{\"v\":\"n1\"}\n");
+
+        let mut bodies = Vec::new();
+        up.run_once_with_post(|_, body| {
+            bodies.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        assert_eq!(logs.len(), 3, "poison + healthy residue + fresh line");
+        // The poison line rides the raw fallback…
+        assert!(logs[0]["raw"].as_str().unwrap().contains("poison"));
+        // …the healthy residue behind it is NOT dropped…
+        assert_eq!(logs[1]["v"], "h2");
+        // …and the fresh active file still ships.
+        assert_eq!(logs[2]["v"], "n1");
+    }
+
+    #[test]
+    fn drain_read_error_does_not_drop_rotated_residue() {
+        // A corrupted pinned offset (here pushed to u64::MAX) must never
+        // drop the rotated residue. On the pre-guard drain the read at such
+        // an offset errored and the `if let Ok` swallow shipped only the
+        // fresh file's line; main's generation guard now routes offsets
+        // that do not land just past a newline (a u64::MAX offset cannot
+        // even be positioned for the newline probe) to a drain from byte
+        // 0, and the drain's own read-error fallback retries from 0 —
+        // either way the residue must ship.
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let rotated = up.rotated_path("cosh");
+
+        // Round 1 consumes file A's only line; the offset pins at 12.
+        write_lines(&path, "{\"v\":\"a1\"}\n");
+        up.run_once_with_post(|_, _| Ok(())).unwrap();
+        let stored = up.load_offsets()["cosh"].clone();
+        assert_eq!(stored.offset as usize, "{\"v\":\"a1\"}\n".len());
+
+        // Rotation with an undrained healthy residue behind the pinned
+        // offset, plus a corrupted offset that cannot be seeked to.
+        fs::rename(&path, &rotated).unwrap();
+        let mut r = OpenOptions::new().append(true).open(&rotated).unwrap();
+        r.write_all(b"{\"v\":\"h2\"}\n").unwrap();
+        write_lines(&path, "{\"v\":\"n1\"}\n");
+        let mut offsets = up.load_offsets();
+        offsets.insert(
+            "cosh".to_string(),
+            FileOffset {
+                inode: stored.inode,
+                offset: u64::MAX,
+            },
+        );
+        up.save_offsets(&offsets).unwrap();
+
+        let mut bodies = Vec::new();
+        up.run_once_with_post(|_, body| {
+            bodies.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        // The drain fell back to byte 0: a1 is re-shipped (the price of the
+        // corrupted offset — dedup handles it downstream) and h2 survives.
+        assert_eq!(logs[0]["v"], "a1");
+        assert_eq!(logs[1]["v"], "h2");
+        assert_eq!(logs[2]["v"], "n1");
+        // The persisted offset now describes a real position again.
+        let stored = up.load_offsets()["cosh"].clone();
+        assert_eq!(stored.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(
+            stored.offset as usize,
+            "{\"v\":\"n1\"}\n".len(),
+            "the round advanced through the fresh file"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn drain_unreadable_rotated_file_still_ships_fresh() {
+        // An unreadable rotated residue must be surfaced (logged on
+        // stderr), not silently swallowed — but it also must not fail the
+        // whole component round: the fresh active file still uploads and
+        // its offset persists. A directory in the rotated path gives a
+        // deterministic read error (read(2) on a directory fd fails with
+        // EISDIR) with the stored offset at 0, exercising the drain's
+        // from-zero failure arm.
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let rotated = up.rotated_path("cosh");
+
+        fs::create_dir(&rotated).unwrap();
+        let stored = FileOffset {
+            inode: inode_of(&fs::metadata(&rotated).unwrap()),
+            offset: 0,
+        };
+        write_lines(&path, "{\"v\":\"n1\"}\n");
+        let mut offsets = up.load_offsets();
+        offsets.insert("cosh".to_string(), stored);
+        up.save_offsets(&offsets).unwrap();
+
+        let mut bodies = Vec::new();
+        up.run_once_with_post(|_, body| {
+            bodies.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["v"], "n1");
+        // The round still checkpointed the fresh file.
+        let stored = up.load_offsets()["cosh"].clone();
+        assert_eq!(stored.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(stored.offset as usize, "{\"v\":\"n1\"}\n".len());
     }
 
     #[test]
