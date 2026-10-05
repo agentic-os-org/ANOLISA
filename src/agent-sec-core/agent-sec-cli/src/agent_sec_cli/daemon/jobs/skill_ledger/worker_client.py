@@ -103,16 +103,21 @@ class SkillLedgerWorkerClient:
                 self._stopping = False
 
     async def _process_once(self, change: SkillFsChange) -> dict[str, Any]:
+        # Serialize BEFORE spawning: an oversized request is a permanent
+        # payload error, not a transport failure, and must neither spawn a
+        # doomed worker nor be retried.
+        request = new_worker_request(change)
+        frame = serialize_worker_request(request)
+
         process = await self._ensure_worker()
         if process.stdin is None or process.stdout is None:
             raise SkillLedgerWorkerTransportError("worker stdio is unavailable")
 
-        request = new_worker_request(change)
         try:
-            process.stdin.write(serialize_worker_request(request))
+            process.stdin.write(frame)
             await process.stdin.drain()
             line = await process.stdout.readline()
-        except (BrokenPipeError, ConnectionError, OSError, ValueError) as exc:
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
             raise SkillLedgerWorkerTransportError(
                 self._transport_message(f"worker communication failed: {exc}")
             ) from exc

@@ -480,3 +480,45 @@ def test_worker_stop_escalates_to_kill(monkeypatch, tmp_path: Path):
 
     assert process.stdin.closed is True
     assert process.signals == ["terminate", "kill"]
+
+
+def test_oversize_request_never_spawns_worker(monkeypatch, tmp_path: Path):
+    """An oversized request frame is a permanent payload error.
+
+    Serializing used to happen AFTER _ensure_worker() and WorkerProtocolError
+    (a ValueError) was caught by the transport except-clause: the client
+    classified a never-attempted communication as a transport failure,
+    killed the freshly spawned worker, spawned a second one, and failed
+    identically. Serialize-before-spawn classifies it as a protocol error
+    with zero spawns and zero retries.
+    """
+    process = FakeProcess(201, "success")
+    calls = install_process_factory(monkeypatch, [process])
+
+    # A change whose serialized frame exceeds MAX_WORKER_FRAME_BYTES
+    # (4 MiB): many distinct accumulated paths.
+    big_paths = {f"skills/pack{i:07d}/file{j}.md" for i in range(150000) for j in range(1)}
+    change = SkillFsChange(
+        canonical_skill_dir=tmp_path / "weather",
+        event_kinds={"write"},
+        paths=big_paths,
+    )
+
+    async def scenario():
+        client = SkillLedgerWorkerClient()
+        try:
+            await client.process_change(change)
+            return None
+        except Exception as exc:  # noqa: BLE001 - return for assertion
+            return exc
+        finally:
+            await client.stop()
+
+    exc = asyncio.run(scenario())
+
+    assert exc is not None, "oversized request must fail"
+    assert "exceeds" in str(exc), f"expected frame-size error, got: {exc}"
+    assert not isinstance(exc, SkillLedgerWorkerTransportError), (
+        f"payload error misclassified as transport failure: {exc!r}"
+    )
+    assert len(calls) == 0, f"worker spawned {len(calls)} time(s) for an unsendable frame"
