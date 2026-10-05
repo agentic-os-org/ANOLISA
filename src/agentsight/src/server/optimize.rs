@@ -151,17 +151,22 @@ impl OptLlmConfig {
 
 /// Back up a config file this process could not parse before `save` replaces it.
 ///
-/// [`OptLlmConfig::load`] treats a file that does not parse as an empty
-/// configuration, so its settings — including the sealed API key — never enter
-/// memory: the next save would overwrite them without a trace. Keep a copy
-/// first, the same way `config.rs::ensure_default_agents_config` refuses to
-/// replace invalid JSON outright (issue #1502).
+/// [`OptLlmConfig::load`] treats a file that does not deserialize into the
+/// typed config — truncated JSON *or* valid JSON with a wrong field type — as
+/// an empty configuration, so its settings — including the sealed API key —
+/// never enter memory: the next save would overwrite them without a trace.
+/// Keep a copy first, the same way `config.rs::ensure_default_agents_config`
+/// refuses to replace invalid JSON outright (issue #1502).
 fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
     let Ok(content) = std::fs::read_to_string(path) else {
         // Absent or unreadable: there is nothing this process is about to lose.
         return Ok(());
     };
-    if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+    // Validating against the typed struct, not just `serde_json::Value`, is
+    // what makes a file like `{"search_timeout_secs": "60"}` unparseable here
+    // too: `load` drops it to the default config, so its contents are just as
+    // lost as truncated JSON if `save` overwrites it unpreserved.
+    if serde_json::from_str::<OptLlmConfig>(&content).is_ok() {
         return Ok(());
     }
     let ts = std::time::SystemTime::now()
@@ -1340,6 +1345,42 @@ mod tests {
         // Once the file parses again there is nothing left to preserve.
         config.save(&path).unwrap();
         assert_eq!(config_backups(&dir).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Valid JSON that does not deserialize into `OptLlmConfig` (here
+    /// `search_timeout_secs` is a string) is folded into the default config by
+    /// `load` exactly like truncated JSON, dropping the sealed key and every
+    /// other setting. `save` must keep a copy before overwriting it.
+    #[test]
+    fn save_keeps_a_typed_invalid_config_it_could_not_parse() {
+        let dir = tmp_dir("typed-invalid-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let typed_invalid =
+            r#"{"api_key":"enc:v1:AAAA:BBBB","model":"qwen","search_timeout_secs":"60"}"#;
+        std::fs::write(&path, typed_invalid).unwrap();
+
+        let config = OptLlmConfig {
+            api_key: Some("sk-fresh".into()),
+            model: Some("gpt-4o".into()),
+            base_url: None,
+            search_timeout_secs: None,
+        };
+        config.save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(
+            backups.len(),
+            1,
+            "a config that fails OptLlmConfig deserialization must be kept"
+        );
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), typed_invalid);
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the new config is written: {stored}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
