@@ -562,6 +562,91 @@ mod tests {
         );
     }
 
+    /// The engine matches endpoint rules with `(ip & mask) == net` where `ip`
+    /// is the user-supplied sockaddr of connect(2), read at syscall entry.
+    /// connect() to 0.0.0.0 is valid on Linux (it reaches loopback), so a
+    /// match-nothing sentinel of `(0, /32)` is not match-nothing: it is
+    /// byte-identical to the legitimate pattern `endpoint "0.0.0.0"` and fires
+    /// on those connections. The only pair that never matches under the ABI is
+    /// `(net != 0, mask == 0)`: `ip & 0 == net` is false for every `ip`.
+    fn assert_never_matches(net: u32, mask: u32) {
+        let (zero_net, zero_mask) = lower_ipv4("0.0.0.0");
+        assert!(
+            net != zero_net || mask != zero_mask,
+            "sentinel collides with the literal pattern `endpoint \"0.0.0.0\"` \
+             (connect to 0.0.0.0 reaches loopback on Linux)"
+        );
+        assert_eq!(mask, 0, "never-match requires a zero mask");
+        assert_ne!(net, 0, "a zero net with a zero mask is match-any");
+        // spot-check the ABI's own arithmetic: no ip satisfies it
+        for ip in [0u32, 1, 0xff, 0x00ff_ffff, 0x7f00_0001, u32::MAX] {
+            assert_ne!(
+                ip & mask,
+                net,
+                "sentinel (net={net}, mask={mask}) matches ip={ip}"
+            );
+        }
+    }
+
+    #[test]
+    fn match_nothing_endpoint_rule_sentinel_is_unreachable() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block connect endpoint "*.internal"
+              because "x"
+            "#,
+        )
+        .expect("parse");
+        let compiled = compile(&pol).expect("compile");
+        let cfg: CConfig =
+            unsafe { std::ptr::read_unaligned(compiled.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        assert_never_matches(cfg.rules[0].ipv4, cfg.rules[0].ipv4_mask);
+    }
+
+    #[test]
+    fn match_nothing_endpoint_source_sentinel_is_unreachable() {
+        // A 100-byte label exceeds the 63-byte DNS label limit, so resolution
+        // fails deterministically regardless of the resolver environment.
+        let host = format!("{}.invalid", "x".repeat(100));
+        let pol = crate::dsl::parse::parse(&format!(
+            r#"source NET = endpoint "{host}"
+            rule r:
+              block exec "sh" if NET
+              because "x""#
+        ))
+        .expect("parse");
+        let compiled = compile(&pol).expect("compile");
+        let cfg: CConfig =
+            unsafe { std::ptr::read_unaligned(compiled.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_updates, 2, "endpoint source lowers connect+recv");
+        for u in &cfg.updates[..cfg.n_updates as usize] {
+            assert_never_matches(u.ipv4, u.ipv4_mask);
+        }
+    }
+
+    #[test]
+    fn match_nothing_unless_target_sentinel_is_unreachable() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block connect endpoint "*" unless target "*.internal"
+              because "x"
+            "#,
+        )
+        .expect("parse");
+        let compiled = compile(&pol).expect("compile");
+        let cfg: CConfig =
+            unsafe { std::ptr::read_unaligned(compiled.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        // `unless target` fails closed: the exception must never be satisfied
+        // (a satisfied exception skips the rule), for any observed ip.
+        assert_eq!(cfg.rules[0].cond_kind, C_TARGET);
+        assert_eq!(cfg.rules[0].cond_neg, 0);
+        assert_never_matches(cfg.rules[0].cond_ipv4, cfg.rules[0].cond_ipv4_mask);
+    }
+
     #[test]
     fn numeric_ipv4_patterns_keep_exact_semantics() {
         assert_eq!(
@@ -795,9 +880,20 @@ fn lower_numeric_ipv4(pat: &str) -> Option<(u32, u32)> {
     if k == 0 { None } else { Some((net, mask)) }
 }
 
+/// The engine matches endpoint events with `(ip & mask) == net`, where `ip`
+/// is the user-supplied sockaddr of connect(2) read at syscall entry.
+/// connect() to 0.0.0.0 is valid on Linux — the kernel routes it to loopback
+/// — so `(0, /32)` is not a match-nothing sentinel: it is byte-identical to
+/// the legitimate pattern `endpoint "0.0.0.0"` and fires on those
+/// connections. The only pair that never matches under the ABI is
+/// `(net != 0, mask == 0)`: `ip & 0 == net` is false for every `ip`. No
+/// user pattern lowers to it (match-any `"*"` is `(0, 0)`; every other
+/// representable pattern has at least one 0xff mask octet).
+const NEVER_MATCH_ENDPOINT: (u32, u32) = (1, 0);
+
 #[cfg(test)]
 fn lower_ipv4(pat: &str) -> (u32, u32) {
-    lower_numeric_ipv4(pat).unwrap_or((0, u32::MAX))
+    lower_numeric_ipv4(pat).unwrap_or(NEVER_MATCH_ENDPOINT)
 }
 
 fn hostname_candidate(pat: &str) -> Option<&str> {
@@ -873,7 +969,7 @@ impl Ctx {
                     "endpoint pattern '{pat}' resolved to no IPv4 addresses at compile time; \
                      it lowers to a match-nothing matcher, so connect/recv to it never matches"
                 ));
-                vec![(0, u32::MAX)]
+                vec![NEVER_MATCH_ENDPOINT]
             } else {
                 addrs.into_iter().map(|addr| (addr, u32::MAX)).collect()
             }
@@ -888,7 +984,7 @@ impl Ctx {
                  (wildcard or non-IPv4 literal); it lowers to a match-nothing matcher, \
                  so connect/recv to it never matches"
             ));
-            vec![(0, u32::MAX)]
+            vec![NEVER_MATCH_ENDPOINT]
         };
         self.endpoint_cache.insert(pat.to_string(), matches.clone());
         matches
@@ -910,7 +1006,10 @@ impl Ctx {
                  exception is void"
             ));
         }
-        if negate { (0, 0) } else { (0, u32::MAX) }
+        // The `unless` branch must also never be satisfied: a satisfied
+        // exception skips the rule, and `(0, /32)` would be satisfied by a
+        // connect to 0.0.0.0, silently re-opening the voided exception.
+        if negate { (0, 0) } else { NEVER_MATCH_ENDPOINT }
     }
 
     fn add_update(&mut self, spec: UpdateSpec<'_>) -> Result<(), String> {
