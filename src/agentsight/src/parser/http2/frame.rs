@@ -285,7 +285,10 @@ impl ParsedHttp2Frame {
 
             // Indexed Header Field (1xxxxxxx) - fully indexed in static or dynamic table
             if first_byte & 0x80 != 0 {
-                let index = (first_byte & 0x7F) as usize;
+                // The index is an HPACK integer (RFC 7541 §5.1) with a 7-bit
+                // prefix: 0x7F continues in base-128 octets, so dynamic
+                // indices from 127 up need the continuation consumed too.
+                let (index, consumed) = Self::decode_hpack_integer(payload, pos, 0x7F);
                 if let Some((name, value)) = Self::get_static_table_entry(index) {
                     result.push((name.to_string(), Some(value.to_string())));
                 } else if index == 0 {
@@ -294,7 +297,7 @@ impl ParsedHttp2Frame {
                     // Dynamic table index - cannot decode without state
                     result.push((format!("<dynamic:{index}>"), None));
                 }
-                pos += 1;
+                pos += consumed;
             }
             // Literal Header Field with Incremental Indexing (01xxxxxx)
             else if first_byte & 0xC0 == 0x40 {
@@ -310,7 +313,8 @@ impl ParsedHttp2Frame {
                 // the extended string length in `decode_literal_string`.
                 // Those octets belong to the update — skipping only the
                 // first one left the next field starting mid-integer.
-                pos += Self::hpack_integer_len(payload, pos);
+                let (_, update_len) = Self::decode_hpack_integer(payload, pos, 0x1F);
+                pos += update_len;
             }
             // Literal Header Field without Indexing (0000xxxx) or Never Indexed (0001xxxx)
             else {
@@ -328,15 +332,23 @@ impl ParsedHttp2Frame {
         &self,
         payload: &[u8],
         start: usize,
-        _indexed: bool,
+        indexed: bool,
     ) -> (String, String, usize) {
         let mut pos = start;
-        let first_byte = payload[pos];
-        pos += 1;
 
-        // Extract name (either from static table or literal)
+        // Extract name (either from static table or literal). The name index
+        // is an HPACK integer (RFC 7541 §5.1): the incremental-indexing form
+        // carries it in a 6-bit prefix, the without/never-indexed forms in a
+        // 4-bit prefix, and an all-ones prefix continues in base-128 octets —
+        // the same encoding as the extended string length in
+        // `decode_literal_string`. Reading the prefix bits alone left the walk
+        // mid-integer, so the continuation octets were parsed as the name or
+        // value and every following field shifted.
+        let prefix_mask: u8 = if indexed { 0x3F } else { 0x0F };
+        let (name_index, consumed) = Self::decode_hpack_integer(payload, pos, prefix_mask);
+        pos += consumed;
+
         let name: String;
-        let name_index = (first_byte & 0x3F) as usize;
 
         if name_index > 0 {
             // Name is in static table
@@ -357,6 +369,37 @@ impl ParsedHttp2Frame {
         pos += consumed;
 
         (name, value, pos - start)
+    }
+
+    /// Decode the HPACK integer beginning at `start` (RFC 7541 §5.1).
+    ///
+    /// The first octet carries the `prefix_mask` bits of the value; an
+    /// all-ones prefix continues in base-128 octets, seven bits each, until
+    /// an octet with its high bit clear. Returns the value and the number of
+    /// octets consumed. A chain that never terminates inside the block stops
+    /// at the payload end and saturates the value — the same corrupt-input
+    /// contract `decode_literal_string` keeps for extended lengths.
+    fn decode_hpack_integer(payload: &[u8], start: usize, prefix_mask: u8) -> (usize, usize) {
+        let prefix_max = prefix_mask as usize;
+        let first = (payload[start] & prefix_mask) as usize;
+        if first < prefix_max {
+            return (first, 1);
+        }
+
+        let mut value = first;
+        let mut len = 1usize;
+        let mut shift = 0u32;
+        while let Some(&b) = payload.get(start + len) {
+            len += 1;
+            if let Some(addend) = ((b & 0x7F) as usize).checked_shl(shift) {
+                value = value.saturating_add(addend);
+            }
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        (value, len)
     }
 
     /// Decode a literal string (length-prefixed, possibly Huffman encoded)
@@ -409,29 +452,6 @@ impl ParsedHttp2Frame {
         };
 
         (result, pos + length - start)
-    }
-
-    /// Number of octets in the HPACK integer beginning at `start`.
-    ///
-    /// A dynamic-table size update is a single HPACK integer (RFC 7541
-    /// §6.3) with a 5-bit prefix: a value below 31 fits in the first octet,
-    /// while the all-ones prefix continues in base-128 octets — the same
-    /// encoding as the extended string length in
-    /// [`Self::decode_literal_string`]. Only the octet count is needed to
-    /// skip one statelessly; a chain that never terminates inside the
-    /// block stops at the payload end, like that walk.
-    fn hpack_integer_len(payload: &[u8], start: usize) -> usize {
-        let mut len = 1;
-        if payload[start] & 0x1F != 0x1F {
-            return len;
-        }
-        while let Some(&b) = payload.get(start + len) {
-            len += 1;
-            if b & 0x80 == 0 {
-                break;
-            }
-        }
-        len
     }
 
     /// Decode an HPACK Huffman-encoded string (RFC 7541 Appendix B) using the
@@ -929,5 +949,81 @@ mod tests {
         let payload = vec![5u8, 0, 0, 0, 0, 0]; // pad length covers everything
         let frame = headers_frame_with_flags(0x0c, payload);
         assert!(frame.decode_headers_stateless().is_empty());
+    }
+
+    /// The hpack crate encodes `content-type` (static name index 31) in the
+    /// literal-without-indexing form, whose 4-bit name prefix saturates at 15
+    /// and continues in a base-128 octet: 0x0F 0x10 = 15 + 16 = 31. The
+    /// stateless walk read only the prefix bits (accept-charset, index 15)
+    /// and then parsed the continuation octet as the value length, so the
+    /// value came back truncated and every following field shifted.
+    #[test]
+    fn stateless_decodes_literal_with_extended_name_index() {
+        use hpack::Encoder;
+        let mut encoder = Encoder::new();
+        let headers = [
+            (b":status".to_vec(), b"200".to_vec()),
+            (b"content-type".to_vec(), b"Text/Event-Stream".to_vec()),
+        ];
+        let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
+
+        // Pin the wire form the test exists for: :status indexed, then a
+        // without-indexing literal whose name index needs one continuation
+        // octet (15 + 16 = 31, content-type).
+        assert!(
+            encoded.starts_with(&[0x88, 0x0f, 0x10]),
+            "the encoder must keep using the extended name index form: {encoded:02x?}"
+        );
+
+        let decoded = headers_frame(encoded).decode_headers_stateless();
+        assert_eq!(
+            decoded,
+            vec![
+                (":status".to_string(), Some("200".to_string())),
+                (
+                    "content-type".to_string(),
+                    Some("Text/Event-Stream".to_string())
+                ),
+            ],
+            "a literal with an extended name index must decode exactly"
+        );
+    }
+
+    /// An indexed field with a 7-bit prefix: 0xFF continues in one octet, so
+    /// 0xFF 0x01 is dynamic index 128. The walk read only the prefix
+    /// (`<dynamic:127>`) and then parsed the continuation octet 0x01 as
+    /// another indexed field (:authority), shifting everything after it.
+    #[test]
+    fn stateless_decodes_indexed_field_with_extended_index() {
+        let decoded = headers_frame(vec![0xff, 0x01, 0x82]).decode_headers_stateless();
+        assert_eq!(
+            decoded,
+            vec![
+                ("<dynamic:128>".to_string(), None),
+                (":method".to_string(), Some("GET".to_string())),
+            ],
+            "the continuation octet belongs to the index, not the next field"
+        );
+    }
+
+    /// A literal with incremental indexing whose 6-bit name prefix saturates
+    /// at 63 and continues in one octet: 0x7F 0x25 names dynamic index
+    /// 63 + 37 = 100. The name cannot be resolved statelessly, but its
+    /// octets must still be consumed or the value and every following field
+    /// shift.
+    #[test]
+    fn stateless_consumes_extended_name_index_of_indexed_literal() {
+        let mut payload = vec![0x7f, 0x25, 0x03];
+        payload.extend_from_slice(b"abc");
+        payload.push(0x82); // :method GET
+        let decoded = headers_frame(payload).decode_headers_stateless();
+        assert_eq!(
+            decoded,
+            vec![
+                ("<unknown:100>".to_string(), Some("abc".to_string())),
+                (":method".to_string(), Some("GET".to_string())),
+            ],
+            "the dynamic name is opaque but the value and the next field decode exactly"
+        );
     }
 }
