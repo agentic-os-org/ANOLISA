@@ -738,8 +738,22 @@ fn parse_process_start_time(stat: &str) -> Result<u64, ProcessStatError> {
         .map_err(|_| ProcessStatError::InvalidStartTime)
 }
 
+/// Reads a `/proc` text file, decoding non-UTF-8 bytes lossily.
+///
+/// `/proc/<pid>/stat` and `/proc/<pid>/status` embed the process name, and the
+/// kernel allows almost any non-NUL bytes in a name (`prctl(PR_SET_NAME)` sets
+/// them directly, and an executable whose name is not valid UTF-8 passes them
+/// on). `read_to_string` rejects such a file outright, which failed binding
+/// preparation (`KernelFailure`) and PID-namespace resolution for a process
+/// purely because of its name, while every field these parsers read (start
+/// time, NSpid) is plain ASCII positioned after the name. Mirrors the
+/// sibling fix in `src/enforcement/target.rs`.
+fn read_proc_text_lossy(path: &str) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn read_process_start_time(pid: i32) -> Result<u64, BackendError> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))
+    let stat = read_proc_text_lossy(&format!("/proc/{pid}/stat"))
         .map_err(|error| BackendError::KernelFailure(format!("read /proc/{pid}/stat: {error}")))?;
     parse_process_start_time(&stat)
         .map_err(|error| BackendError::KernelFailure(format!("parse /proc/{pid}/stat: {error}")))
@@ -1307,9 +1321,15 @@ fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
 /// index 0 is the outermost (host) PID and the last element is the innermost
 /// (namespace-local) PID.
 fn read_nspid_chain(pid: i32) -> Vec<i32> {
-    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+    let Ok(status) = read_proc_text_lossy(&format!("/proc/{pid}/status")) else {
         return vec![];
     };
+    parse_nspid_from_status(&status)
+}
+
+/// Parse the `NSpid:` chain from a decoded `/proc/<pid>/status` payload;
+/// empty when the line is absent or carries no valid PID.
+fn parse_nspid_from_status(status: &str) -> Vec<i32> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("NSpid:") {
             return rest
@@ -1329,7 +1349,7 @@ fn first_nspid(pid: i32) -> Option<i32> {
 
 /// Read `start_time` (field 22) from `/proc/<pid>/stat`.
 fn proc_start_time(pid: i32) -> Result<u64, ()> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
+    let stat = read_proc_text_lossy(&format!("/proc/{pid}/stat")).map_err(|_| ())?;
     let after_comm = &stat[stat.rfind(')').ok_or(())? + 2..];
     after_comm
         .split_ascii_whitespace()
@@ -1916,6 +1936,41 @@ mod tests {
     fn proc_start_time_handles_parenthesized_comm() {
         let stat = "42 (a tricky) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 98765";
         assert_eq!(parse_process_start_time(stat), Ok(98765));
+    }
+
+    #[test]
+    fn read_proc_text_lossy_keeps_ascii_fields_across_invalid_bytes() {
+        // /proc/<pid>/stat embeds the comm between parentheses, and the kernel
+        // allows non-NUL non-UTF-8 bytes in a comm. `read_to_string` rejected
+        // the whole file, failing binding preparation (KernelFailure) for a
+        // valid target; the lossy read keeps the ASCII start-time field.
+        let dir = std::env::temp_dir().join(format!("enforcer_stat_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("stat");
+        let mut stat = b"42 (qoder".to_vec();
+        stat.push(0xff);
+        stat.extend_from_slice(
+            b") S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 45678 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+        );
+        fs::write(&path, &stat).expect("write non-UTF-8 stat");
+
+        let text = read_proc_text_lossy(path.to_str().unwrap()).expect("lossy read must succeed");
+        assert!(text.starts_with("42 (qoder\u{fffd}) S "));
+        assert_eq!(parse_process_start_time(&text), Ok(45678));
+
+        assert!(read_proc_text_lossy("/proc/2000000000/stat").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_nspid_from_status_survives_a_lossy_name_line() {
+        // /proc/<pid>/status leads with `Name:`, so a non-UTF-8 comm decodes
+        // lossily in front of the NSpid line the resolver needs.
+        let status = "Name:\tqoder\u{fffd}\nPid:\t39560\nNSpid:\t39560\t1\nTgid:\t39560\n";
+        assert_eq!(parse_nspid_from_status(status), vec![39560, 1]);
+        // Missing line stays empty.
+        assert!(parse_nspid_from_status("Pid:\t39560\n").is_empty());
     }
 
     #[test]
