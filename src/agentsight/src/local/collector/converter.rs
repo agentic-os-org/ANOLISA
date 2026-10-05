@@ -3,6 +3,8 @@
 //! Parses QoderWork/Qoder/Claude Code JSONL session files and converts them
 //! to ATIF v1.7 documents for trajectory display. These agents share a common
 //! JSONL format with event types: `runtime-config`, `user`, `assistant`.
+//! Codex rollouts use a different envelope schema and are delegated to the
+//! collector crate's Codex converter.
 //!
 //! Content blocks within messages:
 //! - `assistant` content: `thinking`, `text`, `tool_use`
@@ -28,6 +30,18 @@ pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
 }
 
 pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajectory> {
+    // Codex rollouts use a different envelope schema
+    // (`{"timestamp","type","payload"}` records). The collector crate already
+    // ships a converter for them, so delegate instead of emitting an empty
+    // trajectory. `response_item`/`turn_context` only occur in Codex files,
+    // which keeps the extra parse off the Claude/Qoder path.
+    if content.contains("response_item") || content.contains("turn_context") {
+        let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
+        if agentsight_trajectory_collector::codex::is_codex_rollout(&events) {
+            return agentsight_trajectory_collector::codex::convert_codex_events(&events, "codex");
+        }
+    }
+
     let mut session_id = String::new();
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
@@ -522,5 +536,49 @@ mod tests {
         );
         let traj = convert_jsonl_content_to_atif(&content).unwrap();
         assert_eq!(traj.steps[0].model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_codex_rollout_delegates_to_the_codex_converter() {
+        // A Codex rollout is an envelope stream; the Claude-style loop would
+        // return an empty trajectory with agent "unknown" for it.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.360Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t-1\",\"model\":\"gpt-5.6-sol\",\"effort\":\"medium\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:58.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:59.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"file-a\\n\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:57:00.153Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
+        let agent_step = &traj.steps[1];
+        assert_eq!(agent_step.source, StepSource::Agent);
+        assert_eq!(agent_step.message, "done");
+        let calls = agent_step.tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].function_name, "exec");
+        let obs = agent_step.observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_qoder_session_meta_does_not_trigger_codex_delegation() {
+        // Qoder transcripts also carry a `session_meta` event; the Claude
+        // path must keep handling them (no payload envelope → not Codex).
+        let content = concat!(
+            "{\"type\":\"session_meta\",\"foo\":\"bar\"}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "hello");
+        assert_eq!(traj.agent.name, "unknown");
     }
 }

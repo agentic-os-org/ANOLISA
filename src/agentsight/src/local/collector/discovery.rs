@@ -131,8 +131,35 @@ fn scan_source(dir: &Path, source: &SessionSource, sessions: &mut Vec<LocalSessi
                 }
             }
         }
-        Layout::Flat => {
-            scan_project_dir(dir, source, "(default)", sessions);
+        Layout::Flat => scan_flat_dir(dir, source, "(default)", sessions),
+    }
+}
+
+/// Walk a flat session root, descending into every subdirectory.
+///
+/// Codex stores its rollouts under date subdirectories
+/// (`sessions/YYYY/MM/DD/rollout-*.jsonl`), so a flat root must be walked
+/// recursively — mirroring the trajectory collector's flat scan — or every
+/// real Codex session stays invisible to the listing.
+fn scan_flat_dir(
+    dir: &Path,
+    source: &SessionSource,
+    project: &str,
+    sessions: &mut Vec<LocalSession>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            scan_flat_dir(&path, source, project, sessions);
+        } else if path.is_file()
+            && path.extension().is_some_and(|ext| ext == "jsonl")
+            && let Some(session) = parse_session_file(&path, source, project)
+        {
+            sessions.push(session);
         }
     }
 }
@@ -243,58 +270,47 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         let is_user = trimmed.contains(r#""type":"user""#) || trimmed.contains(r#""type": "user""#);
         let is_assistant =
             trimmed.contains(r#""type":"assistant""#) || trimmed.contains(r#""type": "assistant""#);
+        // Codex rollouts are envelope records: the authoritative user input is
+        // an event_msg/user_message payload and the assistant text rides in
+        // response_item/message payloads with role "assistant".
+        let is_codex_user = trimmed.contains(r#""type":"user_message""#)
+            || trimmed.contains(r#""type": "user_message""#);
+        let is_codex_assistant =
+            trimmed.contains(r#""role":"assistant""#) || trimmed.contains(r#""role": "assistant""#);
 
-        if !is_user && !is_assistant {
-            // Still try to extract session_id from early lines
+        if !is_user && !is_assistant && !is_codex_user && !is_codex_assistant {
+            // Still try to extract session_id from early lines: Qoder
+            // runtime-config records carry a top-level `sessionId`, Codex
+            // session_meta envelopes carry `payload.session_id`.
             if session_id.is_empty()
-                && trimmed.contains("sessionId")
+                && (trimmed.contains("sessionId") || trimmed.contains("session_meta"))
                 && let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed)
-                && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str())
+                && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str()).or_else(|| {
+                    event
+                        .pointer("/payload/session_id")
+                        .and_then(|v| v.as_str())
+                })
             {
                 session_id = sid.to_string();
             }
             continue;
         }
 
-        if is_user || is_assistant {
-            message_count += 1;
-        }
+        message_count += 1;
 
         // Parse JSON only for the first user message to extract first_message
-        if is_user && !parsed_first_user {
+        if (is_user || is_codex_user) && !parsed_first_user {
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 if session_id.is_empty()
                     && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str())
                 {
                     session_id = sid.to_string();
                 }
-                // message.content can be a string (Claude Code transcripts)
-                // or an array of content blocks (Qoder/QoderWork).
-                if let Some(content) = event.pointer("/message/content") {
-                    if let Some(text) = content.as_str() {
-                        let stripped = strip_system_context(text);
-                        if !stripped.is_empty() {
-                            if first_message.is_empty() {
-                                first_message = truncate(&stripped, 200);
-                            }
-                            has_human_text = true;
-                        }
-                    } else if let Some(content_arr) = content.as_array() {
-                        for block in content_arr {
-                            let block_type =
-                                block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if block_type == "text" {
-                                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                let stripped = strip_system_context(text);
-                                if !stripped.is_empty() {
-                                    if first_message.is_empty() {
-                                        first_message = truncate(&stripped, 200);
-                                    }
-                                    has_human_text = true;
-                                }
-                            }
-                        }
+                if let Some(text) = user_event_text(&event) {
+                    if first_message.is_empty() {
+                        first_message = truncate(&text, 200);
                     }
+                    has_human_text = true;
                 }
                 if has_human_text {
                     parsed_first_user = true;
@@ -312,35 +328,11 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
                 continue;
             }
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if event_type == "user" {
-                    if let Some(content) = event.pointer("/message/content") {
-                        if let Some(text) = content.as_str() {
-                            let stripped = strip_system_context(text);
-                            if !stripped.is_empty() {
-                                if first_message.is_empty() {
-                                    first_message = truncate(&stripped, 200);
-                                }
-                                has_human_text = true;
-                            }
-                        } else if let Some(content_arr) = content.as_array() {
-                            for block in content_arr {
-                                let block_type =
-                                    block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                if block_type == "text" {
-                                    let text =
-                                        block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                    let stripped = strip_system_context(text);
-                                    if !stripped.is_empty() {
-                                        if first_message.is_empty() {
-                                            first_message = truncate(&stripped, 200);
-                                        }
-                                        has_human_text = true;
-                                    }
-                                }
-                            }
-                        }
+                if let Some(text) = user_event_text(&event) {
+                    if first_message.is_empty() {
+                        first_message = truncate(&text, 200);
                     }
+                    has_human_text = true;
                 }
             }
         }
@@ -415,6 +407,43 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
     match last_match_idx {
         Some(idx) if idx + 1 < parts.len() => parts[idx + 1..].join("-"),
         _ => parts.join("-"),
+    }
+}
+
+/// Extract the human-readable text of a user message event, with
+/// `<system-reminder>` blocks stripped.
+///
+/// Two session schemas reach the listing: Claude-style `user` events carry
+/// `message.content` (a string, or an array whose `text` blocks hold the
+/// input), while Codex `event_msg`/`user_message` envelopes carry
+/// `payload.message`. Returns the first non-empty text found, or `None`.
+fn user_event_text(event: &serde_json::Value) -> Option<String> {
+    let event_type = event.get("type").and_then(|v| v.as_str())?;
+    match event_type {
+        "user" => {
+            let content = event.pointer("/message/content")?;
+            match content {
+                serde_json::Value::String(s) => {
+                    let stripped = strip_system_context(s);
+                    (!stripped.is_empty()).then_some(stripped)
+                }
+                serde_json::Value::Array(blocks) => blocks.iter().find_map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                        return None;
+                    }
+                    let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    let stripped = strip_system_context(text);
+                    (!stripped.is_empty()).then_some(stripped)
+                }),
+                _ => None,
+            }
+        }
+        "event_msg" => event
+            .pointer("/payload/message")
+            .and_then(|v| v.as_str())
+            .map(strip_system_context)
+            .filter(|s| !s.is_empty()),
+        _ => None,
     }
 }
 
@@ -734,5 +763,100 @@ mod tests {
         unsafe { std::env::set_var("HOME", "/nonexistent/path/that/does/not/exist") };
         let sessions = discover_local_sessions();
         assert!(sessions.is_empty());
+    }
+
+    /// A realistic Codex rollout: envelopes under `.codex/sessions/YYYY/MM/DD/`.
+    const CODEX_ROLLOUT: &str = concat!(
+        "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d-ebc4-77f2-9a5c-937b8ff496c5\",\"cwd\":\"/Users/u/vscode/sysom-dev\",\"cli_version\":\"0.146.0\",\"model_provider\":\"openai\"}}\n",
+        "{\"timestamp\":\"2026-08-03T09:56:52.360Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t-1\",\"cwd\":\"/Users/u/vscode/sysom-dev\",\"model\":\"gpt-5.6-sol\",\"effort\":\"medium\"}}\n",
+        "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"会话记录存在哪个文件里面\"}}\n",
+        "{\"timestamp\":\"2026-08-03T09:56:58.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"exec\",\"input\":\"{\\\"cmd\\\":\\\"ls ~/.codex\\\"}\"}}\n",
+        "{\"timestamp\":\"2026-08-03T09:56:59.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_1\",\"output\":\"sessions\\n\"}}\n",
+        "{\"timestamp\":\"2026-08-03T09:57:00.153Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"记录在 ~/.codex/sessions 下\"}]}}\n",
+    );
+
+    fn codex_source() -> &'static SessionSource {
+        SESSION_SOURCES
+            .iter()
+            .find(|s| s.agent_id == "codex")
+            .expect("codex source registered")
+    }
+
+    #[test]
+    fn codex_rollouts_under_date_dirs_are_listed() {
+        // Codex writes rollouts to sessions/YYYY/MM/DD/rollout-*.jsonl, three
+        // levels below the flat root; the flat scan must descend into the
+        // date subdirectories or no real Codex session is ever listed.
+        let tmp = std::env::temp_dir().join("agentsight_codex_date_dirs");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let day = tmp.join("2026/08/03");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-08-03T09-56-48-019fc70d.jsonl"),
+            CODEX_ROLLOUT,
+        )
+        .unwrap();
+
+        let mut sessions = Vec::new();
+        scan_source(&tmp, codex_source(), &mut sessions);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a rollout in the date tree must be found: {sessions:?}"
+        );
+        let session = &sessions[0];
+        assert_eq!(
+            session.session_id, "019fc70d-ebc4-77f2-9a5c-937b8ff496c5",
+            "session_meta payload.session_id must be picked up"
+        );
+        assert_eq!(session.agent_id, "codex");
+        assert_eq!(session.first_message, "会话记录存在哪个文件里面");
+        // One user_message event plus one assistant response_item.
+        assert_eq!(session.message_count, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn codex_envelope_session_is_parsed_from_the_flat_root() {
+        // Even directly under the root, a Codex rollout is an envelope
+        // stream: the user text lives in event_msg/user_message payloads, so
+        // the Claude-style fast scan alone would drop the session from the
+        // listing entirely.
+        let tmp = std::env::temp_dir().join("agentsight_codex_flat_root");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("rollout-direct.jsonl");
+        std::fs::write(&file, CODEX_ROLLOUT).unwrap();
+
+        let session = parse_session_file(&file, codex_source(), "(default)")
+            .expect("a rollout with a user message must be listed");
+        assert_eq!(
+            session.session_id, "019fc70d-ebc4-77f2-9a5c-937b8ff496c5",
+            "session_meta payload.session_id must be picked up"
+        );
+        assert_eq!(session.first_message, "会话记录存在哪个文件里面");
+        assert_eq!(session.message_count, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn codex_rollout_without_user_message_is_dropped() {
+        // A rollout holding only session metadata and assistant output has
+        // no human input to preview; the listing keeps skipping it.
+        let tmp = std::env::temp_dir().join("agentsight_codex_no_user");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("rollout-no-user.jsonl");
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-meta\",\"cwd\":\"/w/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:57:00.153Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        );
+        std::fs::write(&file, content).unwrap();
+
+        assert!(parse_session_file(&file, codex_source(), "(default)").is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
