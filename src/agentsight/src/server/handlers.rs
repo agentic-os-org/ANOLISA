@@ -2740,6 +2740,121 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// The aggregate interruption endpoints share `InterruptionQuery` with the
+    /// list endpoint but only pass the window and `agent_name` to the store:
+    /// `stats` and the two detailed count queries read no type/severity/
+    /// resolved parameter. Those filters were silently dropped, so a caller
+    /// filtering by severity received the unfiltered aggregate with 200 — a
+    /// plausible-looking wrong number. A filter the endpoint cannot apply is
+    /// refused up front instead, while the supported window/agent filters keep
+    /// answering.
+    #[actix_web::test]
+    async fn interruption_aggregates_reject_filters_they_cannot_apply() {
+        let interruption_path = unique_handler_db("interruptions-aggregate-filters");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let mut rate_limit = make_interruption_event(
+            "int-agg-1",
+            "sess-agg-1",
+            "conv-agg-1",
+            crate::interruption::InterruptionType::RateLimit,
+        );
+        rate_limit.severity = crate::interruption::types::Severity::High;
+        istore.insert(&rate_limit).unwrap();
+        let mut crash = make_interruption_event(
+            "int-agg-2",
+            "sess-agg-2",
+            "conv-agg-2",
+            crate::interruption::InterruptionType::AgentCrash,
+        );
+        crash.severity = crate::interruption::types::Severity::Critical;
+        crash.agent_name = Some("Agent-B".to_string());
+        istore.insert(&crash).unwrap();
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_count)
+                .service(interruption_stats)
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        let window = "start_ns=0&end_ns=9223372036854775807";
+
+        // Supported filters keep working: no filter counts both rows, and
+        // `agent_name` scopes the count to one agent.
+        let all = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/interruptions/count?{window}"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(all.status(), StatusCode::OK);
+        let all_body = service_response_json(all).await;
+        assert_eq!(all_body["total"], 2, "{all_body}");
+        assert_eq!(all_body["by_severity"]["critical"], 1, "{all_body}");
+
+        let scoped = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/interruptions/count?{window}&agent_name=Agent-B"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(scoped.status(), StatusCode::OK);
+        assert_eq!(service_response_json(scoped).await["total"], 1);
+
+        // Every aggregate endpoint must reject the row-level filters it does
+        // not implement instead of answering unfiltered data with 200. Valid
+        // tokens are rejected too — the endpoints cannot apply them either.
+        for uri in [
+            format!("/interruptions/count?{window}&interruption_type=rate_limit"),
+            format!("/interruptions/count?{window}&severity=critical"),
+            format!("/interruptions/count?{window}&resolved=false"),
+            format!("/interruptions/stats?{window}&interruption_type=rate_limit"),
+            format!("/interruptions/stats?{window}&severity=critical"),
+            format!("/interruptions/session-counts?{window}&severity=critical"),
+            format!("/interruptions/session-counts?{window}&resolved=true"),
+            format!("/interruptions/conversation-counts?{window}&interruption_type=rate_limit"),
+            format!("/interruptions/conversation-counts?{window}&resolved=true"),
+            // A supported filter alongside an unsupported one must not hide
+            // the unsupported one.
+            format!("/interruptions/count?{window}&agent_name=Agent-B&severity=critical"),
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(&uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject a filter it cannot apply"
+            );
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            assert!(
+                body["error"].is_string(),
+                "the 400 must name the unsupported filter: {body}"
+            );
+        }
+
+        // Guard: the unfiltered variants of all four endpoints still answer
+        // 200, so the rejection above is not a blanket failure.
+        for uri in [
+            format!("/interruptions/count?{window}"),
+            format!("/interruptions/stats?{window}"),
+            format!("/interruptions/session-counts?{window}"),
+            format!("/interruptions/conversation-counts?{window}"),
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(&uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&interruption_path);
+    }
+
     /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
     /// makes the default 24 h start wrap into a huge positive bound. The query
     /// then runs on an inverted (always empty) window and still answers 200,
@@ -4427,6 +4542,47 @@ fn reject_unknown_interruption_filters(query: &InterruptionQuery) -> Option<Http
     None
 }
 
+/// Reject row-level filters the aggregate endpoints cannot honour.
+///
+/// `interruption_count`, `interruption_stats`, `interruption_session_counts`
+/// and `interruption_conversation_counts` share `InterruptionQuery` with the
+/// list endpoint but pass only the window and `agent_name` to the store:
+/// `stats` and the two detailed count queries read no type/severity/resolved
+/// parameter. Silently dropping those filters answered a filtered request with
+/// the unfiltered aggregate and 200 — a plausible-looking wrong number — so
+/// they are refused up front, the same direction as the list endpoint's
+/// unknown-token check above. `resolved` is rejected even on the
+/// unresolved-only breakdowns: accepting `resolved=false` there would make the
+/// equally ignored `resolved=true` look supported while always returning the
+/// unresolved view.
+fn reject_unsupported_interruption_filters(
+    query: &InterruptionQuery,
+    endpoint: &str,
+) -> Option<HttpResponse> {
+    let mut unsupported = Vec::new();
+    if query.interruption_type.is_some() {
+        unsupported.push("interruption_type");
+    }
+    if query.severity.is_some() {
+        unsupported.push("severity");
+    }
+    if query.resolved.is_some() {
+        unsupported.push("resolved");
+    }
+    if unsupported.is_empty() {
+        return None;
+    }
+    Some(HttpResponse::BadRequest().json(json!({
+        "error": "unsupported_filter",
+        "message": format!(
+            "{endpoint} accepts only start_ns, end_ns and agent_name; {} must be \
+             applied on GET /api/interruptions, which filters individual events",
+            unsupported.join(", ")
+        ),
+        "unsupported_filters": unsupported,
+    })))
+}
+
 /// GET /api/interruptions
 ///
 /// Returns a list of interruption events matching the query.
@@ -4482,6 +4638,9 @@ pub async fn list_interruptions(
 /// Returns total interruption count + breakdown by severity within a time range.
 /// Counts unresolved events only, so the total always equals the sum of the
 /// `session-counts` / `conversation-counts` breakdowns.
+/// Only the window and `agent_name` filters are supported; row-level
+/// `interruption_type` / `severity` / `resolved` are rejected with 400 because
+/// the store cannot apply them here.
 /// Response: { total, by_severity: { critical, high, medium, low } }
 #[get("/interruptions/count")]
 pub async fn interruption_count(
@@ -4494,6 +4653,12 @@ pub async fn interruption_count(
     };
 
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
+    if let Some(response) = reject_unsupported_interruption_filters(
+        &query,
+        "GET /api/interruptions/conversation-counts",
+    ) {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -4538,6 +4703,9 @@ pub async fn interruption_count(
 ///
 /// Returns per-type count statistics within a time range. Unresolved only, to
 /// stay consistent with the overview card whose tooltip this feeds.
+/// Only the window and `agent_name` filters are supported; row-level
+/// `interruption_type` / `severity` / `resolved` are rejected with 400 because
+/// the store cannot apply them here.
 #[get("/interruptions/stats")]
 pub async fn interruption_stats(
     data: web::Data<AppState>,
@@ -4549,6 +4717,11 @@ pub async fn interruption_stats(
     };
 
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
+    if let Some(response) =
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/count")
+    {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -4568,6 +4741,9 @@ pub async fn interruption_stats(
 /// GET /api/interruptions/session-counts?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns unresolved interruption breakdown per session_id, grouped by severity and type.
+/// Only the window and `agent_name` filters are supported; row-level
+/// `interruption_type` / `severity` / `resolved` are rejected with 400 because
+/// the store cannot apply them here.
 #[get("/interruptions/session-counts")]
 pub async fn interruption_session_counts(
     data: web::Data<AppState>,
@@ -4579,6 +4755,11 @@ pub async fn interruption_session_counts(
     };
 
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
+    if let Some(response) =
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/stats")
+    {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -4643,6 +4824,9 @@ pub async fn interruption_session_counts(
 /// nests conversation rows under a session, so a session-less event must not be
 /// attributed to whichever session owns its conversation — the
 /// unassigned-session row already accounts for it.
+/// Only the window and `agent_name` filters are supported; row-level
+/// `interruption_type` / `severity` / `resolved` are rejected with 400 because
+/// the store cannot apply them here.
 #[get("/interruptions/conversation-counts")]
 pub async fn interruption_conversation_counts(
     data: web::Data<AppState>,
@@ -4654,6 +4838,11 @@ pub async fn interruption_conversation_counts(
     };
 
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
+    if let Some(response) =
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/session-counts")
+    {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
