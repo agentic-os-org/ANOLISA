@@ -543,7 +543,7 @@ fn render_cosh_ng_section(out: &mut String, diagnostics: &cosh_ng::CoshNgDiagnos
                 }
             }
             out.push_str(
-                "\nReproduction checklist (GitHub issue #3055 SOP) — run in the affected Zsh session:\n\n",
+                "\nReproduction checklist (GitHub issue #3055 SOP) — run each step inside the affected cosh session (not a plain Zsh), exactly as typed:\n\n",
             );
             out.push_str("```zsh\n");
             out.push_str("typeset -p _COSH_AI_ENABLED _COSH_HAS_USER_COMMAND_NOT_FOUND\n");
@@ -1045,6 +1045,30 @@ mod tests {
         assert!(
             markdown.contains("~/.local/lib/anolisa/libexec/cosh-ng/cosh-shell doctor"),
             "reproduction checklist must use the resolved binary path: {markdown}"
+        );
+        // The SOP checklist is pasted verbatim into users' sessions, so it
+        // must carry the #3055 contrast diagnostic exactly as the original
+        // report specifies it: the explicit `?? 测试` agent-marker form must
+        // succeed while the bare `测试` form falls through to the implicit
+        // Zsh routing — dropping the explicit step removes the contrast
+        // the diagnosis depends on. The premise line must also scope the
+        // steps to the affected cosh session, not a plain Zsh.
+        let checklist = markdown
+            .split("```zsh\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("zsh checklist block");
+        assert_eq!(
+            checklist,
+            "typeset -p _COSH_AI_ENABLED _COSH_HAS_USER_COMMAND_NOT_FOUND\n\
+             whence -v command_not_found_handler\n\
+             whence -v _cosh_user_command_not_found_handler\n\
+             ?? 测试",
+            "checklist must keep the #3055 contrast diagnostic: {markdown}"
+        );
+        assert!(
+            markdown.contains("run each step inside the affected cosh session"),
+            "the checklist premise must scope the steps to the cosh session: {markdown}"
         );
     }
 
