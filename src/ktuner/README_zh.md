@@ -107,6 +107,8 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 { "error": "tune requires root (sudo ktuner tune)" }
 ```
 
+网络 `net.ipv4.conf` 和 `net.ipv6.conf` 参数保留网卡大小写与字面点：`ktuner why net/ipv4/conf/Br0.100/forwarding` 指向 `Br0.100`。也接受点分隔别名。网卡包含字面点时，持久化使用首个分隔符为斜杠的键保留路径含义。当前内置规则不生成逐 VLAN 推荐。
+
 ## 安全性
 
 - **代码执行拒绝列表**：`kernel.core_pattern`、`kernel.modprobe`、`kernel.hotplug`、`kernel.poweroff_cmd`、`kernel.modules_disabled`、`kernel.kexec_load_disabled`、`kernel.usermodehelper.*`、`fs.binfmt_misc.*` 在任何写路径（tune/fix/rollback）中都被无条件阻止。匹配基于解析后的文件系统路径而非参数拼写，因此 slash/dot/traversal 变体均会被拦截。

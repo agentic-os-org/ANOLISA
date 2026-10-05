@@ -282,14 +282,27 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
 
 /// Normalize a user-supplied parameter name for lookup: sysfs names
 /// (`block/...`, `transparent_hugepage/...`) are filesystem identities and
-/// must stay verbatim, while sysctl names accept slash/dot and case
-/// variants.
+/// must stay verbatim. Sysctl namespaces accept slash/dot and case variants,
+/// but network interface identities retain their case and literal dots.
 fn normalize_param(param: &str) -> String {
     if param.starts_with("block/") || param.starts_with("transparent_hugepage/") {
-        param.to_string()
-    } else {
-        param.replace('/', ".").to_lowercase()
+        return param.to_string();
     }
+    for proto in ["ipv4", "ipv6"] {
+        let prefix = format!("net.{proto}.conf.");
+        if param
+            .get(..prefix.len())
+            .is_some_and(|p| p.replace('/', ".").eq_ignore_ascii_case(&prefix))
+        {
+            let rest = &param[prefix.len()..];
+            if let Some((iface, property)) = rest.rsplit_once('/').or_else(|| rest.rsplit_once('.'))
+            {
+                return format!("net.{proto}.conf.{iface}.{}", property.to_ascii_lowercase());
+            }
+            return format!("net.{proto}.conf.{rest}");
+        }
+    }
+    param.replace('/', ".").to_lowercase()
 }
 
 /// Find the recommendation for a user-supplied parameter name, accepting the
@@ -302,7 +315,7 @@ fn find_recommendation<'a>(
     let normalized = normalize_param(param);
     eval.recommendations
         .iter()
-        .find(|r| r.param == param || r.param == normalized)
+        .find(|r| r.param == param || normalize_param(&r.param) == normalized)
 }
 
 fn cmd_fix(param: &str) -> Result<i32> {
@@ -464,6 +477,69 @@ fn rec_json(r: &Recommendation) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn network_normalization_preserves_interface_identity() {
+        for proto in ["ipv4", "ipv6"] {
+            for iface in ["Br0", "Br0.100", "br0.100", "lo"] {
+                for input in [
+                    format!("net/{proto}/conf/{iface}/forwarding"),
+                    format!("net.{proto}.conf.{iface}.forwarding"),
+                    format!("NET/{proto}/CONF/{iface}/FORWARDING"),
+                    format!("net/{proto}.conf/{iface}/forwarding"),
+                ] {
+                    assert_eq!(
+                        normalize_param(&input),
+                        format!("net.{proto}.conf.{iface}.forwarding")
+                    );
+                }
+            }
+        }
+        assert_eq!(normalize_param("VM/SWAPPINESS"), "vm.swappiness");
+        assert_eq!(
+            normalize_param("block/Disk.0/scheduler"),
+            "block/Disk.0/scheduler"
+        );
+    }
+
+    #[test]
+    fn network_lookup_does_not_match_a_different_interface() {
+        let eval = rules::EvalResult {
+            recommendations: vec![
+                rec("net.ipv4.conf.br0.100.forwarding", true),
+                rec("net/ipv4/conf/Br0.100/forwarding", true),
+            ],
+            total_checked: 2,
+        };
+        let found = find_recommendation(&eval, "net.ipv4.conf.Br0.100.forwarding").unwrap();
+        assert_eq!(found.param, "net/ipv4/conf/Br0.100/forwarding");
+        assert!(find_recommendation(&eval, "net.ipv4.conf.BR0.100.forwarding").is_none());
+    }
+
+    #[test]
+    fn network_why_reads_the_requested_interface_path() {
+        let eval = rules::EvalResult {
+            recommendations: vec![],
+            total_checked: 0,
+        };
+        for proto in ["ipv4", "ipv6"] {
+            for input in [
+                format!("net/{proto}/conf/Br0.100/forwarding"),
+                format!("net.{proto}.conf.Br0.100.forwarding"),
+            ] {
+                let (output, code) = why_with(&input, &eval, |path| {
+                    assert_eq!(
+                        path,
+                        format!("/proc/sys/net/{proto}/conf/Br0.100/forwarding")
+                    );
+                    Ok(Some("1\n".into()))
+                })
+                .unwrap();
+                assert_eq!(code, 0);
+                assert_eq!(output["current"], "1");
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -81,6 +81,8 @@ is a successful no-op (`0`); an unreadable or missing ledger is a command error 
 
 ---
 
+For network conf parameters, interface identity is case-sensitive. Both `net/ipv4/conf/Br0.100/forwarding` and `net.ipv4.conf.Br0.100.forwarding` address the same interface; `br0.100` is a different identity. IPv6 follows the same rule. Persisted records for interfaces with literal dots use slash-first sysctl.d keys so systemd preserves those dots. This supports existing valid records or custom library recommendations; built-in rules do not currently generate per-VLAN recommendations.
+
 ## Permission Boundary
 
 | Command | Root | Effect |

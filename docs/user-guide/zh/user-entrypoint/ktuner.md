@@ -78,6 +78,8 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 
 ---
 
+网络 conf 参数中的网卡身份区分大小写。`net/ipv4/conf/Br0.100/forwarding` 和 `net.ipv4.conf.Br0.100.forwarding` 指向同一网卡；`br0.100` 是不同的身份。IPv6 遵循相同规则。网卡包含字面点时，持久化记录使用首个分隔符为斜杠的 sysctl.d 键，让 systemd 保留这些点。此行为支持已有有效记录或自定义库推荐；当前内置规则不生成逐 VLAN 推荐。
+
 ## 权限边界
 
 | 命令 | Root | 作用 |

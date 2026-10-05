@@ -726,15 +726,16 @@ fn render_persistence(
             ));
             has_nonsysctl = true;
         } else if param.contains('.') || param.contains('/') {
-            // Slashed sysctl spellings ("kernel/sysrq") resolve to the same
-            // /proc/sys file as the dotted form, but sysctl.d requires the
-            // dotted spelling — normalize or the value silently vanishes at
-            // reboot while the ledger still lists it.
-            sysctl_content.push_str(&format!(
-                "{} = {}\n",
-                param.replace('/', "."),
-                entry.applied
-            ));
+            // A slash as the first separator makes sysctl.d preserve literal
+            // dots. Derive dotted-interface keys from the recorded proc path,
+            // or systemd would interpret Br0.100 as two directories.
+            let key = entry
+                .path
+                .strip_prefix("/proc/sys/")
+                .filter(|path| net_conf_path(param).is_some() && path.contains('.'))
+                .map(str::to_string)
+                .unwrap_or_else(|| param.replace('/', "."));
+            sysctl_content.push_str(&format!("{key} = {}\n", entry.applied));
             has_sysctl = true;
         }
     }
@@ -1132,6 +1133,31 @@ pub fn auto_rollback_on_degradation(result: &VerifyResult) -> Result<Option<Roll
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persistence_preserves_literal_interface_dots() {
+        for proto in ["ipv4", "ipv6"] {
+            for param in [
+                format!("net/{proto}/conf/Br0.100/forwarding"),
+                format!("net.{proto}.conf.Br0.100.forwarding"),
+            ] {
+                let path = format!("/proc/sys/net/{proto}/conf/Br0.100/forwarding");
+                let entries = BTreeMap::from([(
+                    param,
+                    RollbackEntry {
+                        previous: "0".into(),
+                        applied: "1".into(),
+                        path,
+                    },
+                )]);
+                let (config, script) = render_persistence(&entries);
+                assert!(config
+                    .unwrap()
+                    .contains(&format!("net/{proto}/conf/Br0.100/forwarding = 1")));
+                assert!(script.is_none());
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

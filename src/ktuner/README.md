@@ -111,6 +111,8 @@ Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and cle
 { "error": "tune requires root (sudo ktuner tune)" }
 ```
 
+Network `net.ipv4.conf` and `net.ipv6.conf` names preserve interface case and literal dots: `ktuner why net/ipv4/conf/Br0.100/forwarding` addresses `Br0.100`. Dotted aliases are also accepted. Persistence retains that path with a slash-first key when an interface contains dots. Built-in rules do not currently generate per-VLAN recommendations.
+
 ## Security
 
 - **Code-execution deny-list**: `kernel.core_pattern`, `kernel.modprobe`, `kernel.hotplug`, `kernel.poweroff_cmd`, `kernel.modules_disabled`, `kernel.kexec_load_disabled`, `kernel.usermodehelper.*`, `fs.binfmt_misc.*` are unconditionally blocked from any write path (tune/fix/rollback). Matching is done on the resolved filesystem path, not the parameter spelling, so slash/dot/traversal variants are all caught.
