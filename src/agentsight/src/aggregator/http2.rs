@@ -14,6 +14,7 @@ use hpack::Decoder;
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::time::{Duration, Instant};
 
 const MAX_CONTINUATION_BUFFER: usize = 65536;
 
@@ -36,6 +37,12 @@ const HPACK_TABLE_SIZE_CAP: usize = 64 * 1024;
 /// for `SETTINGS_HEADER_TABLE_SIZE`); also the effective cap for a
 /// connection before it has seen any SETTINGS.
 const HPACK_DEFAULT_TABLE_SIZE: usize = 4096;
+
+/// Default per-stream payload cap (8 MiB), mirroring the HTTP/1 connection cap.
+const DEFAULT_MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
+
+/// Default idle timeout for partially aggregated streams (60 s).
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Per-connection HPACK decoder state (one decoder per direction)
 struct HpackConnectionState {
@@ -811,6 +818,13 @@ pub struct Http2StreamAggregator {
     continuation_buffers: HashMap<StreamId, ContinuationBuffer>,
     /// Decoded headers waiting to be attached to streams on completion
     decoded_headers_store: HashMap<StreamId, DecodedHeadersPair>,
+    /// Approximate time of the last frame stored per stream, drives idle
+    /// eviction. Bounded by the stream LRU capacity.
+    last_activity: LruCache<StreamId, Instant>,
+    /// Maximum payload bytes retained per partially aggregated stream.
+    max_stream_bytes: usize,
+    /// Idle timeout before the periodic sweep drops a partial stream.
+    idle_timeout: Duration,
     /// Cumulative active-stream evictions from the bounded LRU.
     eviction_count: u64,
 }
@@ -824,18 +838,30 @@ impl Default for Http2StreamAggregator {
 impl Http2StreamAggregator {
     /// Create a new aggregator with default capacity
     pub fn new() -> Self {
-        Http2StreamAggregator {
-            streams: LruCache::new(NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY * 4).unwrap()),
-            completed_streams: Vec::new(),
-            hpack_states: LruCache::new(NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY).unwrap()),
-            continuation_buffers: HashMap::new(),
-            decoded_headers_store: HashMap::new(),
-            eviction_count: 0,
-        }
+        Self::with_limits(
+            DEFAULT_CONNECTION_CAPACITY * 4,
+            DEFAULT_MAX_STREAM_BYTES,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
     }
 
-    /// Create a new aggregator with custom capacity
+    /// Create a new aggregator with custom capacity and default limits.
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_limits(
+            capacity,
+            DEFAULT_MAX_STREAM_BYTES,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+    }
+
+    /// Create a new aggregator with explicit capacity and memory/time limits.
+    ///
+    /// `max_stream_bytes` caps the payload bytes a partially aggregated stream
+    /// may retain; exceeding it drops the stream. `idle_timeout` bounds how long
+    /// a stream with no new frames survives the periodic
+    /// [`Self::evict_idle_and_oversized`] sweep. Both mirror the HTTP/1
+    /// connection limits.
+    pub fn with_limits(capacity: usize, max_stream_bytes: usize, idle_timeout: Duration) -> Self {
         // A zero capacity has no meaningful LRU; clamp to one so a
         // misconfigured caller gets maximum eviction instead of a panic.
         let cap = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
@@ -845,6 +871,9 @@ impl Http2StreamAggregator {
             hpack_states: LruCache::new(cap),
             continuation_buffers: HashMap::new(),
             decoded_headers_store: HashMap::new(),
+            last_activity: LruCache::new(cap),
+            max_stream_bytes: max_stream_bytes.max(1024),
+            idle_timeout,
             eviction_count: 0,
         }
     }
@@ -1119,12 +1148,35 @@ impl Http2StreamAggregator {
     }
 
     /// Insert stream state back into LRU, cleaning up side-maps on eviction.
+    ///
+    /// A stream retaining more payload than `max_stream_bytes` is dropped
+    /// instead of stored: every buffered frame keeps an `Rc<SslEvent>` alive,
+    /// so a stream that never reaches END_STREAM would otherwise grow until the
+    /// process exits.
     fn insert_stream_state(&mut self, stream_id: StreamId, state: Http2StreamState) {
-        if let Some((evicted_id, _)) = self.streams.push(stream_id, state) {
-            self.continuation_buffers.remove(&evicted_id);
-            self.decoded_headers_store.remove(&evicted_id);
+        let retained = state.buffered_bytes();
+        if retained > self.max_stream_bytes {
+            log::warn!(
+                "http/2 stream {stream_id:?} retained {retained} bytes > max_stream_bytes={}, dropping",
+                self.max_stream_bytes
+            );
             self.eviction_count = self.eviction_count.saturating_add(1);
+            self.discard_side_state(stream_id);
+            return;
         }
+
+        self.last_activity.push(stream_id, Instant::now());
+        if let Some((evicted_id, _)) = self.streams.push(stream_id, state) {
+            self.eviction_count = self.eviction_count.saturating_add(1);
+            self.discard_side_state(evicted_id);
+        }
+    }
+
+    /// Release the side maps belonging to a stream that is no longer retained.
+    fn discard_side_state(&mut self, stream_id: StreamId) {
+        self.continuation_buffers.remove(&stream_id);
+        self.decoded_headers_store.remove(&stream_id);
+        self.last_activity.pop(&stream_id);
     }
 
     /// Store decoded headers for a stream. They'll be attached when the stream completes.
@@ -1159,7 +1211,53 @@ impl Http2StreamAggregator {
         // Defensive cleanup: a malformed or aborted stream could leave a stale
         // continuation buffer behind; remove it when the stream completes.
         self.continuation_buffers.remove(&stream_id);
+        self.last_activity.pop(&stream_id);
         stream
+    }
+
+    /// Drop streams that have been idle longer than `idle_timeout` and, as a
+    /// safety net, any partial stream whose retained payload exceeds
+    /// `max_stream_bytes`.
+    ///
+    /// Completed streams are returned to the caller and are never retained
+    /// here, so this sweep only bounds partial aggregation state. The HTTP/1
+    /// aggregator runs an equivalent sweep on the same periodic tick.
+    pub fn evict_idle_and_oversized(&mut self) {
+        let now = Instant::now();
+        let timeout = self.idle_timeout;
+
+        let idle: Vec<StreamId> = self
+            .last_activity
+            .iter()
+            .filter_map(|(stream_id, seen)| {
+                (now.duration_since(*seen) > timeout).then_some(*stream_id)
+            })
+            .collect();
+        let oversized: Vec<StreamId> = self
+            .streams
+            .iter()
+            .filter(|(_, state)| state.buffered_bytes() > self.max_stream_bytes)
+            .map(|(stream_id, _)| *stream_id)
+            .collect();
+
+        let mut evicted = 0u64;
+        for stream_id in idle.into_iter().chain(oversized) {
+            let was_retained = self.streams.pop(&stream_id).is_some();
+            let was_tracked = self.last_activity.pop(&stream_id).is_some();
+            if was_retained || was_tracked {
+                self.discard_side_state(stream_id);
+                evicted += 1;
+            }
+        }
+
+        if evicted > 0 {
+            self.eviction_count = self.eviction_count.saturating_add(evicted);
+            log::info!(
+                "http/2 evicted {evicted} idle/oversized stream(s) (timeout={}s, max_stream_bytes={})",
+                timeout.as_secs(),
+                self.max_stream_bytes
+            );
+        }
     }
 
     /// Process a single frame within the context of a stream state
@@ -1413,6 +1511,7 @@ impl Http2StreamAggregator {
         self.hpack_states.clear();
         self.continuation_buffers.clear();
         self.decoded_headers_store.clear();
+        self.last_activity.clear();
     }
 
     /// Drain all pending streams and return them as completed
@@ -1422,8 +1521,11 @@ impl Http2StreamAggregator {
 
         // Move all streams from LRU cache
         while let Some((stream_id, state)) = self.streams.pop_lru() {
+            self.last_activity.pop(&stream_id);
             if let Some(stream) = self.stream_from_state(state, stream_id) {
                 result.push(self.finalize_stream(stream_id, stream));
+            } else {
+                self.discard_side_state(stream_id);
             }
         }
 
@@ -1546,6 +1648,104 @@ mod tests {
         // panic; it must clamp to one instead.
         let mut aggregator = Http2StreamAggregator::with_capacity(0);
         assert!(aggregator.process_frames(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn oversized_stream_is_dropped_at_insert() {
+        // Regression: DATA frames were buffered without any size check, so a
+        // stream that never reaches END_STREAM grew for the process lifetime.
+        const LIMIT: usize = 4096;
+        let mut aggregator = Http2StreamAggregator::with_limits(8, LIMIT, Duration::from_secs(60));
+
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            1,
+            0x04,
+            b":method: POST".to_vec(),
+            create_test_event(1234, 0x1000, 1, 1000),
+        )]);
+        for i in 0..16 {
+            aggregator.process_frames(vec![create_test_frame(
+                1,
+                0,
+                0x00,
+                vec![b'x'; 1024],
+                create_test_event(1234, 0x1000, 1, 2000 + i),
+            )]);
+        }
+
+        let metrics = aggregator.metrics();
+        assert!(
+            metrics.pending_connection_bytes <= LIMIT,
+            "a partial stream must not retain more than max_stream_bytes: {} > {}",
+            metrics.pending_connection_bytes,
+            LIMIT
+        );
+        assert!(
+            metrics.eviction_count > 0,
+            "oversized frames must evict the stream instead of accumulating"
+        );
+    }
+
+    #[test]
+    fn idle_stream_is_dropped_by_eviction_sweep() {
+        let mut aggregator = Http2StreamAggregator::with_limits(
+            8,
+            DEFAULT_MAX_STREAM_BYTES,
+            Duration::from_millis(50),
+        );
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0,
+            0x00,
+            b"partial".to_vec(),
+            create_test_event(1234, 0x1000, 1, 1000),
+        )]);
+        assert_eq!(aggregator.active_stream_count(), 1);
+
+        // A fresh stream survives the sweep.
+        aggregator.evict_idle_and_oversized();
+        assert_eq!(aggregator.active_stream_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(60));
+        aggregator.evict_idle_and_oversized();
+        assert_eq!(aggregator.active_stream_count(), 0);
+        assert_eq!(aggregator.eviction_count, 1);
+        assert_eq!(aggregator.metrics().pending_connection_bytes, 0);
+    }
+
+    #[test]
+    fn eviction_sweep_keeps_completed_stream_side_state_clean() {
+        // The sweep must release the continuation and decoded-header side maps
+        // of the streams it drops, not just the frame buffers.
+        let connection_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x1000,
+        };
+        let mut aggregator = Http2StreamAggregator::with_limits(
+            8,
+            DEFAULT_MAX_STREAM_BYTES,
+            Duration::from_millis(50),
+        );
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            1,
+            0x00,
+            b"fragment".to_vec(),
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1000),
+        )]);
+        let stream_id = StreamId::new(connection_id, 1);
+        aggregator
+            .decoded_headers_store
+            .insert(stream_id, DecodedHeadersPair::default());
+        assert!(aggregator.continuation_buffers.contains_key(&stream_id));
+
+        std::thread::sleep(Duration::from_millis(60));
+        aggregator.evict_idle_and_oversized();
+
+        assert!(!aggregator.continuation_buffers.contains_key(&stream_id));
+        assert!(!aggregator.decoded_headers_store.contains_key(&stream_id));
+        assert!(aggregator.last_activity.get(&stream_id).is_none());
     }
 
     fn create_test_event(pid: u32, ssl_ptr: u64, rw: i32, timestamp_ns: u64) -> Rc<SslEvent> {

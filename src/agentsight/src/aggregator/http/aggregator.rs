@@ -324,13 +324,19 @@ impl HttpConnectionAggregator {
             );
         }
 
-        // Also evict oversized body buffers.
+        // Also evict oversized body buffers. `buffered_bytes` covers a pending
+        // request body and an active SSE stream alike (parsed events plus any
+        // still-encoded compressed buffer), so an endless SSE response cannot
+        // retain events for the process lifetime. Merely idle in-flight states
+        // are deliberately kept: `snapshot_idle_connections` persists them as
+        // interruption evidence and a stream that resumes must still complete.
         let oversized: Vec<ConnectionId> = self
             .connections
             .iter()
             .filter_map(|(k, state)| {
                 let body_len = match state {
-                    ConnectionState::RequestBodyPending { body_buffer, .. } => body_buffer.len(),
+                    ConnectionState::RequestBodyPending { .. }
+                    | ConnectionState::SseActive { .. } => state.buffered_bytes(),
                     _ => 0,
                 };
                 if body_len > max_bytes { Some(*k) } else { None }
@@ -3364,6 +3370,68 @@ mod tests {
             agg.last_appended_src_ptr.peek(&conn_id).is_none(),
             "the crash drain must not leave the append cursor behind"
         );
+    }
+
+    #[test]
+    fn test_oversized_sse_active_is_evicted() {
+        // Regression: the oversized scan only looked at RequestBodyPending, so
+        // an SSE stream that never terminates (client stops reading, no done
+        // marker) retained every parsed event for the process lifetime.
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 4242,
+            ssl_ptr: 0xC000,
+        };
+        let source =
+            create_mock_ssl_event_with_buf(conn_id.pid, conn_id.ssl_ptr, vec![b'e'; 2048], 0);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: source.clone(),
+            reassembled_body: None,
+        };
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        let response_headers = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: source.clone(),
+        };
+        let sse_events: Vec<ParsedSseEvent> = (0..4)
+            .map(|_| ParsedSseEvent::new(None, None, None, 0, 1024, source.clone()))
+            .collect();
+
+        agg.connections.push(
+            conn_id,
+            ConnectionState::SseActive {
+                request: Some(request),
+                response_headers,
+                sse_events,
+                compressed_buffer: None,
+                content_encoding: None,
+                zstd_decoder: None,
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+
+        agg.evict_idle_and_oversized();
+
+        assert!(
+            agg.connections.peek(&conn_id).is_none(),
+            "an SSE stream retaining more than max_body_bytes must be evicted"
+        );
+        let metrics = agg.metrics();
+        assert_eq!(metrics.pending_connection_count, 0);
+        assert_eq!(metrics.pending_connection_bytes, 0);
+        assert_eq!(metrics.eviction_count, 1);
     }
 
     #[test]
