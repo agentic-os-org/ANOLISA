@@ -30,7 +30,9 @@ const OBSERVATION_TRIM_CHARS: usize = 80;
 /// `render_trimmed` feeds LLM prompts (the perf experience-library
 /// strategy), and reasoning models emit tens of thousands of characters of
 /// hidden chain-of-thought per step — uncapped narration is the exact
-/// context overflow `summary` caps its payload to avoid.
+/// context overflow `summary` caps its payload to avoid. The same head cap
+/// bounds user narration: a pasted log or config dump in one user turn is
+/// the other routine source of oversized prompt payload.
 const NARRATION_TRIM_CHARS: usize = 800;
 
 // ─── Document types ──────────────────────────────────────────────────────────
@@ -340,9 +342,9 @@ pub(crate) fn truncate_chars(raw: &str, max_chars: usize) -> String {
 // ─── LLM-facing rendering ────────────────────────────────────────────────────
 
 /// Render the trajectory as compact readable text for LLM prompts, trimming
-/// tool observations to a short prefix and narration (thinking / text) to a
-/// head cap. Preserves step order, sources, and tool names/arguments
-/// summaries.
+/// tool observations to a short prefix and narration (thinking / text / user
+/// messages) to a head cap. Preserves step order, sources, and tool
+/// names/arguments summaries.
 pub fn render_trimmed(traj: &AtifTrajectory) -> String {
     let mut out = String::new();
     for step in &traj.steps {
@@ -357,7 +359,10 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
             }
             "user" => {
                 let msg = step.message.as_deref().unwrap_or("");
-                out.push_str(&format!("[{ts}] user: {msg}\n"));
+                out.push_str(&format!(
+                    "[{ts}] user: {}\n",
+                    truncate_chars(msg, NARRATION_TRIM_CHARS)
+                ));
             }
             _ => {
                 out.push_str(&format!("[{ts}] agent (step {}):\n", step.step_id));
@@ -595,5 +600,36 @@ mod tests {
         );
         assert!(text.contains("thinking: think"));
         assert!(text.contains("text: text"));
+    }
+
+    /// A user step carrying a pasted payload (a log, a config dump, a whole
+    /// file) must be head-capped like every other narration: `render_trimmed`
+    /// feeds the perf experience-library prompt, and the user turn is the one
+    /// place oversized input routinely enters a trajectory — a single pasted
+    /// log shipped verbatim is the exact context overflow the narration cap
+    /// exists to avoid.
+    #[test]
+    fn render_trimmed_caps_user_messages() {
+        let json = String::from(
+            r#"{"schema_version":"ATIF-v1.6","session_id":"s1",
+                "agent":{"name":"a","version":"1"},
+                "steps":[
+                    {"step_id":1,"source":"user","timestamp":"2026-01-01T00:00:01Z",
+                     "message":"BIGLOG"},
+                    {"step_id":2,"source":"user","timestamp":"2026-01-01T00:00:02Z",
+                     "message":"keep this short turn verbatim"}]}"#,
+        )
+        .replace("BIGLOG", &"log ".repeat(20_000));
+        let traj = AtifTrajectory::from_json(&json).unwrap();
+        let text = render_trimmed(&traj);
+        assert!(
+            text.chars().count() < 4_000,
+            "a pasted user payload must be capped, got {} chars",
+            text.chars().count()
+        );
+        assert!(text.contains("user: log"));
+        assert!(!text.contains(&"log ".repeat(1_000)));
+        // A short user turn is not a pasted payload and stays verbatim.
+        assert!(text.contains("user: keep this short turn verbatim\n"));
     }
 }
