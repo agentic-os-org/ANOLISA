@@ -378,6 +378,16 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
 
 // ─── Session row with expand ──────────────────────────────────────────────────
 
+/**
+ * Compounded savings as a percentage of baseline consumption. The summary
+ * card and the session rows share this formula; the server's per-session
+ * `compounded_savings_rate` divides by actual total tokens instead, which is
+ * not the rate either surface displays.
+ */
+export function compoundedSavingsRate(compoundedSaved: number, baselineTokens: number): number {
+  return baselineTokens > 0 ? (compoundedSaved / baselineTokens) * 100 : 0;
+}
+
 const SessionRow: React.FC<{
   session: SessionSavings;
   initialExpanded?: boolean;
@@ -388,6 +398,7 @@ const SessionRow: React.FC<{
   const { t } = useI18n();
   const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(initialExpanded);
+  const savingsRate = compoundedSavingsRate(session.compounded_saved, session.baseline_tokens);
 
   return (
     <>
@@ -442,11 +453,11 @@ const SessionRow: React.FC<{
             <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden max-w-[80px]">
               <div
                 className="h-full bg-green-500 rounded-full"
-                style={{ width: `${Math.min(session.compounded_savings_rate * 100, 100)}%` }}
+                style={{ width: `${Math.min(savingsRate, 100)}%` }}
               />
             </div>
             <span className="text-xs font-semibold text-green-600">
-              {(session.compounded_savings_rate * 100).toFixed(1)}%
+              {savingsRate.toFixed(1)}%
             </span>
           </div>
         </td>
@@ -621,7 +632,7 @@ export const TokenSavingsPage: React.FC = () => {
   const totalCompoundedSaved = summary?.total_compounded_saved ?? 0;
   const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
   const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
-  const savingsRate = baselineTokens > 0 ? (totalCompoundedSaved / baselineTokens) * 100 : 0;
+  const savingsRate = compoundedSavingsRate(totalCompoundedSaved, baselineTokens);
 
   return (
     <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
