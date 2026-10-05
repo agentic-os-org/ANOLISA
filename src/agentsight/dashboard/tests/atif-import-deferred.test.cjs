@@ -226,6 +226,7 @@ function loadPageModule(relativePath, moduleStubs, driver) {
     if (moduleStubs[name]) return moduleStubs[name];
     if (name === '../utils/text') return loadPageModule('src/utils/text.ts', moduleStubs, driver);
     if (name === '../utils/trajectoryTextFilter') return loadPageModule('src/utils/trajectoryTextFilter.ts', moduleStubs, driver);
+    if (name === '../utils/optimizationStrategies') return loadPageModule('src/utils/optimizationStrategies.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
