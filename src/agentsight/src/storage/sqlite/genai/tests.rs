@@ -3592,3 +3592,41 @@ fn non_llm_events_are_persisted_with_the_schema_timestamp_column() {
     drop(conn);
     let _ = std::fs::remove_file(&path);
 }
+
+/// `get_call_turn_indices` reads a nullable column as `String`, so one NULL
+/// `call_id` row fails the whole map — the sibling
+/// `get_tool_call_turn_indices` was hardened for exactly this shape and this
+/// function was missed.
+#[test]
+fn call_turn_indices_survive_a_null_call_id_row() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_turnidx_null_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO genai_events (event_type, call_id, session_id, start_timestamp_ns, event_json)
+             VALUES ('llm_call', 'call-a', 'sess-1', 100, '{}');
+             INSERT INTO genai_events (event_type, call_id, session_id, start_timestamp_ns, event_json)
+             VALUES ('llm_call', NULL, 'sess-1', 200, '{}');
+             INSERT INTO genai_events (event_type, call_id, session_id, start_timestamp_ns, event_json)
+             VALUES ('llm_call', 'call-b', 'sess-1', 300, '{}');",
+        )
+        .unwrap();
+    }
+
+    let indices = store
+        .get_call_turn_indices(&["sess-1"])
+        .expect("a NULL call_id row must not fail the whole map");
+    assert_eq!(indices.get("call-a"), Some(&1));
+    assert_eq!(indices.get("call-b"), Some(&3));
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+}
