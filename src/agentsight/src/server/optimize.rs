@@ -922,6 +922,20 @@ pub async fn list_optimization_history(
     if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
+    // Resolve the window before consulting the optimizer's state: an
+    // explicit future start (end defaults to now) is as inverted as a
+    // supplied pair, and a default start that is not representable must be
+    // rejected instead of `saturating_sub` clamping it to `i64::MIN`, which
+    // silently answered an empty 200.
+    let end_ns = query.end_ns.unwrap_or_else(now_ns);
+    let start_ns = match super::handlers::start_or_default(
+        query.start_ns,
+        end_ns,
+        HISTORY_DEFAULT_WINDOW_NS,
+    ) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let state = match optimize_state(&data) {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -932,10 +946,6 @@ pub async fn list_optimization_history(
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(now_ns);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns.saturating_sub(HISTORY_DEFAULT_WINDOW_NS));
     let limit = query.limit.unwrap_or(100).clamp(1, HISTORY_MAX_LIMIT);
 
     match store.list(start_ns, end_ns, limit) {
@@ -1124,6 +1134,50 @@ mod tests {
         );
         let body: serde_json::Value = awtest::read_body_json(response).await;
         assert_eq!(body["error"], "start_ns must not exceed end_ns");
+
+        // One-sided form: `end_ns` is absent, so it defaults to now and a
+        // future start is just as inverted.
+        let request = awtest::TestRequest::get()
+            .uri("/optimize/results?start_ns=9223372036854775807")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "a start beyond the defaulted end must be rejected"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+    }
+
+    #[actix_web::test]
+    async fn history_rejects_an_unrepresentable_default_window() {
+        use actix_web::{App, test as awtest};
+
+        // `end_ns` near `i64::MIN` used to make `saturating_sub` clamp the
+        // default start to `i64::MIN` and answer 200 `[]` — indistinguishable
+        // from "no history in range". It is rejected like every sibling
+        // endpoint rejects an unrepresentable default window.
+        let dir = tmp_dir("unrepresentable-window");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(list_optimization_history),
+        )
+        .await;
+        let request = awtest::TestRequest::get()
+            .uri("/optimize/results?end_ns=-9223372036854775808")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an unrepresentable default window must be rejected, not clamped"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "default time range is out of bounds");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[actix_web::test]

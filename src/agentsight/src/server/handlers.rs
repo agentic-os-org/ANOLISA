@@ -48,13 +48,6 @@ pub async fn health(data: web::Data<AppState>) -> impl Responder {
 /// called without an explicit `start_ns`.
 pub(super) const DEFAULT_WINDOW_NS: i64 = 86_400_000_000_000;
 
-/// Start of a requested time range, defaulting to `window_ns` before `end_ns`.
-///
-/// Returns the 400 response to answer with when that default is not
-/// representable. `end_ns` is a plain query parameter, so a value near
-/// `i64::MIN` overflows the subtraction, and the wrapped result is a start far
-/// *after* the end — an inverted window that matches nothing while still
-/// answering 200. `/metrics/latency` already rejects the same input.
 /// Reject an explicitly inverted time window (`start_ns > end_ns`).
 ///
 /// `/sessions/{session_id}/resources` and `/metrics/latency` already answer
@@ -73,17 +66,31 @@ pub(super) fn reject_inverted_window(
     None
 }
 
+/// Start of a requested time range, defaulting to `window_ns` before `end_ns`.
+///
+/// Returns the 400 response to answer with when the resolved start is invalid.
+/// A default that is not representable (an `end_ns` near `i64::MIN` overflows
+/// the subtraction) wraps into a start far *after* the end; an explicit future
+/// `start_ns` with no `end_ns` is inverted once `end_ns` defaults to now.
+/// Both match nothing while still answering 200, so they are rejected exactly
+/// like `/metrics/latency` rejects them.
 pub(super) fn start_or_default(
     requested: Option<i64>,
     end_ns: i64,
     window_ns: i64,
 ) -> Result<i64, HttpResponse> {
-    match requested {
-        Some(start_ns) => Ok(start_ns),
+    let start_ns = match requested {
+        Some(start_ns) => start_ns,
         None => end_ns.checked_sub(window_ns).ok_or_else(|| {
             HttpResponse::BadRequest().json(json!({"error": "default time range is out of bounds"}))
-        }),
+        })?,
+    };
+    if start_ns > end_ns {
+        return Err(
+            HttpResponse::BadRequest().json(json!({"error": "start_ns must not exceed end_ns"}))
+        );
     }
+    Ok(start_ns)
 }
 
 // ─── Authentication endpoints ────────────────────────────────────────────────
@@ -2814,6 +2821,25 @@ mod tests {
             );
         }
 
+        // A start with no end defaults the end to now; a future start is just
+        // as inverted, and returning an empty 200 would read as "no data".
+        for uri in [
+            "/sessions?start_ns=9223372036854775807",
+            "/agent-names?start_ns=9223372036854775807",
+            "/timeseries?start_ns=9223372036854775807&buckets=1",
+            "/skill-metrics?start_ns=9223372036854775807",
+        ] {
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject a start beyond the defaulted end like /metrics/latency does"
+            );
+            let body: serde_json::Value = awtest::read_body_json(rejected).await;
+            assert_eq!(body["error"], "start_ns must not exceed end_ns", "{uri}");
+        }
+
         // Guard: an ordinary window still answers.
         for uri in [
             "/sessions?start_ns=1000&end_ns=2000",
@@ -2857,6 +2883,24 @@ mod tests {
                 rejected.status(),
                 StatusCode::BAD_REQUEST,
                 "{uri} must reject an inverted range like /metrics/latency does"
+            );
+        }
+
+        // With no `end_ns`, the handler defaults it to now; a future start is
+        // inverted after that resolution and must be rejected too.
+        for uri in [
+            "/interruptions?start_ns=9223372036854775807",
+            "/interruptions/count?start_ns=9223372036854775807",
+            "/interruptions/stats?start_ns=9223372036854775807",
+            "/interruptions/session-counts?start_ns=9223372036854775807",
+            "/interruptions/conversation-counts?start_ns=9223372036854775807",
+        ] {
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject a start beyond the defaulted end"
             );
         }
 
