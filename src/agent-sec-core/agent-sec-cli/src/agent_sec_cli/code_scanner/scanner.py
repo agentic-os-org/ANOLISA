@@ -2,7 +2,7 @@ import time
 from typing import List, Optional
 
 from agent_sec_cli.code_scanner.engine.code_extractor import (
-    extract_inline_code,
+    extract_inline_code_span,
 )
 from agent_sec_cli.code_scanner.engine.llm_engine import scan_with_llm
 from agent_sec_cli.code_scanner.engine.regex_engine import run_regex_rules
@@ -91,19 +91,31 @@ def scan(
 
     try:
         # For bash code, attempt inline extraction to detect nested python etc.
+        outer_remainder = None
         if language == Language.BASH:
             # NOTE: nested Python-in-Bash-in-Python is not handled for now.
-            # Also not handled: multi-command strings where only one part
-            # is an interpreter call (e.g. "cd /tmp && python3 -c 'code'").
-            inline = extract_inline_code(code)
-            if inline is not None:
-                code, language = inline
+            span = extract_inline_code_span(code)
+            if span is not None:
+                inner_code, inner_language, start, end = span
+                # The interpreter call may sit inside a multi-command line;
+                # the commands around it are exactly what the rules exist to
+                # catch, so they must be scanned too instead of discarded.
+                remainder = (code[:start] + " " + code[end:]).strip()
+                outer_remainder = remainder if remainder else None
+                code, language = inner_code, inner_language
 
         all_rules = load_rules(language)
         if rules is not None:
             enabled = set(rules)
             all_rules = [r for r in all_rules if r.rule_id in enabled]
         findings = run_regex_rules(code, all_rules, language)
+        if outer_remainder is not None:
+            bash_rules = load_rules(Language.BASH)
+            if rules is not None:
+                bash_rules = [r for r in bash_rules if r.rule_id in enabled]
+            findings = findings + run_regex_rules(
+                outer_remainder, bash_rules, Language.BASH
+            )
         verdict = _compute_verdict(findings)
         summary = _build_summary(findings, language)
         elapsed = (time.monotonic_ns() - start) // 1_000_000
