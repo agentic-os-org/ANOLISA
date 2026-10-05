@@ -5,6 +5,14 @@ const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const PT_NOTE: u32 = 4;
 const NT_GNU_BUILD_ID: u32 = 3;
 
+/// Upper bound on a PT_NOTE segment this parser will read. Real GNU build-id
+/// notes are a few dozen bytes, so the cap keeps a corrupt or crafted
+/// `p_filesz` from driving a huge allocation (Rust aborts when an allocation
+/// fails, which would take the whole service down).
+const MAX_NOTE_BYTES: u64 = 64 * 1024;
+/// Minimum note entry size: the namesz/descsz/type header itself.
+const NOTE_HEADER_BYTES: u64 = 12;
+
 /// Parse GNU Build-ID from an ELF binary's PT_NOTE segment.
 /// Returns the hex-encoded build-id string, or None if not present.
 ///
@@ -70,8 +78,20 @@ pub fn read_buildid(path: &str) -> Option<String> {
 
         let p_offset = read_u64(&phdr[8..])?;
         let p_filesz = read_u64(&phdr[32..])?;
+        // p_filesz is an untrusted file field: reject implausible sizes before
+        // they can drive an allocation, then clamp to the bytes actually
+        // present beyond p_offset so a truncated image cannot make the read
+        // fail either.
+        if !(NOTE_HEADER_BYTES..=MAX_NOTE_BYTES).contains(&p_filesz) {
+            return None;
+        }
+        let available = f.metadata().ok()?.len().checked_sub(p_offset)?;
+        let note_len = p_filesz.min(available) as usize;
+        if note_len < NOTE_HEADER_BYTES as usize {
+            return None;
+        }
 
-        let mut note_buf = vec![0u8; p_filesz as usize];
+        let mut note_buf = vec![0u8; note_len];
         f.seek(SeekFrom::Start(p_offset)).ok()?;
         f.read_exact(&mut note_buf).ok()?;
 
@@ -112,6 +132,23 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal ELF64 image (header + one PT_NOTE program header) pointing at
+    /// `p_offset` with the given `p_filesz`, `len` bytes long overall.
+    fn elf_with_pt_note(p_offset: u64, p_filesz: u64, len: usize) -> Vec<u8> {
+        let mut elf = vec![0u8; len];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2; // 64-bit
+        elf[5] = 1; // little-endian
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+        let ph_off = 64usize;
+        elf[ph_off..ph_off + 4].copy_from_slice(&4u32.to_le_bytes()); // PT_NOTE
+        elf[ph_off + 8..ph_off + 16].copy_from_slice(&p_offset.to_le_bytes());
+        elf[ph_off + 32..ph_off + 40].copy_from_slice(&p_filesz.to_le_bytes());
+        elf
+    }
 
     #[test]
     fn parse_note_section() {
@@ -155,6 +192,24 @@ mod tests {
 
         let dir = std::env::temp_dir();
         let path = dir.join("test_no_buildid.elf");
+        std::fs::write(&path, &elf).unwrap();
+        let result = read_buildid(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn oversized_note_segment_is_rejected_without_allocating() {
+        // Regression: `p_filesz` is a raw u64 straight from the file. A crafted
+        // or corrupt PT_NOTE claiming u64::MAX used to drive
+        // `vec![0u8; p_filesz as usize]`, and Rust aborts the whole process
+        // when that allocation fails -- an AgentSight outage triggerable by a
+        // file at a `codex*` path. The parser must reject the implausible size
+        // and return None instead of allocating.
+        let elf = elf_with_pt_note(128, u64::MAX, 256);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_oversized_note.elf");
         std::fs::write(&path, &elf).unwrap();
         let result = read_buildid(path.to_str().unwrap());
         std::fs::remove_file(&path).ok();
