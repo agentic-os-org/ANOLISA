@@ -1334,28 +1334,61 @@ fn classify_socket_object(is_socket: bool, owner_uid: u32, our_uid: u32) -> Sock
 /// Ensure the socket parent directory exists, is a directory (not a
 /// symlink), is owned by the current uid, and has permissions `0o700`.
 ///
-/// - If the parent does not exist, creates it (and ancestors) and sets
-///   permissions to `0o700`.
+/// Relative socket paths are resolved against the cwd first: a bare
+/// `control.sock` or a `sub/control.sock` is checked (and created) at its
+/// REAL location, so the ancestor chain covers the cwd and everything
+/// above it instead of only the literal relative components.
+///
+/// - If the parent does not exist, creates every missing level with mode
+///   `0o700` (umask cannot widen it) and validates the ancestor chain.
 /// - If the parent exists, verifies it is a directory, owned by the
 ///   current euid, and tightens permissions to `0o700`.
 /// - Fails closed if the parent is not a directory, is owned by another
-///   uid, or permissions cannot be set.
+///   uid, or the cwd or any ancestor cannot be validated.
 pub fn secure_socket_parent(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let parent = match socket_path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => return Ok(()),
+    let relative_parent = match socket_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        // A bare relative name (`control.sock`) lives directly in the cwd;
+        // treat the cwd as the parent so it and its ancestors are checked.
+        Some(_) => PathBuf::new(),
+        None => return Ok(()),
+    };
+    let parent = if relative_parent.as_os_str().is_empty() {
+        std::env::current_dir()?
+    } else if relative_parent.is_absolute() {
+        relative_parent
+    } else {
+        std::env::current_dir()?.join(relative_parent)
     };
 
+    let our_uid = unsafe { libc::geteuid() };
+
     if !parent.exists() {
-        std::fs::create_dir_all(parent)?;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(parent, perms)?;
+        // create_dir_all honors the umask for the intermediate levels, and
+        // the ancestor validation below rejects group/other-writable
+        // ancestors: under a permissive umask the mount could never use
+        // the path it just created. Create every missing level at 0700
+        // (a mode the umask can only narrow) from the top down.
+        let mut missing: Vec<std::path::PathBuf> = Vec::new();
+        let mut probe = parent.clone();
+        while !probe.exists() {
+            missing.push(probe.clone());
+            match probe.parent() {
+                Some(p) if p != probe => probe = p.to_path_buf(),
+                _ => break,
+            }
+        }
+        for dir in missing.into_iter().rev() {
+            mkdir_owned_0700(&dir)?;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        validate_socket_ancestors(&parent, our_uid)?;
         return Ok(());
     }
 
-    let meta = std::fs::symlink_metadata(parent)?;
+    let meta = std::fs::symlink_metadata(&parent)?;
     if !meta.file_type().is_dir() {
         return Err(format!(
             "socket parent '{}' exists but is not a directory",
@@ -1364,7 +1397,6 @@ pub fn secure_socket_parent(socket_path: &Path) -> Result<(), Box<dyn std::error
         .into());
     }
 
-    let our_uid = unsafe { libc::geteuid() };
     if meta.uid() != our_uid {
         return Err(format!(
             "socket parent '{}' is owned by uid {}; expected the current uid {our_uid}",
@@ -1374,9 +1406,73 @@ pub fn secure_socket_parent(socket_path: &Path) -> Result<(), Box<dyn std::error
         .into());
     }
 
-    let perms = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(parent, perms)?;
+    // The 0700 parent is only as strong as the directories above it: a
+    // group/other-writable ancestor lets another user rename our parent
+    // away and bind their own socket at the same path (the lifecycle lock
+    // moves with the renamed directory). The notify client already applies
+    // this check to its endpoint, so mount and client agree on one policy.
+    validate_socket_ancestors(&parent, our_uid)?;
 
+    let perms = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(&parent, perms)?;
+
+    Ok(())
+}
+
+/// Create a directory with mode `0700` before the umask can widen it:
+/// `std::fs::create_dir` applies `0o777 & !umask`, so a permissive umask
+/// would yield a group/other-accessible directory that the ancestor
+/// validation then rejects.
+fn mkdir_owned_0700(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let rc = unsafe { libc::mkdir(c.as_ptr(), 0o700) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Reject socket parents whose EXISTING ancestors are unsafe.
+///
+/// Root-owned sticky directories (`/tmp`) are the conventional exception;
+/// everything else must be owned by root or the current euid and must not be
+/// group/other writable. Non-existent components are skipped — they cannot be
+/// attacked until they exist.
+fn validate_socket_ancestors(
+    parent: &Path,
+    our_uid: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for ancestor in parent.ancestors().skip(1) {
+        let Ok(meta) = std::fs::symlink_metadata(ancestor) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() {
+            return Err(format!(
+                "socket ancestor '{}' exists but is not a directory",
+                ancestor.display()
+            )
+            .into());
+        }
+        let sticky_root = meta.uid() == 0 && (meta.permissions().mode() & 0o1000) != 0;
+        if meta.uid() != our_uid && meta.uid() != 0 {
+            return Err(format!(
+                "socket ancestor '{}' is owned by uid {}; expected root or the current uid {our_uid}",
+                ancestor.display(),
+                meta.uid()
+            )
+            .into());
+        }
+        if (meta.permissions().mode() & 0o022) != 0 && !sticky_root {
+            return Err(format!(
+                "socket ancestor '{}' is group/other writable; another user could replace the socket parent",
+                ancestor.display()
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -2010,6 +2106,21 @@ mod tests {
                 )),
             }
         }
+    }
+
+    /// A tempdir pinned to 0700 for socket-path fixtures.
+    ///
+    /// `tempfile::tempdir()` inherits the process umask, and in-process
+    /// FUSE mount tests set `umask(0)` for the lifetime of their daemon
+    /// (SkillFS applies the caller's umask explicitly), so a fixture root
+    /// can end up world-writable and the ancestor-chain check then —
+    /// correctly — refuses it. Pin 0700 so these tests exercise the socket
+    /// logic rather than the leaked umask.
+    fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
     }
 
     #[test]
@@ -3716,7 +3827,7 @@ mod tests {
 
         #[test]
         fn hmac_server_authenticates_before_dispatch() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let key_path = dir.path().join("key");
             write_key(&key_path, 7);
@@ -3743,7 +3854,7 @@ mod tests {
 
         #[test]
         fn hmac_server_rejects_plain_or_wrong_key_without_dispatch() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let key_path = dir.path().join("key");
             let wrong_path = dir.path().join("wrong-key");
@@ -3785,7 +3896,7 @@ mod tests {
 
         #[test]
         fn server_ping_returns_pong() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3809,7 +3920,7 @@ mod tests {
 
         #[test]
         fn server_status_returns_ready() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3829,7 +3940,7 @@ mod tests {
 
         #[test]
         fn server_unknown_method_returns_error() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3851,7 +3962,7 @@ mod tests {
 
         #[test]
         fn server_invalid_schema_returns_error() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3874,7 +3985,7 @@ mod tests {
 
         #[test]
         fn server_invalid_json_returns_error() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3893,7 +4004,7 @@ mod tests {
 
         #[test]
         fn server_untrusted_peer_rejected() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3927,7 +4038,7 @@ mod tests {
 
         #[test]
         fn server_untrusted_uid_rejected() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             // Use the real exe but require uid=99999, which won't match.
             let mut peer_config = self_exe_config();
@@ -3959,7 +4070,7 @@ mod tests {
 
         #[test]
         fn server_handles_sequential_connections() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -3986,7 +4097,7 @@ mod tests {
 
         #[test]
         fn shutdown_removes_socket_file() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4004,7 +4115,7 @@ mod tests {
 
         #[test]
         fn drop_removes_socket_file() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4022,7 +4133,7 @@ mod tests {
 
         #[test]
         fn socket_permissions_are_0600() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4044,7 +4155,7 @@ mod tests {
 
         #[test]
         fn socket_parent_permissions_are_0700() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let subdir = dir.path().join("sock-parent");
             let socket_path = subdir.join("test.sock");
             let config = ControlSocketConfig {
@@ -4073,8 +4184,38 @@ mod tests {
         }
 
         #[test]
+        fn socket_parent_under_a_writable_ancestor_is_rejected() {
+            // The 0700 parent is meaningless when an ancestor is world
+            // writable: another user can rename it away and bind their own
+            // socket at the same path. The notify client already rejects such
+            // endpoints, so the server must too.
+            let dir = private_tempdir();
+            use std::os::unix::fs::PermissionsExt;
+            let shared = dir.path().join("shared");
+            std::fs::create_dir(&shared).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+            let socket_path = shared.join("skillfs").join("control.sock");
+            let err = secure_socket_parent(&socket_path)
+                .expect_err("a world-writable ancestor must be rejected");
+            let message = err.to_string();
+            assert!(
+                message.contains("group/other writable"),
+                "unexpected rejection message: {message}"
+            );
+
+            // The same path under a private ancestor is still accepted
+            // (pin 0700 explicitly: `create_dir` inherits the leaked umask).
+            let private = dir.path().join("private");
+            std::fs::create_dir(&private).unwrap();
+            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+            secure_socket_parent(&private.join("skillfs").join("control.sock"))
+                .expect("a private ancestor chain must be accepted");
+        }
+
+        #[test]
         fn socket_parent_existing_gets_tightened_to_0700() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let subdir = dir.path().join("loose-parent");
             std::fs::create_dir(&subdir).unwrap();
             use std::os::unix::fs::PermissionsExt;
@@ -4098,11 +4239,54 @@ mod tests {
             handle.shutdown();
         }
 
+        #[test]
+        fn socket_parent_missing_levels_are_created_0700() {
+            // Every level the mount itself creates must be private: with
+            // create_dir_all the intermediate levels inherited the umask
+            // (0775 under 0002) and the ancestor validation then rejected
+            // the path the program had just built for itself.
+            let dir = private_tempdir();
+            use std::os::unix::fs::PermissionsExt;
+            let socket_path = dir.path().join("a").join("b").join("control.sock");
+            secure_socket_parent(&socket_path).expect("missing levels must be created");
+
+            for level in ["a", "a/b"] {
+                let mode = std::fs::metadata(dir.path().join(level))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(
+                    mode, 0o700,
+                    "created level {level} must be 0700, got {mode:o}"
+                );
+            }
+        }
+
+        #[test]
+        fn mkdir_owned_0700_ignores_umask() {
+            // Under the leakiest umask (000) the created directory must
+            // still be 0700: the mode is set at creation time, not patched
+            // afterwards (which would leave a wider window or be skipped).
+            let dir = private_tempdir();
+            let nested = dir.path().join("x");
+            use std::os::unix::fs::PermissionsExt;
+            let previous = unsafe { libc::umask(0o000) };
+            let created = mkdir_owned_0700(&nested);
+            unsafe { libc::umask(previous) };
+            created.expect("mkdir at umask 000 must succeed");
+            let mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "mode must be 0700 regardless of umask, got {mode:o}"
+            );
+        }
+
         // ── Request size limit ────────────────────────────────────────────
 
         #[test]
         fn normal_request_accepted() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4132,7 +4316,7 @@ mod tests {
 
         #[test]
         fn oversized_request_rejected() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let config = ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4294,8 +4478,8 @@ mod tests {
 
         #[test]
         fn server_meta_write_activation_untrusted_peer_rejected() {
-            let dir = tempfile::tempdir().unwrap();
-            let source = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
+            let source = private_tempdir();
             let skill_dir = source.path().join("demo-weather");
             std::fs::create_dir(&skill_dir).unwrap();
 
@@ -4534,7 +4718,7 @@ mod tests {
 
         #[test]
         fn server_meta_set_xattr_untrusted_peer_no_disk_change() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let source = match xattr_capable_tempdir_for_meta() {
                 Some(d) => d,
                 None => {
@@ -4775,8 +4959,8 @@ mod tests {
 
         #[test]
         fn server_resolve_live_source_untrusted_peer_rejected() {
-            let dir = tempfile::tempdir().unwrap();
-            let source = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
+            let source = private_tempdir();
             seed_skill_dir(source.path(), "my-skill");
 
             let socket_path = dir.path().join("test.sock");
@@ -4903,7 +5087,7 @@ mod tests {
 
         #[test]
         fn second_instance_fails_while_socket_active() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let handle1 = ControlSocketServer::new(ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4932,7 +5116,7 @@ mod tests {
 
         #[test]
         fn lifecycle_lock_does_not_block_unbounded() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let handle1 = ControlSocketServer::new(ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -4959,7 +5143,7 @@ mod tests {
 
         #[test]
         fn stale_socket_is_recovered() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             // Leave a stale socket file behind (std does not unlink on drop)
             // and recover it immediately — no pre-settling. This exercises
@@ -4988,7 +5172,7 @@ mod tests {
 
         #[test]
         fn listener_setup_failure_cleans_socket_and_releases_lock() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let result = ControlSocketServer::new(ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -5015,7 +5199,7 @@ mod tests {
 
         #[test]
         fn start_refuses_symlink_at_socket_path() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let target = dir.path().join("target");
             std::fs::write(&target, "x").unwrap();
             let socket_path = dir.path().join("test.sock");
@@ -5038,7 +5222,7 @@ mod tests {
 
         #[test]
         fn start_refuses_regular_file_at_socket_path() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             std::fs::write(&socket_path, "not a socket").unwrap();
 
@@ -5057,7 +5241,7 @@ mod tests {
 
         #[test]
         fn shutdown_does_not_delete_replaced_path() {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let socket_path = dir.path().join("test.sock");
             let handle = ControlSocketServer::new(ControlSocketConfig {
                 socket_path: socket_path.clone(),
@@ -5087,7 +5271,7 @@ mod tests {
         #[test]
         fn socket_and_parent_permissions() {
             use std::os::unix::fs::PermissionsExt;
-            let dir = tempfile::tempdir().unwrap();
+            let dir = private_tempdir();
             let parent = dir.path().join("sock-parent");
             let socket_path = parent.join("test.sock");
             let handle = ControlSocketServer::new(ControlSocketConfig {
