@@ -3,19 +3,35 @@
 import argparse, json, os, sys
 
 def _install():
+    # Prefer the canonical `pymupdf` module: the legacy `fitz` shim prints a
+    # deprecation banner to stdout, which corrupts --format json output.
+    try:
+        import pymupdf; return pymupdf
+    except ImportError:
+        pass
     try: import fitz; return fitz
     except ImportError:
         import subprocess; subprocess.check_call([sys.executable,"-m","pip","install","-q","PyMuPDF"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        import fitz; return fitz
+        import pymupdf; return pymupdf
 
 def _pages(spec, total):
     ps = set()
     for p in spec.split(","):
         p = p.strip()
+        if not p:
+            continue
         if "-" in p:
-            a, b = p.split("-",1); [ps.add(i) for i in range(max(0,int(a)-1), min(total,int(b)))]
+            a, b = p.split("-",1)
+            try:
+                lo, hi = int(a), int(b)
+            except ValueError:
+                print(f"ERROR: invalid page range '{p}' (expected N-M)",file=sys.stderr); sys.exit(1)
+            [ps.add(i) for i in range(max(0,lo-1), min(total,hi))]
         else:
-            i = int(p)-1
+            try:
+                i = int(p)-1
+            except ValueError:
+                print(f"ERROR: invalid page number '{p}'",file=sys.stderr); sys.exit(1)
             if 0 <= i < total: ps.add(i)
     return sorted(ps)
 
@@ -34,6 +50,10 @@ def main():
     doc = fitz.open(a.file)
     n = len(doc)
     idx = _pages(a.pages, n) if a.pages else list(range(n))
+    if a.pages and not idx:
+        # A spec whose pages all fall outside the document must not exit 0
+        # with empty output — callers cannot tell it apart from an empty PDF.
+        print(f"ERROR: no page in '{a.pages}' within 1..{n}",file=sys.stderr); sys.exit(1)
 
     meta = {}
     if a.metadata and doc.metadata:
