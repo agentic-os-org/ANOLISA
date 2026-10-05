@@ -85,8 +85,11 @@ export class Assembler {
       };
     }
 
-    const tail = turns.slice(-freshTailTurns);
-    const older = turns.slice(0, -freshTailTurns);
+    // freshTailTurns <= 0 means "keep no turns verbatim". slice(-0) evaluates
+    // as slice(0) (the whole array), which would silently make every turn the
+    // fresh tail and disable summarization entirely, so route it explicitly.
+    const tail = freshTailTurns > 0 ? turns.slice(-freshTailTurns) : [];
+    const older = freshTailTurns > 0 ? turns.slice(0, -freshTailTurns) : turns;
 
     const summaryLines: string[] = [];
     let droppedTurns = 0;

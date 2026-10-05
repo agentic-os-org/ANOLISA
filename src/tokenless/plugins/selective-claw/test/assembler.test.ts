@@ -122,4 +122,39 @@ describe("Assembler", () => {
     expect(tailMsgs[0].content).toContain("Turn 3");
     expect(tailMsgs[tailMsgs.length - 1].content).toContain("Turn 5");
   });
+
+  it("summarizes every turn when freshTailTurns is 0", () => {
+    // README: 超出 freshTailTurns 的旧轮次自动生成一句话摘要 —— 0 表示
+    // 不保留原文轮次；slice(-0) 等价 slice(0)，曾把全部轮次当作最近轮次
+    const msgs = makeTurns(5);
+    const summaries = new Map<number, string>([
+      [1, "s1"], [2, "s2"], [3, "s3"], [4, "s4"], [5, "s5"],
+    ]);
+    const result = assembler.assemble({
+      messages: msgs,
+      summaries,
+      tokenBudget: 100000,
+      freshTailTurns: 0,
+    });
+
+    expect(result.stats.freshTailTurnCount).toBe(0);
+    expect(result.stats.freshTailMessageCount).toBe(0);
+    expect(result.stats.summaryCount).toBe(5);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0].content).toContain("Turn 1: s1");
+    expect(result.messages[0].content).toContain("Turn 5: s5");
+  });
+
+  it("treats negative freshTailTurns as 0 fresh turns", () => {
+    const msgs = makeTurns(4);
+    const result = assembler.assemble({
+      messages: msgs,
+      summaries: new Map(),
+      tokenBudget: 100000,
+      freshTailTurns: -1,
+    });
+
+    expect(result.stats.freshTailTurnCount).toBe(0);
+    expect(result.stats.summaryCount).toBe(4);
+  });
 });
