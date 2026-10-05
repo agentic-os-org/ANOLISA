@@ -32,6 +32,8 @@ sudo ktuner rollback --list   # read-only preview of what rollback would restore
 
 All output goes to **stdout as JSON**. Errors go to **stderr as JSON**. No ANSI colors, no progress bars, no human-formatted text on stdout.
 
+Object keys are emitted in alphabetical order. Read fields by name rather than relying on their order.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -49,33 +51,46 @@ keeps its JSON counts on stdout and preserves the ledger for retry.
 
 ```json
 {
-  "score": 30,
+  "counts": {
+    "high_confidence": 5,
+    "performance": 34,
+    "security": 6,
+    "writable": 40
+  },
+  "environment": "物理机/虚拟机",
   "predicted_score": 100,
-  "total_checked": 196,
   "recommendations": [
     {
-      "param": "net.ipv4.tcp_rfc1337",
-      "current": "0",
-      "recommended": "1",
-      "reason": "防止 TIME_WAIT 状态下的 RST 攻击",
-      "confidence": "high",
       "category": "security",
+      "confidence": "high",
+      "current": "0",
+      "param": "net.ipv4.tcp_rfc1337",
+      "reason": "防止 TIME_WAIT 状态下的 RST 攻击",
+      "recommended": "1",
       "subcategory": "network",
       "writable": true
     }
   ],
-  "counts": { "performance": 34, "security": 6, "high_confidence": 5, "writable": 40 },
-  "system": { "kernel": "6.6.102+", "cpu_cores": 2, "memory_gb": 8, "numa_nodes": 1 },
-  "environment": "物理机/虚拟机",
-  "workload": "mixed",
-  "services": ["Nginx", "PostgreSQL"]
+  "score": 30,
+  "services": [
+    "Nginx",
+    "PostgreSQL"
+  ],
+  "system": {
+    "cpu_cores": 2,
+    "kernel": "6.6.102+",
+    "memory_gb": 8,
+    "numa_nodes": 1
+  },
+  "total_checked": 196,
+  "workload": "mixed"
 }
 ```
 
 ### tune output
 
 ```json
-{ "applied": 5, "score_before": 30, "score_after": 35 }
+{"applied": 5, "score_after": 35, "score_before": 30}
 ```
 
 `tune --dry-run` previews the plan instead; `status` uses the same
@@ -84,13 +99,13 @@ when there is nothing to apply), and `blocked` counts recommendations this
 environment filtered out (unwritable or runtime-dangerous):
 
 ```json
-{ "dry_run": true, "status": "planned", "blocked": 1, "would_apply": [ ... ] }
+{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ]}
 ```
 
 ### rollback output
 
 ```json
-{ "restored": 5, "failed": 0, "skipped": 0, "status": "Full" }
+{"failed": 0, "restored": 5, "skipped": 0, "status": "Full"}
 ```
 
 ### rollback --list output
@@ -100,7 +115,7 @@ written or deleted (the ledger is 0600 under a 0700 root-owned dir, so it shares
 root gate; a corrupt ledger surfaces as an error rather than an empty list):
 
 ```json
-{ "count": 2, "pending": [ { "param": "vm.swappiness", "applied": "1", "previous": "60" } ] }
+{"count": 2, "pending": [{"applied": "1", "param": "vm.swappiness", "previous": "60"}]}
 ```
 
 Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and cleans up.
@@ -108,7 +123,7 @@ Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and cle
 ### error output (stderr)
 
 ```json
-{ "error": "tune requires root (sudo ktuner tune)" }
+{"error": "tune requires root (sudo ktuner tune)"}
 ```
 
 ## Security

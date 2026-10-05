@@ -32,6 +32,8 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 
 所有输出以 **JSON 格式写入 stdout**。错误以 **JSON 格式写入 stderr**。stdout 不包含 ANSI 颜色、进度条或人类可读的格式化文本。
 
+对象键按字母顺序输出。读取字段时应使用键名，不应依赖字段顺序。
+
 ### 退出码
 
 | 退出码 | 含义 |
@@ -48,33 +50,46 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 
 ```json
 {
-  "score": 30,
+  "counts": {
+    "high_confidence": 5,
+    "performance": 34,
+    "security": 6,
+    "writable": 40
+  },
+  "environment": "物理机/虚拟机",
   "predicted_score": 100,
-  "total_checked": 196,
   "recommendations": [
     {
-      "param": "net.ipv4.tcp_rfc1337",
-      "current": "0",
-      "recommended": "1",
-      "reason": "防止 TIME_WAIT 状态下的 RST 攻击",
-      "confidence": "high",
       "category": "security",
+      "confidence": "high",
+      "current": "0",
+      "param": "net.ipv4.tcp_rfc1337",
+      "reason": "防止 TIME_WAIT 状态下的 RST 攻击",
+      "recommended": "1",
       "subcategory": "network",
       "writable": true
     }
   ],
-  "counts": { "performance": 34, "security": 6, "high_confidence": 5, "writable": 40 },
-  "system": { "kernel": "6.6.102+", "cpu_cores": 2, "memory_gb": 8, "numa_nodes": 1 },
-  "environment": "物理机/虚拟机",
-  "workload": "mixed",
-  "services": ["Nginx", "PostgreSQL"]
+  "score": 30,
+  "services": [
+    "Nginx",
+    "PostgreSQL"
+  ],
+  "system": {
+    "cpu_cores": 2,
+    "kernel": "6.6.102+",
+    "memory_gb": 8,
+    "numa_nodes": 1
+  },
+  "total_checked": 196,
+  "workload": "mixed"
 }
 ```
 
 ### tune 输出
 
 ```json
-{ "applied": 5, "score_before": 30, "score_after": 35 }
+{"applied": 5, "score_after": 35, "score_before": 30}
 ```
 
 `tune --dry-run` 输出的是预览；`status` 与短路路径使用同一套取值
@@ -82,13 +97,13 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 为本环境过滤掉的建议数（不可写或运行时危险）：
 
 ```json
-{ "dry_run": true, "status": "planned", "blocked": 1, "would_apply": [ ... ] }
+{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ]}
 ```
 
 ### rollback 输出
 
 ```json
-{ "restored": 5, "failed": 0, "skipped": 0, "status": "Full" }
+{"failed": 0, "restored": 5, "skipped": 0, "status": "Full"}
 ```
 
 ### rollback --list 输出
@@ -96,7 +111,7 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 `sudo ktuner rollback --list` 预览回滚将恢复的内容——只读，不写入不删除（ledger 是 0700 root 目录下的 0600 文件，因此与 rollback 共用 root 门槛；损坏的 ledger 报错而不是当作空列表）：
 
 ```json
-{ "count": 2, "pending": [ { "param": "vm.swappiness", "applied": "1", "previous": "60" } ] }
+{"count": 2, "pending": [{"applied": "1", "param": "vm.swappiness", "previous": "60"}]}
 ```
 
 普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
@@ -104,7 +119,7 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ### 错误输出（stderr）
 
 ```json
-{ "error": "tune requires root (sudo ktuner tune)" }
+{"error": "tune requires root (sudo ktuner tune)"}
 ```
 
 ## 安全性

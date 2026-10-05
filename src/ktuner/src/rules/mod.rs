@@ -1736,14 +1736,11 @@ fn eval_perf_event_paranoid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
     eval_perf_event_paranoid_at(info, recs, "/proc/sys/kernel/perf_event_paranoid")
 }
 
-/// Path-injectable form (the `eval_*_at` idiom) so the signed parse is
-/// unit-testable against a temp file. `kernel/perf/events/core.c` registers
-/// perf_event_paranoid over [-1, 2], where -1 means even unprivileged users
-/// may use perf events — a legal, common setting on profiling fleets. The
-/// unsigned reader parses "-1" to Err and falls back to 0, a DIFFERENT
-/// meaningful value (kernel-restricted), so `current_value` lied on -1 hosts
-/// and the rollback ledger's `previous` restored 0 instead of -1 — a silent
-/// wrong "Full" restore. Read signed, mirroring eval_sched_rt_runtime.
+/// Path-injectable form so the signed parse is unit-testable against a temp
+/// file. The upstream perf_event_paranoid sysctl has no upper bound of 2;
+/// -1 permits unprivileged perf events. An unsigned parse turns -1 into the
+/// fallback 0, misreporting the current value and losing the original on
+/// rollback. Read signed, mirroring eval_sched_rt_runtime.
 fn eval_perf_event_paranoid_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
