@@ -254,6 +254,37 @@ def test_events_accepts_query_value_boundaries() -> None:
     reader.count.assert_called_once()
 
 
+def test_events_summary_fractional_last_hours_label():
+    """The summary header must state the exact window the query used.
+
+    :.0f rounded the label ("last 2 hours" for a 1.5 h window, "last 0
+    hours" for 0.5 h) while the query itself used the true float.
+    """
+    from unittest.mock import MagicMock
+
+    reader = MagicMock()
+    event = MagicMock()
+    event.timestamp = "2026-10-07T00:00:00+00:00"
+    event.category = "audit"
+    event.event_type = "test_event"
+    event.severity = "info"
+    event.details = "{}"
+    reader.query.return_value = [event]
+
+    for hours, want in (
+        (1.5, "last 1.5 hours"),
+        (0.5, "last 0.5 hours"),
+        (24, "last 24 hours"),
+    ):
+        with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+            result = CliRunner().invoke(
+                app,
+                ["events", "--summary", "--last-hours", str(hours)],
+            )
+        assert result.exit_code == 0, result.output
+        assert want in result.output, f"{hours} -> {result.output!r}"
+
+
 def test_extract_trace_context_arg_stops_at_posix_double_dash():
     assert (
         _extract_trace_context_arg(
