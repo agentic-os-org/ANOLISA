@@ -80,23 +80,17 @@ pub fn recover_oom_events(
 
         // Try to correlate with genai_events to find active session/conversation
         // via pending (in-flight) LLM calls at OOM time.
-        let (session_id, conversation_id, active_conversations): (
-            Option<String>,
-            Option<String>,
+        let (attributions, active_conversations): (
+            Vec<(Option<String>, Option<String>)>,
             Vec<String>,
         ) = if let Some(gstore) = genai_store {
             match gstore.list_pending_for_pid(ev.pid) {
                 Ok(pairs) => {
-                    let primary = pairs.first();
                     let convs: Vec<String> = pairs
                         .iter()
                         .filter_map(|(_, _, _, cid)| cid.clone())
                         .collect();
-                    (
-                        primary.and_then(|(_, sid, _, _)| sid.clone()),
-                        primary.and_then(|(_, _, _, cid)| cid.clone()),
-                        convs,
-                    )
+                    (group_pending_attributions(&pairs), convs)
                 }
                 Err(e) => {
                     log::debug!(
@@ -104,42 +98,56 @@ pub fn recover_oom_events(
                         ev.pid,
                         e
                     );
-                    (None, None, Vec::new())
+                    (Vec::new(), Vec::new())
                 }
             }
         } else {
-            (None, None, Vec::new())
+            (Vec::new(), Vec::new())
         };
 
-        let Some(interruption) =
-            oom_interruption_for(ev, session_id, conversation_id, &active_conversations)
-        else {
-            // Neither a known-agent comm nor any pending llm_call correlation:
-            // pure noise (a build job, a browser tab), not an agent crash.
-            log::debug!(
-                "OOM recovery: skip non-agent pid={} name={}",
-                ev.pid,
-                ev.process_name
-            );
-            continue;
+        // A known-agent kill with no pending correlation still gets one
+        // unattributed event, as before. With correlation, emit one event per
+        // conversation: the old `pairs.first()` attribution marked every
+        // pending call interrupted while leaving all but the first
+        // conversation without a parent agent_crash event.
+        let attributions = if attributions.is_empty() {
+            vec![(None, None)]
+        } else {
+            attributions
         };
 
-        match interruption_store.insert(&interruption) {
-            Ok(_) => {
-                log::info!(
-                    "OOM recovery: wrote agent_crash for pid={} name={} at {}",
+        for (session_id, conversation_id) in attributions {
+            let Some(interruption) =
+                oom_interruption_for(ev, session_id, conversation_id, &active_conversations)
+            else {
+                // Neither a known-agent comm nor any pending llm_call
+                // correlation: pure noise (a build job, a browser tab), not
+                // an agent crash.
+                log::debug!(
+                    "OOM recovery: skip non-agent pid={} name={}",
                     ev.pid,
-                    ev.process_name,
-                    ev.timestamp_ns,
+                    ev.process_name
                 );
-                written += 1;
-            }
-            Err(e) => {
-                log::warn!(
-                    "OOM recovery: failed to insert event for pid={}: {}",
-                    ev.pid,
-                    e
-                );
+                continue;
+            };
+
+            match interruption_store.insert(&interruption) {
+                Ok(_) => {
+                    log::info!(
+                        "OOM recovery: wrote agent_crash for pid={} name={} at {}",
+                        ev.pid,
+                        ev.process_name,
+                        ev.timestamp_ns,
+                    );
+                    written += 1;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "OOM recovery: failed to insert event for pid={}: {}",
+                        ev.pid,
+                        e
+                    );
+                }
             }
         }
     }
@@ -164,6 +172,25 @@ fn dmesg_command() -> Command {
     let mut command = Command::new("dmesg");
     command.env("LC_ALL", "C");
     command
+}
+
+/// Distinct `(session_id, conversation_id)` pairs among a pid's pending calls.
+///
+/// Order is first-seen; an empty input yields an empty list, leaving the
+/// caller to decide whether an unattributed event should be emitted. The
+/// startup path writes one event per pair instead of only the first, so every
+/// conversation whose calls will be marked interrupted keeps a parent event.
+fn group_pending_attributions(
+    pairs: &[(String, Option<String>, Option<String>, Option<String>)],
+) -> Vec<(Option<String>, Option<String>)> {
+    let mut groups: Vec<(Option<String>, Option<String>)> = Vec::new();
+    for (_, session_id, _, conversation_id) in pairs {
+        let key = (session_id.clone(), conversation_id.clone());
+        if !groups.contains(&key) {
+            groups.push(key);
+        }
+    }
+    groups
 }
 
 /// Build the `agent_crash` interruption for one OOM kill, or `None` when the
@@ -233,10 +260,8 @@ fn parse_dmesg_oom_events() -> Result<Vec<OomKillEvent>, Box<dyn std::error::Err
 
 fn parse_dmesg_lines(content: &str) -> Result<Vec<OomKillEvent>, Box<dyn std::error::Error>> {
     let mut events = Vec::new();
-    let now_ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0);
+    // Boot epoch, only needed for boot-relative stamps; read once per scan.
+    let boot_ns = boot_time_ns();
 
     for line in content.lines() {
         // Summary format: "Killed process <pid> (<name>)"
@@ -256,8 +281,20 @@ fn parse_dmesg_lines(content: &str) -> Result<Vec<OomKillEvent>, Box<dyn std::er
             None => continue,
         };
 
-        // Try to extract timestamp from dmesg -T format: [Fri Apr 17 10:00:00 2026]
-        let timestamp_ns = parse_dmesg_timestamp(line).unwrap_or(now_ns);
+        // `dmesg -T` renders an absolute wall-clock stamp; the plain-dmesg
+        // fallback (busybox/Alpine, older util-linux) renders seconds since
+        // boot. Convert the latter via the boot epoch so the value is stable
+        // across scans. A line whose time cannot be determined is skipped
+        // rather than stamped with the scan time: a fabricated "now" changes
+        // on every scan, so the (pid, timestamp) dedup never matches and every
+        // restart re-inserts all historical OOM kills as fresh events.
+        let timestamp_ns = match parse_dmesg_timestamp(line) {
+            Some(ts) => ts,
+            None => match (parse_boot_offset_ns(line), boot_ns) {
+                (Some(offset), Some(boot)) => boot.saturating_add(offset),
+                _ => continue,
+            },
+        };
 
         events.push(OomKillEvent {
             timestamp_ns,
@@ -338,8 +375,11 @@ fn parse_dmesg_timestamp(line: &str) -> Option<i64> {
     // Reconstruct as "17 Apr 2026 15:58:28" for a stable parse
     let normalised = format!("{} {} {} {}", parts[2], parts[1], parts[4], parts[3]);
     let dt = chrono::NaiveDateTime::parse_from_str(&normalised, "%d %b %Y %T").ok()?;
-    let ns = dt.and_utc().timestamp_nanos_opt()?;
-    Some(ns)
+    // The child's environment pins `TZ=UTC` (see `dmesg_command`), so the
+    // wall-clock fields are UTC and the plain conversion below is exact; the
+    // non-`-T` fallback renders boot-relative seconds, which `line_timestamp_ns`
+    // resolves against the boot epoch instead of this function.
+    dt.and_utc().timestamp_nanos_opt()
 }
 
 /// Match a process comm name to a known agent name.
@@ -365,8 +405,9 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
 /// when an agent process disappears, we check dmesg to determine if it
 /// was killed by the OOM killer (vs normal exit, SIGKILL, segfault, etc.).
 ///
-/// Returns `true` if the PID appears in an OOM kill line in dmesg
-/// (either format accepted by [`line_matches_oom_kill`]).
+/// Returns `true` if the PID appears in a recent OOM kill line in dmesg
+/// (either format accepted by [`line_matches_oom_kill`] and a timestamp
+/// within [`OOM_RECENCY_WINDOW_SECS`]).
 pub fn was_pid_oom_killed(pid: i32) -> bool {
     let output = match dmesg_command().arg("-T").output() {
         Ok(o) if o.status.success() => o,
@@ -382,10 +423,108 @@ pub fn was_pid_oom_killed(pid: i32) -> bool {
 
     let content = String::from_utf8_lossy(&output.stdout);
     let pid_str = pid.to_string();
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    let cutoff_ns = now_ns.saturating_sub(OOM_RECENCY_WINDOW_SECS * 1_000_000_000);
+    // Only needed for the plain-dmesg boot-relative fallback; read once.
+    let boot_ns = boot_time_ns();
 
     content
         .lines()
-        .any(|line| line_matches_oom_kill(line, &pid_str))
+        .any(|line| line_matches_recent_oom_kill(line, &pid_str, cutoff_ns, boot_ns))
+}
+
+/// Window within which a dmesg OOM kill may be attributed to a process that
+/// just disappeared.
+///
+/// Must exceed the slowest detector's lag (serve-mode HealthChecker: 30s cycle
+/// plus the drain paths in trace mode), while still excluding kills from
+/// earlier in the boot and recycled pid numbers — the dmesg ring buffer keeps
+/// them for the whole boot.
+const OOM_RECENCY_WINDOW_SECS: i64 = 300;
+
+/// Returns `true` when a line attributes an OOM kill to `pid_str` *and* the
+/// kill's timestamp is at or after `cutoff_ns`.
+///
+/// The pid match alone is not enough: dmesg keeps earlier kills for the whole
+/// boot and pid numbers get recycled, so an un-bounded match reports a fresh
+/// crash for a process that merely reused the number, and callers stamp the
+/// wrong root cause (`oom: true` / `oom_crash`).
+///
+/// A line whose time cannot be resolved (neither a `dmesg -T` wall clock nor
+/// a boot-relative stamp with a known boot epoch) cannot be shown to be
+/// recent; it does not match.
+fn line_matches_recent_oom_kill(
+    line: &str,
+    pid_str: &str,
+    cutoff_ns: i64,
+    boot_ns: Option<i64>,
+) -> bool {
+    if !line_matches_oom_kill(line, pid_str) {
+        return false;
+    }
+    match line_timestamp_ns(line, boot_ns) {
+        Some(ts) => ts >= cutoff_ns,
+        None => false,
+    }
+}
+
+/// Resolve a dmesg line's `[...]` prefix to epoch nanoseconds.
+///
+/// `dmesg -T` renders an absolute local wall clock; plain `dmesg` (the
+/// unprivileged fallback) renders seconds since boot, which need `boot_ns`
+/// (from `/proc/stat`'s `btime`) to become an absolute instant.
+fn line_timestamp_ns(line: &str, boot_ns: Option<i64>) -> Option<i64> {
+    if let Some(ns) = parse_dmesg_timestamp(line) {
+        return Some(ns);
+    }
+    let boot = boot_ns?;
+    parse_boot_offset_ns(line).map(|offset| boot.saturating_add(offset))
+}
+
+/// Parse the boot-relative prefix plain `dmesg` emits when `-T` is
+/// unavailable: "[  123.456789]" -> nanoseconds since boot.
+///
+/// Returns `None` for bracket contents that are not a number (e.g. the
+/// `dmesg -T` weekday form, `[ts]` placeholders), so the caller can fall
+/// through to "cannot date this kill".
+fn parse_boot_offset_ns(line: &str) -> Option<i64> {
+    let start = line.find('[')?;
+    let end = line.find(']')?;
+    if end <= start {
+        return None;
+    }
+    let ts_str = line[start + 1..end].trim();
+    let (secs_str, frac_str) = match ts_str.split_once('.') {
+        Some((secs, frac)) => (secs, frac),
+        None => (ts_str, ""),
+    };
+    let secs: i64 = secs_str.parse().ok()?;
+    let mut frac_ns: i64 = 0;
+    if !frac_str.is_empty() {
+        // Kernel printk emits microsecond precision; accept up to nanoseconds
+        // and reject anything non-numeric rather than guessing.
+        let digits: String = frac_str.chars().take(9).collect();
+        let value: i64 = digits.parse().ok()?;
+        frac_ns = value.checked_mul(10i64.checked_pow(9 - digits.len() as u32)?)?;
+    }
+    secs.checked_mul(1_000_000_000)?.checked_add(frac_ns)
+}
+
+/// Wall-clock time of system boot in epoch nanoseconds, read from
+/// `/proc/stat`'s `btime` line.
+///
+/// Unlike `now - uptime`, which moves with the scan, `btime` is fixed, so
+/// the same boot-relative dmesg line always maps to the same instant. `None`
+/// when the file is unreadable or carries no numeric `btime`, in which case
+/// boot-relative kills cannot be dated.
+fn boot_time_ns() -> Option<i64> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = stat.lines().find(|l| l.starts_with("btime "))?;
+    let secs: i64 = line.trim_start_matches("btime ").trim().parse().ok()?;
+    secs.checked_mul(1_000_000_000)
 }
 
 /// Returns `true` if a single dmesg line attributes an OOM kill to `pid_str`.
@@ -461,6 +600,119 @@ mod tests {
         assert!(!line_matches_oom_kill("", "669334"));
     }
 
+    // ─── was_pid_oom_killed: recency window ────────────────────────────────
+
+    /// A `dmesg -T` stand-in that emits one kill from years ago (still in the
+    /// ring buffer) and one dated now. The un-bounded matcher reports both as
+    /// OOM kills, so a pid recycled from an old victim was marked `oom_crash`
+    /// with the wrong root cause.
+    const FAKE_DMESG_RECENCY: &str = r#"#!/bin/sh
+printf '[Fri Apr 17 10:00:00 2020] Out of memory: Killed process 4000001 (openclaw-gatewa) total-vm:1024kB\n'
+printf '[%s] Out of memory: Killed process 4000002 (openclaw-gatewa) total-vm:1024kB\n' "$(date '+%a %b %e %T %Y')"
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn was_pid_oom_killed_ignores_stale_dmesg_kills() {
+        const CHILD: &str = "AGENTSIGHT_OOM_RECENCY_CHILD";
+        let fake_dir = std::env::temp_dir().join(format!(
+            "agentsight-fake-dmesg-recency-{}",
+            std::process::id()
+        ));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG_RECENCY).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::was_pid_oom_killed_ignores_stale_dmesg_kills",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // The 2020 kill is long outside any recency window: a process that
+        // merely recycled pid 4000001 must not be attributed to the OOM killer.
+        assert!(
+            !was_pid_oom_killed(4_000_001),
+            "a kill from years earlier in the ring buffer must not count as recent"
+        );
+        // A kill dated now must still be detected.
+        assert!(
+            was_pid_oom_killed(4_000_002),
+            "a freshly dated dmesg kill must still be attributed"
+        );
+    }
+
+    #[test]
+    fn oom_recency_gate_rejects_stale_lines_and_accepts_fresh_ones() {
+        // The wall-clock lines are a day apart and the cutoff sits between
+        // them, so no real UTC offset (chrono::Local is host-dependent) can
+        // flip either comparison.
+        let stale = "[Wed Apr 16 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB";
+        let fresh = "[Fri Apr 18 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB";
+        let cutoff_ns = 1_776_420_000_000_000_000; // 2026-04-17T10:00:00Z
+        assert!(!line_matches_recent_oom_kill(
+            stale, "12345", cutoff_ns, None
+        ));
+        assert!(line_matches_recent_oom_kill(
+            fresh, "12345", cutoff_ns, None
+        ));
+        // Pid mismatch stays rejected regardless of recency.
+        assert!(!line_matches_recent_oom_kill(fresh, "999", cutoff_ns, None));
+
+        // Boot-relative stamps (plain-dmesg fallback) resolve via `btime`.
+        let boot_line =
+            "[  123.456789] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB";
+        let boot_ns = 1_776_420_000_000_000_000i64;
+        let kill_ns = boot_ns + 123_456_789_000;
+        assert!(line_matches_recent_oom_kill(
+            boot_line,
+            "12345",
+            kill_ns - 1,
+            Some(boot_ns)
+        ));
+        assert!(!line_matches_recent_oom_kill(
+            boot_line,
+            "12345",
+            kill_ns + 1,
+            Some(boot_ns)
+        ));
+        // Without a boot epoch the kill cannot be dated and is not "recent".
+        assert!(!line_matches_recent_oom_kill(boot_line, "12345", 0, None));
+        // An undatable placeholder bracket is likewise not recent.
+        assert!(!line_matches_recent_oom_kill(
+            "[ts] Out of memory: Killed process 12345 (openclaw-gatewa)",
+            "12345",
+            0,
+            None
+        ));
+    }
+
     // ─── dmesg output locale (startup recovery timestamps) ────────────────
 
     /// A `dmesg` stand-in that mimics util-linux: `-T` renders the timestamp
@@ -511,6 +763,11 @@ esac
                 .env(CHILD, "1")
                 .env("LC_ALL", "zh_CN.UTF-8")
                 .env("LANG", "zh_CN.UTF-8")
+                // Pin the zone so the expected epoch below is the UTC reading
+                // on every host; the child environment is the only thing that
+                // decides this, so the assertion holds regardless of the
+                // developer's TZ.
+                .env("TZ", "UTC")
                 .env("PATH", path_var)
                 .output()
                 .expect("re-exec the test binary");
@@ -537,8 +794,16 @@ esac
         );
     }
 
+    /// `dmesg -T` renders the stamp as local wall-clock time, so the parser
+    /// must resolve it in the host's local zone. Without that, every recovered
+    /// event is shifted by the UTC offset (e.g. +8h on Asia/Shanghai) and
+    /// falls outside time-range queries, retention windows and correlation.
+    ///
+    /// Re-executed in a child so TZ can be set without mutating the parallel
+    /// test process. `TZ=UTC-8` is POSIX for UTC+08:00 and, unlike an IANA
+    /// name, needs no tzdata in the container.
+    #[cfg(unix)]
     // ─── parse_dmesg_lines: startup recovery path (#3130) ─────────────────
-
     #[test]
     fn parse_dmesg_lines_recognises_structured_oom_kill() {
         // The startup recovery path must recognise the same structured format
@@ -556,6 +821,27 @@ esac
         // Structured line
         assert_eq!(events[1].pid, 669334);
         assert_eq!(events[1].process_name, "python3");
+    }
+
+    #[test]
+    fn boot_relative_dmesg_lines_get_a_stable_timestamp() {
+        // When `dmesg -T` is unavailable (busybox/Alpine, older util-linux)
+        // the fallback prints boot-relative stamps ("[  123.456789]"), which
+        // parse_dmesg_timestamp cannot read. Stamping those with the scan
+        // time makes the value change on every run, so the (pid, timestamp)
+        // dedup can never match and every restart re-inserts all historical
+        // OOM kills as fresh events. The derived time must be stable.
+        let line =
+            "[  123.456789] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB";
+        let first = parse_dmesg_lines(line).expect("parse");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = parse_dmesg_lines(line).expect("parse");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            first[0].timestamp_ns, second[0].timestamp_ns,
+            "a boot-relative line must not be restamped with the scan time"
+        );
     }
 
     #[test]
@@ -649,5 +935,42 @@ esac
         assert_eq!(detail["oom"], true);
         assert_eq!(detail["source"], "dmesg");
         assert_eq!(detail["active_conversations"][0], "conv-1");
+    }
+
+    /// One OOM kill of a multi-session agent must produce one event per
+    /// conversation: taking only `pairs.first()` attributed the crash to the
+    /// first conversation while every pending call (all conversations) was
+    /// marked interrupted, leaving the rest without a parent event.
+    #[test]
+    fn oom_recovery_attributions_cover_every_pending_conversation() {
+        let pairs = vec![
+            (
+                "c1".to_string(),
+                Some("s1".to_string()),
+                None,
+                Some("conv-1".to_string()),
+            ),
+            (
+                "c2".to_string(),
+                Some("s2".to_string()),
+                None,
+                Some("conv-2".to_string()),
+            ),
+            // A duplicate conversation collapses into a single attribution.
+            (
+                "c3".to_string(),
+                Some("s1".to_string()),
+                None,
+                Some("conv-1".to_string()),
+            ),
+        ];
+        assert_eq!(
+            group_pending_attributions(&pairs),
+            vec![
+                (Some("s1".to_string()), Some("conv-1".to_string())),
+                (Some("s2".to_string()), Some("conv-2".to_string())),
+            ]
+        );
+        assert!(group_pending_attributions(&[]).is_empty());
     }
 }
