@@ -40,6 +40,19 @@ test('Codex rollout UUID aliases retain the captured row identity', () => {
   assert.deepEqual(result[0].sources, ['ebpf', 'log']);
 });
 
+test('Codex rollout alias carries subagent counts to the captured bare UUID', () => {
+  const id = '00000000-0000-0000-0000-000000000002';
+  const stem = `rollout-2026-10-01-${id}`;
+  const result = merge([captured(id)], [
+    logged(stem),
+    logged(`${stem}:subagent:child`, { is_subagent: true }),
+  ]);
+  assert.equal(result.length, 1, 'the parent must merge into the captured row');
+  assert.equal(result[0].session_id, id);
+  assert.deepEqual(result[0].sources, ['ebpf', 'log']);
+  assert.equal(result[0].subagent_count, 1, 'the badge count must reach the merged row');
+});
+
 test('log parents hide children regardless of arrival order and orphan children remain', () => {
   const child = logged('parent:subagent:child', { is_subagent: true });
   for (const logs of [[child, logged('parent')], [logged('parent'), child]]) {
