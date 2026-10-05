@@ -75,6 +75,7 @@ LOGGER = logging.getLogger("agent-sec-core.daemon")
 DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 2.0
 DEFAULT_REQUEST_READ_TIMEOUT_MS = 5000
+DEFAULT_RESPONSE_WRITE_TIMEOUT_SECONDS = 5.0
 SocketIdentity = tuple[int, int]
 _AUTH_WIRE_FRAME_LIMIT = AUTH_FRAME_LIMIT + 1
 
@@ -207,6 +208,7 @@ class DaemonServer:
         self._active_connections = 0
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._drain_timeout_seconds = DEFAULT_DRAIN_TIMEOUT_SECONDS
+        self._response_write_timeout_seconds = DEFAULT_RESPONSE_WRITE_TIMEOUT_SECONDS
         self._previous_umask: int | None = None
         self._socket_identity: SocketIdentity | None = None
         self._notify_auth_secret: SharedSecret | None = None
@@ -597,8 +599,20 @@ class DaemonServer:
             if raw_response:
                 writer.write(raw_response)
                 bytes_out = len(raw_response)
-                with contextlib.suppress(ConnectionError, BrokenPipeError):
-                    await writer.drain()
+                # A peer that stops reading must not wedge its connection
+                # slot: once the socket buffers fill, an unbounded drain()
+                # blocks the client task forever, and max_connections wedged
+                # peers exhaust the daemon with BusyError for every healthy
+                # client. _write_auth_frame bounds its drain the same way.
+                # On timeout abort the transport so the slot is released
+                # instead of waiting for the peer to start reading.
+                try:
+                    await asyncio.wait_for(
+                        writer.drain(),
+                        timeout=self._response_write_timeout_seconds,
+                    )
+                except (asyncio.TimeoutError, ConnectionError, BrokenPipeError):
+                    writer.abort()
             return bytes_out, response
         finally:
             await self._close_writer(writer)

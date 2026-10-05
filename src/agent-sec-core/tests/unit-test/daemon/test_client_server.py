@@ -396,6 +396,57 @@ def test_daemon_write_response_closes_writer_when_drain_is_cancelled(
     assert writer.wait_closed_called is True
 
 
+def test_daemon_write_response_aborts_wedged_peer(monkeypatch, tmp_path: Path):
+    class WedgedPeerWriter:
+        """A peer that accepts the write but never reads it."""
+
+        def __init__(self) -> None:
+            self.drain_started = asyncio.Event()
+            self.aborted = False
+            self.closed = False
+            self.wait_closed_called = False
+
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            self.drain_started.set()
+            await asyncio.Event().wait()
+
+        def abort(self) -> None:
+            self.aborted = True
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            self.wait_closed_called = True
+
+    monkeypatch.setattr(
+        daemon_server_module,
+        "DEFAULT_RESPONSE_WRITE_TIMEOUT_SECONDS",
+        0.05,
+        raising=False,
+    )
+
+    async def scenario():
+        writer = WedgedPeerWriter()
+        server = DaemonServer(socket_path=tmp_path / "runtime" / "daemon.sock")
+        # The outer bound proves the wedged drain can no longer hold the
+        # connection slot forever; before the bound existed this times out.
+        result = await asyncio.wait_for(
+            server._write_response(writer, success_response("req-wedged-peer")),
+            timeout=2.0,
+        )
+        return writer, result
+
+    writer, (_bytes_out, _response) = asyncio.run(scenario())
+
+    assert writer.aborted is True
+    assert writer.closed is True
+    assert writer.wait_closed_called is True
+
+
 def test_daemon_server_uses_default_job_registration(monkeypatch, tmp_path: Path):
     registered_managers = []
 
