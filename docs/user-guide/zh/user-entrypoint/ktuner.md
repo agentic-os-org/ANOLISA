@@ -89,6 +89,7 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 安全保证：
 
 - **代码执行 deny-list**：可能导致代码执行的参数（`kernel.core_pattern`、`kernel.modprobe`、`kernel.hotplug` 等）在所有写入路径上被无条件阻止。匹配基于解析后的文件系统路径，因此拼写变体无法绕过。
+- **并发操作**：tune、fix、库导入和 rollback 通过同一把锁串行执行原值读取、写入、账本更新和持久化。过期诊断值不会被用作新的回滚原值；无法读取账本时阻止新写入。此保证不覆盖外部 sysctl 写入者或崩溃恢复。
 - **回滚安全**：已应用的改动会被记录；部分回滚失败时绝不丢弃其余参数的原始值。
 - **无自主 root**：ktuner 非 root 运行时一律报错。通过 cosh 调用时，沙箱守卫与权限提示确保任何 `sudo ktuner tune` 都经人工批准才执行。
 

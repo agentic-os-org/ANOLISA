@@ -70,13 +70,15 @@ pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
 }
 
 fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyOutcome> {
+    let guard = lock_ledger_at(ROLLBACK_PATH)?;
+    load_rollback()?; // Refuse an unreadable ledger before any live write.
     let total = recommendations.len();
     let mut applied_recs: Vec<Recommendation> = Vec::new();
     let mut failed: Vec<ApplyFailure> = Vec::new();
     let mut clamped: Vec<ClampNote> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
-        match apply_single(rec) {
-            Ok(outcome) => {
+        match apply_recordable(rec) {
+            Ok((applied, outcome)) => {
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} → {}",
@@ -107,7 +109,7 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyO
                 }
                 // The ledger and sysctl.d must describe live reality: record
                 // the value the kernel actually took, not the request (#4160).
-                applied_recs.push(rec_with_effective(rec, &outcome));
+                applied_recs.push(applied);
             }
             Err(e) => {
                 failed.push(ApplyFailure {
@@ -129,8 +131,8 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyO
     }
 
     if !applied_recs.is_empty() {
-        save_rollback(&applied_recs)?;
-        persist_from_rollback()?;
+        save_rollback(&guard, &applied_recs)?;
+        persist_from_rollback(&guard)?;
         if !quiet {
             println!();
             println!(
@@ -154,17 +156,34 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyO
 /// just as reversible (and survives reboot) as `tune`. Returns the write
 /// outcome so `fix` can report the value the kernel actually took.
 pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
-    let outcome = apply_single(rec)?;
-    // Same recording rule as the batch path: the ledger and sysctl.d carry
-    // the value that is actually live, not the requested one (#4160).
-    let applied = rec_with_effective(rec, &outcome);
-    save_rollback(std::slice::from_ref(&applied))?;
-    persist_from_rollback()?;
+    let guard = lock_ledger_at(ROLLBACK_PATH)?;
+    load_rollback()?;
+    let (applied, outcome) = apply_recordable(rec)?;
+    save_rollback(&guard, std::slice::from_ref(&applied))?;
+    persist_from_rollback(&guard)?;
     Ok(outcome)
 }
 
-fn apply_single(rec: &Recommendation) -> Result<WriteOutcome> {
-    write_and_verify(&rec.param, &rec.recommended_value)
+// Recommendations are gathered before locking and may describe an older
+// state. Capture a writable original only after the transaction owns the lock.
+fn read_previous(param: &str) -> Result<String> {
+    let path = param_to_path(param);
+    let value = fs::read_to_string(&path)
+        .with_context(|| format!("read original value from {path} before applying"))?;
+    let trimmed = value.trim();
+    Ok(trimmed
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+        .unwrap_or(trimmed)
+        .to_string())
+}
+
+fn apply_recordable(rec: &Recommendation) -> Result<(Recommendation, WriteOutcome)> {
+    let previous = read_previous(&rec.param)?;
+    let outcome = write_and_verify(&rec.param, &rec.recommended_value)?;
+    let mut applied = rec_with_effective(rec, &outcome);
+    applied.current_value = previous;
+    Ok((applied, outcome))
 }
 
 /// The result of a verified write: the value now live in the kernel.
@@ -528,14 +547,18 @@ fn write_atomic_with(
     result
 }
 
-fn save_rollback(recommendations: &[Recommendation]) -> Result<()> {
-    merge_rollback(recommendations.iter().map(|r| {
-        (
-            r.param.clone(),
-            r.current_value.clone(),
-            r.recommended_value.clone(),
-        )
-    }))
+fn save_rollback(guard: &LedgerLock, recommendations: &[Recommendation]) -> Result<()> {
+    merge_rollback_locked(
+        guard,
+        ROLLBACK_PATH,
+        recommendations.iter().map(|r| {
+            (
+                r.param.clone(),
+                r.current_value.clone(),
+                r.recommended_value.clone(),
+            )
+        }),
+    )
 }
 
 /// Merge `(param, previous, applied)` entries into a cumulative rollback record.
@@ -620,22 +643,21 @@ fn lock_ledger_at(path: &str) -> Result<LedgerLock> {
     Ok(LedgerLock { _file: file })
 }
 
-/// Merge the given entries into the on-disk rollback record and persist it.
-fn merge_rollback<I>(entries: I) -> Result<()>
-where
-    I: IntoIterator<Item = (String, String, String)>,
-{
-    merge_rollback_at(ROLLBACK_PATH, entries)
-}
-
+#[cfg(test)]
 fn merge_rollback_at<I>(path: &str, entries: I) -> Result<()>
 where
     I: IntoIterator<Item = (String, String, String)>,
 {
-    // Hold the ledger lock across load -> merge -> publish: a concurrent
-    // fix/tune merging into the same snapshot is otherwise silently dropped
-    // by whichever write_atomic rename lands last (lost update).
-    let _guard = lock_ledger_at(path)?;
+    let guard = lock_ledger_at(path)?;
+    merge_rollback_locked(&guard, path, entries)
+}
+
+// Callers retain the same descriptor through live writes and persistence.
+// Opening a second descriptor here would deadlock against their own flock.
+fn merge_rollback_locked<I>(_guard: &LedgerLock, path: &str, entries: I) -> Result<()>
+where
+    I: IntoIterator<Item = (String, String, String)>,
+{
     let data = merge_entries(load_rollback_from(path)?, entries);
     let dir = Path::new(path)
         .parent()
@@ -675,8 +697,10 @@ fn validate_import_value(param: &str, value: &str) -> Result<()> {
 /// write_and_verify), then record it in the rollback ledger so `ktuner
 /// rollback` can undo it. This gives `import` the same safety net as
 /// `fix`/`tune` — previously import did a raw, unguarded, unverified fs::write
-/// with no way back. `current` is the pre-write value: rollback is only
-/// recorded when it is known, so we never record a bogus "" original to restore.
+/// with no way back. The original is read under the transaction lock;
+/// `current` is retained for compatibility but is never trusted as an original.
+/// Unreadable write-only parameters can still be applied when `current` is
+/// absent, without inventing a rollback value or persistence entry.
 pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<()> {
     // Structural name guard before anything else: the rollback ledger records
     // the key verbatim and persistence re-emits it, so a degenerate spelling
@@ -685,16 +709,21 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         anyhow::bail!("invalid parameter name {param}: traversal, empty segment, or absolute path");
     }
     validate_import_value(param, value)?;
+    let guard = lock_ledger_at(ROLLBACK_PATH)?;
+    load_rollback()?;
+    let previous = match read_previous(param) {
+        Ok(previous) => Some(previous),
+        Err(error) if current.is_some() => return Err(error),
+        Err(_) => None,
+    };
     let outcome = write_and_verify(param, value)?;
-    if let Some(prev) = current {
-        merge_rollback(std::iter::once((
-            param.to_string(),
-            prev.to_string(),
-            // Record what the kernel actually took, matching the batch and
-            // fix paths: if the kernel clamped the imported value, the ledger
-            // must describe live reality or rollback restores a lie (#4160).
-            outcome.effective,
-        )))?;
+    if let Some(previous) = previous {
+        merge_rollback_locked(
+            &guard,
+            ROLLBACK_PATH,
+            std::iter::once((param.to_string(), previous, outcome.effective)),
+        )?;
+        persist_from_rollback(&guard)?;
     }
     Ok(())
 }
@@ -749,12 +778,7 @@ fn render_persistence(
 /// keeps persistence cumulative across runs (previously each run overwrote the
 /// files with only its own batch, silently dropping earlier params) and never
 /// persists a param that failed to apply (those are not in the record).
-fn persist_from_rollback() -> Result<()> {
-    // Hold the ledger lock across read -> render -> publish: this renders
-    // files derived from the ledger, so a stale snapshot written after a
-    // concurrent run's fresher render would silently drop that run's line
-    // from the persisted sysctl.d.
-    let _guard = lock_ledger_at(ROLLBACK_PATH)?;
+fn persist_from_rollback(_guard: &LedgerLock) -> Result<()> {
     let data = load_rollback()?;
     let (sysctl_content, nonsysctl_script) = render_persistence(&data.entries);
 
@@ -932,15 +956,12 @@ fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
 }
 
 fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
+    let _guard = lock_ledger_at(ROLLBACK_PATH)?;
     if !Path::new(ROLLBACK_PATH).exists() {
         anyhow::bail!("没有找到 rollback 文件 ({ROLLBACK_PATH})，可能尚未执行过 tune");
     }
 
-    // Hold the ledger lock across read -> restore -> finalize: a concurrent
-    // fix merging between the read and the finalize delete would record its
-    // pristine `previous` into a ledger that is then deleted unrestored —
-    // a live kernel change with no way back.
-    let _guard = lock_ledger_at(ROLLBACK_PATH)?;
+    // The existence check, restore and cleanup share the apply transaction lock.
     let json = fs::read_to_string(ROLLBACK_PATH).context("读取 rollback 文件失败")?;
     let data: RollbackData = serde_json::from_str(&json).context("解析 rollback 文件失败")?;
     let RollbackOutcome {
