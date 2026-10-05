@@ -122,10 +122,10 @@ pub const MAX_TURNS_LIMIT: usize = 1000;
 /// newest position.
 ///
 /// `rows` must already arrive newest-first — the same normalization both
-/// turns handlers apply: the genai store returns chronological rows and
-/// the Linux handler reverses (`.rev()`) them; the trajectory source
-/// (`list_recent_atif_jsons`) is natively DESC and the macOS handler
-/// passes it straight through.
+/// source loaders apply: the Linux loader reverses the genai store's
+/// chronological rows, and the trajectory source emits each document's
+/// turns newest-first under the store's DESC document order. Both turns
+/// handlers pass the normalized rows straight through.
 fn select_newest_unique_turns<'a>(
     rows: impl Iterator<Item = &'a PreferenceEventRow>,
 ) -> Vec<String> {

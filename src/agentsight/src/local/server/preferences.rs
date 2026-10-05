@@ -151,9 +151,9 @@ async fn llm_findings(
         .optimize
         .build_client()
         .map_err(|_| "LLM not configured".to_string())?;
-    // The trajectory source is natively newest-first — the same order the
-    // turns handler passes through to select_unique_turns — and the
-    // shared selection answers in prompt order: most recent last.
+    // The trajectory source emits rows newest-first — the order the shared
+    // selection requires — and llm_input_turns answers in prompt order:
+    // most recent last.
     let turns = llm_input_turns(rows.iter());
     analyze_user_turns(&client, &turns)
         .await
@@ -206,8 +206,8 @@ pub async fn get_preference_turns(
         Ok(loaded) => loaded,
         Err(resp) => return resp,
     };
-    // The trajectory source (list_recent_atif_jsons) already yields
-    // newest-first rows — the order the turns contract documents.
+    // The trajectory source emits each document's turns newest-first — the
+    // order the turns contract documents.
     let turns = select_unique_turns(rows.iter(), query.limit);
     HttpResponse::Ok().json(serde_json::json!({
         "window_days": window_days,
