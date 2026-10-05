@@ -36,11 +36,15 @@ function viewer({ readFailure = false } = {}) {
     },
   };
   const output = dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD);
-  runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
-    exports, URLSearchParams,
+  const browser = {
     setTimeout: () => 0,
     Blob, URL: { createObjectURL: (blob) => { downloads.push(blob); return 'blob:test'; }, revokeObjectURL() {} },
-    document: { createElement: () => ({ click() {} }) },
+    document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
+  };
+  const download = {};
+  runInNewContext(readFileSync(process.env.AGENTSIGHT_DOWNLOAD_BUILD, 'utf8'), { exports: download, ...browser });
+  runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
+    exports, URLSearchParams, ...browser,
     FileReader: class {
       constructor() { readers.push(this); }
       readAsText() { if (readFailure) throw new Error('read failed'); }
@@ -66,6 +70,7 @@ function viewer({ readFailure = false } = {}) {
       if (name === '../utils/optimizationStrategies') return require(process.env.AGENTSIGHT_STRATEGIES_BUILD);
       if (name === '../utils/roundModel') return require(process.env.AGENTSIGHT_ROUND_MODEL_BUILD);
       if (name === '../utils/text') return require(join(output, '../utils/text.js'));
+      if (name === '../utils/download') return download;
       if (name.startsWith('../components/')) return {};
       throw new Error(`Unexpected ATIF viewer dependency ${name}`);
     },

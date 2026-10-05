@@ -1309,6 +1309,12 @@ function renderAtifPage() {
       new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
       return mod.exports;
     })(),
+    '../utils/download': (() => {
+      const out = transpile('src/utils/download.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
     '../utils/savings': (() => {
       const out = transpile('src/utils/savings.ts');
       const mod = { exports: {} };
