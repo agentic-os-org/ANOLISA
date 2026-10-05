@@ -145,6 +145,13 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         _skip()
 
+    if not isinstance(input_data, dict):
+        # Valid JSON that is not an object (array/scalar/null): nothing to
+        # diagnose, pass through silently — same fail-open contract as
+        # undecodable input. The sibling compress_schema_hook.py treats this
+        # input class the same way.
+        _skip()
+
     tool_name = input_data.get("tool_name", "")
     tool_response = input_data.get("tool_response")
     if tool_name in SKIP_TOOLS or tool_response is None:
