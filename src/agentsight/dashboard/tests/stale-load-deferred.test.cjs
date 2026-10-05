@@ -514,6 +514,45 @@ test('security sessions: an older loadSessions response must not survive a newer
   );
 });
 
+test('security sessions: a superseded loadSessions still clears its loading flag', async () => {
+  const { calls, driver, rendered } = renderSecurityPage();
+  const loadOverview = rendered.callbacks[1];
+  const loadSessions = rendered.callbacks[3];
+
+  // 1. Entering the timeline runs loadSessions, which owns the sessions
+  //    spinner (slot 24) that disables the session <select>.
+  const sessionsPromise = loadSessions();
+  assert.equal(calls.fetchSecuritySessions.length, 1);
+  assert.equal(driver.slots[24].value, true, 'slot 24 must be sessionsLoading');
+
+  // 2. A newer overview batch (which also fetches sessions for the cards)
+  //    supersedes the in-flight loadSessions; it never touches the spinner.
+  const overviewPromise = loadOverview();
+  assert.equal(calls.fetchSecuritySessions.length, 2);
+  calls.fetchSecuritySummary[0].resolve({ state: 'ok', data: {} });
+  for (let i = 0; i < 4; i += 1) calls.fetchSecurityCountBy[i].resolve({ state: 'ok', data: { items: [] } });
+  calls.fetchSecurityEvents[0].resolve({ state: 'ok', data: { items: [] } });
+  calls.fetchSecuritySessions[1].resolve({
+    state: 'ok',
+    data: { items: [{ session_id: 'new-range-session' }] },
+  });
+  await overviewPromise;
+  await settle();
+  assert.equal(driver.slots[24].value, true,
+    'the overview batch must not clear the sessions spinner');
+
+  // 3. The superseded response lands last. Its state writes are dropped, but
+  //    it must still clear the spinner or the <select> stays disabled forever.
+  calls.fetchSecuritySessions[0].resolve({
+    state: 'ok',
+    data: { items: [{ session_id: 'old-range-session' }] },
+  });
+  await sessionsPromise;
+  await settle();
+  assert.equal(driver.slots[24].value, false,
+    'a superseded loadSessions must still clear sessionsLoading');
+});
+
 test('security event detail: clicking A then B with A resolving last must still show B', async () => {
   const { calls, driver, rendered } = renderSecurityPage();
   const loadEventDetail = rendered.callbacks[4];
@@ -1026,6 +1065,12 @@ function renderAtifPage() {
     '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
     '../utils/apiClient': { ...stubs },
     '../utils/roundModel': roundModel,
+    '../utils/savings': (() => {
+      const out = transpile('src/utils/savings.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': panelStub,
     '../utils/trajectoryTree': {
@@ -1068,4 +1113,157 @@ test('atif viewer: the causal panel follows the loaded id, not the edited input'
   assert.equal(panel.props.sessionId, 'session-a',
     'editing the input must not retarget attribution at an unloaded id');
   assert.equal(panel.props.idKind, 'session');
+});
+
+// ─── ConversationList ─────────────────────────────────────────────────────────
+//
+// Hook-slot map: 0 startMs · 1 endMs · 2 agentNames · 3 selectedAgent ·
+// 4 agentNamesLoading · 5 sessions · 6 loading · 7 error.
+// useCallback order: handleResolvedEvent, syncParams, loadAgentNames, runQuery,
+//   handleQuery.
+
+test('conversation list: the Query button must use the selected end time, not now', async () => {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchSessions',
+    'fetchTraces',
+    'fetchAgentNames',
+    'fetchTimeseries',
+    'fetchInterruptionCount',
+    'fetchInterruptionStats',
+    'fetchInterruptionSessionCounts',
+    'fetchInterruptionConversationCounts',
+    'fetchLatestEvaluation',
+    'fetchTokenSavings',
+  ]);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    'react-router-dom': {
+      useNavigate: () => () => {},
+      useSearchParams: () => [{ get: () => null }, () => {}],
+    },
+    recharts: {
+      ...componentStub('LineChart'), ...componentStub('Line'), ...componentStub('BarChart'),
+      ...componentStub('Bar'), ...componentStub('XAxis'), ...componentStub('YAxis'),
+      ...componentStub('CartesianGrid'), ...componentStub('Tooltip'), ...componentStub('Legend'),
+      ...componentStub('ResponsiveContainer'),
+    },
+    '../components/InterruptionBadge': componentStub('InterruptionBadge'),
+    '../components/InterruptionPanel': componentStub('InterruptionPanel'),
+    '../components/EvaluationBadge': componentStub('EvaluationBadge'),
+    '../components/EvaluationPanel': componentStub('EvaluationPanel'),
+    '../components/DateTimePicker': componentStub('DateTimePicker'),
+    '../components/SessionIdHelp': componentStub('SessionIdHelp'),
+    '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+    '../utils/datetime': { formatNsPadded: (ns) => String(ns) },
+    '../utils/timeseriesBuckets': {
+      fillModelBuckets: (data) => data,
+      fillTokenBuckets: (data) => data,
+    },
+    '../utils/apiClient': {
+      ...stubs,
+      conversationInterruptionKey: (sessionId, conversationId) => `${sessionId}\u0000${conversationId}`,
+      UNASSIGNED_INTERRUPTION_BUCKET: '__unassigned__',
+    },
+  };
+  const pageModule = loadPageModule('src/pages/ConversationList.tsx', moduleStubs, driver);
+  const page = pageModule.ConversationList;
+  assert.equal(typeof page, 'function', 'ConversationList must be a component');
+  driver.render(page);
+  // Sanity: slots 0/1 are the query time-range state.
+  const startMs = driver.slots[0].value;
+  assert.equal(typeof startMs, 'number', 'slot 0 must be startMs');
+
+  const selectedEnd = Date.UTC(2024, 0, 2, 3, 4, 5);
+  driver.slots[1].setter(selectedEnd);
+  const rendered = driver.render(page);
+  const handleQuery = rendered.callbacks[4];
+  assert.equal(typeof handleQuery, 'function', 'callbacks[4] must be handleQuery');
+
+  void handleQuery();
+  assert.equal(driver.slots[1].value, selectedEnd,
+    'handleQuery must not overwrite the selected end time');
+  assert.equal(calls.fetchSessions.length, 1, 'the query must fetch sessions');
+  assert.deepEqual(
+    calls.fetchSessions[0].args,
+    [startMs * 1_000_000, selectedEnd * 1_000_000],
+    'the sessions fetch must carry the selected end time',
+  );
+});
+
+// ─── InterruptionPanel ────────────────────────────────────────────────────────
+//
+// Hook-slot map: 0 events · 1 loading · 2 error; useCallback: load.
+
+function collectElements(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const child of node) collectElements(child, out);
+    return out;
+  }
+  if (node.type) out.push(node);
+  if (node.children) collectElements(node.children, out);
+  return out;
+}
+
+test('interruption panel: resolved events are neither counted nor offered Resolve', async () => {
+  const payload = [
+    {
+      interruption_id: 'unresolved-1', resolved: false, severity: 'high',
+      interruption_type: 'loop', occurred_at_ns: 1, call_id: null, detail: null,
+    },
+    {
+      interruption_id: 'resolved-1', resolved: true, severity: 'high',
+      interruption_type: 'loop', occurred_at_ns: 2, call_id: null, detail: null,
+    },
+  ];
+  const tCalls = [];
+  const t = (key, params) => {
+    tCalls.push({ key, params });
+    return key;
+  };
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../utils/apiClient': {
+      fetchSessionInterruptions: async () => payload,
+      fetchConversationInterruptions: async () => payload,
+      resolveInterruption: async () => {},
+    },
+    '../i18n': {
+      useI18n: () => ({ t }),
+      useLocaleTag: () => 'en-US',
+      interruptionTypeKey: () => null,
+    },
+    '../utils/datetime': { formatNs: (ns) => String(ns) },
+  };
+  const module = loadPageModule('src/components/InterruptionPanel.tsx', moduleStubs, driver);
+  const Panel = module.InterruptionPanel;
+  assert.equal(typeof Panel, 'function', 'InterruptionPanel must be a component');
+
+  let rendered = driver.render(Panel, { sessionId: 's1' });
+  assert.equal(driver.slots[1].value, true, 'slot 1 must be the loading flag');
+  await rendered.callbacks[0]();
+  rendered = driver.render(Panel, { sessionId: 's1' });
+
+  const countCall = tCalls.find((call) => call.key === 'comp.interrupt.unresolvedCount');
+  assert.ok(countCall, 'the panel must render the unresolved count');
+  assert.equal(countCall.params.n, 1, 'only unresolved events may be counted');
+
+  const elements = collectElements(rendered.element);
+  const rows = elements.filter(
+    (el) => el.props && el.props.event && typeof el.props.onResolved === 'function',
+  );
+  assert.deepEqual(
+    rows.map((el) => el.props.event.interruption_id),
+    ['unresolved-1'],
+    'resolved events must not get a row',
+  );
+
+  // The single row must expose exactly one Resolve affordance.
+  const rowDriver = createHooksDriver();
+  const rowRender = rowDriver.render(rows[0].type, rows[0].props);
+  const resolveButtons = collectElements(rowRender.element).filter(
+    (el) => el.props && el.props.title === 'comp.interrupt.markResolvedTitle',
+  );
+  assert.equal(resolveButtons.length, 1, 'the unresolved row must offer Resolve');
 });

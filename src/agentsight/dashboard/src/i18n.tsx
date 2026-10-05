@@ -2392,6 +2392,24 @@ export function localeTag(locale: Locale): string {
   return locale;
 }
 
+/**
+ * Substitutes `{name}` placeholders in a message template.
+ *
+ * Parameter values are opaque data, so the substitution is a single pass over
+ * the template: a value is never scanned for placeholders (`{n}` inside a
+ * value stays literal) and, because the replacer is a function rather than a
+ * replacement string, `$&`, `$'`, `$`` and `$$` inside a value survive too.
+ */
+export function interpolateMessage(
+  template: string,
+  params?: Record<string, string | number>,
+): string {
+  if (!params) return template;
+  return template.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (placeholder, name) =>
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : placeholder,
+  );
+}
+
 export const I18nProvider: React.FC<React.PropsWithChildren> = ({ children }) => {
   const [locale, setLocaleState] = useState<Locale>(resolveInitialLocale);
 
@@ -2410,15 +2428,8 @@ export const I18nProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
   }, []);
 
   const t = useCallback(
-    (key: MessageKey, params?: Record<string, string | number>) => {
-      let msg = messages[locale][key];
-      if (params) {
-        for (const [k, v] of Object.entries(params)) {
-          msg = msg.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
-        }
-      }
-      return msg;
-    },
+    (key: MessageKey, params?: Record<string, string | number>) =>
+      interpolateMessage(messages[locale][key], params),
     [locale],
   );
 

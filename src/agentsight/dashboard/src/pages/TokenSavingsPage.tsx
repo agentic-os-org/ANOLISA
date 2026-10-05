@@ -8,6 +8,7 @@ import { downloadSavingsCsv } from '../utils/savingsCsv';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
+import { compoundedSavingsRate } from '../utils/savings';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 
@@ -377,16 +378,6 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
 };
 
 // ─── Session row with expand ──────────────────────────────────────────────────
-
-/**
- * Compounded savings as a percentage of baseline consumption. The summary
- * card and the session rows share this formula; the server's per-session
- * `compounded_savings_rate` divides by actual total tokens instead, which is
- * not the rate either surface displays.
- */
-export function compoundedSavingsRate(compoundedSaved: number, baselineTokens: number): number {
-  return baselineTokens > 0 ? (compoundedSaved / baselineTokens) * 100 : 0;
-}
 
 const SessionRow: React.FC<{
   session: SessionSavings;

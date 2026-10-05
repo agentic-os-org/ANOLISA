@@ -159,6 +159,7 @@ function renderViewerPage() {
       useLocaleTag: () => 'en',
     },
     '../utils/roundModel': roundModel,
+    '../utils/savings': savingsModule,
     '../utils/apiClient': { ...stubs },
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': componentStub('CausalAttributionPanel'),
@@ -186,6 +187,23 @@ function renderViewerPage() {
     handleFileImport: rendered.callbacks[4],
   };
 }
+
+
+// TokenSavingsPage and AtifViewerPage render savings rates through the shared
+// src/utils/savings.ts; transpiled from source so the page still runs the real
+// formula rather than a hand-written stand-in.
+const savingsModule = (() => {
+  const module = { exports: {} };
+  const fn = new Function('require', 'module', 'exports', transpile('src/utils/savings.ts'));
+  fn(
+    (name) => {
+      throw new Error(`savings must not require anything at runtime: ${name}`);
+    },
+    module,
+    module.exports,
+  );
+  return module.exports;
+})();
 
 function loadPageModule(relativePath, moduleStubs, driver) {
   const code = transpile(relativePath);

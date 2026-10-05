@@ -113,6 +113,11 @@ export const SecurityObservabilityPage: React.FC = () => {
   // A's body. Only the newest click may write the detail state.
   const eventDetailRequestIdRef = useRef(0);
   const statusRequestIdRef = useRef(0);
+  // `sessionsLoading` is owned by the loadSessions request that raised it: the
+  // shared sessions token above can also be bumped by loadOverview, which never
+  // touches the spinner, so a superseded loadSessions must still clear its own
+  // flag or the timeline session <select> stays disabled forever.
+  const sessionsLoadingRequestIdRef = useRef(0);
 
   const isAvailable = isSecurityAvailableState(status?.state);
   const rangeParams: SecurityTimeRangeParams = useMemo(() => ({
@@ -243,6 +248,7 @@ export const SecurityObservabilityPage: React.FC = () => {
   const loadSessions = useCallback(async () => {
     if (!isAvailable) return;
     const requestId = ++sessionsRequestIdRef.current;
+    sessionsLoadingRequestIdRef.current = requestId;
     setSessionsLoading(true);
     setSessionsError(null);
     try {
@@ -258,7 +264,7 @@ export const SecurityObservabilityPage: React.FC = () => {
         setSessionsError(errorMessage(error, t));
       }
     } finally {
-      if (requestId === sessionsRequestIdRef.current) {
+      if (sessionsLoadingRequestIdRef.current === requestId) {
         setSessionsLoading(false);
       }
     }

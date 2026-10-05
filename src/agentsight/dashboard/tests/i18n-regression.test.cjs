@@ -3,7 +3,7 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
 
-const { resolveLocale, messages, SUPPORTED_LOCALES } = require(process.env.AGENTSIGHT_I18N_BUILD);
+const { resolveLocale, messages, SUPPORTED_LOCALES, interpolateMessage } = require(process.env.AGENTSIGHT_I18N_BUILD);
 
 test('resolveLocale selects the first supported browser locale', () => {
   assert.equal(resolveLocale(null, ['fr-FR', 'zh-CN']), 'zh-CN');
@@ -83,4 +83,18 @@ test('the audit page passes the active locale to every risk-conclusion call', ()
       `the active locale must decide whether '${call}' is translated`,
     );
   }
+});
+
+// Parameter values are data, not replacement patterns: `$&`, `$'`, `$`` and `$$`
+// inside a value must survive verbatim, and a value that looks like a
+// placeholder must not be re-substituted.
+test('interpolation keeps replacement patterns inside parameter values literal', () => {
+  assert.equal(typeof interpolateMessage, 'function',
+    'the interpolation helper must be exported');
+  assert.equal(interpolateMessage('a {n} b', { n: 'x$&y' }), 'a x$&y b');
+  assert.equal(interpolateMessage('a {n} b', { n: "$'$`$$" }), "a $'$`$$ b");
+  assert.equal(interpolateMessage('a {n} b', { n: '{n}' }), 'a {n} b');
+  assert.equal(interpolateMessage('{n}+{m}', { n: '{m}', m: 'ok' }), '{m}+ok');
+  assert.equal(interpolateMessage('a {n} b', { n: 42 }), 'a 42 b');
+  assert.equal(interpolateMessage('a {n} b'), 'a {n} b');
 });

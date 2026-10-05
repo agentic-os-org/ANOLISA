@@ -1,4 +1,4 @@
-// The test transpiles the page with the dashboard's own babel toolchain, so
+// The test transpiles the pages with the dashboard's own babel toolchain, so
 // this runner has no extra compilation step.
 const { execFileSync } = require('node:child_process');
 

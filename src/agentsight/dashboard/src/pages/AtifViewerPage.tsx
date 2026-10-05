@@ -19,6 +19,7 @@ import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import type { Round } from '../utils/roundModel';
 import { groupIntoRounds, initialRound, roundStats } from '../utils/roundModel';
+import { compoundedSavingsRate } from '../utils/savings';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1019,7 +1020,10 @@ export const AtifViewerPage: React.FC = () => {
                     <p className="text-xl font-bold text-green-600">
                       {fmtTokens(savingsDetail.total_compounded_saved)}
                       <span className="text-sm font-normal text-gray-400 ml-1">
-                        ({(savingsDetail.savings_rate * 100).toFixed(1)}%)
+                        ({compoundedSavingsRate(
+                          savingsDetail.total_compounded_saved,
+                          savingsDetail.total_original_tokens,
+                        ).toFixed(1)}%)
                       </span>
                     </p>
                   </div>

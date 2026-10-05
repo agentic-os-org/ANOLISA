@@ -894,8 +894,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   }, []);
 
   const handleQuery = useCallback(async () => {
-    const effectiveEnd = Date.now();
-    setEndMs(effectiveEnd);
+    // Query the end time the user picked. `endMs` is initialized to "now" when
+    // no end was chosen, so it is only ever re-defaulted at mount, never here.
+    const effectiveEnd = endMs;
     setError(null);
     setHasQueried(true);
     setSessionPage(0); // reset to first page on new query
@@ -910,7 +911,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     if (!ok && requestId === loadRequestIdRef.current) {
       setError((error as Error)?.message ?? t('cl.queryFailed'));
     }
-  }, [startMs, selectedAgent, syncParams, runQuery, t]);
+  }, [startMs, endMs, selectedAgent, syncParams, runQuery, t]);
 
   // Auto-load on mount: show all records for the default time range immediately
   const hasRestoredRef = React.useRef(false);

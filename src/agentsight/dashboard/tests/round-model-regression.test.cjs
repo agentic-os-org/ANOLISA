@@ -224,6 +224,22 @@ function loadModuleFromCode(code, moduleStubs) {
   return module.exports;
 }
 
+// The viewer renders savings rates through the shared src/utils/savings.ts;
+// transpiled from source so the page still runs the real formula rather than a
+// hand-written stand-in.
+const savingsModule = (() => {
+  const module = { exports: {} };
+  const fn = new Function('require', 'module', 'exports', transpile('src/utils/savings.ts'));
+  fn(
+    (name) => {
+      throw new Error(`savings must not require anything at runtime: ${name}`);
+    },
+    module,
+    module.exports,
+  );
+  return module.exports;
+})();
+
 function realModule(relativePath) {
   return loadModuleFromCode(transpile(relativePath), {
     // roundModel type-imports i18n/types (erased); trajectoryTree likewise.
@@ -319,6 +335,7 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
     },
     '../utils/apiClient': apiStubs,
     '../utils/roundModel': roundModel,
+    '../utils/savings': savingsModule,
     '../utils/trajectoryTree': trajectoryTree,
     '../utils/trajectoryTextFilter': trajectoryTextFilter,
     '../components/SubagentGraph': { SubagentGraph: () => null },

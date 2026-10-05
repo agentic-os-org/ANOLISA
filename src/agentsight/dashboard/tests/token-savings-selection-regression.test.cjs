@@ -123,6 +123,23 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+
+// The viewer renders savings rates through the shared src/utils/savings.ts;
+// transpiled from source so the page still runs the real formula rather than a
+// hand-written stand-in.
+const savingsModule = (() => {
+  const module = { exports: {} };
+  const fn = new Function('require', 'module', 'exports', transpile('src/utils/savings.ts'));
+  fn(
+    (name) => {
+      throw new Error(`savings must not require anything at runtime: ${name}`);
+    },
+    module,
+    module.exports,
+  );
+  return module.exports;
+})();
+
 function loadPageModule(relativePath, moduleStubs, hooks) {
   const code = transpile(relativePath);
   const module = { exports: {} };
@@ -197,6 +214,7 @@ function makeHarness() {
       ...componentStub('ResponsiveContainer'),
     },
     '../utils/apiClient': { ...stubs },
+    '../utils/savings': savingsModule,
     '../utils/savingsCsv': { downloadSavingsCsv: (rows) => downloads.push(rows) },
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
