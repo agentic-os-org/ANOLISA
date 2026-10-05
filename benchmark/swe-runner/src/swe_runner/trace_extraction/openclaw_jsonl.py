@@ -20,7 +20,8 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Generator, Iterable
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -32,20 +33,26 @@ logger = logging.getLogger(__name__)
 DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError as exc:
-            logger.warning("Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s", path, line_number, exc)
-            continue
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
+def _iter_jsonl(path: Path) -> Generator[dict[str, Any], None, None]:
+    """Yield decoded records without retaining the entire raw transcript."""
+    line_number = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for physical_line in handle:
+            # Preserve legacy splitlines boundaries and diagnostic numbering.
+            for raw_line in physical_line.splitlines():
+                line_number += 1
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    logger.warning(
+                        "Skipping malformed OpenClaw JSONL line file=%s line=%s error=%s", path, line_number, exc
+                    )
+                    continue
+                if isinstance(entry, dict):
+                    yield entry
 
 
 def _timestamp_ns(entry: dict[str, Any]) -> int | None:
@@ -144,7 +151,9 @@ def _entry_parts(entry: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _text_from_parts(parts: list[dict[str, Any]]) -> str | None:
-    texts = [part.get("content") for part in parts if part.get("type") == "text" and isinstance(part.get("content"), str)]
+    texts = [
+        part.get("content") for part in parts if part.get("type") == "text" and isinstance(part.get("content"), str)
+    ]
     return "\n".join(text for text in texts if text) or None
 
 
@@ -266,15 +275,6 @@ def _entry_provider(entry: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _session_id_from_entries(path: Path, entries: list[dict[str, Any]]) -> str:
-    for entry in entries:
-        if entry.get("type") == "session":
-            raw_id = entry.get("id")
-            if isinstance(raw_id, str) and raw_id:
-                return raw_id
-    return path.stem
-
-
 def _local_agent_id_from_session_file(path: Path) -> str | None:
     """Return the local OpenClaw agent id from <profile>/agents/<agent>/sessions/<session>.jsonl."""
     if len(path.parents) < 3:
@@ -372,11 +372,7 @@ def _is_search_command(command: str) -> bool:
 
 def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
     """Reconstruct one OpenClaw transcript JSONL file into the runner trace schema."""
-    entries = _read_jsonl(path)
-    if not entries:
-        return None
-
-    session_id = _session_id_from_entries(path, entries)
+    session_id: str | None = None
     first_user_msg: str | None = None
     steps: list[dict[str, Any]] = []
     models: set[str] = set()
@@ -409,109 +405,114 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
     tool_result_counts: Counter[str] = Counter()
     pending_tool_responses: list[dict[str, Any]] = []
 
-    for entry in entries:
-        timestamp_ns = _timestamp_ns(entry)
-        if timestamp_ns is not None:
-            first_ts = timestamp_ns if first_ts is None else min(first_ts, timestamp_ns)
-            last_ts = timestamp_ns if last_ts is None else max(last_ts, timestamp_ns)
+    with closing(_iter_jsonl(path)) as entries:
+        for entry in entries:
+            if session_id is None and entry.get("type") == "session":
+                raw_id = entry.get("id")
+                if isinstance(raw_id, str) and raw_id:
+                    session_id = raw_id
+            timestamp_ns = _timestamp_ns(entry)
+            if timestamp_ns is not None:
+                first_ts = timestamp_ns if first_ts is None else min(first_ts, timestamp_ns)
+                last_ts = timestamp_ns if last_ts is None else max(last_ts, timestamp_ns)
 
-        parts = _entry_parts(entry)
-        role = _entry_role(entry)
-        if role == "user" and first_user_msg is None:
-            first_user_msg = _text_from_parts(parts)
-        if role == "toolResult":
-            tool_response = _tool_response_from_entry(entry, parts)
-            pending_tool_responses.append(tool_response)
-            tool_result_count += 1
-            response_tool_name = _tool_name(tool_response.get("tool_name"))
-            tool_result_counts[response_tool_name] += 1
-            if _is_failed_tool_response(tool_response):
-                failed_tool_result_count += 1
-            response_text_metrics = _tool_response_text_metrics([tool_response])
-            tool_result_chars += response_text_metrics["tool_response_chars"]
-            tool_result_lines += response_text_metrics["tool_response_lines"]
-            tool_result_tokens_approx += response_text_metrics["tool_response_tokens_approx"]
+            parts = _entry_parts(entry)
+            role = _entry_role(entry)
+            if role == "user" and first_user_msg is None:
+                first_user_msg = _text_from_parts(parts)
+            if role == "toolResult":
+                tool_response = _tool_response_from_entry(entry, parts)
+                pending_tool_responses.append(tool_response)
+                tool_result_count += 1
+                response_tool_name = _tool_name(tool_response.get("tool_name"))
+                tool_result_counts[response_tool_name] += 1
+                if _is_failed_tool_response(tool_response):
+                    failed_tool_result_count += 1
+                response_text_metrics = _tool_response_text_metrics([tool_response])
+                tool_result_chars += response_text_metrics["tool_response_chars"]
+                tool_result_lines += response_text_metrics["tool_response_lines"]
+                tool_result_tokens_approx += response_text_metrics["tool_response_tokens_approx"]
 
-        raw_usage = _entry_usage(entry)
-        usage = _normalize_usage(raw_usage)
-        if not usage:
-            continue
-
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
-        cache_read_tokens = int(usage.get("cache_read_tokens", 0))
-        cache_write_tokens = int(usage.get("cache_write_tokens", 0))
-        reasoning_tokens = int(usage.get("reasoning_tokens", 0))
-        reported_tokens = int(usage.get("total_tokens", 0))
-        cost = usage.get("cost")
-        if isinstance(cost, int | float):
-            total_cost += float(cost)
-            has_cost = True
-
-        model = _entry_model(entry)
-        provider = _entry_provider(entry)
-        if model:
-            models.add(model)
-        if provider:
-            providers.add(provider)
-
-        step: dict[str, Any] = {
-            "step_index": len(steps),
-            "event_id": entry.get("id") or f"{path.stem}:{len(steps)}",
-            "trace_id": session_id,
-            "timestamp_ns": timestamp_ns,
-            "model": model,
-            "provider": provider,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "reasoning_tokens": reasoning_tokens,
-            "total_tokens": reported_tokens,
-        }
-        if timestamp_ns is not None:
-            step["timestamp"] = ns_to_iso(timestamp_ns)
-        if cache_read_tokens:
-            step["cache_read_tokens"] = cache_read_tokens
-        if cache_write_tokens:
-            step["cache_write_tokens"] = cache_write_tokens
-        if isinstance(cost, int | float):
-            step["cost"] = float(cost)
-
-        assistant_parts = [_format_assistant_part(part) for part in parts] if role == "assistant" else []
-        tool_calls = _tool_call_parts(assistant_parts)
-        step["tool_call_count"] = len(tool_calls)
-        for tool_call in tool_calls:
-            call_name = _tool_name(tool_call.get("name"))
-            tool_call_counts[call_name] += 1
-            tool_call_count += 1
-            if call_name == "read":
-                file_read_tool_count += 1
-            if call_name in {"edit", "write"}:
-                file_edit_tool_count += 1
-            command = _exec_command_from_tool_call(tool_call)
-            if command is None:
+            raw_usage = _entry_usage(entry)
+            usage = _normalize_usage(raw_usage)
+            if not usage:
                 continue
-            exec_command_count += 1
-            if _is_pytest_command(command):
-                pytest_command_count += 1
-            if _is_git_diff_command(command):
-                git_diff_command_count += 1
-            if _is_search_command(command):
-                search_command_count += 1
-        _attach_tool_responses(step, pending_tool_responses)
-        pending_tool_responses = []
 
-        if assistant_parts:
-            step["assistant_output"] = assistant_parts
+            input_tokens = int(usage.get("input_tokens", 0))
+            output_tokens = int(usage.get("output_tokens", 0))
+            cache_read_tokens = int(usage.get("cache_read_tokens", 0))
+            cache_write_tokens = int(usage.get("cache_write_tokens", 0))
+            reasoning_tokens = int(usage.get("reasoning_tokens", 0))
+            reported_tokens = int(usage.get("total_tokens", 0))
+            cost = usage.get("cost")
+            if isinstance(cost, int | float):
+                total_cost += float(cost)
+                has_cost = True
 
-        steps.append(step)
-        total_input += input_tokens
-        total_output += output_tokens
-        total_cache_read += cache_read_tokens
-        total_cache_write += cache_write_tokens
-        total_reasoning += reasoning_tokens
-        total_reported += reported_tokens
-        max_step_input = max(max_step_input, input_tokens)
-        max_step_output = max(max_step_output, output_tokens)
+            model = _entry_model(entry)
+            provider = _entry_provider(entry)
+            if model:
+                models.add(model)
+            if provider:
+                providers.add(provider)
+
+            step: dict[str, Any] = {
+                "step_index": len(steps),
+                "event_id": entry.get("id") or f"{path.stem}:{len(steps)}",
+                "trace_id": session_id,
+                "timestamp_ns": timestamp_ns,
+                "model": model,
+                "provider": provider,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "total_tokens": reported_tokens,
+            }
+            if timestamp_ns is not None:
+                step["timestamp"] = ns_to_iso(timestamp_ns)
+            if cache_read_tokens:
+                step["cache_read_tokens"] = cache_read_tokens
+            if cache_write_tokens:
+                step["cache_write_tokens"] = cache_write_tokens
+            if isinstance(cost, int | float):
+                step["cost"] = float(cost)
+
+            assistant_parts = [_format_assistant_part(part) for part in parts] if role == "assistant" else []
+            tool_calls = _tool_call_parts(assistant_parts)
+            step["tool_call_count"] = len(tool_calls)
+            for tool_call in tool_calls:
+                call_name = _tool_name(tool_call.get("name"))
+                tool_call_counts[call_name] += 1
+                tool_call_count += 1
+                if call_name == "read":
+                    file_read_tool_count += 1
+                if call_name in {"edit", "write"}:
+                    file_edit_tool_count += 1
+                command = _exec_command_from_tool_call(tool_call)
+                if command is None:
+                    continue
+                exec_command_count += 1
+                if _is_pytest_command(command):
+                    pytest_command_count += 1
+                if _is_git_diff_command(command):
+                    git_diff_command_count += 1
+                if _is_search_command(command):
+                    search_command_count += 1
+            _attach_tool_responses(step, pending_tool_responses)
+            pending_tool_responses = []
+
+            if assistant_parts:
+                step["assistant_output"] = assistant_parts
+
+            steps.append(step)
+            total_input += input_tokens
+            total_output += output_tokens
+            total_cache_read += cache_read_tokens
+            total_cache_write += cache_write_tokens
+            total_reasoning += reasoning_tokens
+            total_reported += reported_tokens
+            max_step_input = max(max_step_input, input_tokens)
+            max_step_output = max(max_step_output, output_tokens)
 
     if not steps:
         return None
@@ -527,11 +528,15 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
             )
             step["tool_response_chars"] = int(step.get("tool_response_chars", 0)) + metrics["tool_response_chars"]
             step["tool_response_lines"] = int(step.get("tool_response_lines", 0)) + metrics["tool_response_lines"]
-            step["tool_response_tokens_approx"] = int(step.get("tool_response_tokens_approx", 0)) + metrics[
-                "tool_response_tokens_approx"
-            ]
+            step["tool_response_tokens_approx"] = (
+                int(step.get("tool_response_tokens_approx", 0)) + metrics["tool_response_tokens_approx"]
+            )
 
     issue_id = extract_issue_id(first_user_msg) or _local_agent_id_from_session_file(path)
+    session_id = session_id or path.stem
+    # A valid session header may appear after the steps that reference it.
+    for step in steps:
+        step["trace_id"] = session_id
 
     return {
         "source": "openclaw-jsonl",
