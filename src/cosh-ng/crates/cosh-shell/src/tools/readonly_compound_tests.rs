@@ -263,6 +263,11 @@ fn executor_ignores_path_shadowing_of_allowlisted_names() {
     // only, so the step reports 127, the marker never appears, and
     // list evaluation continues.
     use std::os::unix::fs::PermissionsExt;
+    // PATH is process-global: hold the project-level shared lock (the
+    // same instance the pipeline shadow test takes) and restore via the
+    // RAII guard, so this test cannot race other PATH-mutating tests
+    // and a panic cannot leak the shadowed value.
+    let _path_guard = super::test_support::path_env_guard();
     let dir = std::env::temp_dir().join(format!(
         "cosh-compound-shadow-{}-{}",
         std::process::id(),

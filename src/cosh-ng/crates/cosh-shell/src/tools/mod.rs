@@ -22,6 +22,8 @@ pub(crate) mod readonly_interceptor;
 pub(crate) mod readonly_pipeline;
 pub(crate) mod readonly_rules;
 mod temp_output;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::new();
