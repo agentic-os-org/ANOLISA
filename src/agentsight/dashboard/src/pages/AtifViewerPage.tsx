@@ -607,6 +607,10 @@ export const AtifViewerPage: React.FC = () => {
     (searchParams.get('type') as 'session' | 'conversation') || 'session'
   );
   const [queryId, setQueryId] = useState(searchParams.get('id') || '');
+  // Query that produced the document on screen, as opposed to the live form
+  // fields: editing the input without pressing Load must not retarget the
+  // causal panel (or store its history under an id that was never loaded).
+  const [loadedQuery, setLoadedQuery] = useState<{ type: 'session' | 'conversation'; id: string } | null>(null);
 
   // Data state
   const [doc, setDoc] = useState<AtifDocument | null>(null);
@@ -726,6 +730,7 @@ export const AtifViewerPage: React.FC = () => {
       }
       if (requestId !== loadRequestIdRef.current) return;
       setDoc(data);
+      setLoadedQuery({ type: qt, id: i.trim() });
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
       // Round selection follows the node the URL restored, not always the root.
@@ -801,6 +806,7 @@ export const AtifViewerPage: React.FC = () => {
         setNodePath([]);
         setError(null);
         setQueryId(parsed.session_id ?? '');
+        setLoadedQuery({ type: 'session', id: parsed.session_id ?? '' });
         setExpandedSections(new Set());
         setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument), t), new Set()));
       } catch {
@@ -1116,11 +1122,11 @@ export const AtifViewerPage: React.FC = () => {
                   {/* Right: causal attribution panel */}
                   <div className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
                     <CausalAttributionPanel
-                      sessionId={queryId}
+                      sessionId={loadedQuery?.id ?? ''}
                       roundIndex={selectedRound ?? undefined}
                       roundLabel={activeRound?.label}
                       isPreambleRound={activeRound?.isPreamble ?? false}
-                      idKind={queryType}
+                      idKind={loadedQuery?.type}
                     />
                   </div>
                 </div>

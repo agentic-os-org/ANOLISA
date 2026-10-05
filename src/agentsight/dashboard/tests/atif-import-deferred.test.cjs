@@ -176,10 +176,10 @@ function renderViewerPage() {
   assert.equal(typeof page, 'function', 'AtifViewerPage must be a component');
   const rendered = driver.render(page);
   // Sanity: the hook-slot map must match the page's real hook order.
-  assert.equal(driver.slots[3] !== undefined && 'setter' in driver.slots[3], true,
-    'slot 3 must be the doc state');
-  assert.equal(typeof driver.slots[13].value.current, 'number',
-    'slot 13 must be the load request-id ref');
+  assert.equal(driver.slots[4] !== undefined && 'setter' in driver.slots[4], true,
+    'slot 4 must be the doc state');
+  assert.equal(typeof driver.slots[14].value.current, 'number',
+    'slot 14 must be the load request-id ref');
   return {
     calls, driver, rendered, urlParams,
     handleLoad: rendered.callbacks[3],
@@ -231,13 +231,13 @@ test('atif viewer: a late network response must not replace an imported document
   const network = ctx.handleLoad('session', 'net-session');
   assert.equal(ctx.calls.fetchAtifBySession.length, 1,
     'handleLoad must issue the session fetch');
-  assert.equal(ctx.driver.slots[4].value, true, 'the network load starts loading');
+  assert.equal(ctx.driver.slots[5].value, true, 'the network load starts loading');
 
   // The user imports a local document while the request is in flight.
   const reader = importFile(ctx.handleFileImport, 'local.json', JSON.stringify(atifDoc('imported-doc')));
   completeRead(reader, JSON.stringify(atifDoc('imported-doc')));
   await settle();
-  assert.equal(ctx.driver.slots[3].value.session_id, 'imported-doc',
+  assert.equal(ctx.driver.slots[4].value.session_id, 'imported-doc',
     'the import must land while the request is pending');
 
   // The older network response resolves LAST.
@@ -246,11 +246,11 @@ test('atif viewer: a late network response must not replace an imported document
   await settle();
   await settle();
 
-  assert.equal(ctx.driver.slots[3].value.session_id, 'imported-doc',
+  assert.equal(ctx.driver.slots[4].value.session_id, 'imported-doc',
     'the late network response must not replace the imported document');
-  assert.equal(ctx.driver.slots[4].value, false,
+  assert.equal(ctx.driver.slots[5].value, false,
     'the import must own the loading state');
-  assert.equal(ctx.driver.slots[5].value, null, 'no error may surface');
+  assert.equal(ctx.driver.slots[6].value, null, 'no error may surface');
 });
 
 test('atif viewer: an import completing after a newer network load must not clobber it', async () => {
@@ -263,18 +263,18 @@ test('atif viewer: an import completing after a newer network load must not clob
   await network;
   await settle();
   await settle();
-  assert.equal(ctx.driver.slots[3].value.session_id, 'network-doc',
+  assert.equal(ctx.driver.slots[4].value.session_id, 'network-doc',
     'the newer network load must own the document');
 
   // The stale import read completes LAST with valid JSON.
   completeRead(reader, JSON.stringify(atifDoc('old-import')));
   await settle();
 
-  assert.equal(ctx.driver.slots[3].value.session_id, 'network-doc',
+  assert.equal(ctx.driver.slots[4].value.session_id, 'network-doc',
     'the invalidated read must not replace the document');
-  assert.equal(ctx.driver.slots[5].value, null,
+  assert.equal(ctx.driver.slots[6].value, null,
     'the invalidated read must not surface an obsolete error');
-  assert.equal(ctx.driver.slots[4].value, false,
+  assert.equal(ctx.driver.slots[5].value, false,
     'the invalidated read must not touch the loading state');
 });
 
@@ -286,15 +286,15 @@ test('atif viewer: out-of-order imports keep the newer file', async () => {
   const second = importFile(ctx.handleFileImport, 'b.json', JSON.stringify(atifDoc('file-b')));
   completeRead(second, JSON.stringify(atifDoc('file-b')));
   await settle();
-  assert.equal(ctx.driver.slots[3].value.session_id, 'file-b');
+  assert.equal(ctx.driver.slots[4].value.session_id, 'file-b');
 
   // The older read lands last.
   completeRead(first, JSON.stringify(atifDoc('file-a')));
   await settle();
 
-  assert.equal(ctx.driver.slots[3].value.session_id, 'file-b',
+  assert.equal(ctx.driver.slots[4].value.session_id, 'file-b',
     'the older import must not overwrite the newer file');
-  assert.equal(ctx.driver.slots[4].value, false, 'loading must be released');
+  assert.equal(ctx.driver.slots[5].value, false, 'loading must be released');
 });
 
 test('atif viewer: an invalidated read error must stay silent', async () => {
@@ -306,24 +306,24 @@ test('atif viewer: an invalidated read error must stay silent', async () => {
   const fresh = importFile(ctx.handleFileImport, 'good.json', JSON.stringify(atifDoc('good-doc')));
   completeRead(fresh, JSON.stringify(atifDoc('good-doc')));
   await settle();
-  assert.equal(ctx.driver.slots[3].value.session_id, 'good-doc');
+  assert.equal(ctx.driver.slots[4].value.session_id, 'good-doc');
 
   // The stale read completes with malformed content and then fails on read.
   completeRead(stale, 'not json at all');
   await settle();
-  assert.equal(ctx.driver.slots[5].value, null,
+  assert.equal(ctx.driver.slots[6].value, null,
     'an obsolete parse error must not surface for the invalidated read');
-  assert.equal(ctx.driver.slots[3].value.session_id, 'good-doc',
+  assert.equal(ctx.driver.slots[4].value.session_id, 'good-doc',
     'the invalidated read must not replace the document');
-  assert.equal(ctx.driver.slots[4].value, false,
+  assert.equal(ctx.driver.slots[5].value, false,
     'the invalidated read must not finish another request\'s loading state');
 
   if (typeof stale.onerror === 'function') {
     stale.onerror(new Error('read failed'));
     await settle();
-    assert.equal(ctx.driver.slots[5].value, null,
+    assert.equal(ctx.driver.slots[6].value, null,
       'an invalidated read failure must stay silent');
-    assert.equal(ctx.driver.slots[4].value, false);
+    assert.equal(ctx.driver.slots[5].value, false);
   }
 });
 
@@ -336,8 +336,8 @@ test('atif viewer: a terminal read failure reports an error and releases loading
   reader.onerror(new Error('read failed'));
   await settle();
 
-  assert.equal(ctx.driver.slots[5].value, 'atif.loadFailed',
+  assert.equal(ctx.driver.slots[6].value, 'atif.loadFailed',
     'the read failure must surface an error');
-  assert.equal(ctx.driver.slots[4].value, false,
+  assert.equal(ctx.driver.slots[5].value, false,
     'the failed import must release the loading state');
 });

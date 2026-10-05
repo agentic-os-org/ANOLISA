@@ -174,6 +174,18 @@ export const AgentSessionsPage: React.FC = () => {
 
   // Debounce the LLM semantic search. Pure-LLM search: no client-side
   // substring fast path — every query goes through the backend ranking.
+  //
+  // The 10 s poll replaces `merged` (and thus `base`) with a fresh array even
+  // when the payload is unchanged, so depending on `base` directly would
+  // re-arm this effect on every poll and re-issue a paid request with an
+  // identical body. Depend on a value-compared key of the candidate ids
+  // instead: the search only re-runs when the query or the candidate set
+  // really changes.
+  const semanticCandidateKey = useMemo(
+    () => base.slice(0, 50).map((s) => s.session_id).join('\u0000'),
+    [base],
+  );
+
   useEffect(() => {
     const query = search.trim();
     if (!query || !semanticEnabled) {
@@ -222,7 +234,7 @@ export const AgentSessionsPage: React.FC = () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [search, semanticEnabled, base]);
+  }, [search, semanticEnabled, semanticCandidateKey]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
