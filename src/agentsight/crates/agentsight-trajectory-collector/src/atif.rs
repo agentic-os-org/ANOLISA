@@ -457,6 +457,12 @@ fn extract_agent_info(
 ///   - `String` → returned as-is
 ///   - `Array` of content blocks → concatenates `text`-type blocks
 ///   - Anything else → `""` or stringified form
+///
+/// `tool_result` blocks are deliberately skipped: the tool output belongs to
+/// the owning agent step's observation (`extract_tool_results`), and folding
+/// it into a user step's message would leak tool output into the
+/// `first/last_user_message` previews, preference rules and LLM prompts that
+/// read the message as the human's own words.
 fn extract_text_from_content(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
@@ -464,35 +470,10 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
             let mut parts: Vec<&str> = Vec::new();
             for block in blocks {
                 if let Some(obj) = block.as_object() {
-                    match obj.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => {
-                            if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
-                                parts.push(t);
-                            }
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
+                            parts.push(t);
                         }
-                        Some("tool_result") => {
-                            let rc = obj.get("content").unwrap_or(&serde_json::Value::Null);
-                            match rc {
-                                serde_json::Value::String(s) => parts.push(s.as_str()),
-                                serde_json::Value::Array(subs) => {
-                                    for sub in subs {
-                                        if let Some(sub_obj) = sub.as_object() {
-                                            if sub_obj.get("type").and_then(|t| t.as_str())
-                                                == Some("text")
-                                            {
-                                                if let Some(t) =
-                                                    sub_obj.get("text").and_then(|v| v.as_str())
-                                                {
-                                                    parts.push(t);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -808,6 +789,31 @@ mod tests {
             .expect("first-event mixed user step carries its observation");
         assert_eq!(obs.results.len(), 1);
         assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn mixed_event_user_message_carries_no_tool_output() {
+        // A mixed user event packs a tool_result and genuine user text. The
+        // tool output belongs to the agent's observation, not to the user's
+        // message: downstream consumers (first/last_user_message previews,
+        // preference rules, LLM prompts) read the message as the human's own
+        // words, so it must equal the text block exactly.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+
+        let user_step = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::User)
+            .expect("mixed event must still yield a user step");
+        assert_eq!(
+            user_step.message, "also update the docs",
+            "tool output must not leak into the user message"
+        );
     }
 
     #[test]

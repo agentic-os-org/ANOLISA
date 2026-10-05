@@ -101,9 +101,7 @@ pub fn convert_codex_events(
     // Newer CLIs emit `event_msg/user_message` for the real user input; when
     // present, role=user response_items (which also carry injected
     // environment/AGENTS.md context) are skipped to avoid duplicates.
-    let has_user_event_msg = events
-        .iter()
-        .any(|e| envelope_type(e) == "event_msg" && payload_type(e) == "user_message");
+    let has_user_event_msg = has_user_message_event(events);
 
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
@@ -305,9 +303,7 @@ pub fn extract_private_metadata(
     // response_items then only carry injected context. Legacy rollouts
     // predate the event, so their user messages are the role=user
     // response_items the converter's fallback turns into steps.
-    let has_user_event_msg = events
-        .iter()
-        .any(|e| envelope_type(e) == "event_msg" && payload_type(e) == "user_message");
+    let has_user_event_msg = has_user_message_event(events);
 
     for e in events {
         let payload = e.get("payload").unwrap_or(&serde_json::Value::Null);
@@ -389,6 +385,23 @@ fn payload_type(e: &serde_json::Value) -> &str {
         .and_then(|p| p.get("type"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
+}
+
+/// Whether the rollout contains a step-producing `event_msg/user_message`.
+///
+/// Only non-empty messages produce a user step in `convert_codex_events`, so
+/// only those may switch the converter (and the metadata counter) away from
+/// the legacy role=user fallback; a single message-less event must not
+/// silently discard every user message of the rollout.
+fn has_user_message_event(events: &[serde_json::Value]) -> bool {
+    events.iter().any(|e| {
+        envelope_type(e) == "event_msg"
+            && payload_type(e) == "user_message"
+            && e.get("payload")
+                .and_then(|p| p.get("message"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|message| !message.is_empty())
+    })
 }
 
 fn user_step(step_id: usize, ts: Option<&str>, message: String) -> Step {
@@ -658,6 +671,34 @@ mod tests {
         assert_eq!(traj.steps[0].source, StepSource::User);
         assert_eq!(traj.steps[0].message, "hello");
         assert_eq!(traj.steps[1].message, "hi");
+    }
+
+    #[test]
+    fn message_less_user_event_does_not_disable_the_legacy_fallback() {
+        // A rollout can contain a message-less event_msg/user_message (the
+        // converter skips it, see test_message_less_user_message_emits_no_step)
+        // while the real input still lives in a role=user response_item. The
+        // era guard must count only step-producing events: otherwise this one
+        // empty event disables the legacy fallback globally and the rollout
+        // yields zero user steps.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-5\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let user_steps: Vec<&Step> = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .collect();
+        assert_eq!(user_steps.len(), 1, "steps: {:?}", traj.steps);
+        assert_eq!(user_steps[0].message, "hello");
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(extra["user_message_count"], 1);
     }
 
     #[test]
