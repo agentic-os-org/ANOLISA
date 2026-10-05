@@ -341,12 +341,33 @@ fn now_ns() -> i64 {
 const HISTORY_MAX_LIMIT: usize = 200;
 const HISTORY_DEFAULT_WINDOW_NS: i64 = 30 * 86_400_000_000_000;
 
+/// Reject an explicitly inverted time window (`start_ns > end_ns`).
+///
+/// Mirrors the Linux server's `reject_inverted_window` family: the store's
+/// `updated_at_ns >= start AND <= end` predicate matches nothing for an
+/// inverted window, so the endpoint used to answer an empty 200 that a
+/// caller cannot tell apart from "no results in this range". The guard runs
+/// before the store is consulted, so an unconfigured instance answers the
+/// family's 400 too, like its Linux sibling.
+fn reject_inverted_window(start_ns: Option<i64>, end_ns: Option<i64>) -> Option<HttpResponse> {
+    if matches!((start_ns, end_ns), (Some(start), Some(end)) if start > end) {
+        return Some(
+            HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "start_ns must not exceed end_ns"})),
+        );
+    }
+    None
+}
+
 /// GET /api/optimize/results
 #[get("/api/optimize/results")]
 pub async fn list_optimization_history(
     data: web::Data<OptimizeAppState>,
     query: web::Query<HistoryQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let Some(ref store) = data.optimize.store else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
@@ -708,5 +729,93 @@ mod tests {
         assert_eq!(config.search_timeout(), std::time::Duration::from_secs(30));
         let serialized = serde_json::to_string(&OptLlmConfig::default()).expect("serialize");
         assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
+    }
+
+    #[actix_web::test]
+    async fn optimization_history_rejects_an_inverted_window() {
+        // The Linux sibling rejects `start_ns > end_ns` with the window-guard
+        // family's 400 before consulting the optimizer's state; this endpoint
+        // handed the inverted range to the store, whose
+        // `updated_at_ns >= start AND <= end` predicate matches nothing, and
+        // answered an empty 200 that reads as "no results in this range".
+        use crate::config::StorageConfig;
+        use crate::database::{
+            DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole,
+            DatabaseSpec,
+        };
+        use actix_web::{App, test as awtest};
+
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-local-opt-inverted-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        let db_path = dir.join("trajectories.db");
+        let database_manager = Arc::new(
+            DatabaseManager::new(
+                DatabaseRole::LocalServer,
+                [DatabaseSpec::new(
+                    DatabaseId::Trajectories,
+                    &db_path,
+                    DatabaseAccess::ReadOnly,
+                    DatabaseCoverage::Partial,
+                )],
+            )
+            .expect("build the local database manager"),
+        );
+        let local_state = web::Data::new(super::super::LocalState {
+            trajectory_store: Arc::new(RwLock::new(None)),
+            db_path,
+            storage_config: StorageConfig::default(),
+            database_manager,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+        });
+        // `store: None` is the unconfigured instance: the guard must answer
+        // before that state is consulted, like the Linux sibling.
+        let state = web::Data::new(OptimizeAppState {
+            optimize: OptimizeState::init(&dir, None),
+            local_state,
+        });
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(state)
+                .service(list_optimization_history),
+        )
+        .await;
+
+        let request = awtest::TestRequest::get()
+            .uri("/api/optimize/results?start_ns=2000&end_ns=1000")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected, not answered with an empty 200"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+
+        // Controls: an ascending window and one-sided windows stay 200.
+        for uri in [
+            "/api/optimize/results?start_ns=1000&end_ns=2000",
+            "/api/optimize/results?start_ns=2000",
+            "/api/optimize/results?end_ns=1000",
+            "/api/optimize/results",
+        ] {
+            let request = awtest::TestRequest::get().uri(uri).to_request();
+            let response = awtest::call_service(&app, request).await;
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::OK,
+                "a well-formed window must pass: {uri}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
