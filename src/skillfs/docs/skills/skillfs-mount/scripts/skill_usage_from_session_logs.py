@@ -224,7 +224,12 @@ def print_report(results: dict, mode: str = "summary"):
     print("Skill Usage Report (session logs)")
     print("=" * 60)
 
-    total_calls = 0
+    # by_agent aggregates every session of every agent regardless of the
+    # report mode, so the footer total is computed from it directly —
+    # accumulating inside a single mode branch left it at 0 in the others.
+    total_calls = sum(
+        sum(skills.values()) for skills in results["by_agent"].values()
+    )
 
     print("\nWorkspace mapping:")
     print("-" * 40)
@@ -242,7 +247,6 @@ def print_report(results: dict, mode: str = "summary"):
             for skill_name in sorted(agent_stats.keys(), key=lambda x: agent_stats[x], reverse=True):
                 count = agent_stats[skill_name]
                 print(f"    {skill_name}: {count}")
-                total_calls += count
 
     if mode in ("date", "all"):
         print("\nBy date:")
