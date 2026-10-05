@@ -51,11 +51,11 @@ impl AuditAnalyzer {
         // LLM API calls (identified by path). Without this, non-streaming
         // completions (stream:false) are invisible in audit --type llm.
         //
-        // Use the same path set that decides whether the GenAI pipeline
-        // creates a row at all: a private copy here drifted from it, and
-        // /v1/responses (plus the DashScope native endpoints) were parsed
-        // into trajectories yet never audited.
-        let is_llm_path = crate::genai::GenAIBuilder::is_llm_api_path(&http_record.path);
+        // Use the shared parser-layer path set that decides whether the
+        // GenAI pipeline creates a row at all: a private copy here
+        // drifted from it, and /v1/responses (plus the DashScope native
+        // endpoints) were parsed into trajectories yet never audited.
+        let is_llm_path = crate::parser::llm::is_llm_api_path(&http_record.path);
         if !http_record.is_sse && !is_llm_path {
             return None;
         }

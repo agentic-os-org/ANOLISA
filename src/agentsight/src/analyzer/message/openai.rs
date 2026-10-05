@@ -706,7 +706,7 @@ impl OpenAIParser {
             // response object (object=="response" + output[] + usage), so
             // deep-parsing a poll would re-record the create call's output
             // and re-count its usage tokens as a second llm_call. Must
-            // stay in lockstep with GenAIBuilder::is_llm_api_path.
+            // stay in lockstep with parser::llm::is_llm_api_path.
             || (path.contains("/v1/responses")
                 && !path.contains("/v1/responses/"))
     }
