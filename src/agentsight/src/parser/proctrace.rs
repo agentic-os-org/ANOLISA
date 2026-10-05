@@ -65,7 +65,13 @@ impl ProcTraceParser {
             VariableEvent::Stdout {
                 header, payload, ..
             } => {
-                let stdout_data = String::from_utf8(payload.clone()).ok();
+                // A stdout chunk is arbitrary process bytes: a tool printing
+                // binary, or a multibyte character split across two chunks,
+                // has no valid UTF-8. Dropping the event for that lost the
+                // bytes entirely — the aggregation layer is byte-oriented and
+                // converts lossily at read time (`stdout_string`), so a lossy
+                // decode here keeps the same contract and the event.
+                let stdout_data = Some(String::from_utf8_lossy(payload).into_owned());
                 Some(ParsedProcEvent {
                     event_type: ProcEventType::Stdout,
                     pid: header.pid,
@@ -290,6 +296,31 @@ mod tests {
             args: None,
             stdout_data: Some(data.to_string()),
         }
+    }
+
+    /// A stdout chunk is arbitrary process bytes; a non-UTF-8 chunk used to be
+    /// dropped outright, so its bytes never reached the aggregated stdout
+    /// (which is byte-oriented and decodes lossily when read) nor the trace.
+    #[test]
+    fn non_utf8_stdout_chunk_is_kept() {
+        // SAFETY: `proc_event_header` is a `#[repr(C)]` bindgen struct of
+        // plain integers, so an all-zero bit pattern is a valid value. Only
+        // the pid/tid fields are read from it.
+        let header: crate::probes::proctrace::ProcEventHeader = unsafe { std::mem::zeroed() };
+        let event = VariableEvent::Stdout {
+            header,
+            fd: 1,
+            payload: vec![0xff, 0xfe, b'A'],
+        };
+
+        let parsed =
+            ProcTraceParser::parse_variable(&event).expect("a stdout chunk must not be dropped");
+        assert_eq!(parsed.event_type, ProcEventType::Stdout);
+        let data = parsed.stdout_data.expect("stdout data");
+        assert!(
+            data.ends_with('A'),
+            "the decodable tail must survive: {data:?}"
+        );
     }
 
     #[test]
