@@ -645,11 +645,14 @@ impl HttpConnectionAggregator {
             Some(cl) => request.body_len >= cl,
             None => {
                 // No Content-Length: check for Transfer-Encoding: chunked
-                let is_chunked = request
-                    .headers
-                    .get("transfer-encoding")
-                    .map(|v| v.contains("chunked"))
-                    .unwrap_or(false);
+                // RFC 7230 §3.3.1: the coding names are case-insensitive and
+                // comma-separated, so compare tokens. `contains("chunked")`
+                // missed `Chunked` and declared the body complete on the first
+                // read, dropping every later body read.
+                let is_chunked = request.headers.get("transfer-encoding").is_some_and(|v| {
+                    v.split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+                });
                 if is_chunked {
                     // Detect completion by walking the chunk framing, not by
                     // scanning for the terminator bytes: the 5-byte pattern can
@@ -3278,6 +3281,51 @@ mod tests {
         assert_eq!(combined.pending_connection_count, usize::MAX);
         assert_eq!(combined.pending_connection_bytes, usize::MAX);
         assert_eq!(combined.eviction_count, u64::MAX);
+    }
+
+    /// `Transfer-Encoding` values are case-insensitive (RFC 7230 §3.3.1) and
+    /// may be a list. The request path matched the literal lower-case
+    /// substring while the response path compares tokens case-insensitively,
+    /// so `Transfer-Encoding: Chunked` was read as "no length, not chunked",
+    /// the body was declared complete on the first read and every remaining
+    /// body read was dropped.
+    #[test]
+    fn test_chunked_request_detection_is_case_insensitive() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let partial_body = b"POST /chat HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n5\r\nhe";
+        let event = create_mock_ssl_event_with_buf(9102, 0xE100, partial_body.to_vec(), 1);
+        let header_end = partial_body
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+
+        let mut headers = HashMap::new();
+        headers.insert("transfer-encoding".to_string(), "Chunked".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len: partial_body.len() - header_end,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 9102,
+            ssl_ptr: 0xE100,
+        };
+        assert!(
+            matches!(
+                aggregator.connections.peek(&conn_id),
+                Some(ConnectionState::RequestBodyPending { .. })
+            ),
+            "a mixed-case chunked encoding must keep the request body open"
+        );
     }
 
     #[test]
