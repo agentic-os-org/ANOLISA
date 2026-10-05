@@ -51,7 +51,7 @@ impl GenAIBuilder {
         );
 
         // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
-        let path_match = self.is_llm_api_path(&http.path);
+        let path_match = crate::parser::llm::is_llm_api_path(&http.path);
         let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
         let is_llm = path_match || body_match;
         if !is_llm && !http.is_sse {
@@ -859,7 +859,7 @@ impl GenAIBuilder {
                 }
             }
             msgs
-        } else if messages.is_empty() && Self::is_dashscope_native_path(&http.path) {
+        } else if messages.is_empty() && crate::parser::llm::is_dashscope_native_path(&http.path) {
             // Non-streaming DashScope/Bailian native protocol: no typed parser
             // claims `/aigc/*-generation/generation`, so the `output` envelope
             // has to be reconstructed from the raw response body.
@@ -945,6 +945,74 @@ mod tests {
         let builder = GenAIBuilder::new();
         let http = make_http("/api/health", None, None);
         assert!(build_call(&builder, &[AnalysisResult::Http(http)]).is_none());
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_count_tokens() {
+        // A real count-tokens request: the same conversation the real
+        // /v1/messages call will send, but no max_tokens (the typed Anthropic
+        // parser refuses it) and a bare {"input_tokens": N} response with no
+        // usage object. Before the gate narrowing this built a phantom
+        // llm_call row per count — same conversation_id as the real turn,
+        // zero tokens, no output — doubling call counts and consuming
+        // preference-window slots.
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/messages/count_tokens",
+            Some(
+                r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Summarize this long document"}],"system":"You are helpful"}"#
+                    .to_string(),
+            ),
+            Some(r#"{"input_tokens":1256}"#.to_string()),
+        );
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "count_tokens is not an inference call and must not build an llm_call"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_responses_retrieval() {
+        // A retrieval poll (GET /v1/responses/{id}) answers with the STORED
+        // response object — the same object=="response" + output[] + usage
+        // shape the create call answered with — so the deep-parse path
+        // would turn the poll into a full phantom llm_call on top of the
+        // row the real create already produced: re-recorded output text,
+        // re-counted usage tokens, and a fast round-trip dragging e2e
+        // latency percentiles down.
+        let builder = GenAIBuilder::new();
+        let mut http = make_http(
+            "/v1/responses/resp_abc123",
+            None,
+            Some(
+                r#"{"id":"resp_abc123","object":"response","status":"completed","model":"gpt-5","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello!","annotations":[]}]}],"usage":{"input_tokens":12,"output_tokens":5,"total_tokens":17}}"#
+                    .to_string(),
+            ),
+        );
+        http.method = "GET".to_string();
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "a retrieval poll is not an inference call and must not build an llm_call"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_responses_cancel() {
+        // POST /v1/responses/{id}/cancel shares the /v1/responses prefix
+        // too; cancelling a background response creates no new inference.
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/responses/resp_abc123/cancel",
+            Some("{}".to_string()),
+            Some(
+                r#"{"id":"resp_abc123","object":"response","status":"cancelled","model":"gpt-5","output":[]}"#
+                    .to_string(),
+            ),
+        );
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "cancel is not an inference call and must not build an llm_call"
+        );
     }
 
     // ── Verification: HTTPS-fallback trigger for unparsable LLM traffic ──

@@ -266,6 +266,11 @@ impl HttpConnectionAggregator {
         if let Some((evicted_key, evicted_state)) = self.connections.push(key, state) {
             if evicted_key != key {
                 self.eviction_count = self.eviction_count.saturating_add(1);
+                self.sse_continuation_buffers.pop(&evicted_key);
+                self.last_appended_src_ptr.pop(&evicted_key);
+                // The side caches are keyed by connection as well. Their own LRU
+                // would eventually drop these entries, but until then they hold
+                // up to 1 MiB of continuation buffer per evicted connection.
                 log::warn!(
                     "[HttpAggregator] LRU evicted conn={:?} state={} | capacity={}",
                     evicted_key,
@@ -640,11 +645,14 @@ impl HttpConnectionAggregator {
             Some(cl) => request.body_len >= cl,
             None => {
                 // No Content-Length: check for Transfer-Encoding: chunked
-                let is_chunked = request
-                    .headers
-                    .get("transfer-encoding")
-                    .map(|v| v.contains("chunked"))
-                    .unwrap_or(false);
+                // RFC 7230 §3.3.1: the coding names are case-insensitive and
+                // comma-separated, so compare tokens. `contains("chunked")`
+                // missed `Chunked` and declared the body complete on the first
+                // read, dropping every later body read.
+                let is_chunked = request.headers.get("transfer-encoding").is_some_and(|v| {
+                    v.split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+                });
                 if is_chunked {
                     // Detect completion by walking the chunk framing, not by
                     // scanning for the terminator bytes: the 5-byte pattern can
@@ -1258,6 +1266,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.sse_continuation_buffers.pop(&key);
+                self.last_appended_src_ptr.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
                 match state {
@@ -1320,6 +1330,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in dead_keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.sse_continuation_buffers.pop(&key);
+                self.last_appended_src_ptr.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
                 match state {
@@ -3105,6 +3117,77 @@ mod tests {
         assert_eq!(metrics.eviction_count, 1);
     }
 
+    /// The per-connection SSE side caches are released on insert, on LRU
+    /// eviction and on SSE completion, but the two PID drain paths (crash
+    /// detection and the periodic dead-PID sweep) only released the
+    /// connection, activity and snapshot maps — so a dead process's
+    /// continuation buffer stayed resident and a later connection reusing the
+    /// same (pid, ssl_ptr) key appended onto the stale bytes.
+    #[test]
+    fn test_pid_drains_release_the_side_caches() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 4242,
+            ssl_ptr: 0x9000,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+            reassembled_body: None,
+        };
+        agg.connections.push(
+            conn_id,
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len: Some(4096),
+                body_buffer: Vec::new(),
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+        agg.sse_continuation_buffers
+            .push(conn_id, b"stale".to_vec());
+        agg.last_appended_src_ptr.push(conn_id, 42);
+
+        agg.drain_connections_for_pid(conn_id.pid);
+
+        assert!(agg.connections.peek(&conn_id).is_none());
+        assert!(
+            agg.sse_continuation_buffers.peek(&conn_id).is_none(),
+            "the crash drain must not leave the continuation buffer behind"
+        );
+        assert!(
+            agg.last_appended_src_ptr.peek(&conn_id).is_none(),
+            "the crash drain must not leave the append cursor behind"
+        );
+    }
+
+    #[test]
+    fn test_capacity_eviction_releases_the_side_caches() {
+        let mut agg = HttpConnectionAggregator::with_capacity(1);
+        let conn_a = ConnectionId { pid: 1, ssl_ptr: 1 };
+        let conn_b = ConnectionId { pid: 1, ssl_ptr: 2 };
+
+        agg.insert(conn_a, ConnectionState::Idle);
+        agg.sse_continuation_buffers.push(conn_a, vec![0u8; 1024]);
+        agg.last_appended_src_ptr.push(conn_a, 7);
+
+        // A second connection evicts the first by capacity.
+        agg.insert(conn_b, ConnectionState::Idle);
+
+        assert!(agg.connections.peek(&conn_a).is_none());
+        assert!(
+            agg.sse_continuation_buffers.peek(&conn_a).is_none(),
+            "the evicted connection's continuation buffer must be released with it"
+        );
+        assert!(agg.last_appended_src_ptr.peek(&conn_a).is_none());
+    }
+
     #[test]
     fn test_connection_metrics_report_retained_payload_bytes() {
         let mut agg = HttpConnectionAggregator::with_capacity(2);
@@ -3198,6 +3281,51 @@ mod tests {
         assert_eq!(combined.pending_connection_count, usize::MAX);
         assert_eq!(combined.pending_connection_bytes, usize::MAX);
         assert_eq!(combined.eviction_count, u64::MAX);
+    }
+
+    /// `Transfer-Encoding` values are case-insensitive (RFC 7230 §3.3.1) and
+    /// may be a list. The request path matched the literal lower-case
+    /// substring while the response path compares tokens case-insensitively,
+    /// so `Transfer-Encoding: Chunked` was read as "no length, not chunked",
+    /// the body was declared complete on the first read and every remaining
+    /// body read was dropped.
+    #[test]
+    fn test_chunked_request_detection_is_case_insensitive() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let partial_body = b"POST /chat HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n5\r\nhe";
+        let event = create_mock_ssl_event_with_buf(9102, 0xE100, partial_body.to_vec(), 1);
+        let header_end = partial_body
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+
+        let mut headers = HashMap::new();
+        headers.insert("transfer-encoding".to_string(), "Chunked".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len: partial_body.len() - header_end,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 9102,
+            ssl_ptr: 0xE100,
+        };
+        assert!(
+            matches!(
+                aggregator.connections.peek(&conn_id),
+                Some(ConnectionState::RequestBodyPending { .. })
+            ),
+            "a mixed-case chunked encoding must keep the request body open"
+        );
     }
 
     #[test]

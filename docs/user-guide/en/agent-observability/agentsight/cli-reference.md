@@ -432,3 +432,7 @@ The same numbers appear on the Dashboard's Skill Metrics page.
 - [Configuration](configuration.md) — what the config file controls
 - [Dashboard guide](dashboard.md) — UI equivalents of these queries
 - [Data and storage](data-and-storage.md) — HTTP API and database layout
+
+## Benchmark artifacts
+
+Running `scripts/benchmark/campaign/aggregate_report.py --campaign <campaign.json> --results <results>` also exports UTF-8 `run-inventory.csv`. It contains every discovered formal `runs/**/run-result.json` across smoke, capacity, matrix, soak, recovery and fault scenarios, sorted by relative artifact path. Columns retain run settings, harness exit code, verdict, JSON arrays of missing/failed gates, and `result_path`; absent optional values stay empty. Archived incomplete runs are outside this inventory. Existing summary reports and source artifacts are preserved.

@@ -90,7 +90,7 @@ fn build_data_section(
                     } else {
                         0.0
                     };
-                    format!("{:.0}%", r)
+                    format!("{r:.0}%")
                 })
                 .collect();
             format!(

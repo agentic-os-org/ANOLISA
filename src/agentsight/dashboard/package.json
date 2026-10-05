@@ -6,9 +6,12 @@
     "build": "webpack --mode production",
     "build:embed": "AGENTSIGHT_EMBED=1 webpack --mode production",
     "typecheck": "tsc --noEmit",
+    "test:token-savings-selection": "node tests/run-token-savings-selection-regression.cjs",
     "test:api-client": "node tests/run-api-client-regression.cjs",
     "test:i18n": "node tests/run-i18n-regression.cjs",
     "test:navigation": "node tests/run-navigation-regression.cjs",
+    "test:stale-load": "node tests/run-stale-load-regression.cjs",
+    "test:agent-sessions-subagent-count": "node tests/run-agent-sessions-subagent-count-regression.cjs",
     "test:product-branding": "node --test tests/product-branding-regression.test.cjs"
   },
   "dependencies": {

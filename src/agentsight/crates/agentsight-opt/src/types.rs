@@ -1056,6 +1056,11 @@ pub struct AccuracyResult {
     /// 五字段正交归因结果（主渲染）；`failures` 保留兼容旧渲染。
     #[serde(default)]
     pub issues: Vec<AccIssue>,
+    /// Judgments that errored (transport/parse) — neither kept nor dismissed.
+    /// A result whose judgments all failed is returned as an error instead, so
+    /// this is only non-zero for partial failures.
+    #[serde(default)]
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

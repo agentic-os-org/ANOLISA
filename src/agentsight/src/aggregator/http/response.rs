@@ -196,6 +196,42 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
         }
     }
 
+    // DashScope/Bailian native envelope: the payload is nested under `output`
+    // (`output.text`, or `output.choices[].message` carrying content, reasoning
+    // or whole tool calls), so the top-level `choices` walk below never sees
+    // it. Native streams are parsed and stored like any other protocol, so
+    // without this branch their first-output timestamp stayed empty.
+    if let Some(output) = value.get("output").filter(|o| o.is_object()) {
+        if non_empty_string(output.get("text")) {
+            return true;
+        }
+        if let Some(choices) = output.get("choices").and_then(serde_json::Value::as_array) {
+            return choices.iter().any(|choice| {
+                let Some(message) = choice.get("message") else {
+                    return false;
+                };
+                let has_content = message.get("content").is_some_and(|content| {
+                    non_empty_string(Some(content))
+                        || content.as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|b| non_empty_string(b.get("text")))
+                        })
+                });
+                has_content
+                    || non_empty_string(message.get("reasoning_content"))
+                    || message
+                        .get("tool_calls")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                let function = call.get("function");
+                                non_empty_string(function.and_then(|f| f.get("name")))
+                                    || non_empty_string(function.and_then(|f| f.get("arguments")))
+                            })
+                        })
+            });
+        }
+    }
+
     value
         .get("choices")
         .and_then(serde_json::Value::as_array)
@@ -378,6 +414,36 @@ mod latency_tests {
         });
         assert!(event_has_meaningful_output(Some(&anthropic)));
         assert!(event_has_meaningful_output(Some(&chat)));
+    }
+
+    /// The DashScope/Bailian native envelope nests its payload under `output`
+    /// (`output.text` or `output.choices[].message`), so the top-level
+    /// `choices` walk never saw it: a native stream produced no first-output
+    /// timestamp, and its TTFT was missing from the latency stats.
+    #[test]
+    fn recognizes_dashscope_native_output() {
+        let content = serde_json::json!({
+            "output": {"choices": [{"finish_reason": "null",
+                                    "message": {"role": "assistant", "content": "你"}}]},
+            "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}
+        });
+        let text_format = serde_json::json!({
+            "output": {"finish_reason": "null", "text": "1, 2"}
+        });
+        let tool_call = serde_json::json!({
+            "output": {"choices": [{"finish_reason": "null",
+                                    "message": {"content": "",
+                                                "tool_calls": [{"index": 0, "id": "call_1",
+                                                                "type": "function",
+                                                                "function": {"name": "get_weather",
+                                                                             "arguments": ""}}]}}]}
+        });
+        let usage_only = serde_json::json!({"output": {"finish_reason": "null", "text": ""}});
+
+        assert!(event_has_meaningful_output(Some(&content)));
+        assert!(event_has_meaningful_output(Some(&text_format)));
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+        assert!(!event_has_meaningful_output(Some(&usage_only)));
     }
 
     #[test]

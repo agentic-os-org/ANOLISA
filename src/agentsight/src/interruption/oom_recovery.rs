@@ -2,8 +2,10 @@
 //!
 //! On AgentSight startup, scans `dmesg` for OOM kill events that occurred
 //! after the last known AgentSight shutdown timestamp. For each killed process
-//! that matches a known agent name, an `agent_crash` InterruptionEvent is
-//! written to the interruption store with `oom: true` in its detail JSON.
+//! that matches a known agent name — or that has in-flight LLM calls in
+//! genai_events, whatever its comm — an `agent_crash` InterruptionEvent is
+//! written to the interruption store with `oom: true` in its detail JSON;
+//! kills with neither signal are noise and are skipped.
 //!
 //! This handles the case where AgentSight itself was killed by OOM and
 //! therefore could not record the crash in real-time.
@@ -30,7 +32,9 @@ struct OomKillEvent {
 /// Run OOM recovery on startup.
 ///
 /// Reads `dmesg -T`, parses OOM kill events, and writes `agent_crash`
-/// interruption events for any killed process whose name matches a known agent.
+/// interruption events for any killed process whose name matches a known
+/// agent or that has a pending llm_call correlation; kills with neither
+/// signal are skipped as noise.
 ///
 /// Uses the latest existing OOM event timestamp in the DB as `since_ns` to
 /// avoid re-writing events from previous runs. Each event is also checked
@@ -74,9 +78,6 @@ pub fn recover_oom_events(
             continue;
         }
 
-        // Match against known agent process name prefixes
-        let agent_name = match_agent_name(&ev.process_name);
-
         // Try to correlate with genai_events to find active session/conversation
         // via pending (in-flight) LLM calls at OOM time.
         let (session_id, conversation_id, active_conversations): (
@@ -110,28 +111,18 @@ pub fn recover_oom_events(
             (None, None, Vec::new())
         };
 
-        let mut detail = serde_json::json!({
-            "pid": ev.pid,
-            "process_name": ev.process_name,
-            "agent_name": agent_name,
-            "oom": true,
-            "source": "dmesg",
-        });
-        if !active_conversations.is_empty() {
-            detail["active_conversations"] = serde_json::json!(active_conversations);
-        }
-
-        let interruption = InterruptionEvent::new(
-            InterruptionType::AgentCrash,
-            session_id,
-            None,
-            conversation_id,
-            None,
-            Some(ev.pid),
-            agent_name.map(|s| s.to_string()),
-            ev.timestamp_ns,
-            Some(detail),
-        );
+        let Some(interruption) =
+            oom_interruption_for(ev, session_id, conversation_id, &active_conversations)
+        else {
+            // Neither a known-agent comm nor any pending llm_call correlation:
+            // pure noise (a build job, a browser tab), not an agent crash.
+            log::debug!(
+                "OOM recovery: skip non-agent pid={} name={}",
+                ev.pid,
+                ev.process_name
+            );
+            continue;
+        };
 
         match interruption_store.insert(&interruption) {
             Ok(_) => {
@@ -160,19 +151,80 @@ pub fn recover_oom_events(
     );
 }
 
+/// `dmesg` with its output locale pinned.
+///
+/// `dmesg -T` renders the timestamp with `strftime("%c")`, which follows the
+/// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`). On
+/// a host exporting e.g. `LANG=zh_CN.UTF-8` the weekday and month names come
+/// out localized, [`parse_dmesg_timestamp`] cannot read them, and every OOM
+/// event is stamped with the scan time instead of the kill time — which also
+/// defeats the `(pid, timestamp)` dedup in [`recover_oom_events`]. Pin the
+/// child to the C locale so the output keeps the format the parser documents.
+fn dmesg_command() -> Command {
+    let mut command = Command::new("dmesg");
+    command.env("LC_ALL", "C");
+    command
+}
+
+/// Build the `agent_crash` interruption for one OOM kill, or `None` when the
+/// kill is noise.
+///
+/// The match table is deliberately narrow (openclaw / cosh / node), but an
+/// unmatched process that has in-flight LLM calls in genai_events is still
+/// an agent-class kill — the correlation is the evidence — so it is recorded
+/// with `agent_name: None` and the correlation's attribution, exactly as
+/// before. Only a kill with neither a known-agent comm nor any pending
+/// correlation (a build job, a browser tab, an unrelated worker) is skipped.
+fn oom_interruption_for(
+    ev: &OomKillEvent,
+    session_id: Option<String>,
+    conversation_id: Option<String>,
+    active_conversations: &[String],
+) -> Option<InterruptionEvent> {
+    let agent_name = match_agent_name(&ev.process_name);
+    if agent_name.is_none()
+        && session_id.is_none()
+        && conversation_id.is_none()
+        && active_conversations.is_empty()
+    {
+        return None;
+    }
+    let mut detail = serde_json::json!({
+        "pid": ev.pid,
+        "process_name": ev.process_name,
+        "agent_name": agent_name,
+        "oom": true,
+        "source": "dmesg",
+    });
+    if !active_conversations.is_empty() {
+        detail["active_conversations"] = serde_json::json!(active_conversations);
+    }
+    Some(InterruptionEvent::new(
+        InterruptionType::AgentCrash,
+        session_id,
+        None,
+        conversation_id,
+        None,
+        Some(ev.pid),
+        agent_name.map(|s| s.to_string()),
+        ev.timestamp_ns,
+        Some(detail),
+    ))
+}
+
 /// Parse OOM kill events from `dmesg -T` output.
 ///
 /// Looks for lines like:
 ///   [Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) ...
 fn parse_dmesg_oom_events() -> Result<Vec<OomKillEvent>, Box<dyn std::error::Error>> {
-    let output = Command::new("dmesg")
+    let output = dmesg_command()
         .arg("-T")
         .output()
         .map_err(|e| format!("failed to run dmesg: {e}"))?;
 
     if !output.status.success() {
         // Some systems require privileges; fall back to dmesg without -T
-        let output2 = Command::new("dmesg").output()?;
+        let output2 = dmesg_command().output()?;
         return parse_dmesg_lines(&String::from_utf8_lossy(&output2.stdout));
     }
 
@@ -316,11 +368,11 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
 /// Returns `true` if the PID appears in an OOM kill line in dmesg
 /// (either format accepted by [`line_matches_oom_kill`]).
 pub fn was_pid_oom_killed(pid: i32) -> bool {
-    let output = match Command::new("dmesg").arg("-T").output() {
+    let output = match dmesg_command().arg("-T").output() {
         Ok(o) if o.status.success() => o,
         Ok(_) => {
             // Fallback without -T
-            match Command::new("dmesg").output() {
+            match dmesg_command().output() {
                 Ok(o) => o,
                 Err(_) => return false,
             }
@@ -409,6 +461,82 @@ mod tests {
         assert!(!line_matches_oom_kill("", "669334"));
     }
 
+    // ─── dmesg output locale (startup recovery timestamps) ────────────────
+
+    /// A `dmesg` stand-in that mimics util-linux: `-T` renders the timestamp
+    /// with `strftime("%c")`, so the weekday and month names follow the
+    /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`).
+    const FAKE_DMESG: &str = r#"#!/bin/sh
+case "${LC_ALL:-${LC_TIME:-${LANG:-}}}" in
+    ""|C|POSIX|C.*)
+        printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+        ;;
+    *)
+        printf '[五 4月 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+        ;;
+esac
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn oom_recovery_reads_dmesg_timestamps_under_a_foreign_locale() {
+        // The parser only understands the C-locale `%b` form. Parse the fake
+        // dmesg output in a re-executed child whose locale is foreign and
+        // whose PATH finds the fake, so the assertion covers the command the
+        // recovery path actually spawns without mutating other tests' env.
+        const CHILD: &str = "AGENTSIGHT_OOM_LOCALE_CHILD";
+        let fake_dir =
+            std::env::temp_dir().join(format!("agentsight-fake-dmesg-{}", std::process::id()));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::oom_recovery_reads_dmesg_timestamps_under_a_foreign_locale",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LC_ALL", "zh_CN.UTF-8")
+                .env("LANG", "zh_CN.UTF-8")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let events = parse_dmesg_oom_events().expect("read fake dmesg");
+        let event = events
+            .iter()
+            .find(|event| event.pid == 12345)
+            .expect("killed process event");
+        // "[Fri Apr 17 10:00:00 2026]" -> 2026-04-17T10:00:00Z
+        assert_eq!(
+            event.timestamp_ns, 1_776_420_000_000_000_000,
+            "the C-locale timestamp must survive a foreign LC_TIME"
+        );
+    }
+
     // ─── parse_dmesg_lines: startup recovery path (#3130) ─────────────────
 
     #[test]
@@ -451,5 +579,75 @@ mod tests {
                 .is_none()
         );
         assert!(parse_oom_kill_structured("").is_none());
+    }
+
+    // ─── oom_interruption_for: only agent kills become agent_crash ──────────
+
+    fn oom_event(process_name: &str) -> OomKillEvent {
+        OomKillEvent {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            pid: 4242,
+            process_name: process_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn non_agent_oom_kill_is_not_an_agent_crash() {
+        // No known-agent comm AND no pending llm_call correlation: pure noise
+        // (a build job, a browser tab); writing it with agent_name: None and
+        // no attribution produced false critical agent_crash records.
+        assert!(oom_interruption_for(&oom_event("python3"), None, None, &[]).is_none());
+        assert!(oom_interruption_for(&oom_event("chrome"), None, None, &[]).is_none());
+        assert!(oom_interruption_for(&oom_event("mysqld"), None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn unmatched_oom_kill_with_pending_correlation_is_kept() {
+        // A claude/qwen/codex-class comm is not in the narrow match table,
+        // but a pending llm_call row for the pid is the evidence this was an
+        // agent-class kill: the event must keep its session attribution and
+        // agent_name: None, exactly as before the noise skip.
+        let interruption = oom_interruption_for(
+            &oom_event("claude"),
+            Some("sess-9".to_string()),
+            Some("conv-9".to_string()),
+            &["conv-9".to_string()],
+        )
+        .expect("correlation is evidence of an agent kill");
+        assert_eq!(interruption.agent_name, None);
+        assert_eq!(interruption.session_id.as_deref(), Some("sess-9"));
+        assert_eq!(interruption.conversation_id.as_deref(), Some("conv-9"));
+        assert!(matches!(
+            interruption.interruption_type,
+            InterruptionType::AgentCrash
+        ));
+        let detail: serde_json::Value =
+            serde_json::from_str(&interruption.detail.expect("detail")).expect("valid json");
+        assert_eq!(detail["agent_name"], serde_json::Value::Null);
+        assert_eq!(detail["active_conversations"][0], "conv-9");
+    }
+
+    #[test]
+    fn agent_oom_kill_keeps_its_detail_shape() {
+        let interruption = oom_interruption_for(
+            &oom_event("openclaw-gatewa"),
+            Some("sess-1".to_string()),
+            Some("conv-1".to_string()),
+            &["conv-1".to_string()],
+        )
+        .expect("a kill of a known agent runtime must be recorded");
+        assert!(matches!(
+            interruption.interruption_type,
+            InterruptionType::AgentCrash
+        ));
+        assert_eq!(interruption.agent_name.as_deref(), Some("OpenClaw"));
+        assert_eq!(interruption.pid, Some(4242));
+        assert_eq!(interruption.session_id.as_deref(), Some("sess-1"));
+        let detail: serde_json::Value =
+            serde_json::from_str(&interruption.detail.expect("detail")).expect("valid json");
+        assert_eq!(detail["agent_name"], "OpenClaw");
+        assert_eq!(detail["oom"], true);
+        assert_eq!(detail["source"], "dmesg");
+        assert_eq!(detail["active_conversations"][0], "conv-1");
     }
 }

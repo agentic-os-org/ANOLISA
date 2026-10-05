@@ -124,7 +124,7 @@ impl ProcTraceParser {
             ProcEventType::Stdout => {
                 let data = parsed.stdout_data?;
                 let display_data = if data.len() > 100 {
-                    format!("{}...", &data[..100])
+                    format!("{}...", boundary_preview(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -202,7 +202,11 @@ impl TraceArgs for ParsedProcEvent {
 
                     // Add data preview (truncated)
                     let preview = if data.len() > 200 {
-                        format!("{}... ({} bytes total)", &data[..200], data.len())
+                        format!(
+                            "{}... ({} bytes total)",
+                            boundary_preview(data, 200),
+                            data.len()
+                        )
                     } else {
                         data.clone()
                     };
@@ -218,6 +222,19 @@ impl TraceArgs for ParsedProcEvent {
     }
 }
 
+/// Shorten a preview to at most `max_bytes`, cutting on a character boundary
+/// so multi-byte stdout text is never split mid-character.
+fn boundary_preview(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl ParsedProcEvent {
     /// Convert to Chrome Trace Event
     pub fn to_chrome_trace_event(&self) -> ChromeTraceEvent {
@@ -227,7 +244,7 @@ impl ParsedProcEvent {
             ProcEventType::Stdout => {
                 let data = self.stdout_data.as_ref().cloned().unwrap_or_default();
                 let display_data = if data.len() > 100 {
-                    format!("{}...", &data[..100])
+                    format!("{}...", boundary_preview(&data, 100))
                 } else {
                     data.clone()
                 };
@@ -254,5 +271,50 @@ impl ParsedProcEvent {
             id: None,
             bp: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stdout_event(data: &str) -> ParsedProcEvent {
+        ParsedProcEvent {
+            event_type: ProcEventType::Stdout,
+            pid: 1,
+            tid: 1,
+            ppid: 0,
+            ptid: 0,
+            comm: "proc".to_string(),
+            timestamp_ns: 0,
+            args: None,
+            stdout_data: Some(data.to_string()),
+        }
+    }
+
+    #[test]
+    fn stdout_event_name_cuts_on_char_boundary() {
+        // 99 ASCII bytes then a 3-byte character straddling offset 100: the
+        // chrome-trace event name sliced at byte 100, inside the character.
+        let data = format!("{}中中", "a".repeat(99));
+        let event = stdout_event(&data);
+        let chrome = event.to_chrome_trace_event();
+        assert!(chrome.name.starts_with("stdout: aaa"));
+        assert!(chrome.name.ends_with("..."));
+    }
+
+    #[test]
+    fn stdout_args_preview_cuts_on_char_boundary() {
+        // 199 ASCII bytes then a 3-byte character straddling offset 200.
+        let data = format!("{}中", "b".repeat(199));
+        let event = stdout_event(&data);
+        let args = event.to_trace_args();
+        let preview = args["data"].as_str().expect("data preview");
+        assert!(preview.ends_with("(202 bytes total)"));
+        assert!(!preview.contains('中'));
+
+        // Short data is untouched.
+        assert_eq!(boundary_preview("hello", 100), "hello");
+        assert!(!preview.contains('中'));
     }
 }

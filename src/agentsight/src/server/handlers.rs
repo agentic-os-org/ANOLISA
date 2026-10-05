@@ -18,6 +18,7 @@ use crate::grader::{
     RuleGrader, TargetType, load_conversation_input,
 };
 use crate::health::AgentHealthStatus;
+use crate::interruption::InterruptionType;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
 
@@ -39,6 +40,50 @@ pub async fn health(data: web::Data<AppState>) -> impl Responder {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": data.start_time.elapsed().as_secs()
     }))
+}
+
+// ─── Time range helpers ──────────────────────────────────────────────────────
+
+/// One day in nanoseconds: the default window for query endpoints that are
+/// called without an explicit `start_ns`.
+pub(super) const DEFAULT_WINDOW_NS: i64 = 86_400_000_000_000;
+
+/// Start of a requested time range, defaulting to `window_ns` before `end_ns`.
+///
+/// Returns the 400 response to answer with when that default is not
+/// representable. `end_ns` is a plain query parameter, so a value near
+/// `i64::MIN` overflows the subtraction, and the wrapped result is a start far
+/// *after* the end — an inverted window that matches nothing while still
+/// answering 200. `/metrics/latency` already rejects the same input.
+/// Reject an explicitly inverted time window (`start_ns > end_ns`).
+///
+/// `/sessions/{session_id}/resources` and `/metrics/latency` already answer
+/// 400 for it; the other window endpoints handed the inverted range to the
+/// store and answered 200 with an empty result, which the caller cannot tell
+/// apart from "this range has no data".
+pub(super) fn reject_inverted_window(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+) -> Option<HttpResponse> {
+    if matches!((start_ns, end_ns), (Some(start), Some(end)) if start > end) {
+        return Some(
+            HttpResponse::BadRequest().json(json!({"error": "start_ns must not exceed end_ns"})),
+        );
+    }
+    None
+}
+
+pub(super) fn start_or_default(
+    requested: Option<i64>,
+    end_ns: i64,
+    window_ns: i64,
+) -> Result<i64, HttpResponse> {
+    match requested {
+        Some(start_ns) => Ok(start_ns),
+        None => end_ns.checked_sub(window_ns).ok_or_else(|| {
+            HttpResponse::BadRequest().json(json!({"error": "default time range is out of bounds"}))
+        }),
+    }
 }
 
 // ─── Authentication endpoints ────────────────────────────────────────────────
@@ -145,10 +190,14 @@ pub async fn list_sessions(
     data: web::Data<AppState>,
     query: web::Query<SessionQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     let Some(store) = data.genai_store.as_deref() else {
         return HttpResponse::InternalServerError()
@@ -174,6 +223,9 @@ pub async fn list_traces_by_session(
 ) -> impl Responder {
     let session_id = path.into_inner();
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let start_ns = query.start_ns;
     let end_ns = query.end_ns;
 
@@ -516,10 +568,14 @@ pub async fn list_agent_names(
     data: web::Data<AppState>,
     query: web::Query<TimeRangeQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     let Some(store) = data.genai_store.as_deref() else {
         return HttpResponse::InternalServerError()
@@ -549,10 +605,14 @@ pub async fn get_timeseries(
     data: web::Data<AppState>,
     query: web::Query<TimeseriesQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let buckets = query.buckets.unwrap_or(30);
     let agent_name = query.agent_name.as_deref();
 
@@ -2005,6 +2065,172 @@ mod tests {
         assert_eq!(arr[0]["session_id"], "s-1");
     }
 
+    fn test_app_state_with_trajectory_and_reuse(
+        trajectory_store: Option<Arc<TrajectoryStore>>,
+        reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
+    ) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            reuse_store,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            storage_path: PathBuf::from(":memory:"),
+            genai_store: None,
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(trajectory_store)),
+        })
+    }
+
+    /// The reuse-label filter runs *after* the SQL `LIMIT`, so with `limit=N`
+    /// any matching trajectory older than the newest N rows is invisible:
+    /// `/api/trajectories?label=good` silently answers an empty list even
+    /// though a labelled trajectory exists. The label parameter is documented
+    /// as a filter over originals, and an agent asking for `good` history is
+    /// exactly the caller that cannot tell an empty filter from no data.
+    #[actix_web::test]
+    async fn trajectory_label_typos_are_rejected() {
+        // `label=god` used to drop the unknown token and return an empty 200
+        // ("no such trajectories"), while `exclude_label=uselesss` failed
+        // open and served everything. Both must be a 400 like the reuse API.
+        let db = unique_handler_db("label-typo");
+        let tstore = Arc::new(TrajectoryStore::new_with_path(&db).unwrap());
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-label-typo");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for (uri, field) in [
+            ("/api/trajectories?label=god", "label"),
+            ("/api/trajectories?exclude_label=uselesss", "exclude_label"),
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must be rejected"
+            );
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(field),
+                "{uri}: the error must name the offending field, got {body}"
+            );
+        }
+
+        // A valid token still filters normally.
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?label=good")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_label_filter_keeps_matches_beyond_the_newest_limit_window() {
+        let db = unique_handler_db("label-filter-window");
+        let tstore = TrajectoryStore::new_with_path(&db).unwrap();
+        // Oldest first, so collected_at_ns orders s-1 < s-2 < s-3.
+        for session in ["s-1", "s-2", "s-3"] {
+            tstore
+                .upsert_trajectory(&trajectory_record(session, "proj-a", "qoder"))
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let tstore = Arc::new(tstore);
+
+        let label_dir = temp_root("reuse-label-window");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+        reuse
+            .upsert_auto_label(
+                "s-1",
+                crate::reuse::label::TrajectoryIdentity {
+                    title: Some("old but good".to_string()),
+                    project: "proj-a".to_string(),
+                    source: "qoder".to_string(),
+                    agent_name: "qoder".to_string(),
+                    started_at: None,
+                    is_subagent: false,
+                },
+                crate::reuse::TriageOutcome {
+                    label: crate::reuse::TrajectoryLabel::Good,
+                    reason: "fixture".to_string(),
+                    metrics: crate::reuse::TriageMetrics {
+                        n_steps: 2,
+                        n_user_turns: 1,
+                        n_tool_calls: 0,
+                        max_agent_len: 10,
+                    },
+                    n_findings: 0,
+                    rules: Vec::new(),
+                },
+                "fixture-hash",
+                "fixture-version",
+            )
+            .unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?label=good&limit=2")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows: serde_json::Value = awtest::read_body_json(resp).await;
+        let arr = rows.as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "the labelled trajectory must survive the limit filter: {rows}"
+        );
+        assert_eq!(arr[0]["session_id"], "s-1");
+
+        cleanup_db(&db);
+        let _ = std::fs::remove_dir_all(&label_dir);
+    }
+
     #[actix_web::test]
     async fn trajectory_detail_returns_raw_atif_and_404() {
         let data = test_app_state_with_trajectory_store(Some(seeded_trajectory_store("detail")));
@@ -2395,6 +2621,258 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// `limit` is passed straight into SQLite, where a negative LIMIT means
+    /// "no upper bound" and zero means "no rows". `/api/trajectories` and
+    /// `/api/trajectories/steps` already normalize the same parameter (<= 0
+    /// falls back to the documented default), so the list endpoint answering
+    /// the entire window for `limit=-1` — or nothing at all for `limit=0` — is
+    /// both an unbounded-response hazard and an inconsistent contract.
+    #[actix_web::test]
+    async fn interruption_list_normalizes_non_positive_limits() {
+        let interruption_path = unique_handler_db("interruptions-limit");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        for i in 0..250 {
+            let mut event = make_interruption_event(
+                &format!("int-limit-{i}"),
+                &format!("sess-limit-{i}"),
+                &format!("conv-limit-{i}"),
+                crate::interruption::InterruptionType::RateLimit,
+            );
+            event.occurred_at_ns = 1_700_000_000_000_000_000 + i;
+            istore.insert(&event).unwrap();
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions),
+        )
+        .await;
+
+        for limit in ["-1", "0"] {
+            let resp = awtest::call_service(
+                &app,
+                awtest::TestRequest::get()
+                    .uri(&format!(
+                        "/interruptions?start_ns=0&end_ns=9223372036854775807&limit={limit}"
+                    ))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let rows: serde_json::Value = awtest::read_body_json(resp).await;
+            assert_eq!(
+                rows.as_array().unwrap().len(),
+                200,
+                "limit={limit} must fall back to the documented default instead of \
+                 disabling (negative LIMIT) or emptying (LIMIT 0) the cap: {}",
+                rows.as_array().unwrap().len()
+            );
+        }
+
+        // Guard: a positive limit still bounds the response.
+        let bounded = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions?start_ns=0&end_ns=9223372036854775807&limit=7")
+                .to_request(),
+        )
+        .await;
+        let bounded_rows: serde_json::Value = awtest::read_body_json(bounded).await;
+        assert_eq!(bounded_rows.as_array().unwrap().len(), 7);
+
+        cleanup_db(&interruption_path);
+    }
+
+    /// `interruption_type` and `severity` name closed sets: every stored row
+    /// carries a token written by `InterruptionType::as_str` / `Severity`, and
+    /// the CLI binds both filters with `possible_values`. An unknown token can
+    /// therefore never match a row, and the empty 200 it produced was
+    /// indistinguishable from a genuinely empty window.
+    #[actix_web::test]
+    async fn interruption_list_rejects_unknown_filter_tokens() {
+        let interruption_path = unique_handler_db("interruptions-filter-tokens");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        istore
+            .insert(&make_interruption_event(
+                "int-filter-1",
+                "sess-filter",
+                "conv-filter",
+                crate::interruption::InterruptionType::RateLimit,
+            ))
+            .unwrap();
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions),
+        )
+        .await;
+
+        for uri in [
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&interruption_type=rate_limit_typo",
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&severity=sevrity",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            assert!(
+                body["error"].is_string(),
+                "the 400 must say which filter is wrong: {body}"
+            );
+        }
+
+        // Valid tokens still filter, and a valid token with no matching row is
+        // the one case that is legitimately an empty 200.
+        for uri in [
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&interruption_type=rate_limit",
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&severity=medium",
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&interruption_type=auth_error",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&interruption_path);
+    }
+
+    /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
+    /// makes the default 24 h start wrap into a huge positive bound. The query
+    /// then runs on an inverted (always empty) window and still answers 200,
+    /// which a client cannot tell apart from "this range has no data".
+    /// `/metrics/latency` already rejects the same input with 400.
+    #[actix_web::test]
+    async fn interruption_count_rejects_an_unrepresentable_default_window() {
+        let interruption_path = unique_handler_db("interruptions-default-window");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_count),
+        )
+        .await;
+
+        let rejected = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count?end_ns=-9223372036854775808")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::BAD_REQUEST,
+            "an unrepresentable default window must be rejected, not wrapped"
+        );
+
+        // Guard: the ordinary default window still answers.
+        let ok = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        cleanup_db(&interruption_path);
+    }
+
+    #[actix_web::test]
+    async fn genai_window_endpoints_reject_an_inverted_range() {
+        let storage_path = unique_handler_db("inverted-window-genai");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(storage_path.clone()))
+                .service(list_sessions)
+                .service(list_agent_names)
+                .service(get_timeseries)
+                .service(list_traces_by_session)
+                .service(skill_metrics_all),
+        )
+        .await;
+
+        for uri in [
+            "/sessions?start_ns=2000&end_ns=1000",
+            "/agent-names?start_ns=2000&end_ns=1000",
+            "/timeseries?start_ns=2000&end_ns=1000&buckets=1",
+            "/sessions/any/traces?start_ns=2000&end_ns=1000",
+            "/skill-metrics?start_ns=2000&end_ns=1000",
+        ] {
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject an inverted range like /metrics/latency does"
+            );
+        }
+
+        // Guard: an ordinary window still answers.
+        for uri in [
+            "/sessions?start_ns=1000&end_ns=2000",
+            "/timeseries?start_ns=1000&end_ns=2000&buckets=1",
+        ] {
+            let ok =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(ok.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&storage_path);
+    }
+
+    #[actix_web::test]
+    async fn interruption_window_endpoints_reject_an_inverted_range() {
+        let interruption_path = unique_handler_db("inverted-window-interruptions");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions)
+                .service(interruption_count)
+                .service(interruption_stats)
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        for uri in [
+            "/interruptions?start_ns=2000&end_ns=1000",
+            "/interruptions/count?start_ns=2000&end_ns=1000",
+            "/interruptions/stats?start_ns=2000&end_ns=1000",
+            "/interruptions/session-counts?start_ns=2000&end_ns=1000",
+            "/interruptions/conversation-counts?start_ns=2000&end_ns=1000",
+        ] {
+            let rejected =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must reject an inverted range like /metrics/latency does"
+            );
+        }
+
+        // Guard: an ordinary window still answers.
+        let ok = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count?start_ns=1000&end_ns=2000")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        cleanup_db(&interruption_path);
+    }
+
     #[actix_web::test]
     async fn health_reports_status_version_and_uptime() {
         let app =
@@ -2664,6 +3142,73 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    #[test]
+    fn live_process_matches_checks_the_live_executable() {
+        let self_pid = std::process::id();
+        let self_exe = std::fs::read_link(format!("/proc/{self_pid}/exe")).unwrap();
+        let self_exe = self_exe.to_string_lossy();
+        let self_exe = self_exe.strip_suffix(" (deleted)").unwrap_or(&self_exe);
+
+        assert!(live_process_matches(self_pid, self_exe));
+        // A recycled PID runs a different binary: refuse to signal it.
+        assert!(!live_process_matches(self_pid, "/nonexistent/other-agent"));
+        // A dead PID and an empty recorded path cannot be verified. Use a
+        // value above pid_max rather than u32::MAX (which kill(2) would
+        // read as -1).
+        assert!(!live_process_matches(i32::MAX as u32, self_exe));
+        assert!(!live_process_matches(self_pid, ""));
+    }
+
+    #[actix_web::test]
+    async fn agent_health_restart_refuses_a_vanished_or_recycled_pid() {
+        // The store keeps offline entries until acknowledged, so a restart
+        // request can name a PID whose process is gone (or recycled by an
+        // unrelated process). The handler must refuse instead of signalling
+        // it and re-execing the stored command anyway.
+        let state = test_app_state(0);
+        // Above /proc/sys/kernel/pid_max (4194304 on Linux), so no such
+        // process can exist. Deliberately NOT u32::MAX: `kill -9 4294967295`
+        // truncates the argument to -1 before the kill(2) syscall, i.e.
+        // "signal every process the caller may signal".
+        let vanished_pid = i32::MAX as u32;
+        {
+            let mut store = state.health_store.write().unwrap();
+            store.update(
+                vanished_pid,
+                crate::health::AgentHealthStatus {
+                    pid: vanished_pid,
+                    agent_name: "Vanished".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: "/bin/vanished-agent".to_string(),
+                    workspace_path: None,
+                    ports: vec![],
+                    status: crate::health::store::AgentHealthState::Offline,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd: Some(vec!["/bin/true".to_string()]),
+                    offline_since: Some(1),
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+        }
+
+        let app =
+            awtest::init_service(App::new().app_data(state).service(restart_agent_health)).await;
+        let req = awtest::TestRequest::post()
+            .uri(&format!("/agent-health/{vanished_pid}/restart"))
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        let status = resp.status();
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a restart for a non-live pid must be refused"
+        );
+    }
+
     #[actix_web::test]
     async fn agent_health_process_records_can_still_be_deleted() {
         let state = test_app_state(0);
@@ -2762,6 +3307,24 @@ mod tests {
         let agents = include_body["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 2, "Cosh should still be excluded");
         assert_eq!(include_body["filtered_count"], 1);
+
+        // Only the exact parameter enables the flag: a longer value or a
+        // different key that merely contains the text must not.
+        for uri in [
+            "/agent-process-health?include_clients=trueX",
+            "/agent-process-health?xinclude_clients=true",
+            "/agent-process-health?foo=include_clients=true",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            let body = service_response_json(resp).await;
+            assert_eq!(
+                body["agents"].as_array().unwrap().len(),
+                1,
+                "{uri} must not enable include_clients"
+            );
+            assert_eq!(body["filtered_count"], 2, "{uri}");
+        }
 
         let deleted = awtest::call_service(
             &app,
@@ -3158,6 +3721,45 @@ mod tests {
         cleanup_db(&db_path);
     }
 
+    /// `granularity` is a closed set ("day" or "week"): the trend applied a
+    /// literal `== "day"` and fell back to weekly for everything else, so a
+    /// typo answered weekly buckets that look exactly like a valid `week`.
+    #[actix_web::test]
+    async fn skill_metrics_rejects_unknown_granularity() {
+        let db_path = unique_handler_db("skill_metrics_granularity");
+        write_completed_conversation_event(&db_path, "conv-skill-granularity");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(skill_metrics_all)
+                .service(skill_metrics_hotness),
+        )
+        .await;
+
+        for uri in [
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=dayy",
+            "/skill-metrics/hotness?start_ns=0&end_ns=9223372036854775807&granularity=weekk",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Both documented values keep working, and omitting it keeps the
+        // documented weekly default.
+        for uri in [
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=day",
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=week",
+            "/skill-metrics/hotness?start_ns=0&end_ns=9223372036854775807",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&db_path);
+    }
+
     #[actix_web::test]
     async fn storage_backed_handlers_report_database_open_errors() {
         let root = temp_root("handler_open_errors");
@@ -3511,7 +4113,16 @@ pub async fn get_agent_process_health(
     data: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
-    let include_clients = req.query_string().contains("include_clients=true");
+    // Exact key=value match: `contains` also enabled the flag for
+    // `xinclude_clients=true`, `include_clients=trueX`, or an unrelated
+    // parameter whose value merely contains the text.
+    let include_clients = req.query_string().split('&').any(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        matches!(
+            (parts.next(), parts.next()),
+            (Some("include_clients"), Some(value)) if value.eq_ignore_ascii_case("true")
+        )
+    });
     let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
     let all = store.all_agents();
     let total = all.len();
@@ -3531,6 +4142,33 @@ pub async fn get_agent_process_health(
         last_scan_time: store.last_scan_time,
         filtered_count,
     })
+}
+
+/// Whether the live process at `pid` still looks like the agent the health
+/// store recorded. `kill -9` on a recycled PID would hit an unrelated
+/// process, so an unverifiable identity (dead process, empty recorded path,
+/// different executable) must refuse the restart.
+fn live_process_matches(pid: u32, recorded_exe: &str) -> bool {
+    if recorded_exe.is_empty() {
+        return false;
+    }
+    let Ok(live) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let live = live.to_string_lossy();
+    let live = live.strip_suffix(" (deleted)").unwrap_or(&live);
+    if live == recorded_exe {
+        return true;
+    }
+    // Compare canonical spellings when both sides resolve (symlinked
+    // interpreters, /usr/bin aliases).
+    match (
+        std::fs::canonicalize(recorded_exe),
+        std::fs::canonicalize(live),
+    ) {
+        (Ok(recorded), Ok(live)) => recorded == live,
+        _ => false,
+    }
 }
 
 /// DELETE /api/agent-health/{pid}
@@ -3559,13 +4197,12 @@ pub async fn restart_agent_health(
 ) -> impl Responder {
     let pid = path.into_inner();
 
-    let restart_cmd = {
+    let (restart_cmd, recorded_exe) = {
         let store = data.health_store.read().unwrap();
-        store
-            .all_agents()
-            .into_iter()
-            .find(|a| a.pid == pid)
-            .and_then(|a| a.restart_cmd)
+        match store.all_agents().into_iter().find(|a| a.pid == pid) {
+            Some(agent) => (agent.restart_cmd.clone(), agent.exe_path.clone()),
+            None => (None, String::new()),
+        }
     };
 
     let cmd = match restart_cmd {
@@ -3576,13 +4213,35 @@ pub async fn restart_agent_health(
         }
     };
 
+    // A health entry outlives its process (offline entries stay until
+    // acknowledged) and PID reuse is normal, so the live process must still
+    // match the recorded executable before it is signalled — otherwise a
+    // restart would `kill -9` an unrelated process.
+    if !live_process_matches(pid, &recorded_exe) {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "pid {pid} no longer matches the recorded agent ({recorded_exe}); refusing to kill"
+            ),
+        }));
+    }
+
     // Step 1: kill -9
     use std::process::Command;
     let kill_result = Command::new("kill").args(["-9", &pid.to_string()]).output();
 
-    if let Err(e) = kill_result {
-        return HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+    match kill_result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            // A failed kill means the process is already gone (or cannot be
+            // killed); re-execing anyway would start a duplicate agent.
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("kill exited with {}", output.status),
+            }));
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+        }
     }
 
     // Step 2: short wait for process to exit
@@ -3723,11 +4382,49 @@ pub struct InterruptionQuery {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
     pub agent_name: Option<String>,
-    /// Filter by type: llm_error | sse_truncated | agent_crash | token_limit | context_overflow
+    /// Filter by type: any `InterruptionType::as_str` value.
     pub interruption_type: Option<String>,
+    /// Filter by severity: critical | high | medium | low.
     pub severity: Option<String>,
     pub resolved: Option<bool>,
     pub limit: Option<i64>,
+}
+
+/// Default and hard-cap for the interruption list `limit` parameter.
+const INTERRUPTION_DEFAULT_LIMIT: i64 = 200;
+const INTERRUPTION_MAX_LIMIT: i64 = 1000;
+
+/// Reject `interruption_type` / `severity` values the store can never match.
+///
+/// Both name closed sets: every row's type is written by
+/// `InterruptionType::as_str` and its severity by `Severity::as_str`, and the
+/// CLI binds the same two filters with `possible_values`. Accepting an unknown
+/// token and answering an empty 200 makes a typo indistinguishable from a
+/// genuinely empty window, so it is refused up front — the same direction as
+/// the trajectory `category` filter below and the audit read filters.
+fn reject_unknown_interruption_filters(query: &InterruptionQuery) -> Option<HttpResponse> {
+    if let Some(raw) = query.interruption_type.as_deref() {
+        if InterruptionType::from_str(raw).is_none() {
+            return Some(HttpResponse::BadRequest().json(json!({
+                "error": "invalid_interruption_type",
+                "message": format!("Unknown interruption type '{raw}'"),
+                "valid_types": InterruptionType::ALL
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>(),
+            })));
+        }
+    }
+    if let Some(raw) = query.severity.as_deref() {
+        if !matches!(raw, "critical" | "high" | "medium" | "low") {
+            return Some(HttpResponse::BadRequest().json(json!({
+                "error": "invalid_severity",
+                "message": format!("Unknown severity '{raw}'"),
+                "valid_severities": ["critical", "high", "medium", "low"],
+            })));
+        }
+    }
+    None
 }
 
 /// GET /api/interruptions
@@ -3743,11 +4440,26 @@ pub async fn list_interruptions(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
+    if let Some(response) = reject_unknown_interruption_filters(&query) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
-    let limit = query.limit.unwrap_or(200);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
+    // Normalize: <= 0 falls back to the documented default and positive values
+    // are capped. SQLite treats a negative LIMIT as "no upper bound", so a
+    // plain `.unwrap_or(200)` let `limit=-1` return the whole window while
+    // `limit=0` returned nothing — both contradicting the other list
+    // endpoints' contract (`/api/trajectories`).
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(INTERRUPTION_MAX_LIMIT),
+        _ => INTERRUPTION_DEFAULT_LIMIT,
+    };
 
     match istore.list(
         start_ns,
@@ -3781,10 +4493,14 @@ pub async fn interruption_count(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.stats(start_ns, end_ns, Some(false), query.agent_name.as_deref()) {
         Ok(stats) => {
@@ -3832,10 +4548,14 @@ pub async fn interruption_stats(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.stats(start_ns, end_ns, Some(false), query.agent_name.as_deref()) {
         Ok(stats) => HttpResponse::Ok().json(stats),
@@ -3858,10 +4578,14 @@ pub async fn interruption_session_counts(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.count_unresolved_by_session_detailed(start_ns, end_ns, query.agent_name.as_deref())
     {
@@ -3929,10 +4653,14 @@ pub async fn interruption_conversation_counts(
             .json(serde_json::json!({"error": "Interruption store not initialized"}));
     };
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.count_unresolved_by_conversation_detailed(
         start_ns,
@@ -4122,20 +4850,42 @@ pub async fn list_trajectories(
         Some(v) if v > 0 => v.min(TRAJECTORY_MAX_LIMIT),
         _ => TRAJECTORY_DEFAULT_LIMIT,
     };
+    // Label filters live in `reuse.db`, so they cannot be pushed into the
+    // `trajectories.db` query — they are applied to the fetched rows. Applying
+    // them *after* the SQL cap would make every match older than the newest
+    // `limit` rows invisible, so a labelled query must read the whole summary
+    // set (small, payload-free rows) and only then truncate to `limit`.
+    let fetch_limit = if reuse_label_filter_requested(&query) {
+        i64::MAX
+    } else {
+        limit
+    };
     match tstore.list_summaries(
         query.project.as_deref(),
         query.source.as_deref(),
         query.agent_name.as_deref(),
-        limit,
+        fetch_limit,
     ) {
         Ok(mut rows) => {
-            filter_rows_by_reuse_labels(&data, &query, &mut rows);
+            if let Err(response) = filter_rows_by_reuse_labels(&data, &query, &mut rows) {
+                return response;
+            }
+            rows.truncate(limit as usize);
             HttpResponse::Ok().json(rows)
         }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Whether the query asks for any `reuse.db`-backed filtering.
+///
+/// Label filters cannot run in SQL because the labels live in a second
+/// database, so this is what tells the caller to scan summaries without the
+/// display cap before filtering.
+fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
+    query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true)
 }
 
 /// Applies the reuse-label query parameters to trajectory summary rows.
@@ -4149,42 +4899,60 @@ fn filter_rows_by_reuse_labels(
     data: &web::Data<AppState>,
     query: &TrajectoryQuery,
     rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
-) {
-    let labels_needed =
-        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
-    if !labels_needed {
-        return;
+) -> Result<(), HttpResponse> {
+    if !reuse_label_filter_requested(query) {
+        return Ok(());
     }
+    // Reject unknown tokens up front, like the reuse API: a typo used to be
+    // dropped silently, which read as "no such trajectories" for `label` and
+    // failed open (nothing excluded) for `exclude_label`.
+    let parse =
+        |field: &str, raw: &str| -> Result<Vec<crate::reuse::TrajectoryLabel>, HttpResponse> {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|token| {
+                    crate::reuse::TrajectoryLabel::parse(token).ok_or_else(|| {
+                        bad_request_response(format!(
+                            "{field} '{token}' is not a known trajectory label"
+                        ))
+                    })
+                })
+                .collect()
+        };
+    let requested = query
+        .label
+        .as_deref()
+        .map(|raw| parse("label", raw))
+        .transpose()?;
+    let excluded = query
+        .exclude_label
+        .as_deref()
+        .map(|raw| parse("exclude_label", raw))
+        .transpose()?;
+
     let Some(labels) = data.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
         // matches nothing. Serve the empty truth rather than unfiltered rows.
         if query.label.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
-        return;
+        return Ok(());
     };
-    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(crate::reuse::TrajectoryLabel::parse)
-            .collect()
-    };
-    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+    let keep: Option<std::collections::HashSet<String>> = requested.map(|parsed| {
         labels
-            .sessions_with_labels(&parse(raw))
+            .sessions_with_labels(&parsed)
             .unwrap_or_default()
             .into_iter()
             .collect()
     });
-    let drop: Option<std::collections::HashSet<String>> =
-        query.exclude_label.as_deref().map(|raw| {
-            labels
-                .sessions_with_labels(&parse(raw))
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        });
+    let drop: Option<std::collections::HashSet<String>> = excluded.map(|parsed| {
+        labels
+            .sessions_with_labels(&parsed)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
     let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
         Some(
             labels
@@ -4204,6 +4972,7 @@ fn filter_rows_by_reuse_labels(
             && drop.as_ref().is_none_or(|set| !set.contains(id))
             && backed.as_ref().is_none_or(|set| set.contains(id))
     });
+    Ok(())
 }
 
 /// GET /api/trajectories/filters
@@ -4386,7 +5155,8 @@ pub struct SkillMetricsQuery {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
     pub agent_name: Option<String>,
-    /// Granularity for hotness trend: "day" or "week" (default: "week")
+    /// Granularity for hotness trend: "day" or "week" (default: "week").
+    /// An unknown value is rejected rather than silently served as weekly.
     pub granularity: Option<String>,
 }
 
@@ -4483,24 +5253,47 @@ pub async fn skill_metrics_hotness(
     )
 }
 
+/// Reject a `granularity` the hotness trend cannot bucket by.
+///
+/// The parameter names a closed set ("day" or "week"), and the trend applied a
+/// literal `== "day"` with everything else falling back to the weekly default:
+/// `granularity=dayy` answered weekly buckets that look exactly like a valid
+/// `week` request.
+fn reject_unknown_granularity(query: &SkillMetricsQuery) -> Option<HttpResponse> {
+    let raw = query.granularity.as_deref()?;
+    if raw != "day" && raw != "week" {
+        return Some(HttpResponse::BadRequest().json(json!({
+            "error": "invalid_granularity",
+            "message": format!("Unknown granularity '{raw}'"),
+            "valid_granularities": ["day", "week"],
+        })));
+    }
+    None
+}
+
 /// Shared implementation for all skill metrics endpoints.
 fn compute_skill_metrics_response(
     genai_store: Option<&GenAISqliteStore>,
     query: &SkillMetricsQuery,
     mut options: crate::skill_metrics::MetricOptions,
 ) -> HttpResponse {
-    // Apply granularity from query params
-    if let Some(ref g) = query.granularity {
-        if g == "day" {
-            options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
-        }
+    if let Some(response) = reject_unknown_granularity(query) {
+        return response;
+    }
+    // Apply granularity from query params; validation above admits only the
+    // two documented values, the weekly default stays for an absent one.
+    if query.granularity.as_deref() == Some("day") {
+        options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
     }
 
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    // Default: 7 days
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 7 * 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, 7 * DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     let Some(store) = genai_store else {
         return HttpResponse::InternalServerError()

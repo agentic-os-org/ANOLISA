@@ -8,9 +8,11 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -128,8 +130,8 @@ def write_report(
     full: bool = False,
     cargo_jobs: int | None = None,
 ) -> None:
-    """Write partial progress after every command so failures remain visible."""
-    output.write_text(
+    """Publish complete progress atomically, retaining the previous report on failure."""
+    payload = (
         json.dumps(
             {
                 "schema_version": 1,
@@ -140,9 +142,20 @@ def write_report(
             indent=2,
             sort_keys=True,
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
+    target = output.resolve()
+    with tempfile.TemporaryDirectory(
+        prefix=f".{target.name}-", dir=target.parent
+    ) as staging:
+        staged = Path(staging) / target.name
+        with staged.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.exists():
+            shutil.copymode(target, staged)
+        os.replace(staged, target)
 
 
 def report_progress(label: str, status: int, log_path: Path) -> None:

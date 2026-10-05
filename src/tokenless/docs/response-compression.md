@@ -131,10 +131,10 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。工具错误、`file_content` 来源和
-低于 `min_input_chars` 的输入在入口直接透传。来源由 adapter 按工具分类；共享 PostTool Hook
-与 Hermes 插件还把只打印本地文件的 shell 命令（`cat`、`head`、`tail`、`nl`、`less`、`more`、
-`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）报告为
-`file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样；`Grep` 工具输出只允许进入无损的 Search Results
+低于 `min_input_chars` 的输入在入口直接透传。来源由 adapter 按工具分类，shell 工具随请求附带
+`command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
+`nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
+改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样；`Grep` 工具输出只允许进入无损的 Search Results
 路径共享。通过入口后按下表静态派发，每个领域各调用一次：
 
 | ContentType | 前提 | 领域处理 | 默认 |

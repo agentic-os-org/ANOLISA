@@ -196,7 +196,7 @@ impl SelfUpdateFailureContext {
             package: None,
             rpm_version_before: None,
             rpm_version_after: None,
-            endpoint: endpoint_without_credentials(endpoint_url),
+            endpoint: common::endpoint_without_credentials(endpoint_url),
             sensitive_urls: vec![endpoint_url.to_string()],
         }
     }
@@ -376,7 +376,7 @@ fn run_self_update_inner(
 ) -> Result<SelfUpdateExecution, CliError> {
     let manifest = match ops
         .check_update(endpoint_url, current_version)
-        .map_err(self_update_cli_err)?
+        .map_err(|error| self_update_cli_err(error, context))?
     {
         None => {
             return Ok(SelfUpdateExecution::AlreadyLatest {
@@ -395,7 +395,7 @@ fn run_self_update_inner(
             os: os.to_string(),
             arch: arch.to_string(),
         })
-        .map_err(self_update_cli_err)?;
+        .map_err(|error| self_update_cli_err(error, context))?;
     context.sensitive_urls.push(artifact.url.clone());
 
     if intent == ExecutionIntent::Plan {
@@ -405,7 +405,9 @@ fn run_self_update_inner(
         });
     }
 
-    let current_exe = ops.resolve_current_exe().map_err(self_update_cli_err)?;
+    let current_exe = ops
+        .resolve_current_exe()
+        .map_err(|error| self_update_cli_err(error, context))?;
     let applied = if let Some(package) = rpm_owner_for_current_exe(query, &current_exe)? {
         context.apply_mode = Some("rpm_package");
         context.package = Some(package.clone());
@@ -438,7 +440,7 @@ fn run_self_update_inner(
     } else {
         context.apply_mode = Some("binary");
         ops.perform_binary_update(artifact, &current_exe, on_progress)
-            .map_err(self_update_cli_err)?;
+            .map_err(|error| self_update_cli_err(error, context))?;
         SelfUpdateApplied::Binary {
             from: current_version.to_string(),
             to: manifest.version,
@@ -474,10 +476,18 @@ fn installed_package_version_best_effort(
         .map(|info| info.version.to_string())
 }
 
-fn self_update_cli_err(error: core_self_update::SelfUpdateError) -> CliError {
+fn self_update_cli_err(
+    error: core_self_update::SelfUpdateError,
+    context: &SelfUpdateFailureContext,
+) -> CliError {
     CliError::Runtime {
         command: "update self".to_string(),
-        reason: error.to_string(),
+        // The terminal reason gets the same URL hygiene the audit channel
+        // applies (see append_self_update_log): FetchManifest's Display
+        // embeds the full manifest endpoint, and an ANOLISA_UPDATE_URL
+        // internal mirror can carry credentials in it. `update self`
+        // renders this CliError verbatim on stderr.
+        reason: common::redact_known_urls(&error.to_string(), &context.sensitive_urls),
     }
 }
 
@@ -669,7 +679,7 @@ pub(crate) fn append_self_update_log(
             LogStatus::Failed,
             format!(
                 "anolisa CLI self-update failed: {}",
-                redact_known_urls(&failure.error.reason(), &failure.context.sensitive_urls)
+                common::redact_known_urls(&failure.error.reason(), &failure.context.sensitive_urls)
             ),
             failure.context.package.clone().into_iter().collect(),
             serde_json::to_value(&failure.context).unwrap_or_default(),
@@ -707,60 +717,4 @@ pub(crate) fn append_self_update_log(
             warnings: vec![format!("failed to write central log: {error}")],
         },
     }
-}
-
-const REDACTED: &str = "<redacted>";
-
-/// Removes known URLs and withholds text containing any unverified URL.
-pub(crate) fn redact_known_urls(text: &str, urls: &[String]) -> String {
-    let mut out = text.to_string();
-    for url in urls {
-        out = redact_url_runs(&out, url);
-    }
-    if out.contains("://") {
-        return "the failure text was withheld: it carried a URL that could not be \
-                shown to be free of credentials"
-            .to_string();
-    }
-    out
-}
-
-fn redact_url_runs(text: &str, url: &str) -> String {
-    if url.is_empty() {
-        return text.to_string();
-    }
-
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find(url) {
-        out.push_str(&rest[..at]);
-        out.push_str(REDACTED);
-        let matched = &rest[at..];
-        let end = matched
-            .find(char::is_whitespace)
-            .unwrap_or(matched.len())
-            .max(url.len());
-        rest = &matched[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Keeps only scheme and authority because paths and queries may carry secrets.
-fn endpoint_without_credentials(url: &str) -> Option<String> {
-    let sep = url.find("://")?;
-    let remainder = &url[sep + 3..];
-    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let (authority, tail) = remainder.split_at(authority_end);
-    if tail.contains('@') {
-        return None;
-    }
-    let host = match authority.rfind('@') {
-        Some(at) => &authority[at + 1..],
-        None => authority,
-    };
-    if host.is_empty() {
-        return None;
-    }
-    Some(format!("{}{host}", &url[..sep + 3]))
 }

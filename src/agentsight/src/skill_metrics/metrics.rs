@@ -102,7 +102,12 @@ impl ExtractedData {
                 .clone()
                 .or_else(|| event.conversation_id.clone())
                 .unwrap_or_default();
-            all_sessions.insert(session_id);
+            // Rows with neither id cannot be attributed to any session;
+            // counting them as one phantom "" session skews every
+            // per-session metric.
+            if !session_id.is_empty() {
+                all_sessions.insert(session_id);
+            }
 
             download_records.extend(extract_skill_downloads(event));
             load_records.extend(extract_skill_loads(event));
@@ -121,14 +126,17 @@ impl ExtractedData {
 fn compute_downloads(data: &ExtractedData) -> SkillDownloadMetrics {
     let mut downloads: HashMap<String, SkillFirstSeen> = HashMap::new();
 
-    // Track sessions per skill for total_sessions count
+    // Track sessions per skill for total_sessions count. Records from
+    // id-less rows carry an empty session id and are not real sessions.
     let mut skill_sessions: HashMap<String, HashSet<String>> = HashMap::new();
 
     for record in &data.download_records {
-        skill_sessions
-            .entry(record.skill_name.clone())
-            .or_default()
-            .insert(record.session_id.clone());
+        if !record.session_id.is_empty() {
+            skill_sessions
+                .entry(record.skill_name.clone())
+                .or_default()
+                .insert(record.session_id.clone());
+        }
 
         // Keep the earliest record as "first seen" — the input is not
         // guaranteed to be sorted, so first-insert would be whichever
@@ -182,8 +190,14 @@ fn compute_usage_ratio(data: &ExtractedData) -> SkillUsageRatio {
         };
     }
 
-    let sessions_with_skill: HashSet<&String> =
-        data.load_records.iter().map(|r| &r.session_id).collect();
+    // Loads from id-less rows still count toward load totals, but they
+    // cannot be attributed to any real session.
+    let sessions_with_skill: HashSet<&String> = data
+        .load_records
+        .iter()
+        .map(|r| &r.session_id)
+        .filter(|s| !s.is_empty())
+        .collect();
     let with_skill_count = sessions_with_skill.len() as u64;
     let without_skill_count = total_sessions.saturating_sub(with_skill_count);
     let ratio = with_skill_count as f64 / total_sessions as f64;
@@ -633,5 +647,37 @@ mod tests {
         let seen = downloads.downloads.get("test-skill").unwrap();
         assert_eq!(seen.first_seen_timestamp_ns, 10_000);
         assert_eq!(seen.first_seen_session_id, "session-early");
+    }
+
+    #[test]
+    fn id_less_events_do_not_create_a_phantom_session() {
+        // Rows with neither trace_id nor conversation_id used to collapse
+        // into one phantom "" session: total_sessions was inflated,
+        // usage_ratio dragged down and the histogram gained a bogus [0]
+        // bar. Their loads still count; they are just not attributable to
+        // any session.
+        let mut events: Vec<TraceEventDetail> = (0..5_i64)
+            .map(|i| {
+                let mut e = load_event(i, 1_000_000_000 + i, "unused", "test-skill");
+                e.trace_id = None;
+                e.conversation_id = None;
+                e
+            })
+            .collect();
+        events.push(load_event(9, 1_000_000_100, "s1", "test-skill"));
+
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+
+        // The id-less loads still count toward load totals.
+        assert_eq!(report.loads.unwrap().total_loads, 6);
+        // But only the attributed session exists.
+        let usage = report.usage_ratio.unwrap();
+        assert_eq!(usage.total_sessions, 1);
+        assert_eq!(usage.with_skill_count, 1);
+        assert_eq!(usage.without_skill_count, 0);
+        assert_eq!(usage.ratio, 1.0);
+        let dist = report.distribution.unwrap();
+        assert_eq!(dist.histogram[0], 0);
+        assert_eq!(dist.histogram[1], 1);
     }
 }

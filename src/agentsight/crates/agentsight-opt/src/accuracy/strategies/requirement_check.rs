@@ -134,8 +134,12 @@ impl Detector for RequirementCheckStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:requirement_check:coverage"))
             .await
         {
-            Ok(output) => output,
+            Ok(output) => {
+                ctx.judgments.record_ok();
+                output
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[requirement_check] Coverage comparison failed: {e}");
                 return vec![];
             }
@@ -181,6 +185,7 @@ impl Detector for RequirementCheckStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy::detector::JudgmentLog;
 
     /// The "files touched" section of the coverage prompt must list file
     /// paths. Before the recorded target existed it listed the command
@@ -203,11 +208,13 @@ mod tests {
         let inv = crate::trace::build_inventory(&traj);
         let client = crate::llm::LlmClient::with_config("http://localhost", "key", "m");
         let extraction = crate::accuracy::extract::SharedExtraction::default();
+        let judgments = JudgmentLog::default();
         let ctx = AnalysisCtx {
             inv: &inv,
             client: &client,
             repo_root: None,
             extraction: &extraction,
+            judgments: &judgments,
         };
         let files = RequirementCheckStrategy::aggregate_files_touched(&ctx);
         assert_eq!(

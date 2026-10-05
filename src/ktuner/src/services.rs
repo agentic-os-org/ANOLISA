@@ -89,4 +89,46 @@ mod tests {
         let info = info_with(&[]);
         assert!(detect_services(&info).is_empty());
     }
+
+    #[test]
+    fn test_detect_services_ignores_exporters() {
+        // Prometheus-style collectors share a prefix with the service they
+        // monitor, so a substring match reports PostgreSQL, MySQL and friends as
+        // running on a host that only scrapes metrics. read_processes drops them,
+        // and has_process must not reintroduce them from a raw name either.
+        let info = info_with(&[
+            "postgres_exporter",
+            "mysqld_exporter",
+            "redis_exporter",
+            "node_exporter",
+        ]);
+        assert!(
+            detect_services(&info).is_empty(),
+            "exporters are not the monitored service: {:?}",
+            detect_services(&info)
+        );
+        assert!(!info.has_process("postgres"));
+        assert!(!info.has_process("mysqld"));
+        assert!(!info.has_process("node"));
+    }
+
+    #[test]
+    fn test_detect_services_keeps_real_services() {
+        let info = info_with(&["postgres", "mysqld", "redis-server", "nginx"]);
+        let svcs = detect_services(&info);
+        for expected in ["PostgreSQL", "MySQL", "Redis", "Nginx"] {
+            assert!(svcs.contains(&expected), "missing {expected}: {svcs:?}");
+        }
+    }
+
+    #[test]
+    fn test_detect_services_matches_truncated_comm_names() {
+        // /proc/<pid>/comm is 15 bytes, so nginx workers and postgres
+        // background workers are truncated to a "<service>: <role>" prefix and
+        // must still be recognized as the service.
+        let info = info_with(&["nginx: worker p", "postgres: writer"]);
+        let svcs = detect_services(&info);
+        assert!(svcs.contains(&"Nginx"), "{svcs:?}");
+        assert!(svcs.contains(&"PostgreSQL"), "{svcs:?}");
+    }
 }

@@ -438,9 +438,17 @@ impl SSEEvent {
         // Build args with SSE information
         let mut args = serde_json::Map::new();
 
-        // Add data (truncated for display if very long)
+        // Add data (truncated for display if very long). The cut must land on
+        // a character boundary: `data` is the decoded SSE body and a
+        // multi-byte character straddling byte 500 panicked the whole
+        // conversion (the aggregator turns every parsed event into a trace
+        // event).
         let data_preview = if self.data.len() > 500 {
-            format!("{}... ({} bytes total)", &self.data[..500], self.data.len())
+            format!(
+                "{}... ({} bytes total)",
+                preview_on_char_boundary(&self.data, 500),
+                self.data.len()
+            )
         } else {
             self.data.clone()
         };
@@ -478,6 +486,19 @@ impl SSEEvent {
     }
 }
 
+/// Shorten a display preview to at most `max_bytes`, cutting on a character
+/// boundary so multi-byte SSE payloads are never split mid-character.
+fn preview_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +518,43 @@ mod tests {
             is_handshake: false,
             ssl_ptr: 0x1,
         })
+    }
+
+    #[test]
+    fn sse_trace_preview_cuts_on_char_boundary() {
+        // 499 ASCII bytes then multi-byte characters straddling offset 500:
+        // the byte-index slice panicked here, aborting the trace conversion.
+        let mut data = "a".repeat(499);
+        data.push_str("中中中");
+        let event = SSEEvent {
+            id: None,
+            event: None,
+            data,
+            retry: None,
+        };
+        let trace = event.to_chrome_trace_event(1, 1, 0);
+        let preview = trace
+            .args
+            .as_ref()
+            .and_then(|args| args.get("data"))
+            .and_then(|v| v.as_str())
+            .expect("data preview");
+        assert!(preview.starts_with(&"a".repeat(499)));
+        assert!(
+            preview.contains("(508 bytes total)"),
+            "preview must report the full byte length: {preview}"
+        );
+        assert_eq!(trace.args.as_ref().unwrap()["data_length"], 508);
+
+        // Short data is untouched.
+        let short = SSEEvent {
+            id: None,
+            event: None,
+            data: "hello".to_string(),
+            retry: None,
+        };
+        let short_trace = short.to_chrome_trace_event(1, 1, 0);
+        assert_eq!(short_trace.args.as_ref().unwrap()["data"], "hello");
     }
 
     #[test]

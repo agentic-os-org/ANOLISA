@@ -171,13 +171,24 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
             .map(|t| (t - origin).as_seconds_f64())
             .unwrap_or(0.0);
 
-        // Match observations to calls by id; positional fallback.
+        // Match observations to calls by id; positional fallback only for
+        // documents whose results carry no ids at all. Falling back whenever
+        // the id lookup misses would hand a sibling's observation to a call
+        // whose result never arrived (interrupted execution), reporting that
+        // call as failed and feeding the misattribution into the accuracy
+        // detectors and cost ledger.
         for (k, call) in step.calls().iter().enumerate() {
             let result = step
                 .results()
                 .iter()
                 .find(|r| r.source_call_id.as_deref() == Some(call.tool_call_id.as_str()))
-                .or_else(|| step.results().get(k));
+                .or_else(|| {
+                    step.results()
+                        .iter()
+                        .all(|r| r.source_call_id.is_none())
+                        .then(|| step.results().get(k))
+                        .flatten()
+                });
             // Structured flag first, text heuristic only for flag-less documents.
             let err = result.map(observation_result_is_error).unwrap_or(false);
             out.push(ToolCallRecord {
@@ -432,5 +443,48 @@ mod tests {
         ]"#,
         ));
         assert!(inv.user_turns.is_empty());
+    }
+
+    #[test]
+    fn a_call_without_an_observation_does_not_inherit_a_siblings_error() {
+        // c1's tool result never arrived (interrupted execution); c2's did and
+        // failed. The positional fallback must not hand c2's observation to c1:
+        // err then claims c1 failed, which feeds the accuracy detectors and the
+        // cost ledger's churn accounting as a misattributed failure.
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[
+                {"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"ls"}},
+                {"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"ls /nope"}}
+             ],
+             "observation":{"results":[
+                {"source_call_id":"c2","content":"ls: cannot access '/nope': No such file or directory"}]}}
+        ]"#,
+        ));
+        assert_eq!(inv.tool_calls.len(), 2);
+        assert!(
+            !inv.tool_calls[0].err,
+            "a call with no observation must not inherit its sibling's failure"
+        );
+        assert!(inv.tool_calls[1].err, "c2's own observation is an error");
+    }
+
+    #[test]
+    fn id_less_observation_sets_still_pair_positionally() {
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[
+                {"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"ls"}},
+                {"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"ls /nope"}}
+             ],
+             "observation":{"results":[
+                {"content":"file1"},
+                {"content":"ls: cannot access '/nope': No such file or directory"}]}}
+        ]"#,
+        ));
+        assert!(!inv.tool_calls[0].err);
+        assert!(inv.tool_calls[1].err);
     }
 }

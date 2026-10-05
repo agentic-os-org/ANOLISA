@@ -17,7 +17,8 @@ use agentsight_atif::{
 };
 
 /// Event types to skip entirely.
-const SKIP_TYPES: &[&str] = &["runtime-config", "session_meta", "progress", "last-prompt"];
+pub(crate) const SKIP_TYPES: &[&str] =
+    &["runtime-config", "session_meta", "progress", "last-prompt"];
 
 /// Convert raw Qoder JSONL events into an ATIF v1.7 trajectory.
 pub fn convert_qoder_events(
@@ -318,7 +319,11 @@ pub fn convert_qoder_events(
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
                     let trs = extract_tool_results(&nc);
-                    if !trs.is_empty() {
+                    // A mixed event (tool_result + genuine text) is a user
+                    // turn, exactly as the main loop classifies it above.
+                    // Consuming it here would drop the user's text entirely;
+                    // break instead so the main loop emits the user step.
+                    if !trs.is_empty() && !has_text_block(&nc) {
                         let result_ts = ne.get("timestamp").and_then(|v| v.as_str());
                         for tr in &trs {
                             let extra = if tr.is_error {
@@ -660,6 +665,34 @@ mod tests {
         assert_eq!(m.prompt_tokens, Some(3 + 7000 + 19000));
         assert_eq!(m.completion_tokens, Some(452));
         assert_eq!(m.cached_tokens, Some(19000));
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_and_text_keeps_user_turn() {
+        // Claude-style transcripts can pack a tool_result and genuine user
+        // text into one user event (the user sends a message while a tool
+        // result is being replayed). The main loop classifies such an event as
+        // a user turn, but the post-assistant result scan consumed it as a
+        // pure result carrier, so the user's text never appeared in the
+        // trajectory at all. Both orders must produce the same user step.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        let user_step = traj
+            .steps
+            .iter()
+            .find(|s| s.source == StepSource::User)
+            .expect("mixed tool_result + text event must still yield a user step");
+        assert!(
+            user_step.message.contains("also update the docs"),
+            "user text must be preserved, got {:?}",
+            user_step.message
+        );
     }
 
     #[test]

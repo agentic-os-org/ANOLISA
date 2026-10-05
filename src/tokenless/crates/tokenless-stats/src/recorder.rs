@@ -5,12 +5,13 @@
 use crate::diff::DiffRecords;
 use crate::record::{CompressionMode, OperationType, StatsRecord};
 use chrono::DateTime;
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Result type for stats operations
 pub type StatsResult<T> = Result<T, StatsError>;
@@ -34,7 +35,7 @@ pub struct StatsRecorder {
 impl StatsRecorder {
     /// Create a new recorder with database at the given path
     pub fn new<P: AsRef<Path>>(db_path: P) -> StatsResult<Self> {
-        let conn = Connection::open(&db_path)?;
+        let mut conn = Connection::open(&db_path)?;
         // Restrict the stats DB to owner-only — before_text/after_text
         // columns may contain tool output with sensitive content.
         #[cfg(unix)]
@@ -43,13 +44,8 @@ impl StatsRecorder {
             std::fs::set_permissions(db_path.as_ref(), std::fs::Permissions::from_mode(0o600)).ok();
         }
 
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode=WAL;
-            PRAGMA busy_timeout=5000;
-            PRAGMA synchronous=NORMAL;
-        ",
-        )?;
+        Self::enable_wal(&conn, Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS stats (
@@ -148,6 +144,10 @@ impl StatsRecorder {
             [],
         )?;
 
+        // Acquire the writer lock before checking columns so concurrent hook
+        // processes cannot both decide to add the same missing column.
+        let migration = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
         // Schema migration: add columns introduced after the initial schema if
         // missing. Use PRAGMA table_info to check column existence before
         // ALTER TABLE instead of relying on error-message string matching,
@@ -168,16 +168,15 @@ impl StatsRecorder {
             ("tokenizer_id", "TEXT"),
             ("unrecoverable_truncations", "INTEGER"),
         ] {
-            let exists: bool = conn
+            let exists: bool = migration
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = ?",
                     [col],
                     |row| row.get::<_, i64>(0),
                 )
-                .map(|c| c > 0)
-                .unwrap_or(false);
+                .map(|c| c > 0)?;
             if !exists {
-                conn.execute(
+                migration.execute(
                     &format!("ALTER TABLE stats ADD COLUMN {col} {col_type}"),
                     [],
                 )?;
@@ -185,25 +184,52 @@ impl StatsRecorder {
         }
 
         for column in ["agent_id", "session_id", "tool_use_id"] {
-            let exists: bool = conn
+            let exists: bool = migration
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('retrieve_events') WHERE name = ?",
                     [column],
                     |row| row.get::<_, i64>(0),
                 )
-                .map(|count| count > 0)
-                .unwrap_or(false);
+                .map(|count| count > 0)?;
             if !exists {
-                conn.execute(
+                migration.execute(
                     &format!("ALTER TABLE retrieve_events ADD COLUMN {column} TEXT"),
                     [],
                 )?;
             }
         }
+        migration.commit()?;
 
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    fn enable_wal(conn: &Connection, timeout: Duration) -> StatsResult<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+                Ok(()) => break,
+                Err(error)
+                    if matches!(
+                        &error,
+                        rusqlite::Error::SqliteFailure(code, _)
+                            if code.code == rusqlite::ErrorCode::DatabaseBusy
+                    ) && Instant::now() < deadline =>
+                {
+                    // Concurrent first openers can collide while upgrading
+                    // journal locks without invoking SQLite's busy handler.
+                    std::thread::sleep(
+                        Duration::from_millis(10)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        conn.busy_timeout(timeout)?;
+        Ok(())
     }
 
     /// Acquire the connection guard, recovering from poison rather than failing.

@@ -90,10 +90,19 @@ impl std::fmt::Display for RuntimeEnv {
 }
 
 pub fn detect_runtime_env() -> RuntimeEnv {
-    if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
+    runtime_env_from(Path::new("/"))
+}
+
+/// Classify the runtime from the filesystem rooted at `root` (`/` in
+/// production; a temp dir in tests).
+fn runtime_env_from(root: &Path) -> RuntimeEnv {
+    if root.join(".dockerenv").exists() || root.join("run/.containerenv").exists() {
         return RuntimeEnv::Container;
     }
-    if let Ok(cgroup) = fs::read_to_string("/proc/1/cgroup") {
+    // Both files are read lossily: cgroup paths and PID 1's comm (the first
+    // token of /proc/1/sched) may hold non-UTF-8 bytes, which made
+    // `read_to_string` skip the check and report a container as `BareHost`.
+    if let Some(cgroup) = read_text_lossy(&root.join("proc/1/cgroup")) {
         if cgroup.contains("docker")
             || cgroup.contains("kubepods")
             || cgroup.contains("containerd")
@@ -107,7 +116,7 @@ pub fn detect_runtime_env() -> RuntimeEnv {
     // OpenRC, ...), so whitelist those to avoid misclassifying them as
     // containers (which would wrongly mark params read-only and steer the user
     // to the host-export workflow).
-    if let Ok(sched) = fs::read_to_string("/proc/1/sched") {
+    if let Some(sched) = read_text_lossy(&root.join("proc/1/sched")) {
         const KNOWN_INIT: &[&str] = &[
             "systemd",
             "init",
@@ -126,6 +135,11 @@ pub fn detect_runtime_env() -> RuntimeEnv {
         }
     }
     RuntimeEnv::BareHost
+}
+
+fn read_text_lossy(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn is_param_writable(path: &str) -> bool {
@@ -257,6 +271,25 @@ fn parse_meminfo_total_kb(content: &str) -> u64 {
         }
     }
     0
+}
+
+/// Default huge page size in kB, which is the unit of `vm.nr_hugepages`; 0
+/// when /proc/meminfo is unreadable or reports no huge page support.
+pub fn read_default_hugepage_kb() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .map(|meminfo| parse_meminfo_hugepagesize_kb(&meminfo))
+        .unwrap_or(0)
+}
+
+/// Pure /proc/meminfo parsing: the numeric field of the Hugepagesize line, 0
+/// when absent or unparseable.
+fn parse_meminfo_hugepagesize_kb(content: &str) -> u64 {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("Hugepagesize:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kb| kb.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Effective memory in whole GB: the cgroup limit only when it is a real
@@ -446,8 +479,20 @@ fn read_rq_affinity(name: &str) -> u64 {
 }
 
 fn read_network_info() -> Result<Vec<NetInfo>> {
+    read_network_info_from(Path::new("/sys/class/net"))
+}
+
+/// Read every interface under `net_dir` together with its link speed.
+///
+/// The speed lookup is built from the directory entry's raw name, not from
+/// its lossy display form: interface names may contain any byte the kernel's
+/// naming rules allow (`dev_valid_name` accepts everything except `/`, `:`
+/// and whitespace), so a non-UTF-8 name came out of `to_string_lossy` with
+/// U+FFFD replacement bytes and the rebuilt `/sys/class/net/<mangled>/speed`
+/// path no longer resolved — the interface was reported with speed 0.
+/// `net_dir` is a parameter so tests can build a fake sysfs tree.
+fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
     let mut nets = Vec::new();
-    let net_dir = "/sys/class/net";
 
     if let Ok(entries) = fs::read_dir(net_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -462,7 +507,7 @@ fn read_network_info() -> Result<Vec<NetInfo>> {
                 continue;
             }
 
-            let speed_path = format!("/sys/class/net/{name}/speed");
+            let speed_path = entry.path().join("speed");
             let speed_mbps = fs::read_to_string(&speed_path)
                 .ok()
                 .and_then(|s| s.trim().parse::<i64>().ok())
@@ -510,12 +555,49 @@ pub(crate) fn read_sysctl_u64(path: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Signed reader for sysctls whose legal range includes -1 (e.g.
+/// kernel.hung_task_warnings, kernel.perf_event_paranoid). The unsigned
+/// reader maps "-1" to 0, which is a different, meaningful value.
+pub(crate) fn read_sysctl_i64(path: &str) -> i64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 fn read_thp_enabled() -> String {
     let path = "/sys/kernel/mm/transparent_hugepage/enabled";
     fs::read_to_string(path).map_or_else(
         |_| "unknown".to_string(),
         |c| active_option(&c).unwrap_or_else(|| c.trim().to_string()),
     )
+}
+
+/// Read a process's `/proc/<pid>/comm` as a name, lossily.
+///
+/// The kernel allows almost any non-NUL bytes in comm (a process can set
+/// them via `prctl(PR_SET_NAME)`, and an executable named with non-UTF-8
+/// bytes gives its main thread those bytes too). `read_to_string` rejects
+/// such a file outright, which used to make the process invisible to
+/// service detection — its rules then did not fire even though the
+/// workload was running. A lossy read keeps the ASCII prefix, which is
+/// what the boundary matching in `process_name_matches` compares anyway.
+fn read_comm_from(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+/// Read a process's `/proc/<pid>/cmdline` as text, lossily.
+///
+/// The kernel stores argv as raw NUL-terminated bytes, so one non-UTF-8 byte
+/// anywhere in a command line makes `read_to_string` reject the whole file.
+/// The command line is where a JVM's concrete service and an exporter's full
+/// name live, so a rejected read dropped that mapping even though the workload
+/// was running. Lossy decoding keeps the ASCII tokens the matching below
+/// compares; the ordinary path is unchanged.
+fn read_cmdline_from(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn read_processes() -> Result<Vec<ProcessInfo>> {
@@ -527,11 +609,18 @@ fn read_processes() -> Result<Vec<ProcessInfo>> {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.parse::<u32>().is_ok() {
                 let comm_path = format!("/proc/{fname}/comm");
-                if let Ok(comm) = fs::read_to_string(&comm_path) {
-                    let comm = comm.trim().to_string();
-                    // /proc/<pid>/comm is truncated to 15 chars and for a JVM is
-                    // just "java" (likewise "python"/"node"/"beam.smp"), so the
-                    // actual service is invisible. Recover it from cmdline.
+                if let Some(comm) = read_comm_from(&comm_path) {
+                    // A metrics exporter shares its target's name prefix
+                    // ("postgres_exporter"), so keeping it in the process list
+                    // makes the database rules fire on a host that only scrapes
+                    // metrics. It is not the workload, so drop it here rather
+                    // than teaching every rule about exporters.
+                    if is_monitoring_helper(&fname) {
+                        continue;
+                    }
+                    // For a JVM the name is just "java" (likewise
+                    // "python"/"node"/"beam.smp"), so the actual service is
+                    // invisible. Recover it from cmdline.
                     if is_generic_runtime(&comm) {
                         if let Some(svc) = detect_runtime_service(&fname) {
                             procs.push(ProcessInfo { name: svc });
@@ -546,6 +635,68 @@ fn read_processes() -> Result<Vec<ProcessInfo>> {
     Ok(procs)
 }
 
+/// Whether `name` names the process `pattern`, either whole or as the role
+/// prefix a multi-process daemon gives its workers (`nginx: worker process`).
+fn process_name_matches(name: &str, pattern: &str) -> bool {
+    name == pattern
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .is_some_and(|token| token == pattern)
+}
+
+/// Whether the process named `name` is a metrics collector rather than the
+/// workload it monitors. Prometheus-style exporters are named after their target
+/// (`postgres_exporter`, `node-exporter`, `postgres_exporter_v2`), so a service
+/// match reports PostgreSQL, MySQL, Redis or Node as running on a host that only
+/// scrapes metrics, and the database rules then fire.
+pub(crate) fn is_monitoring_helper_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.starts_with("prometheus")
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == "exporter")
+}
+
+/// Whether `pid` is a metrics collector. The kernel truncates
+/// `/proc/<pid>/comm` and the name field of `/proc/<pid>/stat` to 15 bytes,
+/// which hides the distinguishing suffix: `postgres_exporter` becomes
+/// `postgres_export` and is then indistinguishable from a real PostgreSQL
+/// server by name alone. The command line keeps the full name the process was
+/// started with, so it decides when the truncated name does not.
+pub(crate) fn is_monitoring_helper(pid: &str) -> bool {
+    let comm = read_comm_from(&format!("/proc/{pid}/comm")).unwrap_or_default();
+    if is_monitoring_helper_name(&comm) {
+        return true;
+    }
+    read_cmdline_from(&format!("/proc/{pid}/cmdline"))
+        .map(|cmdline| cmdline_names_helper(cmdline.split('\0')))
+        .unwrap_or(false)
+}
+
+/// Whether a command line names a metrics collector. Only the program being
+/// run decides — argv[0], or the payload of a `sh -c` wrapper — because a
+/// bare `exporter` token in a later argument (a config path, say) does not
+/// make the process a collector.
+fn cmdline_names_helper<'a>(mut args: impl Iterator<Item = &'a str>) -> bool {
+    let program = args.next().unwrap_or_default();
+    if is_monitoring_helper_name(program) {
+        return true;
+    }
+    // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
+    // the payload, not as argv[0]; the payload's first word is its command.
+    let is_shell = matches!(
+        program.rsplit('/').next().unwrap_or_default(),
+        "sh" | "bash" | "dash" | "zsh" | "ksh"
+    );
+    is_shell
+        && args.next() == Some("-c")
+        && args
+            .next()
+            .and_then(|payload| payload.split_whitespace().next())
+            .is_some_and(is_monitoring_helper_name)
+}
+
 fn is_generic_runtime(comm: &str) -> bool {
     matches!(
         comm,
@@ -557,46 +708,176 @@ fn is_generic_runtime(comm: &str) -> bool {
 /// its cmdline (main class / jar / script). Returns a canonical service name
 /// that matches the has_process() checks used by rules and classification.
 fn detect_runtime_service(pid: &str) -> Option<String> {
-    let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
-    // cmdline args are NUL-separated.
-    let cmd = cmdline.replace('\0', " ").to_lowercase();
-    // Order matters: more specific markers first.
-    const MARKERS: &[(&str, &str)] = &[
-        ("org.elasticsearch", "elasticsearch"),
-        ("elasticsearch", "elasticsearch"),
-        ("org.opensearch", "opensearch"),
-        ("opensearch", "opensearch"),
-        ("kafka.kafka", "kafka"),
-        ("kafka", "kafka"),
-        ("org.apache.zookeeper", "zookeeper"),
-        ("zookeeper", "zookeeper"),
-        ("org.apache.flink", "flink"),
-        ("flink", "flink"),
-        ("org.apache.spark", "spark"),
-        ("spark", "spark"),
-        ("org.apache.cassandra", "cassandra"),
-        ("cassandra", "cassandra"),
-        ("org.apache.hadoop", "hadoop"),
-        ("hadoop", "hadoop"),
-        ("hbase", "hbase"),
-        ("solr", "solr"),
-        ("logstash", "logstash"),
-        ("pulsar", "pulsar"),
-        ("catalina", "tomcat"),
-        ("tomcat", "tomcat"),
-        ("jenkins", "jenkins"),
-    ];
-    for (marker, svc) in MARKERS {
-        if cmd.contains(marker) {
-            return Some(svc.to_string());
+    let cmdline = read_cmdline_from(&format!("/proc/{pid}/cmdline"))?;
+    runtime_service_from_cmdline(&cmdline).map(str::to_string)
+}
+
+/// Markers mapped to canonical service names, most specific first.
+const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
+    ("org.elasticsearch", "elasticsearch"),
+    ("elasticsearch", "elasticsearch"),
+    ("org.opensearch", "opensearch"),
+    ("opensearch", "opensearch"),
+    ("kafka.kafka", "kafka"),
+    ("kafka", "kafka"),
+    ("org.apache.zookeeper", "zookeeper"),
+    ("zookeeper", "zookeeper"),
+    ("org.apache.flink", "flink"),
+    ("flink", "flink"),
+    ("org.apache.spark", "spark"),
+    ("spark", "spark"),
+    ("org.apache.cassandra", "cassandra"),
+    ("cassandra", "cassandra"),
+    ("org.apache.hadoop", "hadoop"),
+    ("hadoop", "hadoop"),
+    ("hbase", "hbase"),
+    ("org.apache.solr", "solr"),
+    ("solr", "solr"),
+    ("logstash", "logstash"),
+    ("org.apache.pulsar", "pulsar"),
+    ("pulsar", "pulsar"),
+    ("org.apache.catalina", "tomcat"),
+    ("catalina", "tomcat"),
+    ("tomcat", "tomcat"),
+    ("jenkins", "jenkins"),
+];
+
+/// Decide the service a generic-runtime process (java/python/node/...) runs
+/// from its raw NUL-separated cmdline.
+///
+/// Only identity-bearing arguments decide: the jar after `-jar`, and the
+/// non-option arguments (the main class, a script path). JVM options and
+/// their values — a `-D` property, a log path, a classpath entry after
+/// `-cp`/`-classpath`/`--class-path` — merely *mention* services, and the
+/// old whole-cmdline substring scan matched them:
+/// `java -Dlog4j.configurationFile=/opt/spark/conf/... com.example.Main`
+/// classified as Spark and fired the streaming rules on an unrelated
+/// workload. This is the same class of false positive the name-boundary fix
+/// for `has_process` removed (etcdctl vs etcd).
+///
+/// Each candidate argument is matched by its file-name component only (a
+/// directory named after a service is not the program), and a marker matches
+/// only as a whole consecutive run of name tokens, so `sparklesh` or
+/// `etcdbackup` no longer satisfy `spark`/`etcd`.
+fn runtime_service_from_cmdline(cmdline: &str) -> Option<&'static str> {
+    // Collect identity-bearing args: everything that is not an option, plus
+    // the jar path that follows `-jar` (that one *is* an option's value but
+    // names the program).
+    let mut candidates: Vec<&str> = Vec::new();
+    let mut args = cmdline.split('\0').filter(|a| !a.is_empty());
+    while let Some(arg) = args.next() {
+        if arg == "-jar" {
+            if let Some(jar) = args.next() {
+                candidates.push(jar);
+            }
+        } else if arg == "-cp" || arg == "-classpath" || arg == "--class-path" {
+            // The classpath is an option value, not the program: it names
+            // libraries (often service jars), not the entrypoint.
+            let _ = args.next();
+        } else if !arg.starts_with('-') {
+            candidates.push(arg);
+        }
+    }
+
+    let marker_tokens: Vec<Vec<String>> = RUNTIME_SERVICE_MARKERS
+        .iter()
+        .map(|(marker, _)| name_tokens(marker))
+        .collect();
+    let names: Vec<CandidateName> = candidates
+        .iter()
+        .map(|c| {
+            let basename = c.rsplit('/').next().unwrap_or(c);
+            CandidateName {
+                // The class name is the last dotted component: a main class is
+                // the program, its package only says where the program lives.
+                class_tokens: name_tokens(basename.rsplit('.').next().unwrap_or(basename)),
+                tokens: name_tokens(basename),
+                is_class: is_class_name(basename),
+            }
+        })
+        .collect();
+
+    for ((_, svc), needle) in RUNTIME_SERVICE_MARKERS.iter().zip(marker_tokens.iter()) {
+        if names.iter().any(|name| name.matches(needle)) {
+            return Some(svc);
         }
     }
     None
 }
 
+/// One candidate argument, tokenized for marker matching.
+struct CandidateName {
+    /// Tokens of the whole (basename) argument.
+    tokens: Vec<String>,
+    /// Tokens of its last dotted component, i.e. the class name.
+    class_tokens: Vec<String>,
+    /// Whether the argument is a dotted identifier chain rather than a file.
+    is_class: bool,
+}
+
+impl CandidateName {
+    /// Whether `needle` identifies this candidate.
+    ///
+    /// A file name (`kafka_2.13-3.7.0.jar`, `sparklesh-report.py`) is matched
+    /// anywhere in its tokens, as before. A class is decided by its own name or
+    /// by a package run it owns from the root: `kafka.Kafka` and
+    /// `org.apache.zookeeper.server.quorum.QuorumPeerMain` are the services,
+    /// while `com.example.kafka.ConsumerApp` merely lives under a package that
+    /// mentions kafka and is a client of it, not a broker.
+    fn matches(&self, needle: &[String]) -> bool {
+        if !self.is_class {
+            return token_run_contains(&self.tokens, needle);
+        }
+        token_run_starts_at(&self.tokens, needle) || token_run_contains(&self.class_tokens, needle)
+    }
+}
+
+/// Whether an argument reads as a Java class (`com.example.Main`) rather than
+/// a file name: every dot-separated component is an identifier.
+fn is_class_name(candidate: &str) -> bool {
+    candidate.contains('.')
+        && candidate.split('.').all(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        })
+}
+
+/// Whether `haystack` begins with `needle` as a run of tokens.
+fn token_run_starts_at(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty() && haystack.len() >= needle.len() && haystack[..needle.len()] == *needle
+}
+
+/// Split a name into its runs of ASCII alphanumeric characters (lowercased).
+fn name_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `haystack` contains `needle` as a consecutive run of tokens.
+fn token_run_contains(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 impl SystemInfo {
+    /// Whether the sampled process list contains `pattern` as a whole process
+    /// name or as the role prefix of one.
+    ///
+    /// A plain substring test conflates helpers that merely mention a service
+    /// with the service itself: `etcdctl` matched "etcd" and a daemon's private
+    /// helper matched its parent's name. Daemons also name their workers
+    /// `nginx: worker process` or `postgres: writer`, so the name is compared
+    /// both whole and as its first run of name characters — that keeps
+    /// `nginx: worker process` matching while `etcdctl` does not.
     pub fn has_process(&self, pattern: &str) -> bool {
-        self.processes.iter().any(|p| p.name.contains(pattern))
+        self.processes
+            .iter()
+            .any(|p| !is_monitoring_helper_name(&p.name) && process_name_matches(&p.name, pattern))
     }
 
     /// Exact process-name match. Use this for short names that are substrings of
@@ -650,6 +931,33 @@ fn has_listen_socket(content: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn info_with_processes(names: &[&str]) -> SystemInfo {
+        SystemInfo {
+            kernel_version: String::new(),
+            os_distro: String::new(),
+            cpu_model: String::new(),
+            cpu_cores: 1,
+            numa_nodes: 1,
+            memory_total_gb: 1,
+            disks: vec![],
+            network: vec![],
+            sysctl: SysctlValues {
+                swappiness: 60,
+                dirty_ratio: 20,
+                dirty_background_ratio: 10,
+                somaxconn: 128,
+                tcp_fastopen: 0,
+                thp_enabled: "always".to_string(),
+            },
+            processes: names
+                .iter()
+                .map(|name| ProcessInfo {
+                    name: name.to_string(),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn test_gather_system_info() {
         let info = gather_system_info().unwrap();
@@ -696,6 +1004,20 @@ mod tests {
         assert_eq!(parse_meminfo_total_kb("MemFree: 1 kB\n"), 0);
         // Garbage number -> 0, not a panic.
         assert_eq!(parse_meminfo_total_kb("MemTotal: not-a-number kB\n"), 0);
+    }
+
+    #[test]
+    fn parse_meminfo_hugepagesize_kb_reads_the_default_size() {
+        let x86 = "MemTotal: 16384000 kB\nHugePages_Total: 0\nHugepagesize:       2048 kB\n";
+        assert_eq!(parse_meminfo_hugepagesize_kb(x86), 2048);
+        // aarch64 with 64K base pages defaults to 512 MiB huge pages.
+        assert_eq!(
+            parse_meminfo_hugepagesize_kb("Hugepagesize:     524288 kB\n"),
+            524288
+        );
+        // No huge page support, or garbage -> 0, not a panic.
+        assert_eq!(parse_meminfo_hugepagesize_kb("MemTotal: 1 kB\n"), 0);
+        assert_eq!(parse_meminfo_hugepagesize_kb("Hugepagesize: big kB\n"), 0);
     }
 
     #[test]
@@ -838,6 +1160,67 @@ mod tests {
     }
 
     #[test]
+    fn read_sysctl_i64_parses_negative_values() {
+        // "-1" is how the kernel encodes "unlimited" for several sysctls; the
+        // unsigned reader maps it to 0 (a different, meaningful value).
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_read_sysctl_i64_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        assert_eq!(read_sysctl_i64(path.to_str().unwrap()), -1);
+        std::fs::write(&path, b"2\n").unwrap();
+        assert_eq!(read_sysctl_i64(path.to_str().unwrap()), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The kernel's `dev_valid_name` accepts any interface name without `/`,
+    /// `:` or whitespace, so a name can be non-UTF-8. The speed lookup must be
+    /// built from the directory entry's raw name: rebuilding the path from the
+    /// lossy display form (`to_string_lossy` → U+FFFD) made the `speed` file
+    /// unresolvable and reported the interface as having no known speed.
+    #[test]
+    fn network_info_reads_speed_for_a_non_utf8_interface_name() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // One interface whose name carries a raw 0xFF byte, one ordinary
+        // interface, and the loopback shorthand that must stay skipped.
+        let raw = dir.join(std::ffi::OsStr::from_bytes(b"eth\xff0"));
+        fs::create_dir_all(&raw).expect("create fake interface dir");
+        fs::write(raw.join("speed"), b"10000\n").expect("write speed");
+        let plain = dir.join("ens5");
+        fs::create_dir_all(&plain).expect("create plain interface dir");
+        fs::write(plain.join("speed"), b"1000\n").expect("write speed");
+        let lo = dir.join("lo");
+        fs::create_dir_all(&lo).expect("create loopback dir");
+        fs::write(lo.join("speed"), b"1000\n").expect("write speed");
+
+        let nets = read_network_info_from(&dir).expect("read fake sysfs tree");
+        assert_eq!(nets.len(), 2, "lo is skipped: {nets:?}");
+
+        let non_utf8 = nets
+            .iter()
+            .find(|n| n.speed_mbps == 10000)
+            .expect("the non-UTF-8 interface must report its speed");
+        // The stored display name is lossy, but the lookup used the raw name.
+        assert_eq!(non_utf8.name, "eth\u{fffd}0");
+        assert_eq!(
+            nets.iter().find(|n| n.name == "ens5").unwrap().speed_mbps,
+            1000
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_has_process() {
         let info = SystemInfo {
             kernel_version: String::new(),
@@ -869,5 +1252,374 @@ mod tests {
         assert!(info.has_process("postgres"));
         assert!(info.has_process("nginx"));
         assert!(!info.has_process("redis"));
+    }
+
+    #[test]
+    fn test_has_process_respects_name_boundaries() {
+        // A client or dump tool starts with its server's name but is not the
+        // server; a server's own truncated name still is.
+        let info = info_with_processes(&["etcdctl", "mongodump", "postgres", "postgres_export"]);
+
+        assert!(
+            !info.has_process("etcd"),
+            "etcdctl is a client, not the etcd server"
+        );
+        assert!(
+            !info.has_process("mongod"),
+            "mongodump is a tool, not the mongod server"
+        );
+        assert!(info.has_process("postgres"));
+        // The 15-byte comm of a long postgres* process name is still postgres.
+        assert!(info.has_process("postgres_export"));
+    }
+
+    #[test]
+    fn test_has_process_matches_truncated_comm_and_runtime_names() {
+        // "nginx: worker p" is the 15-byte /proc/<pid>/comm of an nginx worker;
+        // "elasticsearch" is the canonical name recovered from a JVM cmdline.
+        let info = info_with_processes(&["nginx: worker p", "elasticsearch", "redis-server"]);
+
+        assert!(info.has_process("nginx"));
+        assert!(info.has_process("elasticsearch"));
+        assert!(info.has_process("redis-server"));
+    }
+
+    /// The kernel allows non-UTF-8 bytes in comm (set via prctl, or inherited
+    /// from an executable named with raw bytes); `read_to_string` rejects
+    /// such a file, which made the process invisible to service detection —
+    /// its rules then did not fire even though the workload was running.
+    /// The lossy read keeps the ASCII prefix the boundary matching compares.
+    #[test]
+    fn read_comm_survives_non_utf8_bytes() {
+        let dir = std::env::temp_dir().join(format!("ktuner_comm_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let comm_path = dir.join("comm");
+        // "postgres" followed by an invalid UTF-8 continuation byte and the
+        // newline the kernel appends.
+        fs::write(&comm_path, b"postgres\xa0\n").expect("write non-UTF-8 comm");
+
+        let comm = read_comm_from(comm_path.to_str().unwrap()).expect("comm must be readable");
+        assert!(
+            comm.starts_with("postgres"),
+            "the ASCII prefix must survive a lossy read: {comm:?}"
+        );
+        // The recovered name still identifies the service.
+        assert!(
+            process_name_matches(&comm, "postgres"),
+            "a lossily-read comm must still match its service name: {comm:?}"
+        );
+
+        // Guard: the ordinary path is unchanged.
+        fs::write(&comm_path, b"nginx: worker process\n").expect("write ordinary comm");
+        assert_eq!(
+            read_comm_from(comm_path.to_str().unwrap()).as_deref(),
+            Some("nginx: worker process")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `/proc/1/sched` starts with PID 1's comm, which may hold non-UTF-8
+    /// bytes (set via prctl), and a cgroup path may too; `read_to_string`
+    /// rejected such a file, so a container fell through to `BareHost`.
+    #[test]
+    fn runtime_env_survives_non_utf8_pid1_files() {
+        let root = std::env::temp_dir().join(format!("ktuner_runtime_{}", std::process::id()));
+        let proc1 = root.join("proc/1");
+        fs::create_dir_all(&proc1).expect("create temp proc dir");
+
+        // Unknown init whose comm carries a raw byte, plain cgroup v2 path.
+        fs::write(proc1.join("cgroup"), b"0::/\n").expect("write cgroup");
+        fs::write(proc1.join("sched"), b"app\xff (1, #threads: 1)\n").expect("write sched");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::Container);
+
+        // Known init, but the container marker sits in a non-UTF-8 cgroup path.
+        fs::write(proc1.join("cgroup"), b"0::/kubepods/pod\xff\n").expect("write cgroup");
+        fs::write(proc1.join("sched"), b"systemd (1, #threads: 1)\n").expect("write sched");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::Container);
+
+        // Guard: a known init with a plain cgroup is still a bare host.
+        fs::write(proc1.join("cgroup"), b"0::/init.scope\n").expect("write cgroup");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::BareHost);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Wait until a freshly spawned child's `/proc/<pid>/cmdline` carries
+    /// `needle`.
+    ///
+    /// `Command::spawn` can return before the kernel publishes the new argv —
+    /// an immediate read is usually empty — so the live-process probes below
+    /// wait for the raw bytes instead of racing the exec.
+    fn wait_for_cmdline(pid: &str, needle: &[u8]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let found = fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle));
+            if found {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "/proc/{pid}/cmdline never contained {needle:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The kernel stores argv as raw NUL-terminated bytes, so one non-UTF-8
+    /// byte anywhere in a command line makes `read_to_string` reject the whole
+    /// file. The service a generic runtime (java/node/...) runs then disappears
+    /// from detection even though the workload is running.
+    #[test]
+    fn detect_runtime_service_reads_non_utf8_cmdline() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::CommandExt;
+        // The raw byte rides in argv[0]; /bin/sleep ignores argv[0] and reads
+        // only the "30" operand, so the process stays alive for the probe.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg0(std::ffi::OsStr::from_bytes(b"/opt/apps/elasticsearch\xff"))
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a process with a non-UTF-8 cmdline");
+        let pid = child.id().to_string();
+        wait_for_cmdline(&pid, b"elasticsearch\xff");
+
+        let service = detect_runtime_service(&pid);
+
+        child.kill().ok();
+        child.wait().ok();
+
+        assert_eq!(
+            service.as_deref(),
+            Some("elasticsearch"),
+            "a raw argv byte must not hide the service the runtime runs"
+        );
+    }
+
+    /// An exporter's distinguishing suffix survives only in the command line
+    /// (comm truncates at 15 bytes), and that command line is raw argv bytes
+    /// too. A stray byte in the program path must not stop the collector from
+    /// being filtered out of the process list.
+    #[test]
+    fn monitoring_helper_detection_reads_non_utf8_cmdline() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("ktuner_stray_byte_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let dir = root.join(std::ffi::OsStr::from_bytes(b"apps\xff"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let exporter_path = dir.join("postgres_exporter");
+        fs::copy("/bin/sleep", &exporter_path).expect("copy sleep to exporter name");
+
+        let mut exporter = std::process::Command::new(&exporter_path)
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn exporter-named process");
+        let pid = exporter.id().to_string();
+        wait_for_cmdline(&pid, b"postgres_exporter");
+
+        let helper = is_monitoring_helper(&pid);
+
+        exporter.kill().ok();
+        exporter.wait().ok();
+        fs::remove_dir_all(&root).ok();
+
+        assert!(
+            helper,
+            "a non-UTF-8 program path must not hide the collector"
+        );
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_option_values_and_directories() {
+        // A JVM option's value (a config path) merely mentions a service; the
+        // main class decides. Before the boundary fix the whole cmdline was
+        // scanned as one string, so this classified as Spark and the streaming
+        // rules fired on an unrelated workload.
+        let cmdline =
+            "java\0-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties\0com.example.Main";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // A jar's directory names a service the jar is not.
+        let cmdline = "java\0-jar\0/opt/hadoop-tools/printer.jar";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+        // A space-separated classpath value is an option value, not the
+        // program: service jars on the classpath must not classify the JVM.
+        let cmdline = "java\0-cp\0/opt/spark/jars/spark-core_2.12-3.5.jar\0com.example.Main";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // The long classpath spellings skip their value the same way.
+        let cmdline = "java\0--class-path\0/opt/kafka/libs/kafka_2.13-3.7.0.jar\0com.example.Main";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // Markers must match whole name tokens: `sparklesh` is not `spark`.
+        let cmdline = "python3\0/opt/app/sparklesh-report.py";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+    }
+
+    #[test]
+    fn test_runtime_service_ignores_package_mentions_in_a_main_class() {
+        // A main class whose *package* mentions a service is a client of it,
+        // not the service: `com.example.kafka.ConsumerApp` consumes Kafka, it
+        // does not run a broker, and classifying it fired the streaming rules
+        // on an unrelated workload. Only the class's own name, or a package
+        // run the service owns from the root, decides.
+        let cmdline =
+            "java\u{0}-cp\u{0}/opt/kafka/libs/kafka_2.13-3.7.0.jar\u{0}com.example.kafka.ConsumerApp";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        let cmdline = "java\u{0}com.example.spark.JobLauncher";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
+
+        // Kafka's own broker class still decides, through its class name.
+        let cmdline = "java\u{0}kafka.Kafka";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+    }
+
+    #[test]
+    fn test_runtime_service_matches_main_classes_and_jars() {
+        // Zookeeper's main class.
+        let cmdline = "java\0-Xmx1g\0org.apache.zookeeper.server.quorum.QuorumPeerMain";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("zookeeper"));
+
+        // Kafka: the -jar value names the program.
+        let cmdline = "java\0-jar\0/opt/kafka/libs/kafka_2.13-3.7.0.jar\0kafka.Kafka";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+
+        // Tomcat's bootstrap class names neither tomcat nor catalina, so the
+        // `org.apache.catalina` package run decides.
+        let cmdline = "java\0org.apache.catalina.startup.Bootstrap\0start";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("tomcat"));
+
+        // Solr and Pulsar main classes likewise carry the service only in
+        // their package run, not in the class name.
+        let cmdline = "java\0org.apache.solr.servlet.SolrDispatchFilter";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("solr"));
+        let cmdline = "java\0org.apache.pulsar.PulsarBrokerStarter\0--broker-conf";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("pulsar"));
+
+        // Elasticsearch, including a versioned jar basename.
+        let cmdline = "java\0-jar\0/usr/share/elasticsearch-8.12.0/lib/elasticsearch-8.12.0.jar";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("elasticsearch"));
+    }
+
+    #[test]
+    fn test_monitoring_helper_is_detected_from_a_live_process() {
+        // The kernel truncates /proc/<pid>/comm (and the name field of
+        // /proc/<pid>/stat) to 15 bytes, so a collector's distinguishing suffix
+        // only survives in the command line. Drive the real /proc reader
+        // against live processes instead of trusting a name string.
+        let dir = std::env::temp_dir().join(format!("ktuner_exporter_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let exporter_path = dir.join("postgres_exporter");
+        fs::copy("/bin/sleep", &exporter_path).expect("copy sleep to exporter name");
+
+        let mut exporter = std::process::Command::new(&exporter_path)
+            .arg("30")
+            .spawn()
+            .expect("spawn exporter-named process");
+        let mut service = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+
+        let exporter_pid = exporter.id().to_string();
+        let service_pid = service.id().to_string();
+        let comm = fs::read_to_string(format!("/proc/{exporter_pid}/comm"))
+            .expect("exporter comm")
+            .trim()
+            .to_string();
+
+        let exporter_is_helper = is_monitoring_helper(&exporter_pid);
+        let service_is_helper = is_monitoring_helper(&service_pid);
+        let comm_alone = is_monitoring_helper_name(&comm);
+
+        exporter.kill().ok();
+        service.kill().ok();
+        exporter.wait().ok();
+        service.wait().ok();
+        fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            comm.len(),
+            15,
+            "the kernel truncates the collector name to {comm}"
+        );
+        assert!(
+            !comm_alone,
+            "the truncated name cannot identify the collector"
+        );
+        assert!(
+            exporter_is_helper,
+            "the command line still names the collector"
+        );
+        assert!(!service_is_helper, "a plain sleep is not a collector");
+    }
+
+    #[test]
+    fn test_is_monitoring_helper_name() {
+        for helper in [
+            "postgres_exporter",
+            "mysqld_exporter",
+            "redis_exporter",
+            "blackbox_exporter",
+            "node-exporter",
+            "postgres_exporter_v2",
+            "exporter",
+            "prometheus",
+            "prometheus-node-exporter",
+            "/usr/local/bin/postgres_exporter",
+        ] {
+            assert!(is_monitoring_helper_name(helper), "{helper} is a collector");
+        }
+        for service in [
+            "postgres",
+            "mysqld",
+            "redis-server",
+            "nginx",
+            "node",
+            "etcd",
+            "mongod",
+            "httpd",
+            "/usr/lib/postgresql/16/bin/postgres",
+            "/usr/sbin/nginx",
+        ] {
+            assert!(
+                !is_monitoring_helper_name(service),
+                "{service} is a service, not a collector"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cmdline_names_helper_only_program_names_decide() {
+        // argv[0] names the collector whatever the later arguments say...
+        assert!(cmdline_names_helper(
+            "/usr/local/bin/postgres_exporter\0--config=/etc/agent.conf\0serve".split('\0')
+        ));
+        assert!(cmdline_names_helper(
+            "node-exporter\0--web.listen-address=:9100".split('\0')
+        ));
+        // ...and a bare "exporter" token in a later argument (a config path,
+        // say) does not make the process a collector.
+        assert!(!cmdline_names_helper(
+            "postgres\0--plugin=exporter\0--config=/opt/exporter.conf".split('\0')
+        ));
+        assert!(!cmdline_names_helper("sleep\x0030".split('\0')));
+        // A `sh -c` wrapper runs the collector as its payload.
+        assert!(cmdline_names_helper(
+            "sh\0-c\0node_exporter --web.listen-address=:9100".split('\0')
+        ));
+        assert!(cmdline_names_helper(
+            "/bin/bash\0-c\0postgres_exporter --help".split('\0')
+        ));
+        // The payload's command decides, not its arguments.
+        assert!(!cmdline_names_helper("sh\0-c\0echo exporter".split('\0')));
+        assert!(!cmdline_names_helper(
+            "sh\0-c\0cat /etc/exporter.conf".split('\0')
+        ));
+        assert!(!cmdline_names_helper("".split('\0')));
     }
 }

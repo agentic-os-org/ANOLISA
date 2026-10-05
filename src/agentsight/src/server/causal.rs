@@ -275,6 +275,31 @@ struct Attribution {
 
 // ─── Endpoint ────────────────────────────────────────────────────────────────
 
+/// Scopes `id_kind` can name. Omitted means "infer from the value shape".
+const ID_KINDS: [&str; 2] = ["session", "conversation"];
+
+/// Reject an `id_kind` the endpoint cannot honor.
+///
+/// The field is documented as naming what `session_id` carries, and the
+/// dashboard types it as `'session' | 'conversation'`, but every other token
+/// fell back to session scope: an attribution then covered the whole session
+/// while the caller believed it had asked for one conversation, with no error
+/// to notice.
+fn parse_id_kind(id_kind: Option<&str>) -> Result<Option<&str>, HttpResponse> {
+    match id_kind {
+        None => Ok(None),
+        Some(kind) if ID_KINDS.contains(&kind) => Ok(Some(kind)),
+        Some(kind) => Err(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "invalid_id_kind",
+            "message": format!(
+                "unknown id_kind '{kind}': expected one of {}",
+                ID_KINDS.join(", ")
+            ),
+            "valid_id_kinds": ID_KINDS,
+        }))),
+    }
+}
+
 /// POST /api/causal-attribution
 ///
 /// Runs the offline causal attribution pipeline against the trajectory of the
@@ -293,6 +318,14 @@ pub async fn run_causal_attribution(
         }));
     }
 
+    // `id_kind` is a closed set; the value shape cannot disambiguate a typo
+    // from a real scope, so reject an unknown token instead of silently
+    // attributing the whole session.
+    let id_kind = match parse_id_kind(req.id_kind.as_deref()) {
+        Ok(id_kind) => id_kind,
+        Err(response) => return response,
+    };
+
     let opt = match state.optimize.as_ref() {
         Some(o) => Arc::clone(o),
         None => {
@@ -310,7 +343,7 @@ pub async fn run_causal_attribution(
     // attribute only the events under a specific conversation_id; we keep
     // that id verbatim and pass it to load_trajectory. Any other scope
     // goes through the legacy resolver (32 hex → session UUID fallback).
-    let is_conversation_scope = req.id_kind.as_deref() == Some("conversation");
+    let is_conversation_scope = id_kind == Some("conversation");
     let resolved_session_id = if is_conversation_scope {
         log::info!(
             "Causal attribution: conversation scope — using '{}' as conversation_id directly",
@@ -345,7 +378,7 @@ pub async fn run_causal_attribution(
         "sess"
     };
     let cache_key = (
-        format!("{}:{}", scope_tag, resolved_session_id),
+        format!("{scope_tag}:{resolved_session_id}"),
         req.round_index,
     );
     if !req.force {
@@ -419,7 +452,7 @@ pub async fn run_causal_attribution(
         &resolved_session_id,
         genai_store.as_deref(),
         trajectory_store.as_deref(),
-        req.id_kind.as_deref(),
+        id_kind,
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -1256,7 +1289,7 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
             let found: Option<String> = conn
                 .query_row(sql, [incoming], |r| r.get::<_, String>(0))
                 .ok();
-            log::info!("resolver: conversation_id lookup → {:?}", found);
+            log::info!("resolver: conversation_id lookup → {found:?}");
             if found.is_some() {
                 return found;
             }
@@ -1272,13 +1305,13 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
         let found: Option<String> = conn
             .query_row(sql, [incoming], |r| r.get::<_, String>(0))
             .ok();
-        log::info!("resolver: trace_id lookup → {:?}", found);
+        log::info!("resolver: trace_id lookup → {found:?}");
         if found.is_some() {
             return found;
         }
     }
 
-    log::info!("resolver: no mapping for '{}' — passthrough", incoming);
+    log::info!("resolver: no mapping for '{incoming}' — passthrough");
     None
 }
 
@@ -1397,9 +1430,7 @@ fn probe_atif_column(
 
         for column in text_columns {
             let sample_sql = format!(
-                "SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" IS NOT NULL LIMIT 1",
-                col = column,
-                table = table,
+                "SELECT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL LIMIT 1",
             );
             let sample: Option<String> = conn
                 .query_row(&sample_sql, [], |r| r.get::<_, String>(0))
@@ -1415,17 +1446,8 @@ fn probe_atif_column(
             // typical of local trajectory stores).
             let session_column = find_session_column(&conn, &table)?;
             let rows_sql = match session_column.as_deref() {
-                Some(col) => format!(
-                    "SELECT \"{col}\" FROM \"{table}\" WHERE \"{sid_col}\" = ?1",
-                    col = column,
-                    table = table,
-                    sid_col = col,
-                ),
-                None => format!(
-                    "SELECT \"{col}\" FROM \"{table}\"",
-                    col = column,
-                    table = table,
-                ),
+                Some(col) => format!("SELECT \"{column}\" FROM \"{table}\" WHERE \"{col}\" = ?1",),
+                None => format!("SELECT \"{column}\" FROM \"{table}\"",),
             };
             let mut rows = match conn.prepare(&rows_sql) {
                 Ok(s) => s,
@@ -1678,10 +1700,7 @@ fn normalize_kind(raw: &str) -> String {
         // Fall through: keep the raw string but lowercase so the frontend's
         // defensive fallback style kicks in instead of crashing.
         other => {
-            log::warn!(
-                "causal-attribution: unknown verdict.kind {:?}, treating as ok",
-                other,
-            );
+            log::warn!("causal-attribution: unknown verdict.kind {other:?}, treating as ok",);
             "ok".to_string()
         }
     }

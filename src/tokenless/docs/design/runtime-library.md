@@ -32,7 +32,9 @@ share that Stash and roll back keys whenever a candidate is discarded. TOON is l
 library and never starts a process. RTK is used only when an adapter supplies `command_field`; every
 rewritten wrapper is anchored to the packaged executable and carries per-execution attribution.
 Content detection, thresholds, TOON selection, diagnostics, authorization, and Stash policy remain
-in Rust Core rather than Python configuration.
+in Rust Core rather than Python configuration. A shell tool's `PostToolRequest` carries the executed
+command line in `command`; Core, not the adapter, reports a plain print of local files as
+`file_read` so that a printed HTML page stays verbatim while data in that output still compresses.
 
 The SDK never stores a process-global current session. `before_model` returns the exact visible
 marker set. An adapter declares whether it has a marker-authorized recovery path and owns any

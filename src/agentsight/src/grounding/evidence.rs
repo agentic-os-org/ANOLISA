@@ -409,7 +409,7 @@ fn assign_aftermath(verdicts: &mut [StepCallVerdict]) {
 /// Collect usable evidence from the step prefix.
 fn build_pool(steps: &[Step], verdicts: &[StepCallVerdict]) -> Vec<EvidenceEntry> {
     let mut pool = Vec::new();
-    for step in steps {
+    for (step_idx, step) in steps.iter().enumerate() {
         match step.source {
             // The user's own words are evidence by definition: a fact they
             // supplied needs no further source.
@@ -446,7 +446,8 @@ fn build_pool(steps: &[Step], verdicts: &[StepCallVerdict]) -> Vec<EvidenceEntry
                 continue;
             }
             let text = result_text(result);
-            let cleaned = strip_command_echo(&text, step, result.source_call_id.as_deref());
+            let cleaned =
+                strip_command_echo(&text, &steps[..=step_idx], result.source_call_id.as_deref());
             push_entry(
                 &mut pool,
                 step.step_id,
@@ -484,15 +485,20 @@ fn push_entry(
 ///
 /// Shell results commonly open with the invocation, so leaving it in would let a
 /// URL or path the agent invented ground itself through its own command line.
-fn strip_command_echo(text: &str, step: &Step, source_call_id: Option<&str>) -> String {
-    let Some(command) = step
-        .tool_calls
-        .as_ref()
-        .and_then(|calls| {
-            calls.iter().find(|c| {
-                source_call_id.is_some_and(|id| same_call_id(c.tool_call_id.as_str(), id))
-            })
-        })
+fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<&str>) -> String {
+    // The call that owns a result may sit on the result's step or on an
+    // earlier one: `classify_calls` correlates a result with
+    // the nearest preceding invocation of its id, and the echo guard must
+    // resolve the owning call the same way. A step-local lookup silently
+    // no-ops for the cross-step shape, which keeps the echoed command in the
+    // pool, where the agent's own command line grounds the very path or URL
+    // it invented.
+    let Some(command) = steps_prefix
+        .iter()
+        .rev()
+        .filter_map(|step| step.tool_calls.as_deref())
+        .flatten()
+        .find(|c| source_call_id.is_some_and(|id| same_call_id(c.tool_call_id.as_str(), id)))
         .and_then(|call| {
             call.arguments
                 .get("command")

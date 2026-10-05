@@ -23,3 +23,20 @@ test('user-visible audit and enforcement UI does not expose the implementation b
     assert.doesNotMatch(readSource(file), /ActPlane|actplane/, `${file} exposes the backend brand`);
   }
 });
+
+test('risk summary violation count follows the agent filter', () => {
+  // The table renders `filteredViolations`; counting the unfiltered list in
+  // the summary card made the card disagree with the visible rows and with
+  // the "filtered by agent" banner.
+  const source = readSource('src/pages/RiskEnforcementPage.tsx');
+  assert.match(
+    source,
+    /const displayedViolations = enforcementViolationTotal\(filteredViolations, health\);/,
+    'the blocked/audited summary must count the agent-filtered violations',
+  );
+  assert.doesNotMatch(
+    source,
+    /enforcementViolationTotal\(violations, health\)/,
+    'the unfiltered list must not feed the summary card',
+  );
+});

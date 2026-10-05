@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 /// Max characters kept per tool observation in [`render_trimmed`].
 const OBSERVATION_TRIM_CHARS: usize = 80;
 
+/// Max characters kept per thinking / text block in [`render_trimmed`].
+/// `render_trimmed` feeds LLM prompts (the perf experience-library
+/// strategy), and reasoning models emit tens of thousands of characters of
+/// hidden chain-of-thought per step — uncapped narration is the exact
+/// context overflow `summary` caps its payload to avoid.
+const NARRATION_TRIM_CHARS: usize = 800;
+
 // ─── Document types ──────────────────────────────────────────────────────────
 
 /// Root ATIF trajectory document (analysis-side mirror of the shared schema).
@@ -333,8 +340,9 @@ pub(crate) fn truncate_chars(raw: &str, max_chars: usize) -> String {
 // ─── LLM-facing rendering ────────────────────────────────────────────────────
 
 /// Render the trajectory as compact readable text for LLM prompts, trimming
-/// tool observations to a short prefix. Preserves step order, sources, tool
-/// names/arguments summaries, and message/reasoning text.
+/// tool observations to a short prefix and narration (thinking / text) to a
+/// head cap. Preserves step order, sources, and tool names/arguments
+/// summaries.
 pub fn render_trimmed(traj: &AtifTrajectory) -> String {
     let mut out = String::new();
     for step in &traj.steps {
@@ -355,12 +363,18 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
                 out.push_str(&format!("[{ts}] agent (step {}):\n", step.step_id));
                 if let Some(r) = step.reasoning_content.as_deref() {
                     if !r.is_empty() {
-                        out.push_str(&format!("  thinking: {r}\n"));
+                        out.push_str(&format!(
+                            "  thinking: {}\n",
+                            truncate_chars(r, NARRATION_TRIM_CHARS)
+                        ));
                     }
                 }
                 if let Some(m) = step.message.as_deref() {
                     if !m.is_empty() {
-                        out.push_str(&format!("  text: {m}\n"));
+                        out.push_str(&format!(
+                            "  text: {}\n",
+                            truncate_chars(m, NARRATION_TRIM_CHARS)
+                        ));
                     }
                 }
                 for call in step.calls() {
@@ -554,5 +568,32 @@ mod tests {
         assert!(text.contains("tool_use Bash: {\"command\":\"ls\"}"));
         assert!(text.contains("[trimmed, 500 chars total]"));
         assert!(!text.contains(&"x".repeat(200)));
+    }
+
+    /// Per-step narration (thinking / text) must be head-capped like tool
+    /// observations: `render_trimmed` feeds the perf experience-library
+    /// prompt, and a reasoning-heavy trace would otherwise ship megabytes of
+    /// hidden chain-of-thought into one LLM call (observed: 240k chars from
+    /// a single step) — the exact context overflow `summary` caps its
+    /// payload to avoid.
+    #[test]
+    fn render_trimmed_caps_thinking_and_text() {
+        let json = String::from(
+            r#"{"schema_version":"ATIF-v1.6","session_id":"s1",
+                "agent":{"name":"a","version":"1"},
+                "steps":[{"step_id":1,"source":"agent","timestamp":"2026-01-01T00:00:05Z",
+                 "reasoning_content":"BIGTHINK","message":"BIGTEXT"}]}"#,
+        )
+        .replace("BIGTHINK", &"think ".repeat(20_000))
+        .replace("BIGTEXT", &"text ".repeat(20_000));
+        let traj = AtifTrajectory::from_json(&json).unwrap();
+        let text = render_trimmed(&traj);
+        assert!(
+            text.chars().count() < 4_000,
+            "narration must be capped, got {} chars for one step",
+            text.chars().count()
+        );
+        assert!(text.contains("thinking: think"));
+        assert!(text.contains("text: text"));
     }
 }

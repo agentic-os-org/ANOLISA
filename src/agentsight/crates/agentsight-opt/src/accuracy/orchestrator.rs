@@ -11,7 +11,7 @@ use crate::llm::LlmClient;
 use crate::trace::TraceInventory;
 use crate::types::{AccIssue, AccRootCause, FixLocus, RootObject};
 
-use crate::accuracy::detector::{AnalysisCtx, Detector, RawIssue};
+use crate::accuracy::detector::{AnalysisCtx, Detector, JudgmentLog, RawIssue};
 use crate::accuracy::extract::SharedExtraction;
 use crate::accuracy::strategies::confirm_before_act::ConfirmBeforeActStrategy;
 use crate::accuracy::strategies::experience_library::ExperienceLibraryStrategy;
@@ -25,12 +25,14 @@ pub async fn run_strategies(
     inv: &TraceInventory,
     extraction: &SharedExtraction,
     repo_root: Option<&Path>,
+    judgments: &JudgmentLog,
 ) -> Vec<AccIssue> {
     let ctx = AnalysisCtx {
         inv,
         client,
         repo_root,
         extraction,
+        judgments,
     };
 
     // Build strategy list.
@@ -124,7 +126,16 @@ fn deduplicate(raw_issues: Vec<(&str, RawIssue)>) -> Vec<(&str, RawIssue)> {
         }
     }
 
-    best.into_values().collect()
+    // `best` is a HashMap, whose iteration order is randomized per map
+    // instance. `run_strategies` then sorts by (evidence_tier, symptom)
+    // only, so survivors that tie on both — e.g. the same command failing
+    // twice, one issue per anchor — kept the map's random order and the
+    // final issue list changed between runs of the same trace. Emit the
+    // survivors ordered by their dedup key so the later stable sort starts
+    // from a deterministic order.
+    let mut survivors: Vec<((String, String), (_, RawIssue))> = best.into_iter().collect();
+    survivors.sort_by(|a, b| a.0.cmp(&b.0));
+    survivors.into_iter().map(|(_, issue)| issue).collect()
 }
 
 /// Convert a `RawIssue` to a finalized `AccIssue` by applying rule-derived gates.
@@ -255,6 +266,45 @@ mod tests {
         let deduped = deduplicate(issues);
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].1.evidence_tier, EvidenceTier::L1);
+    }
+
+    #[test]
+    fn dedup_orders_equal_tier_and_symptom_deterministically() {
+        // The same command failing twice yields one issue per anchor with
+        // identical (evidence_tier, symptom) — both survive dedup (distinct
+        // tool_call_id keys), and `run_strategies` then sorts by
+        // (evidence_tier, symptom) only, so their relative order followed
+        // the HashMap's randomized iteration order and the final issue
+        // list changed between runs of the same trace.
+        fn issue(call_id: &str) -> RawIssue {
+            RawIssue {
+                symptom: "声称完成但工具 bash 执行失败且未恢复: cargo build".into(),
+                defect_type: DefectType::Workflow,
+                primary_object: RootObject::Skill,
+                evidence_tier: EvidenceTier::L1,
+                tool_call_id: Some(call_id.into()),
+                detail: String::new(),
+                verify: String::new(),
+                fix: String::new(),
+            }
+        }
+
+        let input = vec![
+            ("verify_before_done", issue("call-z")),
+            ("verify_before_done", issue("call-a")),
+            ("verify_before_done", issue("call-m")),
+        ];
+
+        // Every `deduplicate` call builds a fresh HashMap, whose iteration
+        // order is randomized per map instance.
+        for _ in 0..16 {
+            let deduped = deduplicate(input.clone());
+            let ids: Vec<&str> = deduped
+                .iter()
+                .map(|(_, i)| i.tool_call_id.as_deref().unwrap())
+                .collect();
+            assert_eq!(ids, vec!["call-a", "call-m", "call-z"]);
+        }
     }
 
     #[test]

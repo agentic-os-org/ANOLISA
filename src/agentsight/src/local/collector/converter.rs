@@ -3,26 +3,54 @@
 //! Parses QoderWork/Qoder/Claude Code JSONL session files and converts them
 //! to ATIF v1.7 documents for trajectory display. These agents share a common
 //! JSONL format with event types: `runtime-config`, `user`, `assistant`.
+//! Codex rollouts use a different envelope schema and are delegated to the
+//! collector crate's Codex converter.
 //!
 //! Content blocks within messages:
 //! - `assistant` content: `thinking`, `text`, `tool_use`
 //! - `user` content: `text` (human input), `tool_result` (tool output)
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Observation, ObservationResult, Step,
-    StepSource, ToolCall,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    // Lossy decode: a session file torn mid-write by a killed agent can end
+    // in the middle of a multi-byte character, and a strict `read_to_string`
+    // would fail the whole conversion, dropping every complete record before
+    // the tail. The torn tail becomes a malformed line the parser skips.
+    let content = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
     convert_jsonl_content_to_atif(&content)
 }
 
 pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajectory> {
+    // Codex rollouts use a different envelope schema
+    // (`{"timestamp","type","payload"}` records). The collector crate already
+    // ships a converter for them, so delegate instead of emitting an empty
+    // trajectory. The substrings mirror `is_codex_rollout`'s envelope types:
+    // `response_item`/`turn_context` only occur in Codex files, while
+    // `session_meta` also catches a rollout truncated before its first turn
+    // (session_meta + user_message, listed by discovery but with no
+    // turn_context/response_item records yet). Qoder transcripts carry a
+    // bare `session_meta` line too, so `is_codex_rollout`'s payload-object
+    // check keeps them on the Claude/Qoder path.
+    if content.contains("response_item")
+        || content.contains("turn_context")
+        || content.contains("session_meta")
+    {
+        let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
+        if agentsight_trajectory_collector::codex::is_codex_rollout(&events) {
+            return agentsight_trajectory_collector::codex::convert_codex_events(&events, "codex");
+        }
+    }
+
     let mut session_id = String::new();
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
@@ -81,43 +109,46 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                 let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
 
                 if let Some(blocks) = content_arr {
-                    let is_tool_result = blocks
+                    // One user message can carry tool results and text at the
+                    // same time (typing while a tool call is pending). Both
+                    // belong to the trajectory: the results as observations on
+                    // the agent step, the text as its own user step.
+                    if blocks
                         .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
-
-                    if is_tool_result {
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    {
                         append_tool_results(&mut steps, blocks);
-                    } else {
-                        let mut message_text = String::new();
-                        for block in blocks {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                if !text.is_empty() {
-                                    if !message_text.is_empty() {
-                                        message_text.push('\n');
-                                    }
-                                    message_text.push_str(text);
+                    }
+
+                    let mut message_text = String::new();
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            if !text.is_empty() {
+                                if !message_text.is_empty() {
+                                    message_text.push('\n');
                                 }
+                                message_text.push_str(text);
                             }
                         }
-                        if !message_text.is_empty() {
-                            step_id += 1;
-                            steps.push(Step {
-                                step_id,
-                                timestamp,
-                                source: StepSource::User,
-                                message: message_text,
-                                model_name: None,
-                                reasoning_effort: None,
-                                reasoning_content: None,
-                                tool_calls: None,
-                                observation: None,
-                                metrics: None,
-                                extra: None,
-                                llm_call_count: None,
-                                is_copied_context: None,
-                            });
-                        }
+                    }
+                    if !message_text.is_empty() {
+                        step_id += 1;
+                        steps.push(Step {
+                            step_id,
+                            timestamp,
+                            source: StepSource::User,
+                            message: message_text,
+                            model_name: None,
+                            reasoning_effort: None,
+                            reasoning_content: None,
+                            tool_calls: None,
+                            observation: None,
+                            metrics: None,
+                            extra: None,
+                            llm_call_count: None,
+                            is_copied_context: None,
+                        });
                     }
                 } else if let Some(content_str) =
                     event.pointer("/message/content").and_then(|c| c.as_str())
@@ -278,6 +309,32 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     })
 }
 
+/// Flatten a `tool_result.content` payload into result text.
+///
+/// Claude Code/Qoder emit `content` as an array of `{"type":"text","text":…}`
+/// blocks; mirror `agentsight-trajectory-collector`'s ATIF converter so the
+/// local viewer keeps the same tool output the canonical collector records.
+fn flatten_tool_result_content(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            let text_parts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| {
+                    let obj = block.as_object()?;
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        obj.get("text").and_then(|v| v.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            text_parts.join("\n")
+        }
+        other => other.to_string(),
+    }
+}
+
 fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
     let last_agent_step = steps
         .iter_mut()
@@ -301,15 +358,29 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let content = block
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let content = Some(Value::String(
+            block
+                .get("content")
+                .map(flatten_tool_result_content)
+                .unwrap_or_default(),
+        ));
+        let extra = if block
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Some(HashMap::from([(
+                EXTRA_IS_ERROR.to_string(),
+                Value::Bool(true),
+            )]))
+        } else {
+            None
+        };
         observation.results.push(ObservationResult {
             source_call_id,
-            content: content.map(serde_json::Value::String),
+            content,
             subagent_trajectory_ref: None,
-            extra: None,
+            extra,
         });
     }
 }
@@ -389,10 +460,57 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_result_array_content_and_error_flag() {
+        // Claude Code/Qoder write `tool_result.content` as an array of text
+        // blocks and mark failures with `is_error`. Both used to be dropped,
+        // so tool output disappeared from collected trajectories and
+        // downstream failure detection saw no error.
+        let content = r#"{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"tc1","name":"bash","input":{"cmd":"false"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","is_error":true,"content":[{"type":"text","text":"command failed"},{"type":"text","text":"exit 1"}]}]}}"#;
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(
+            obs.results[0].content,
+            Some(Value::String("command failed\nexit 1".to_string())),
+            "text blocks must be flattened into the result content"
+        );
+        assert_eq!(
+            obs.results[0]
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get(agentsight_atif::EXTRA_IS_ERROR)),
+            Some(&Value::Bool(true)),
+            "is_error must be carried in the result extra"
+        );
+    }
+
+    #[test]
     fn test_tool_result_without_prior_agent_step() {
         let content = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"result"}]}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 0);
+    }
+
+    #[test]
+    fn test_user_text_beside_tool_result_is_kept() {
+        // A user can type while a tool call is pending; Claude Code then
+        // records one message holding both the tool results and the text.
+        let content = r#"{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"tc1","name":"ls","input":null}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"file.txt"},{"type":"text","text":"keep going with plan B"}]}}"#;
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+
+        let user_steps: Vec<_> = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .collect();
+        assert_eq!(user_steps.len(), 1);
+        assert_eq!(user_steps[0].message, "keep going with plan B");
+
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("tc1"));
     }
 
     #[test]
@@ -459,6 +577,23 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_jsonl_file_with_torn_utf8_tail() {
+        let dir = std::env::temp_dir().join("agentsight_converter_torn_test.jsonl");
+        let mut bytes = br#"{"type":"user","message":{"content":"hello"}}"#.to_vec();
+        bytes.push(b'\n');
+        // A killed agent's last write cut a multi-byte character in half.
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"content\":\"\xe4\xb8");
+        std::fs::write(&dir, bytes).unwrap();
+        let traj = convert_jsonl_to_atif(&dir).unwrap();
+        assert_eq!(
+            traj.steps.len(),
+            1,
+            "the complete record before the tail survives"
+        );
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
     fn test_runtime_config_defaults() {
         let content = r#"{"type":"runtime-config"}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
@@ -476,5 +611,69 @@ mod tests {
         );
         let traj = convert_jsonl_content_to_atif(&content).unwrap();
         assert_eq!(traj.steps[0].model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_codex_rollout_delegates_to_the_codex_converter() {
+        // A Codex rollout is an envelope stream; the Claude-style loop would
+        // return an empty trajectory with agent "unknown" for it.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.360Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t-1\",\"model\":\"gpt-5.6-sol\",\"effort\":\"medium\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:58.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:59.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"file-a\\n\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:57:00.153Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
+        let agent_step = &traj.steps[1];
+        assert_eq!(agent_step.source, StepSource::Agent);
+        assert_eq!(agent_step.message, "done");
+        let calls = agent_step.tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].function_name, "exec");
+        let obs = agent_step.observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_truncated_codex_rollout_still_delegates() {
+        // A rollout killed before its first turn: `session_meta` plus the
+        // user's message, no `turn_context`/`response_item` records yet. The
+        // listing still shows the session (discovery keys on
+        // event_msg/user_message), so the converter must delegate too, not
+        // fall to the Claude loop and emit an empty trajectory.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
+    }
+
+    #[test]
+    fn test_qoder_session_meta_does_not_trigger_codex_delegation() {
+        // Qoder transcripts also carry a `session_meta` event; the Claude
+        // path must keep handling them (no payload envelope → not Codex).
+        let content = concat!(
+            "{\"type\":\"session_meta\",\"foo\":\"bar\"}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "hello");
+        assert_eq!(traj.agent.name, "unknown");
     }
 }

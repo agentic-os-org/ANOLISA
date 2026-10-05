@@ -189,6 +189,22 @@ impl MountFixture {
         )
     }
 
+    /// Mount in normal mode with Hermes layout.
+    pub fn normal_hermes<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_layout(
+            MountMode::Normal,
+            source,
+            Some(mountpoint),
+            Some(skillfs_fuse::SkillLayout::Hermes),
+            None,
+            None,
+            None,
+        )
+    }
+
     /// Mount in normal mode with an opt-in OS adapter transform stage.
     pub fn normal_with_os_adapter<F: FnOnce(&Path)>(seed: F, stage: OsAdapterStage) -> Self {
         let source = tempfile::tempdir().expect("source tempdir");
@@ -389,14 +405,14 @@ impl MountFixture {
     }
 }
 
+/// Live-mountpoint check per `/proc/mounts`; delegates to the production
+/// byte-exact, escape-decoding matcher.
 fn is_mounted(path: &Path) -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(mounts) = std::fs::read("/proc/mounts") else {
         return false;
     };
-    let target = path.to_string_lossy();
-    mounts
-        .lines()
-        .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
 }
 
 fn force_unmount(path: &Path) {

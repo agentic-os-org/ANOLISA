@@ -328,6 +328,42 @@ fn scenario_echoed_command_line_is_not_evidence() {
 }
 
 #[test]
+fn scenario_echoed_command_line_is_stripped_when_the_result_lives_on_a_later_step() {
+    // `classify_calls` correlates a result with its call across steps (each
+    // invocation owns the window up to the next call reusing its id), so the
+    // echo guard must find the call there too. With a step-local lookup the
+    // invocation line stayed in the pool, and the agent's own command line
+    // grounded the very path it invented.
+    let mut calling = agent(2, "");
+    calling.tool_calls = Some(vec![call(
+        "c1",
+        "Bash",
+        serde_json::json!({"command": "cat /fabricated/report.txt"}),
+    )]);
+    let mut carrying = agent(3, "");
+    carrying.observation = Some(Observation {
+        results: vec![ok_result(
+            "c1",
+            "$ cat /fabricated/report.txt\nquarterly summary",
+        )],
+    });
+
+    let doc = traj(vec![
+        user(1, "看一下报告"),
+        calling,
+        carrying,
+        agent(4, "报告位于 /fabricated/report.txt 。内容是季度总结。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert_eq!(
+        grounding_for(&index, "/fabricated/report.txt"),
+        Grounding::Unresolved,
+        "the echoed command of a later-step result must not ground the claim"
+    );
+}
+
+#[test]
 fn scenario_system_prompt_is_not_evidence() {
     let doc = traj(vec![
         system(1, "示例接口：https://example.test/api/v1"),

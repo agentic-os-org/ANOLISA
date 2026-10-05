@@ -121,12 +121,29 @@ fn generate_token() -> String {
 /// Default token file name (stored alongside the SQLite database).
 const TOKEN_FILE_NAME: &str = ".dashboard_token";
 
+/// Restrict the token file to its owner.
+///
+/// `OpenOptions::mode` is only applied when a file is created, so a token file
+/// that already exists — written by hand, restored from a backup, or left
+/// behind by an interrupted run — keeps whatever mode it has.  The user guide
+/// documents this credential file as root-only, so repair the mode whenever
+/// the file is used.  Best effort: a file we cannot chmod is still usable.
+#[cfg(unix)]
+fn restrict_token_file(token_file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(token_file, std::fs::Permissions::from_mode(0o600)) {
+        log::warn!("Failed to restrict dashboard token file {token_file:?}: {e}");
+    }
+}
+
 /// Read the token from a file, or generate and persist a new one.
 fn read_or_create_token(token_file: &Path) -> String {
     // Try reading existing token
     if let Ok(content) = std::fs::read_to_string(token_file) {
         let trimmed = content.trim();
         if !trimmed.is_empty() && trimmed.len() >= 32 {
+            #[cfg(unix)]
+            restrict_token_file(token_file);
             return trimmed.to_string();
         }
     }
@@ -154,6 +171,9 @@ fn read_or_create_token(token_file: &Path) -> String {
         {
             Ok(mut f) => {
                 use std::io::Write;
+                // `mode` above only took effect if this call created the file.
+                #[cfg(unix)]
+                restrict_token_file(token_file);
                 if let Err(e) = f.write_all(token.as_bytes()) {
                     log::warn!("Failed to write dashboard token to {token_file:?}: {e}");
                 } else {
@@ -829,6 +849,50 @@ mod tests {
         let token = read_or_create_token(&token_file);
         assert_eq!(token.len(), 64);
         assert_ne!(token, "short");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `OpenOptions::mode` only applies when the file is created, so a token
+    /// file that already exists with a wider mode used to keep it even though
+    /// the user guide documents this credential file as root-only.
+    #[cfg(unix)]
+    #[test]
+    fn read_or_create_token_repairs_the_mode_of_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("auth_test_repair_existing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let token_file = dir.join(".dashboard_token");
+        let existing = "existing-token-value-1234567890abcdef";
+        std::fs::write(&token_file, existing).ok();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).ok();
+
+        let token = read_or_create_token(&token_file);
+        assert_eq!(token, existing);
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The regeneration path rewrites an existing file, and `mode(0o600)` is
+    /// ignored for an existing file: the rewrite used to leave the old mode.
+    #[cfg(unix)]
+    #[test]
+    fn read_or_create_token_tightens_an_existing_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("auth_test_tighten_rewrite");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let token_file = dir.join(".dashboard_token");
+        std::fs::write(&token_file, "short").ok();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).ok();
+
+        let token = read_or_create_token(&token_file);
+        assert_eq!(token.len(), 64);
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

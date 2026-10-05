@@ -293,7 +293,14 @@ fn parse_home_from_environ(environ: &[u8]) -> Option<PathBuf> {
 #[cfg(unix)]
 fn validated_process_home(proc_root: &Path, pid: u32) -> Option<PathBuf> {
     let process_dir = proc_root.join(pid.to_string());
-    let process_uid = parse_process_uid(&fs::read_to_string(process_dir.join("status")).ok()?)?;
+    // `/proc/<pid>/status` embeds the process name, and the kernel allows
+    // non-UTF-8 bytes in a name; `read_to_string` rejected the whole file, so
+    // the `Uid:` line — ASCII — was lost and the caller silently dropped the
+    // HOME fallback from the scan. Decode lossily, as the cmdline/environ
+    // readers here already do.
+    let status_bytes = fs::read(process_dir.join("status")).ok()?;
+    let status = String::from_utf8_lossy(&status_bytes);
+    let process_uid = parse_process_uid(&status)?;
     let home = parse_home_from_environ(&fs::read(process_dir.join("environ")).ok()?)?;
     if !home.is_absolute() || home == Path::new("/") {
         return None;
@@ -1168,6 +1175,45 @@ mod tests {
         .expect("restored status fixture");
         fs::remove_file(process_dir.join("environ")).expect("environ fixture should be removed");
         assert_eq!(validated_process_home(&proc_root, 4242), None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// `/proc/<pid>/status` embeds the process name, and the kernel allows
+    /// non-UTF-8 bytes in a name; `read_to_string` rejected the whole file, so
+    /// the `Uid:` line — plain ASCII — was lost and the HOME fallback silently
+    /// dropped out of the privileged scan preview.
+    #[cfg(unix)]
+    #[test]
+    fn validates_process_home_despite_a_non_utf8_process_name() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = std::env::temp_dir().join(format!("agentsight-proc-nu-{}", Uuid::new_v4()));
+        let proc_root = root.join("proc");
+        let process_dir = proc_root.join("4242");
+        let home = root.join("home");
+        fs::create_dir_all(&process_dir).expect("process fixture dir");
+        fs::create_dir_all(&home).expect("home fixture dir");
+        let owner_uid = fs::metadata(&home).expect("home metadata").uid();
+        // The kernel allows raw bytes in comm, so the `Name:` line is not
+        // necessarily valid UTF-8 while `Uid:` stays ASCII.
+        let mut status = b"Name:\tnode".to_vec();
+        status.push(0xa0);
+        status.extend_from_slice(
+            format!("-22\nUid:\t{owner_uid}\t{owner_uid}\t{owner_uid}\t{owner_uid}\n").as_bytes(),
+        );
+        fs::write(process_dir.join("status"), status).expect("status fixture");
+        fs::write(
+            process_dir.join("environ"),
+            format!("PATH=/usr/bin\0HOME={}\0", home.display()).as_bytes(),
+        )
+        .expect("environ fixture");
+
+        assert_eq!(
+            validated_process_home(&proc_root, 4242),
+            Some(home.canonicalize().expect("canonical home")),
+            "a non-UTF-8 Name line must not hide the UID and the HOME fallback"
+        );
 
         fs::remove_dir_all(&root).ok();
     }

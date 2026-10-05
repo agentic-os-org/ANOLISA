@@ -129,11 +129,16 @@ impl GenAISqliteStore {
                 };
                 if let [id] = candidates.as_slice() {
                     // Keep request evidence and row identity; RequestCapture also
-                    // keeps deferred calls visible to crash recovery.
+                    // keeps deferred calls visible to crash recovery, which only
+                    // looks at pending rows. The stale sweep may have flipped the
+                    // snapshot to interrupted while the call was still in flight,
+                    // so the adopted row returns to pending and drops the stale
+                    // interruption type.
                     tx.execute(
                         "UPDATE genai_events SET
                             call_id = ?1, trace_id = ?2, conversation_id = ?3,
-                            session_id = ?4, pending_origin = 'request_capture'
+                            session_id = ?4, pending_origin = 'request_capture',
+                            status = 'pending', interruption_type = NULL
                          WHERE id = ?5",
                         params![
                             info.call_id,
@@ -271,30 +276,8 @@ impl GenAISqliteStore {
                     }
                 };
 
-                let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call
-                        .response
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.parts.iter())
-                        .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall {
-                                id: Some(tc_id),
-                                ..
-                            } = p
-                            {
-                                Some(tc_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&ids).ok()
-                    }
-                };
+                let tool_call_ids =
+                    crate::genai::semantic::tool_call_ids_json(&call.response.messages);
 
                 let updated = conn.execute(
                     "UPDATE genai_events SET
@@ -320,8 +303,8 @@ impl GenAISqliteStore {
                         total_tokens        = ?19,
                         cache_creation_tokens = ?20,
                         cache_read_tokens   = ?21,
-                        system_instructions = ?22,
-                        input_messages      = ?23,
+                        system_instructions = COALESCE(?22, system_instructions),
+                        input_messages      = COALESCE(?23, input_messages),
                         output_messages     = ?24,
                         status_code         = ?25,
                         sse_event_count     = ?26,
@@ -744,6 +727,17 @@ impl GenAISqliteStore {
         enrichment: &SseEnrichment,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // The drained call never reaches completion, so this is the only
+        // chance to record the tool calls its SSE chunks carried: every reader
+        // of the column (session turn indices, token-savings attribution, the
+        // session resource timeline) pairs its data by these ids.
+        let tool_call_ids = enrichment
+            .output_messages
+            .as_deref()
+            .and_then(|json| {
+                serde_json::from_str::<Vec<crate::genai::semantic::OutputMessage>>(json).ok()
+            })
+            .and_then(|messages| crate::genai::semantic::tool_call_ids_json(&messages));
         conn.execute(
             "UPDATE genai_events SET
                 model            = COALESCE(?2, model),
@@ -754,7 +748,8 @@ impl GenAISqliteStore {
                 input_tokens     = COALESCE(?7, input_tokens),
                 output_tokens    = COALESCE(?8, output_tokens),
                 total_tokens     = COALESCE(?7, input_tokens, 0)
-                                 + COALESCE(?8, output_tokens, 0)
+                                 + COALESCE(?8, output_tokens, 0),
+                tool_call_ids    = COALESCE(?9, tool_call_ids)
              WHERE call_id = ?1",
             params![
                 call_id,
@@ -765,6 +760,7 @@ impl GenAISqliteStore {
                 enrichment.sse_event_count,
                 enrichment.input_tokens,
                 enrichment.output_tokens,
+                tool_call_ids,
             ],
         )?;
         Ok(())

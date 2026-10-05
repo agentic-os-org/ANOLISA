@@ -1,6 +1,8 @@
 //! Dashboard subcommand — display dashboard URL, auth status, and ECS access guide
 
+use std::ffi::OsStr;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use agentsight::ecs_metadata::{EcsMetadata, probe_ecs_metadata};
@@ -275,9 +277,8 @@ fn check_server_running(port: u16) -> bool {
 
 /// Try to open a URL in the default browser.
 fn try_open_browser(url: &str) {
-    let opener = find_executable("xdg-open");
-    if let Some(bin) = opener {
-        let _ = std::process::Command::new(bin)
+    if let Some(bin) = find_executable("xdg-open") {
+        let _ = std::process::Command::new(&bin)
             .arg(url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -285,13 +286,32 @@ fn try_open_browser(url: &str) {
     }
 }
 
-/// Check whether an executable exists in `$PATH`.
-fn find_executable(name: &str) -> Option<String> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var
-        .split(':')
-        .map(|dir| format!("{dir}/{name}"))
-        .find(|full| std::path::Path::new(full).is_file())
+/// Check whether an executable named `name` exists in `$PATH`.
+fn find_executable(name: &str) -> Option<PathBuf> {
+    find_executable_in(name, std::env::var_os("PATH").as_deref())
+}
+
+/// Check whether an executable named `name` exists in one of the `path_var`
+/// directories.
+///
+/// Only a regular file with an execute bit counts. A same-named plain file
+/// passes a bare `is_file()` check, and `Command::new` on it fails with
+/// `EACCES`; the caller discards that error, so a shadowing non-executable
+/// `xdg-open` would silently keep the browser closed even though a runnable
+/// one sits later in `PATH`. The check mirrors the `PATH` lookup in
+/// `server/capabilities.rs`.
+fn find_executable_in(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let paths = path_var?;
+    std::env::split_paths(paths)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|full| {
+            std::fs::metadata(full)
+                .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
 }
 
 #[cfg(test)]
@@ -305,16 +325,41 @@ mod tests {
         let result = find_executable("ls");
         assert!(result.is_some(), "ls should be found in PATH");
         let path = result.unwrap();
-        assert!(
-            std::path::Path::new(&path).is_file(),
-            "returned path should be a file: {path}"
-        );
+        assert!(path.is_file(), "returned path should be a file: {path:?}");
     }
 
     #[test]
     fn find_executable_returns_none_for_nonexistent_command() {
         let result = find_executable("__nonexistent_binary_xyz__");
         assert!(result.is_none(), "nonexistent command should return None");
+    }
+
+    #[test]
+    fn find_executable_skips_a_non_executable_file() {
+        // A plain file named `xdg-open` earlier in PATH must not shadow the
+        // runnable one: it is `is_file()`-true but not executable, so
+        // `Command::new` fails with EACCES and the caller discards that error
+        // — the browser would silently never open while a usable `xdg-open`
+        // sits later in PATH.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("as-dashboard-exec-{}", std::process::id()));
+        let shadowed = dir.join("shadowed");
+        let runnable = dir.join("bin");
+        std::fs::create_dir_all(&shadowed).expect("create shadowed dir");
+        std::fs::create_dir_all(&runnable).expect("create runnable dir");
+        // `fs::write` creates the file without any execute bit.
+        std::fs::write(shadowed.join("xdg-open"), "not a program").expect("write shadow");
+        let runnable_path = runnable.join("xdg-open");
+        std::fs::write(&runnable_path, "#!/bin/sh\n").expect("write runnable");
+        std::fs::set_permissions(&runnable_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod runnable");
+
+        let path_var = std::env::join_paths([&shadowed, &runnable]).expect("join PATH");
+        let found = find_executable_in("xdg-open", Some(path_var.as_os_str()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.as_deref(), Some(runnable_path.as_path()));
     }
 
     #[test]

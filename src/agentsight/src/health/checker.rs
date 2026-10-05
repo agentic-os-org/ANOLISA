@@ -398,8 +398,7 @@ impl HealthChecker {
                     let removed = store.remove_normal_exits();
                     if removed > 0 {
                         log::debug!(
-                            "Removed {} normal-exit entries from health store (no crash event)",
-                            removed
+                            "Removed {removed} normal-exit entries from health store (no crash event)"
                         );
                     }
                 }
@@ -574,7 +573,20 @@ fn build_restart_cmd(exe_path: &str, cmdline_args: &[String]) -> Vec<String> {
 /// Read the parent PID (ppid) from `<procfs root>/<pid>/stat`.
 /// Returns None if the file cannot be read or parsed.
 fn read_ppid(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(crate::utils::procfs::proc_pid_entry(pid, "stat")).ok()?;
+    read_ppid_from(&crate::utils::procfs::proc_pid_entry(pid, "stat"))
+}
+
+/// Read the parent PID from a `<procfs root>/<pid>/stat` file.
+///
+/// The file embeds the process name in parentheses, and the kernel allows
+/// non-UTF-8 bytes in a name (`prctl(PR_SET_NAME)`, or an executable whose
+/// name is not valid UTF-8).  `read_to_string` rejected such a file outright,
+/// so the ppid — plain ASCII further along the same line — could not be read
+/// and the agent lost its parent association.  Decode lossily: the ASCII
+/// fields keep their positions, so the parse below is unaffected.
+fn read_ppid_from(path: &std::path::Path) -> Option<u32> {
+    let bytes = std::fs::read(path).ok()?;
+    let stat = String::from_utf8_lossy(&bytes);
     // Format: "pid (comm) state ppid ..."
     // Find the closing ')' first (comm may contain spaces/parens)
     let after_comm = stat.rsplit_once(')')?.1;
@@ -605,6 +617,31 @@ mod tests {
     fn test_read_ppid_current_process() {
         // Whatever the parent is, our own stat entry parses.
         assert!(read_ppid(std::process::id()).is_some());
+    }
+
+    /// `/proc/<pid>/stat` embeds the process name in parentheses, and the
+    /// kernel allows non-UTF-8 bytes in a name; `read_to_string` used to
+    /// reject the whole file, losing the ASCII ppid behind the name.
+    #[test]
+    fn read_ppid_from_survives_a_non_utf8_comm() {
+        let dir = std::env::temp_dir().join(format!("agentsight_stat_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let stat_path = dir.join("stat");
+
+        // "claude" plus an invalid UTF-8 continuation byte inside the parens.
+        fs::write(
+            &stat_path,
+            b"4242 (claude\xa0) S 7 4242 4242 0 -1 4194560\n",
+        )
+        .expect("write non-UTF-8 stat");
+        assert_eq!(read_ppid_from(&stat_path), Some(7));
+
+        // Guard: an ordinary name keeps parsing as before.
+        fs::write(&stat_path, b"4242 (node) S 1 4242 4242 0 -1 4194560\n")
+            .expect("write ordinary stat");
+        assert_eq!(read_ppid_from(&stat_path), Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

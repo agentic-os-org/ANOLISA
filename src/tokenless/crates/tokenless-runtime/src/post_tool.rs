@@ -3,6 +3,7 @@
 mod arbitration;
 mod content;
 mod diff;
+pub(crate) mod file_read;
 mod pipeline;
 mod stash_ledger;
 

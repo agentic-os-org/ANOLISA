@@ -8,6 +8,7 @@ const {
   enforcementSupportsMode,
   enforcementViolationTotal,
   fetchContainmentPlan,
+  fetchInterruptionStats,
   fetchLatencyMetrics,
   fetchSecurityCase,
   fetchSecurityStatus,
@@ -214,6 +215,34 @@ test('fetchStorageStatus preserves schema 2 maintenance and partial inventory fi
   assert.equal(response.stores[2].coverage, 'partial');
   assert.deepEqual(response.stores[0].maintenance, maintenance);
   assert.equal(response.stores[1].maintenance.next_run_unix_ms, null);
+});
+
+test('fetchInterruptionStats forwards the agent filter alongside the range', async () => {
+  const requested = [];
+  global.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response(JSON.stringify([]), { status: 200 });
+  };
+
+  await fetchInterruptionStats(1000, 2000, 'claude-code');
+  await fetchInterruptionStats(1000, 2000);
+
+  const withAgent = new URL(requested[0]);
+  assert.equal(withAgent.pathname, '/api/interruptions/stats');
+  assert.equal(withAgent.searchParams.get('start_ns'), '1000');
+  assert.equal(withAgent.searchParams.get('end_ns'), '2000');
+  assert.equal(
+    withAgent.searchParams.get('agent_name'),
+    'claude-code',
+    'the tooltip breakdown must use the same agent scope as the badge',
+  );
+
+  const withoutAgent = new URL(requested[1]);
+  assert.equal(
+    withoutAgent.searchParams.get('agent_name'),
+    null,
+    'an omitted agent must not send agent_name',
+  );
 });
 
 test('fetchLatencyMetrics forwards ranges and preserves nullable percentile data', async () => {
@@ -607,4 +636,17 @@ test('fillTokenBuckets passes data through for a degenerate window', () => {
   ];
   // Zero-width range: bucketNs floors to 0 and the data is returned as-is.
   assert.equal(fillTokenBuckets(data, 5, 5, 30), data);
+});
+
+test('formatDurationSecs never renders 60 seconds inside a minute field', () => {
+  const { formatDurationSecs } = require(process.env.AGENTSIGHT_FORMAT_DURATION_BUILD);
+
+  assert.equal(formatDurationSecs(12.34), '12.3s');
+  assert.equal(formatDurationSecs(59.4), '59.4s');
+  // Rounding happened after the minute split before, yielding "60.0s",
+  // "1m 60s" and "59m 60s".
+  assert.equal(formatDurationSecs(59.96), '1m 0s');
+  assert.equal(formatDurationSecs(119.6), '2m 0s');
+  assert.equal(formatDurationSecs(3599.7), '60m 0s');
+  assert.equal(formatDurationSecs(125), '2m 5s');
 });

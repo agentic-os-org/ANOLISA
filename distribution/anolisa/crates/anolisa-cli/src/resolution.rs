@@ -21,6 +21,7 @@ use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::commands::common;
 use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_v2_url};
 
 /// On-disk schema version for repo-side `components-v2.toml`.
@@ -718,7 +719,11 @@ pub(crate) fn load_component_index_from_base(
         result => result,
     }
     .map_err(|err| ComponentIndexError::Fetch {
-        reason: format!("failed to fetch {url}: {err}"),
+        reason: format!(
+            "failed to fetch {}: {}",
+            common::repository_url_label(&url),
+            common::redact_known_urls(&err.to_string(), std::slice::from_ref(&url)),
+        ),
     })?;
     ComponentIndex::load(&downloaded.cached_path)
 }

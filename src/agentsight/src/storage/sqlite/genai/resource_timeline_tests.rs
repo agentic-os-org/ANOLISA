@@ -49,6 +49,43 @@ fn parses_nested_tool_responses() {
 }
 
 #[test]
+fn reads_raw_tool_response_shapes_from_the_input_column() {
+    // The column stores what the capture wrote. The crash-drain path
+    // (`build_pending_from_request`) keeps the request body verbatim, so an
+    // OpenAI chat replay arrives as `role: "tool"` + `tool_call_id` and a
+    // Responses replay as `function_call_output` + `call_id`; neither uses the
+    // parts shape. Missing them dropped the tool_call phase from the derived
+    // timeline, because a call whose response id is never found is reported as
+    // idle time instead.
+    let openai = parse_tool_response_ids(Some(
+        r#"[{"role":"user","content":"list"},{"role":"tool","tool_call_id":"call-1","content":"a.txt"}]"#,
+    ));
+    assert!(
+        openai.contains("call-1"),
+        "an OpenAI tool replay must be paired, got {openai:?}"
+    );
+
+    let responses = parse_tool_response_ids(Some(
+        r#"[{"role":"user","content":"list"},{"type":"function_call_output","call_id":"call-1","output":"a.txt"}]"#,
+    ));
+    assert!(
+        responses.contains("call-1"),
+        "a Responses tool replay must be paired, got {responses:?}"
+    );
+
+    // The shapes that already worked keep working: the parts form written by
+    // the analyzer, and Anthropic's raw block.
+    let nested = parse_tool_response_ids(Some(
+        r#"[{"role":"user","parts":[{"type":"tool_call_response","id":"call-1","response":{}}]}]"#,
+    ));
+    assert!(nested.contains("call-1"));
+    let anthropic = parse_tool_response_ids(Some(
+        r#"[{"type":"tool_result","tool_use_id":"call-1","content":"a.txt"}]"#,
+    ));
+    assert!(anthropic.contains("call-1"));
+}
+
+#[test]
 fn derives_tool_phase_between_matching_calls() {
     let calls = vec![
         SessionCall {

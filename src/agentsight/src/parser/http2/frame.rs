@@ -325,15 +325,22 @@ impl ParsedHttp2Frame {
         let mut length = (first_byte & 0x7F) as usize;
         pos += 1;
 
-        // Check if more length bytes follow (this is a simplification)
-        // In full HPACK, length can be multi-byte
+        // RFC 7541 §5.1: a full 7-bit prefix (0x7F) means the value continues
+        // in the following bytes, seven more bits per byte. The base computed
+        // above is part of the value, so the groups are added, not substituted.
+        // A truncated block — and a hostile chain of continuation bytes — is
+        // handled by stopping at the payload end and by dropping a shift that
+        // has already passed the width of usize, after which the value can only
+        // exceed any payload anyway.
         if length == 0x7F && pos < payload.len() {
-            // Extended length encoding (not common in practice)
-            length = 0;
+            let mut shift = 0u32;
             loop {
-                let b = payload[pos];
+                let Some(&b) = payload.get(pos) else { break };
                 pos += 1;
-                length += (b & 0x7F) as usize;
+                if shift < usize::BITS {
+                    length = length.saturating_add(((b & 0x7F) as usize) << shift);
+                }
+                shift += 7;
                 if b & 0x80 == 0 {
                     break;
                 }
@@ -644,5 +651,36 @@ mod tests {
         let frame = data_frame(payload.into_bytes());
         let rendered = format!("{frame:?}");
         assert!(rendered.contains("你"));
+    }
+
+    /// The extended length is a little-endian base-128 integer, so each
+    /// continuation byte is shifted by seven more bits. Summing the groups
+    /// decoded a 1337-byte header value as 94 bytes and left the rest of the
+    /// block to be parsed from the middle of the value.
+    #[test]
+    fn test_decode_literal_string_extended_length_shifts_each_group() {
+        // 1337 with a 7-bit prefix is 0x7F, 0xBA, 0x09 (RFC 7541 §5.1 example
+        // shape): 127 + (58 << 0) + (9 << 7).
+        let mut payload = vec![0x7f, 0xba, 0x09];
+        payload.extend(std::iter::repeat_n(b'a', 1337));
+
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&payload, 0);
+
+        assert_eq!(value.len(), 1337, "the whole value must be decoded");
+        assert_eq!(consumed, 3 + 1337);
+    }
+
+    /// A literal string whose extended length never terminates must not read
+    /// past the payload. 0xFF = Huffman flag plus the 0x7F extended-length
+    /// prefix; 0x80 is a continuation byte, so the loop keeps looking for the
+    /// next byte after the payload ends. The helper's contract for
+    /// corrupt/truncated input is a lossy result, not a panic — this input is
+    /// reachable from captured bytes (HPACK header blocks are decoded from
+    /// observed traffic).
+    #[test]
+    fn test_decode_literal_string_truncated_extended_length_does_not_panic() {
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&[0xff, 0x80], 0);
+        assert_eq!(value, "");
+        assert_eq!(consumed, 2, "the whole payload is consumed");
     }
 }

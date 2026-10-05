@@ -124,11 +124,10 @@ impl Detector for ConfirmBeforeActStrategy {
         let messages = vec![
             ChatMessage::system(SYSTEM_PROMPT),
             ChatMessage::user(format!(
-                "## 用户各轮原话\n\n{}\n\n\
-                 ## 敏感写操作列表\n\n{}\n\n\
-                 ## 歧义提示\n\n{}\n\n\
-                 判断越权操作与歧义未确认情况。仅返回 JSON。",
-                user_turns_text, ops_text, ambiguity_text
+                "## 用户各轮原话\n\n{user_turns_text}\n\n\
+                 ## 敏感写操作列表\n\n{ops_text}\n\n\
+                 ## 歧义提示\n\n{ambiguity_text}\n\n\
+                 判断越权操作与歧义未确认情况。仅返回 JSON。"
             )),
         ];
 
@@ -137,8 +136,12 @@ impl Detector for ConfirmBeforeActStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:confirm_before_act"))
             .await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                ctx.judgments.record_ok();
+                v
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[confirm_before_act] LLM judgment failed: {e}");
                 return vec![];
             }

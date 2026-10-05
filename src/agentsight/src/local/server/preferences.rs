@@ -6,17 +6,15 @@
 //! macOS, so `source=genai` fails loudly and `source=auto` degrades
 //! straight to `trajectories.db`.
 
-use std::collections::HashSet;
-
 use actix_web::{HttpResponse, Responder, get, web};
 use agentsight_opt::preference::{LlmPreference, analyze_user_turns};
 use agentsight_trajectory_collector::TrajectoryStore;
 
 use super::optimize::OptimizeAppState;
 use crate::preferences::api::{
-    AutoResolution, DEFAULT_TURNS_LIMIT, MAX_TURNS_LIMIT, PreferenceSourceParam, PreferencesQuery,
-    TurnsQuery, cache_get, cache_put, clamp_window_days, merge_llm_preferences, render_markdown,
-    resolve_auto, window_start_ns,
+    AutoResolution, PreferenceSourceParam, PreferencesQuery, TurnsQuery, cache_get, cache_put,
+    clamp_window_days, llm_input_turns, merge_llm_preferences, render_markdown, resolve_auto,
+    select_unique_turns, window_start_ns,
 };
 use crate::preferences::{aggregator, analyze_rows, detector, trajectory_source};
 
@@ -153,7 +151,10 @@ async fn llm_findings(
         .optimize
         .build_client()
         .map_err(|_| "LLM not configured".to_string())?;
-    let turns: Vec<String> = rows.iter().filter_map(|r| r.user_text.clone()).collect();
+    // The trajectory source emits rows newest-first — the order the shared
+    // selection requires — and llm_input_turns answers in prompt order:
+    // most recent last.
+    let turns = llm_input_turns(rows.iter());
     analyze_user_turns(&client, &turns)
         .await
         .map_err(|e| e.to_string())
@@ -205,19 +206,9 @@ pub async fn get_preference_turns(
         Ok(loaded) => loaded,
         Err(resp) => return resp,
     };
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_TURNS_LIMIT)
-        .clamp(1, MAX_TURNS_LIMIT);
-    let mut seen: HashSet<String> = HashSet::new();
-    let turns: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.user_text.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|s| seen.insert(s.clone()))
-        .take(limit)
-        .collect();
+    // The trajectory source emits each document's turns newest-first — the
+    // order the turns contract documents.
+    let turns = select_unique_turns(rows.iter(), query.limit);
     HttpResponse::Ok().json(serde_json::json!({
         "window_days": window_days,
         "source": resolved.as_str(),

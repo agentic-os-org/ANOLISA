@@ -153,6 +153,11 @@ impl SkillFs {
             PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
                 (Some(skill_name.clone()), None)
             }
+            // A Hermes category slot is attributed to the category
+            // itself — without this arm a rejected category-slot
+            // operation would log an anonymous event with no object
+            // to locate it by.
+            PathType::CategoryDir { category } => (Some(category.clone()), None),
             PathType::NestedSkillDir {
                 category,
                 skill_name,

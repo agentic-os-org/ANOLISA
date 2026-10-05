@@ -709,6 +709,24 @@ rule secret:
     }
 
     #[test]
+    fn empty_pattern_literals_are_rejected() {
+        // An empty pattern lowers to a matcher that can never fire (M_EXACT ""
+        // never equals a non-empty runtime path/comm; the engine rejects an
+        // empty M_CONTAINS literal), so a `block`/`kill` clause carrying one
+        // silently installs no enforcement at all. Reject at parse time.
+        for src in [
+            "rule r:\n  block exec \"\" if A\n  because \"x\"\n",
+            "source S = file \"\"\nrule r:\n  block write file \"/x\" if S\n  because \"x\"\n",
+            "rule r:\n  block exec \"git\" if A unless after exec \"\"\n  because \"x\"\n",
+        ] {
+            assert!(
+                compile_str(src).is_err(),
+                "empty pattern literals must be rejected at compile time: {src:?}"
+            );
+        }
+    }
+
+    #[test]
     fn old_label_keyword_is_rejected() {
         assert!(
             compile_str("label AGENT\nrule r:\n  block exec \"git\" if AGENT\n  because \"x\"\n")

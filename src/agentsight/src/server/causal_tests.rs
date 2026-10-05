@@ -623,3 +623,94 @@ fn schema_probe_does_not_create_a_missing_database() {
     assert!(probe_atif_column(&path, "missing-session").is_err());
     assert!(!path.exists());
 }
+
+// ---------------------------------------------------------------------------
+// id_kind gate
+// ---------------------------------------------------------------------------
+
+fn test_app_state() -> actix_web::web::Data<AppState> {
+    use crate::config::ServerAuthConfig;
+    use crate::grader::EvaluationStore;
+    use crate::health::HealthStore;
+    use crate::security::SecurityStore;
+    use std::sync::{Arc, RwLock};
+
+    let auth_config = ServerAuthConfig { enabled: false };
+    let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+        &auth_config,
+        std::path::Path::new("/tmp"),
+    ));
+    actix_web::web::Data::new(AppState {
+        reuse_store: None,
+        reuse_llm_judge_enabled: false,
+        causal_store: None,
+        storage_path: std::path::PathBuf::from(":memory:"),
+        genai_store: None,
+        start_time: std::time::Instant::now(),
+        health_store: Arc::new(RwLock::new(HealthStore::new())),
+        interruption_store: None,
+        evaluation_store: Arc::new(
+            EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+        ),
+        enforcement: None,
+        containment: None,
+        audit_service: Arc::new(agentsight_audit::AuditService::new(
+            SecurityStore::open_in_memory().unwrap().audit_store(),
+        )),
+        security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+        auth,
+        optimize: None,
+        trajectory_store: Arc::new(RwLock::new(None)),
+    })
+}
+
+#[actix_web::test]
+async fn causal_attribution_rejects_unknown_id_kind() {
+    use actix_web::App;
+    use actix_web::http::StatusCode;
+    use actix_web::test as awtest;
+
+    let app = awtest::init_service(
+        App::new()
+            .app_data(test_app_state())
+            .service(run_causal_attribution),
+    )
+    .await;
+
+    let post = |id_kind: Option<&str>| {
+        let mut body = serde_json::json!({
+            "session_id": "0123456789abcdef0123456789abcdef",
+            "complaint": "为什么这一轮没有完成",
+        });
+        if let Some(kind) = id_kind {
+            body["id_kind"] = serde_json::Value::String(kind.to_string());
+        }
+        awtest::TestRequest::post()
+            .uri("/causal-attribution")
+            .set_json(body)
+            .to_request()
+    };
+
+    // A token outside the closed set must not silently attribute the whole
+    // session while the caller believes it asked for one conversation.
+    let resp = awtest::call_service(&app, post(Some("conversatoin"))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = awtest::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_id_kind");
+    assert_eq!(
+        body["valid_id_kinds"],
+        serde_json::json!(["session", "conversation"])
+    );
+
+    // Both real scopes and the omitted form pass this gate. They stop at the
+    // optimization subsystem this fixture leaves unconfigured; the point is
+    // that the gate does not turn them away.
+    for request in [
+        post(Some("session")),
+        post(Some("conversation")),
+        post(None),
+    ] {
+        let resp = awtest::call_service(&app, request).await;
+        assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}

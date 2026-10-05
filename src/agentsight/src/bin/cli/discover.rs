@@ -3,8 +3,21 @@
 //! This module provides the `discover` subcommand which scans the system
 //! for running AI agent processes.
 
-use agentsight::{AgentScanner, CmdlineGlobMatcher, ProcessContext};
+use agentsight::{AgentInfo, AgentScanner, CmdlineGlobMatcher, DiscoveredAgent, ProcessContext};
 use structopt::StructOpt;
+
+/// A known-agent rule and the PIDs it currently matches.
+///
+/// The flattened [`AgentInfo`] keeps every metadata field existing consumers
+/// read, and `matched_pids` carries what `--list-known` documents and its text
+/// mode prints: the `--json` mode used to omit it, so one command answered two
+/// different questions depending on the format.
+#[derive(serde::Serialize)]
+struct KnownAgentEntry<'a> {
+    #[serde(flatten)]
+    info: &'a AgentInfo,
+    matched_pids: Vec<u32>,
+}
 
 /// Discover subcommand for finding AI agents running on the system
 #[derive(Debug, StructOpt, Clone)]
@@ -79,8 +92,14 @@ impl DiscoverCommand {
         let running_agents = scanner.scan();
 
         if self.json {
-            let infos: Vec<_> = matchers.iter().map(|m| m.info().clone()).collect();
-            super::print_json(&infos);
+            let entries: Vec<KnownAgentEntry> = matchers
+                .iter()
+                .map(|matcher| KnownAgentEntry {
+                    info: matcher.info(),
+                    matched_pids: Self::matched_pids(matcher, &running_agents),
+                })
+                .collect();
+            super::print_json(&entries);
             return;
         }
 
@@ -90,17 +109,9 @@ impl DiscoverCommand {
 
         for matcher in &matchers {
             let agent = matcher.info();
-            let matched_pids: Vec<String> = running_agents
-                .iter()
-                .filter(|running_agent| {
-                    let ctx = ProcessContext {
-                        comm: String::new(),
-                        cmdline_args: running_agent.cmdline_args.clone(),
-                        exe_path: running_agent.exe_path.clone(),
-                    };
-                    matcher.matches(&ctx)
-                })
-                .map(|running_agent| running_agent.pid.to_string())
+            let matched_pids: Vec<String> = Self::matched_pids(matcher, &running_agents)
+                .into_iter()
+                .map(|pid| pid.to_string())
                 .collect();
             let running_pids = if matched_pids.is_empty() {
                 "无".to_string()
@@ -114,6 +125,26 @@ impl DiscoverCommand {
             println!("    {}", agent.description);
             println!();
         }
+    }
+
+    /// PIDs of the running processes this known-agent rule currently matches.
+    ///
+    /// Both output modes report the rule's metadata; only this tells a caller
+    /// which processes it matched, and the `--json` mode used to drop it even
+    /// though the flag documents itself as "show currently matched PIDs".
+    fn matched_pids(matcher: &CmdlineGlobMatcher, running_agents: &[DiscoveredAgent]) -> Vec<u32> {
+        running_agents
+            .iter()
+            .filter(|running_agent| {
+                let ctx = ProcessContext {
+                    comm: String::new(),
+                    cmdline_args: running_agent.cmdline_args.clone(),
+                    exe_path: running_agent.exe_path.clone(),
+                };
+                matcher.matches(&ctx)
+            })
+            .map(|running_agent| running_agent.pid)
+            .collect()
     }
 
     /// Scan the system for running AI agents

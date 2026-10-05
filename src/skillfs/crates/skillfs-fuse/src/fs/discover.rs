@@ -5,6 +5,8 @@
 //! (when `skillfs-views.toml` is present) or falls back to a flat
 //! listing of every skill in the store.
 
+use std::collections::HashSet;
+
 use super::SkillFs;
 use crate::path::find_common_path_prefix;
 
@@ -16,6 +18,11 @@ impl SkillFs {
     /// By default, `source_path` points to each physical `SKILL.md`. A
     /// configured reader-visible root instead maps every path into the FUSE
     /// view so a reader in another mount namespace can open it directly.
+    ///
+    /// A view that names the same skill twice collapses to one entry —
+    /// the same set semantics `SkillStore::split_primary` applies to the
+    /// `/skills` listing — so neither the table nor the frontmatter
+    /// description repeats it.
     ///
     /// When no views config is present, falls back to a simple listing of all
     /// skills in the store.
@@ -29,10 +36,13 @@ impl SkillFs {
                 return self.simple_discover_md(&store);
             }
 
-            // Collect all skill names in secondary views (for frontmatter description).
+            // Collect all skill names in secondary views (for frontmatter
+            // description), collapsing duplicates within and across views.
+            let mut seen_hidden: HashSet<&str> = HashSet::new();
             let hidden_names: Vec<&str> = secondary_views
                 .iter()
                 .flat_map(|v| v.skills.iter().map(|s| s.as_str()))
+                .filter(|name| seen_hidden.insert(name))
                 .filter(|name| store.get(name).is_some())
                 .collect();
 
@@ -81,7 +91,12 @@ Use `read_file` on any `source_path` to read the skill and learn how to use it.\
                 body.push_str("| name | description | source_path |\n");
                 body.push_str("|------|-------------|-------------|\n");
 
-                for skill_name in &view.skills {
+                let mut seen_in_view: HashSet<&str> = HashSet::new();
+                for skill_name in view
+                    .skills
+                    .iter()
+                    .filter(|name| seen_in_view.insert(name.as_str()))
+                {
                     if let Some(entry) = store.get(skill_name.as_str()) {
                         let desc = entry
                             .metadata
@@ -182,24 +197,12 @@ mod tests {
         .expect("write SKILL.md");
     }
 
-    fn discover_fixture() -> (tempfile::TempDir, SkillFs) {
+    fn discover_fixture_with_views(views: &str) -> (tempfile::TempDir, SkillFs) {
         let source = tempfile::tempdir().expect("source tempdir");
         write_skill(source.path(), "primary");
         write_skill(source.path(), "reserve");
-        std::fs::write(
-            source.path().join("skillfs-views.toml"),
-            r#"[[view]]
-name = "default"
-default = true
-skills = ["primary"]
-
-[[view]]
-name = "reserve"
-default = false
-skills = ["reserve"]
-"#,
-        )
-        .expect("write views config");
+        std::fs::write(source.path().join("skillfs-views.toml"), views)
+            .expect("write views config");
 
         let mut store = SkillStore::new();
         let errors = store.load_from_directory(source.path(), &ParseConfig::default());
@@ -212,6 +215,55 @@ skills = ["reserve"]
             false,
         );
         (source, fs)
+    }
+
+    const DEFAULT_VIEWS: &str = r#"[[view]]
+name = "default"
+default = true
+skills = ["primary"]
+
+[[view]]
+name = "reserve"
+default = false
+skills = ["reserve"]
+"#;
+
+    fn discover_fixture() -> (tempfile::TempDir, SkillFs) {
+        discover_fixture_with_views(DEFAULT_VIEWS)
+    }
+
+    #[test]
+    fn discover_lists_a_duplicate_view_entry_once() {
+        // A view may name the same skill twice (hand-edited config). The
+        // /skills path collapses duplicates in `SkillStore::split_primary`;
+        // the discover table and its frontmatter must apply the same set
+        // semantics.
+        let (_source, fs) = discover_fixture_with_views(
+            r#"[[view]]
+name = "default"
+default = true
+skills = ["primary"]
+
+[[view]]
+name = "reserve"
+default = false
+skills = ["reserve", "reserve"]
+"#,
+        );
+        let content = fs.get_skill_discover_content();
+        assert_eq!(
+            content.matches("| reserve | Test skill. |").count(),
+            1,
+            "a duplicate secondary-view entry must render one row:\n{content}"
+        );
+        assert!(
+            content.contains("description: 'Hidden skills: reserve'"),
+            "frontmatter must describe the hidden skill set once:\n{content}"
+        );
+        assert!(
+            !content.contains("reserve, reserve"),
+            "the skill must not repeat in the frontmatter description:\n{content}"
+        );
     }
 
     #[test]

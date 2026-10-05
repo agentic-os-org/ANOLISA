@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import gzip
 import json
+import math
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -54,19 +55,34 @@ def meets(actual: float | bool, expected: float | bool) -> bool:
     return not isinstance(actual, bool) and actual >= expected
 
 
-def timestamp(value: Any) -> float | None:
-    """Parse Unix or RFC 3339 timestamps emitted by the metric collectors."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    if not isinstance(value, str) or not value:
+def finite_float(value: Any) -> float | None:
+    """Convert a sample value to a finite float, skipping unusable data."""
+    if isinstance(value, bool):
         return None
     try:
-        return float(value)
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def timestamp(value: Any) -> float | None:
+    """Parse a finite Unix or RFC 3339 timestamp from the metric collectors."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return finite_float(value)
+    if not isinstance(value, str) or not value:
+        return None
+    result = finite_float(value)
+    if result is not None:
+        return result
+    try:
+        return finite_float(
+            datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        )
     except ValueError:
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return None
+        return None
 
 
 def continuous_recovery(
@@ -108,10 +124,7 @@ def resource_samples(run_path: Path, field: str) -> list[tuple[float, float]]:
     with path.open(encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             sample_time = timestamp(row.get("timestamp"))
-            try:
-                value = float(row[field]) if row.get(field) else None
-            except (KeyError, ValueError):
-                value = None
+            value = finite_float(row.get(field))
             if sample_time is not None and value is not None:
                 samples.append((sample_time, value))
     return samples
@@ -133,13 +146,14 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            data = item.get("data", {}) if isinstance(item, dict) else {}
-            sample_time = timestamp(data.get("time"))
-            try:
-                value = float(data.get("value"))
-            except (TypeError, ValueError):
+            if not isinstance(item, dict):
                 continue
-            if sample_time is None:
+            data = item.get("data", {})
+            if not isinstance(data, dict):
+                continue
+            sample_time = timestamp(data.get("time"))
+            value = finite_float(data.get("value"))
+            if sample_time is None or value is None:
                 continue
             second = int(sample_time)
             if item.get("metric") == "benchmark_requests":
@@ -277,12 +291,33 @@ def fault_outcome(
             "failed": [],
         }
     value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        return {
+            "verdict": "INCONCLUSIVE",
+            "missing": ["fault-results.json"],
+            "failed": [],
+        }
     outcomes = value.get("outcomes", {})
-    missing = [f"case:{name}" for name in sorted(FAULT_CASES - set(outcomes))]
+    if not isinstance(outcomes, dict):
+        outcomes = {}
+    usable: dict[str, int] = {}
+    malformed: set[str] = set()
+    for name in FAULT_CASES:
+        entry = outcomes.get(name)
+        if isinstance(entry, dict) and all(
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= 0
+            for count in entry.values()
+        ):
+            usable[name] = sum(entry.values())
+        else:
+            malformed.add(name)
+    missing = [f"case:{name}" for name in sorted(malformed)]
     failed = [
         f"count:{name}"
-        for name in sorted(FAULT_CASES & set(outcomes))
-        if sum(outcomes[name].values()) != settings["repetitions_per_case"]
+        for name in sorted(usable)
+        if usable[name] != settings["repetitions_per_case"]
     ]
     for name in ("server_healthy_after", "process_alive_before", "process_alive_after"):
         if value.get(name) is not True:

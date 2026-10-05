@@ -118,6 +118,78 @@ fn triage_labels_every_trajectory_and_reports_the_split() {
 }
 
 #[test]
+fn triage_reports_truncation_only_when_work_was_left_out() {
+    // `truncated` tells the caller to continue. It must mean "more rows still
+    // need triage", not merely "more rows exist": already-fresh rows are
+    // walked over without consuming the window, so their presence alone is
+    // not truncation.
+    let (trajectories, labels) = stores("truncation");
+    for id in ["s1", "s2", "s3", "s4"] {
+        insert(&trajectories, id, &substantive_atif());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let query = TriageQuery {
+        limit: Some(2),
+        ..TriageQuery::default()
+    };
+    let config = TriageConfig::default();
+
+    let first = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(first.examined, 2);
+    assert_eq!(first.labelled, 2);
+    assert!(first.truncated, "two rows still need triage");
+
+    // The repeat run picks up exactly the rows left behind and then stops
+    // reporting truncation, even though the store still holds more rows than
+    // the limit.
+    let second = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(second.labelled, 2);
+    assert_eq!(second.unchanged, 2);
+    assert_eq!(second.examined, 4);
+    assert!(!second.truncated, "the backlog has been worked off");
+}
+
+#[test]
+fn repeated_runs_reach_trajectories_beyond_the_first_page() {
+    // The batch window used to be the newest `limit` rows whatever their
+    // state, so a repeat run re-examined the same already-labelled page,
+    // counted it `unchanged` and returned `truncated` again. A trajectory
+    // older than that page could never be labelled, and therefore never
+    // appeared under `?label=` filtering.
+    let (trajectories, labels) = stores("continue");
+    insert(&trajectories, "older", &substantive_atif());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    insert(&trajectories, "middle", &substantive_atif());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    insert(&trajectories, "newest", &substantive_atif());
+    let query = TriageQuery {
+        limit: Some(2),
+        ..TriageQuery::default()
+    };
+    let config = TriageConfig::default();
+
+    let first = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert_eq!(first.labelled, 2, "the newest page is labelled");
+    assert!(first.truncated, "the oldest row did not fit the window");
+    assert!(
+        labels.get_label("older").unwrap().is_none(),
+        "precondition: the third row starts unlabelled"
+    );
+
+    let second = run_triage(Some(&trajectories), &labels, &query, &config).unwrap();
+    assert!(
+        labels.get_label("older").unwrap().is_some(),
+        "a repeat run must reach past the already-labelled page"
+    );
+    assert_eq!(second.labelled, 1);
+    assert_eq!(second.unchanged, 2);
+    assert!(
+        !second.truncated,
+        "with every row labelled there is nothing left to continue"
+    );
+}
+
+#[test]
 fn a_second_run_over_unchanged_content_relabels_nothing() {
     // What makes the endpoint safe to poll: identical bytes under identical
     // rules cannot produce a different verdict, so the work is skipped.

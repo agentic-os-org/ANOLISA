@@ -12,11 +12,20 @@ impl SSEParser {
         let mut result = SSEEvents::new();
         let mut current_event = SSEEvent::new("");
         let mut data_lines: Vec<String> = Vec::new();
-        let lines = buffer.lines().peekable();
         let mut consumed_len = 0;
 
-        for line in lines {
-            consumed_len += line.len() + 1; // +1 for newline
+        // Split inclusive so CRLF lines are measured by their real byte
+        // length: `str::lines()` strips the `\r`, and adding only 1 for it
+        // undercounts every CRLF line, which pushed the remaining-slice start
+        // into the middle of a multi-byte character (panicking) and dropped
+        // the wrong number of unconsumed bytes. A trailing line without a
+        // newline is never consumed, so it stays in `remaining` intact.
+        for raw in buffer.split_inclusive('\n') {
+            let Some(raw_line) = raw.strip_suffix('\n') else {
+                break;
+            };
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            consumed_len += raw.len();
 
             if line.is_empty() {
                 // Empty line terminates the event
@@ -55,13 +64,10 @@ impl SSEParser {
             }
         }
 
-        // Check if we have a complete event at the end (ends with double newline)
-        result.remaining = if buffer.ends_with("\n\n") || buffer.ends_with("\r\n\r\n") {
-            String::new()
-        } else {
-            // Return unconsumed data
-            buffer[consumed_len.saturating_sub(1)..].to_string()
-        };
+        // `consumed_len` only advances past complete (newline-terminated)
+        // lines, so the split is always on a char boundary and any trailing
+        // partial line is returned verbatim.
+        result.remaining = buffer[consumed_len..].to_string();
         result.consumed_bytes = consumed_len;
 
         result
@@ -502,6 +508,39 @@ mod tests {
         let result = SSEParser::parse_stream("data: partial");
         // No double newline means no complete event
         assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_crlf_multibyte_tail() {
+        // CRLF lines must be counted by their full byte length. The old
+        // `line.len() + 1` accounting dropped the `\r`, so the remaining
+        // slice started one byte early per CRLF line and landed inside the
+        // final multi-byte character ("中" at bytes 19..22 -> byte 21).
+        let buffer = "data:a\r\ndata:中中中";
+        let result = SSEParser::parse_stream(buffer);
+        assert_eq!(result.len(), 0);
+        assert_eq!(result.remaining, "data:中中中");
+        assert_eq!(result.consumed_bytes, "data:a\r\n".len());
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_crlf_consumed_bytes() {
+        let buffer = "data: one\r\n\r\ndata: partial";
+        let result = SSEParser::parse_stream(buffer);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.events[0].data, "one");
+        assert_eq!(result.remaining, "data: partial");
+        assert_eq!(result.consumed_bytes, "data: one\r\n\r\n".len());
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_trailing_partial_line_returned() {
+        // LF accounting is unchanged: complete lines are consumed, the
+        // unterminated tail is handed back byte-for-byte.
+        let result = SSEParser::parse_stream("data: a\ndata: b");
+        assert_eq!(result.len(), 0);
+        assert_eq!(result.remaining, "data: b");
+        assert_eq!(result.consumed_bytes, "data: a\n".len());
     }
 
     #[test]

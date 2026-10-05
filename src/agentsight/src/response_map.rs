@@ -200,8 +200,12 @@ impl ResponseSessionMapper {
         // Strip .jsonl suffix
         let stem = basename.strip_suffix(".jsonl")?;
 
-        // Plain `<UUID>.jsonl` (OpenClaw / Cosh / Claude Code)
-        if stem.len() == 36 {
+        // Plain `<UUID>.jsonl` (OpenClaw / Cosh / Claude Code). The UUID shape
+        // is required to mirror the BPF-side filter, whose strict branch
+        // validates `is_uuid`: without the check here, any 36-char `.jsonl`
+        // basename that reaches userspace is stored verbatim as a session id
+        // and poisons both the response-id and the pid mapping.
+        if stem.len() == 36 && Self::is_uuid(stem) {
             return Some(stem.to_string());
         }
 
@@ -311,6 +315,50 @@ mod tests {
     #[test]
     fn test_extract_session_id_wrong_length() {
         assert!(ResponseSessionMapper::extract_session_id("short.jsonl").is_none());
+    }
+
+    #[test]
+    fn test_extract_session_id_rejects_non_uuid_stem() {
+        // A 36-char stem without the UUID shape must not be taken for a
+        // session id: the BPF filter admits `rollout-` prefixed files without
+        // checking suffixes or shape (the verifier rejects variable-length
+        // checks), and this is exactly the shape that can slip through there.
+        assert!(
+            ResponseSessionMapper::extract_session_id("rollout-2026-06-24T20-08-10-abcdefgh.jsonl")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_rejects_plain_non_uuid_stem() {
+        // 36 chars, no `rollout-` prefix: still not a session file.
+        assert!(
+            ResponseSessionMapper::extract_session_id("agent-session-log-2026-10-03-1234567")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_process_filewrite_ignores_non_uuid_stem_files() {
+        // A non-UUID `.jsonl` write that reached userspace must poison
+        // neither mapping: neither the response ids found in its buffer nor
+        // the writing pid may be bound to a stem that is not a session id.
+        let mut mapper = ResponseSessionMapper::new();
+        let event = FileWriteEvent {
+            pid: 4321,
+            tid: 4321,
+            uid: 1000,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "codex".to_string(),
+            filename: "rollout-2026-06-24T20-08-10-abcdefgh.jsonl".to_string(),
+            cgroup_id: 0,
+            buf: br#"{"responseId":"chatcmpl-poison"}"#.to_vec(),
+        };
+        mapper.process_filewrite(&event);
+
+        assert_eq!(mapper.get_session_by_response_id("chatcmpl-poison"), None);
+        assert_eq!(mapper.get_session_by_pid(4321), None);
     }
 
     #[test]

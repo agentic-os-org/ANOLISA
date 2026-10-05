@@ -740,6 +740,75 @@ fn stats_summary() {
 }
 
 #[test]
+fn write_only_compression_reclaims_expired_stash_payloads() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    let compress = |payload: &str| {
+        let input = serde_json::json!({ "text": payload }).to_string();
+        let mut child = fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .args(["compress-response", "--truncate-strings-at", "120"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "compression failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        extract_hash(&String::from_utf8_lossy(&output.stdout))
+            .expect("compression must emit a recovery instruction")
+            .to_string()
+    };
+
+    let old_key = compress(&format!("old session {}", "x".repeat(1024)));
+    let conn = rusqlite::Connection::open(&stash_db).unwrap();
+    conn.execute("UPDATE stash SET expires_at = 0", []).unwrap();
+    drop(conn);
+
+    let current_payload = format!("current session {}", "y".repeat(1024));
+    let current_key = compress(&current_payload);
+
+    // A retrieve would purge the old row and conceal this regression. Inspect
+    // durable state after two separate compression processes instead.
+    let conn = rusqlite::Connection::open(&stash_db).unwrap();
+    let rows: usize = conn
+        .query_row("SELECT COUNT(*) FROM stash", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "write-only compression retained the expired payload"
+    );
+    let (retained_key, retained): (String, String) = conn
+        .query_row("SELECT hash, payload FROM stash", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(retained_key, current_key);
+    assert_eq!(retained, current_payload);
+    let store = SqliteStore::new(&stash_db).unwrap();
+    assert_eq!(store.retrieve(&current_key).unwrap(), Some(current_payload));
+    assert_eq!(store.retrieve(&old_key).unwrap(), None);
+}
+
+#[test]
 fn retrieve_missing_hash() {
     let output = tokenless_bin()
         .args(["retrieve", "000000000000000000000000"])

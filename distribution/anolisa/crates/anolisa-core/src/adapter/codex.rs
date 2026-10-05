@@ -471,6 +471,17 @@ impl FrameworkDriver for CodexDriver {
             ));
         }
 
+        // Codex keeps hook trust after the plugin is gone; drop what enable
+        // wrote so a later bundle with the same hooks is not pre-trusted.
+        match revoke_hook_trust(ctx, &layout) {
+            Ok(true) => messages.push(format!("revoked codex hook trust for '{plugin_ref}'")),
+            Ok(false) => {}
+            Err(err) => {
+                cleanup_complete = false;
+                messages.push(format!("codex hook trust revocation failed: {err}"));
+            }
+        }
+
         match ctx.ops.remove_tree(&layout.root) {
             Ok(true) => messages.push(format!(
                 "removed codex marketplace directory {}",
@@ -618,6 +629,25 @@ fn establish_hook_trust(ctx: &DriverCtx, layout: &MarketplaceLayout) -> Result<(
         state,
     ))?;
     hook_trust::confirm_write(&program, &output)
+}
+
+/// Remove this plugin's user-layer hook trust; `false` when none was recorded.
+fn revoke_hook_trust(ctx: &DriverCtx, layout: &MarketplaceLayout) -> Result<bool, AdapterError> {
+    let program = codex_bin();
+    let output = ctx
+        .ops
+        .run_framework_rpc(hook_trust::read_session(program.clone(), CLI_TIMEOUT))?;
+    let Some(revocation) = hook_trust::plugin_revocation(&program, &output, &layout.plugin_ref())?
+    else {
+        return Ok(false);
+    };
+    let output = ctx.ops.run_framework_rpc(hook_trust::revoke_session(
+        program.clone(),
+        CLI_TIMEOUT,
+        revocation,
+    ))?;
+    hook_trust::confirm_write(&program, &output)?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

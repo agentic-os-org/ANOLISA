@@ -26,70 +26,77 @@ RUNTIME_ERROR_PATTERNS = {
 
 @dataclass(frozen=True)
 class LogPosition:
-    """Identity and bounded pre-run tail used to verify log continuity."""
+    """Bounded identity and boundary evidence for an append-only log interval."""
 
-    offset: int
     device: int
     inode: int
-    anchor: bytes
+    size: int
+    tail: bytes
 
 
 def log_position(path: Path | None) -> LogPosition | None:
-    """Snapshot the opened runtime log, including a bounded continuity anchor."""
+    """Snapshot the opened log identity, size, and at most 64 boundary bytes."""
     if path is None:
         return None
     try:
         with path.open("rb") as handle:
-            metadata = os.fstat(handle.fileno())
-            handle.seek(max(0, metadata.st_size - 4096))
-            anchor = handle.read(min(metadata.st_size, 4096))
-            if len(anchor) != min(metadata.st_size, 4096):
+            stat = os.fstat(handle.fileno())
+            offset = max(0, stat.st_size - 64)
+            handle.seek(offset)
+            tail = handle.read(stat.st_size - offset)
+            if len(tail) != stat.st_size - offset:
                 return None
-            return LogPosition(
-                metadata.st_size, metadata.st_dev, metadata.st_ino, anchor
-            )
+            return LogPosition(stat.st_dev, stat.st_ino, stat.st_size, tail)
     except OSError:
         return None
 
 
 def capture_runtime_log(
-    source: Path | None, start: LogPosition | None, destination: Path
+    source: Path | None, start: LogPosition | int | None, destination: Path
 ) -> tuple[bool | None, list[str]]:
-    """Capture available diagnostics; only continuous evidence can certify clean."""
+    """Copy observed messages; lost log intervals cannot prove a clean run."""
     if source is None or start is None:
         return None, []
+    complete = True
     try:
         with source.open("rb") as handle:
-            metadata = os.fstat(handle.fileno())
-            continuous = (
-                metadata.st_dev == start.device
-                and metadata.st_ino == start.inode
-                and metadata.st_size >= start.offset
-            )
-            if continuous:
-                # Size and inode alone miss copytruncate followed by regrowth.
-                handle.seek(start.offset - len(start.anchor))
-                continuous = handle.read(len(start.anchor)) == start.anchor
-            handle.seek(start.offset if continuous else 0)
+            stat = os.fstat(handle.fileno())
+            if isinstance(start, LogPosition):
+                complete = (stat.st_dev, stat.st_ino) == (
+                    start.device,
+                    start.inode,
+                ) and stat.st_size >= start.size
+                if complete:
+                    handle.seek(start.size - len(start.tail))
+                    complete = handle.read(len(start.tail)) == start.tail
+                handle.seek(start.size if complete else 0)
+            elif stat.st_size >= start:
+                handle.seek(start)
+            else:
+                complete = False
             payload = handle.read()
-            if continuous:
-                handle.seek(start.offset - len(start.anchor))
-                continuous = (
-                    os.fstat(handle.fileno()).st_size >= start.offset
-                    and handle.read(len(start.anchor)) == start.anchor
-                )
-                if not continuous:
-                    handle.seek(0)
-                    payload += b"\n" + handle.read()
+            if complete:
+                after = os.fstat(handle.fileno())
+                boundary = start.size if isinstance(start, LogPosition) else start
+                complete = after.st_size >= max(boundary, handle.tell())
+                if complete and isinstance(start, LogPosition):
+                    handle.seek(start.size - len(start.tail))
+                    complete = handle.read(len(start.tail)) == start.tail
+                if not complete:
+                    # Copytruncate can leave new diagnostics before the old offset.
+                    try:
+                        handle.seek(0)
+                        payload += b"\n" + handle.read()
+                    except OSError:
+                        pass
             try:
                 current = source.stat()
             except OSError:
-                continuous = False
+                complete = False
             else:
-                if not os.path.samestat(metadata, current):
-                    continuous = False
-                    # Rotation can race with open/read. Preserve diagnostics
-                    # from one replacement without chasing an unbounded stream.
+                if (current.st_dev, current.st_ino) != (stat.st_dev, stat.st_ino):
+                    complete = False
+                    # Preserve one replacement without chasing ongoing rotation.
                     try:
                         payload += b"\n" + source.read_bytes()
                     except OSError:
@@ -102,10 +109,7 @@ def capture_runtime_log(
     errors = [
         name for name, pattern in RUNTIME_ERROR_PATTERNS.items() if pattern.search(text)
     ]
-    if errors:
-        return False, errors
-    # A replaced or truncated log may have lost failures from this interval.
-    return (True if continuous else None), []
+    return (False if errors else True if complete else None), errors
 
 
 def process_metadata(pid: int) -> dict[str, Any]:

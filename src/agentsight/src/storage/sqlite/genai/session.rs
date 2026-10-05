@@ -87,7 +87,8 @@ impl GenAISqliteStore {
                 "), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
                     MAX(model)               AS model,
-                    MAX(agent_name)          AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name)) AS agent_name,
                     (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
                       WHERE g2.session_id = g1.session_id
                         AND g2.event_type = 'llm_call'
@@ -147,7 +148,8 @@ impl GenAISqliteStore {
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT session_id,
-                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name))       AS agent_name,
                     COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)   AS total_input,
@@ -157,14 +159,15 @@ impl GenAISqliteStore {
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND agent_name = ?3
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE
              GROUP BY session_id
              ORDER BY MAX(start_timestamp_ns) DESC"
             )
         } else {
             concat!(
                 "SELECT session_id,
-                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name))       AS agent_name,
                     COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)   AS total_input,
@@ -216,7 +219,8 @@ impl GenAISqliteStore {
 
         let sql = concat!(
             "SELECT session_id,
-                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(MAX(agent_name),
+                             MAX(process_name))       AS agent_name,
                     COALESCE(SUM(",
             billed_input_col!(),
             "), 0)   AS total_input,
@@ -297,13 +301,18 @@ impl GenAISqliteStore {
                        ORDER BY start_timestamp_ns ASC";
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map(params![sid], |row| {
-                let call_id: String = row.get(0)?;
+                // `call_id` is nullable in the schema; a NULL (only producible
+                // by a foreign writer) must not error the whole map.
+                let call_id: Option<String> = row.get(0)?;
                 let tool_call_ids: Option<String> = row.get(1)?;
                 Ok((call_id, tool_call_ids))
             })?;
 
             for (idx, row) in rows.enumerate() {
                 let (call_id, tool_call_ids_json) = row?;
+                // A malformed row with a NULL call_id has no key to map, so
+                // skip it instead of failing every session's turn lookup.
+                let Some(call_id) = call_id else { continue };
                 let turn = idx + 1; // 1-based
                 let session_id = sid.to_string();
 
@@ -369,7 +378,14 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            AND g2.start_timestamp_ns BETWEEN ?2 AND ?3
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -392,7 +408,14 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            AND g2.start_timestamp_ns >= ?2
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -415,7 +438,14 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            AND g2.start_timestamp_ns <= ?2
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -438,7 +468,13 @@ impl GenAISqliteStore {
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
                         MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
+(SELECT g2.user_query FROM genai_events g2
+                          WHERE g2.event_type = 'llm_call'
+                            AND g2.conversation_id = genai_events.conversation_id
+                            AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                            {call_kind_filter}
+                          ORDER BY g2.start_timestamp_ns ASC
+                          LIMIT 1) AS user_query
                  FROM genai_events
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
@@ -485,7 +521,11 @@ impl GenAISqliteStore {
         Ok(rows)
     }
 
-    /// List all distinct agent_name values observed in the given time window.
+    /// List the distinct agent labels observed in the given time window,
+    /// merging case variants of one agent into a single entry (the filter
+    /// consumers pass to every other agent-scoped query, which all match
+    /// case-insensitively). The reported spelling is the group's `MIN`, the
+    /// same stable-spelling rule `get_agent_token_summary` uses.
     pub fn list_agent_names(
         &self,
         start_ns: i64,
@@ -493,11 +533,12 @@ impl GenAISqliteStore {
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT agent_name
+            "SELECT MIN(agent_name) AS agent_name
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND agent_name IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
+             GROUP BY agent_name COLLATE NOCASE
              ORDER BY agent_name ASC",
         )?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| row.get::<_, String>(0))?;

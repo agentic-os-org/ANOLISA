@@ -355,13 +355,11 @@ pub(crate) fn build_explanation(
 ) -> String {
     if category == "mcp_response" {
         format!(
-            "MCP Response Compression: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "MCP Response Compression: original {before_tokens} tokens → {after_tokens} tokens, ratio {compression_ratio:.1}%. The following {compounding_turns} LLM calls benefit, compounding to {compounded} tokens saved."
         )
     } else {
         format!(
-            "Tool Output Optimization: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
-            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+            "Tool Output Optimization: original {before_tokens} tokens → {after_tokens} tokens, ratio {compression_ratio:.1}%. The following {compounding_turns} LLM calls benefit, compounding to {compounded} tokens saved."
         )
     }
 }
@@ -420,7 +418,7 @@ pub(crate) fn generate_optimization_tips(
     if zero_savings_sessions > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: format!("Found {} unoptimized sessions", zero_savings_sessions),
+            title: format!("Found {zero_savings_sessions} unoptimized sessions"),
             description: "Some sessions have high consumption but no optimization records; the corresponding agents may not have tokenless enabled or make few tool calls. Check the agent configuration for these sessions.".to_string(),
         });
     }
@@ -459,10 +457,18 @@ pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
 ) -> impl Responder {
+    if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match super::handlers::start_or_default(
+        query.start_ns,
+        end_ns,
+        super::handlers::DEFAULT_WINDOW_NS,
+    ) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let agent_name = query.agent_name.as_deref();
 
     // Step 1: Query sessions from genai_events.db
@@ -526,6 +532,19 @@ pub async fn get_token_savings(
     for session in &sessions {
         let total_tokens = session.total_input_tokens + session.total_output_tokens;
         let request_count = session.request_count;
+        // `request_count` counts only the calls inside the queried window,
+        // while `turn_indices` numbers every call of the session. The
+        // compounding comment below defines M as the SESSION's total turns
+        // (the per-session endpoint already pairs those two), so derive M
+        // from the same session-global map instead of mixing scopes — a tool
+        // invoked at turn 1 of 3 used to compound for (2-1)=1 turn when only
+        // the last two calls were in the window.
+        let session_total_turns = turn_indices
+            .values()
+            .filter(|info| info.session_id == session.session_id)
+            .map(|info| info.turn_index as i64)
+            .max()
+            .unwrap_or(request_count);
         let mut session_saved: i64 = 0;
         let mut session_compounded_saved: i64 = 0;
         let mut session_tool_saved: i64 = 0;
@@ -548,7 +567,7 @@ pub async fn get_token_savings(
                     .get(&row.tool_use_id)
                     .map(|info| info.turn_index)
                     .unwrap_or(1) as i64;
-                let compounding_turns = (request_count - turn_index).max(1);
+                let compounding_turns = (session_total_turns - turn_index).max(1);
                 let compounded = saved * compounding_turns;
 
                 if category == "mcp_response" {
@@ -1016,6 +1035,36 @@ mod tests {
 
     // ─── Integration tests for handlers ───────────────────────────────────
 
+    #[actix_web::test]
+    async fn test_token_savings_rejects_an_inverted_window() {
+        // Every sibling window endpoint rejects `start_ns > end_ns` with 400.
+        // This one answered an empty 200 instead, which a caller reads as "no
+        // savings in that range". No HOME juggling: the guard runs before the
+        // stats store is touched.
+        let tmp = std::env::temp_dir().join(format!("agentsight_inv_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=2000&end_ns=1000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected"
+        );
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[actix_web::test]
     async fn test_get_token_savings_no_stats_db() {
@@ -1050,6 +1099,71 @@ mod tests {
         assert!(!body["sessions"].as_array().unwrap().is_empty());
 
         // Restore HOME to avoid polluting other tests
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Add a third LLM call to the fixture session: turn 3, no tool calls.
+    fn add_third_call(db_path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+             VALUES ('llm_call', 'sess-1', 'call-3', 'test-agent', 'gpt-4', 600, 300, 300000000, '{}', '[]')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn test_savings_compounding_uses_session_turns_in_a_window() {
+        // Window covers only the session's last two calls. tc-1 was invoked
+        // on turn 1 of 3, so its shortened output rides along in turns 2 and
+        // 3: compounding must be 2, not the window-scoped (2 - 1) = 1.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_window_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        add_third_call(&db_path);
+        let _stats_path = setup_stats_db(&tmp);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=150000000&end_ns=300000000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+
+        let items = body["sessions"][0]["optimization_items"]
+            .as_array()
+            .expect("optimization items");
+        let tc1 = items
+            .iter()
+            .find(|item| item["id"] == "tc-1")
+            .expect("tc-1 item");
+        assert_eq!(tc1["saved_tokens"], 1500);
+        assert_eq!(
+            tc1["compounding_turns"], 2,
+            "turn 1 of a 3-turn session compounds over turns 2 and 3"
+        );
+        assert_eq!(tc1["compounded_saved"], 3000);
+
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },

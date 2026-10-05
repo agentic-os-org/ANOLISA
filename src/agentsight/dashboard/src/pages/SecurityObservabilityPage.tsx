@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DateTimePicker } from '../components/DateTimePicker';
 import {
   fetchSecurityCountBy,
@@ -93,6 +93,25 @@ export const SecurityObservabilityPage: React.FC = () => {
   const [sessionEvents, setSessionEvents] = useState<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>> | null>(null);
   const [sessionEventsLoading, setSessionEventsLoading] = useState(false);
   const [sessionEventsError, setSessionEventsError] = useState<string | null>(null);
+  // The dep-driven effects re-issue loadOverview / loadEvents / loadSessions
+  // whenever the time range, the tab, or the applied event filters change, so
+  // responses can interleave; only the newest request may write state, or a
+  // slow older response lands last and the cards, event table, and session
+  // list show data that violates the active filters. Same pattern as
+  // `loadRequestIdRef` on the agent-health and reuse-labels pages.
+  const overviewRequestIdRef = useRef(0);
+  const eventsRequestIdRef = useRef(0);
+  // `securitySessions` is written by BOTH loadOverview (its allSettled batch
+  // fetches sessions for the overview cards) and loadSessions, so the two
+  // writers must share one invalidation boundary: whichever of them is issued
+  // last wins, otherwise an older loadSessions response can still land after
+  // a newer overview batch has already refreshed the session list for the
+  // active time range.
+  const sessionsRequestIdRef = useRef(0);
+  // Event detail is fetched per click on the events tab; rapid clicks A → B
+  // race, and if A's response resolves last the drawer shows B's header with
+  // A's body. Only the newest click may write the detail state.
+  const eventDetailRequestIdRef = useRef(0);
 
   const isAvailable = isSecurityAvailableState(status?.state);
   const rangeParams: SecurityTimeRangeParams = useMemo(() => ({
@@ -121,6 +140,11 @@ export const SecurityObservabilityPage: React.FC = () => {
   }, [t]);
 
   const loadOverview = useCallback(async () => {
+    const requestId = ++overviewRequestIdRef.current;
+    // This batch includes a sessions fetch that writes `securitySessions`, so
+    // it takes the shared sessions token as well: an in-flight loadSessions
+    // from before the range change must not survive this newer request.
+    const sessionsRequestId = ++sessionsRequestIdRef.current;
     setOverviewLoading(true);
     setOverviewError(null);
     const results = await Promise.allSettled([
@@ -132,32 +156,50 @@ export const SecurityObservabilityPage: React.FC = () => {
       fetchSecurityEvents({ ...rangeParams, limit: OVERVIEW_EVENT_SAMPLE_LIMIT, offset: 0, include_details: true }),
       fetchSecuritySessions({ ...rangeParams, limit: 100, offset: 0 }),
     ]);
+    if (requestId !== overviewRequestIdRef.current) return;
 
     const errors: string[] = [];
     const collect = <T,>(
       result: PromiseSettledResult<SecurityApiResponse<T>>,
       setter: (value: SecurityApiResponse<T>) => void,
+      clear: () => void,
     ): SecurityApiResponse<T> | null => {
       if (result.status === 'fulfilled') {
         setter(result.value);
         return result.value;
       }
       errors.push(errorMessage(result.reason, t));
+      // Drop the previous range's payload: the banner explains the failure,
+      // but its numbers would otherwise sit under the new range's label and
+      // read as current.
+      clear();
       return null;
     };
 
-    collect(results[0] as PromiseSettledResult<SecurityApiResponse<SecuritySummary>>, setSummary);
-    collect(results[1] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setCategoryCounts);
-    collect(results[2] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setEventTypeCounts);
-    collect(results[3] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setResultCounts);
-    collect(results[4] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setVerdictCounts);
-    collect(results[5] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>>, setRecentEvents);
+    collect(results[0] as PromiseSettledResult<SecurityApiResponse<SecuritySummary>>, setSummary, () => setSummary(null));
+    collect(results[1] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setCategoryCounts, () => setCategoryCounts(null));
+    collect(results[2] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setEventTypeCounts, () => setEventTypeCounts(null));
+    collect(results[3] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setResultCounts, () => setResultCounts(null));
+    collect(results[4] as PromiseSettledResult<SecurityApiResponse<SecurityCountByResponse>>, setVerdictCounts, () => setVerdictCounts(null));
+    collect(results[5] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>>, setRecentEvents, () => setRecentEvents(null));
     const sessionResult = collect(
       results[6] as PromiseSettledResult<SecurityApiResponse<SecurityPaginated<SecuritySessionSummary>>>,
-      setSecuritySessions,
+      (value) => {
+        // Share the sessions invalidation boundary with loadSessions: if a
+        // newer session-writing request was issued while this batch was in
+        // flight, drop this write instead of overwriting the newer range.
+        if (sessionsRequestId === sessionsRequestIdRef.current) {
+          setSecuritySessions(value);
+        }
+      },
+      () => {
+        if (sessionsRequestId === sessionsRequestIdRef.current) {
+          setSecuritySessions(null);
+        }
+      },
     );
 
-    if (sessionResult) {
+    if (sessionResult && sessionsRequestId === sessionsRequestIdRef.current) {
       const ids = new Set(sessionResult.data.items.map((session) => session.session_id));
       setSelectedSessionId((current) => current && ids.has(current)
         ? current
@@ -170,6 +212,7 @@ export const SecurityObservabilityPage: React.FC = () => {
 
   const loadEvents = useCallback(async (offset: number, filters = appliedEventFilters) => {
     if (!isAvailable) return;
+    const requestId = ++eventsRequestIdRef.current;
     setEventsLoading(true);
     setEventsError(null);
     try {
@@ -180,42 +223,60 @@ export const SecurityObservabilityPage: React.FC = () => {
         offset,
         include_details: true,
       });
+      if (requestId !== eventsRequestIdRef.current) return;
       setEvents(response);
     } catch (error) {
-      setEventsError(errorMessage(error, t));
+      if (requestId === eventsRequestIdRef.current) {
+        setEventsError(errorMessage(error, t));
+      }
     } finally {
-      setEventsLoading(false);
+      if (requestId === eventsRequestIdRef.current) {
+        setEventsLoading(false);
+      }
     }
   }, [appliedEventFilters, isAvailable, rangeParams, t]);
 
   const loadSessions = useCallback(async () => {
     if (!isAvailable) return;
+    const requestId = ++sessionsRequestIdRef.current;
     setSessionsLoading(true);
     setSessionsError(null);
     try {
       const response = await fetchSecuritySessions({ ...rangeParams, limit: 100, offset: 0 });
+      if (requestId !== sessionsRequestIdRef.current) return;
       setSecuritySessions(response);
       const ids = new Set(response.data.items.map((session) => session.session_id));
       setSelectedSessionId((current) => current && ids.has(current)
         ? current
         : response.data.items[0]?.session_id ?? null);
     } catch (error) {
-      setSessionsError(errorMessage(error, t));
+      if (requestId === sessionsRequestIdRef.current) {
+        setSessionsError(errorMessage(error, t));
+      }
     } finally {
-      setSessionsLoading(false);
+      if (requestId === sessionsRequestIdRef.current) {
+        setSessionsLoading(false);
+      }
     }
   }, [isAvailable, rangeParams, t]);
 
   const loadEventDetail = useCallback(async (eventId: string) => {
+    const requestId = ++eventDetailRequestIdRef.current;
     setEventDetailLoading(true);
     setEventDetailError(null);
     setEventDetail(null);
     try {
-      setEventDetail(await fetchSecurityEvent(eventId));
+      const response = await fetchSecurityEvent(eventId);
+      if (requestId !== eventDetailRequestIdRef.current) return;
+      setEventDetail(response);
     } catch (error) {
-      setEventDetailError(errorMessage(error, t));
+      if (requestId === eventDetailRequestIdRef.current) {
+        setEventDetailError(errorMessage(error, t));
+      }
     } finally {
-      setEventDetailLoading(false);
+      if (requestId === eventDetailRequestIdRef.current) {
+        setEventDetailLoading(false);
+      }
     }
   }, [t]);
 

@@ -50,12 +50,12 @@ impl AuditAnalyzer {
         // Create llm_call audit records for SSE responses AND non-streaming
         // LLM API calls (identified by path). Without this, non-streaming
         // completions (stream:false) are invisible in audit --type llm.
-        let is_llm_path = http_record.path.contains("/chat/completions")
-            || http_record.path.contains("/v1/messages")
-            || http_record.path.contains("/v1/completions")
-            || http_record
-                .path
-                .contains("/api/v1/copilot/generate_copilot");
+        //
+        // Use the shared parser-layer path set that decides whether the
+        // GenAI pipeline creates a row at all: a private copy here
+        // drifted from it, and /v1/responses (plus the DashScope native
+        // endpoints) were parsed into trajectories yet never audited.
+        let is_llm_path = crate::parser::llm::is_llm_api_path(&http_record.path);
         if !http_record.is_sse && !is_llm_path {
             return None;
         }
@@ -295,6 +295,28 @@ mod tests {
             result.is_none(),
             "non-LLM path must NOT produce audit record"
         );
+    }
+
+    #[test]
+    fn test_nonsse_responses_and_dashscope_paths_produce_audit() {
+        // Both endpoints are parsed into trajectories by the GenAI pipeline
+        // (is_llm_api_path), so a non-streaming call must not vanish from
+        // audit --type llm.
+        let analyzer = AuditAnalyzer::new();
+        for path in &[
+            "/v1/responses",
+            "/api/v1/services/aigc/text-generation/generation",
+            "/api/v1/services/aigc/multimodal-generation/generation",
+            "/proxy/chat/completions",
+        ] {
+            let record = make_http_record(path, false, None);
+            let result = analyzer.analyze_http(&record, None);
+            assert!(result.is_some(), "{path} must produce an audit record");
+        }
+
+        // Token counting is not an inference call and stays out of the audit.
+        let record = make_http_record("/v1/messages/count_tokens", false, None);
+        assert!(analyzer.analyze_http(&record, None).is_none());
     }
 
     #[test]

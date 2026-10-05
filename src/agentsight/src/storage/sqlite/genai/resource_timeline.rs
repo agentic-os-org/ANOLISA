@@ -278,12 +278,22 @@ fn collect_tool_response_ids(value: &serde_json::Value, ids: &mut HashSet<String
             }
         }
         serde_json::Value::Object(object) => {
-            let is_response = object
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|kind| matches!(kind, "tool_call_response" | "tool_result"));
+            // The column holds whatever the capture wrote. Besides the parts
+            // shape, a request body stored verbatim by the crash drain carries
+            // the raw protocol forms: an OpenAI chat replay writes the tool
+            // result as a `role: "tool"` message keyed by `tool_call_id`, and
+            // Responses writes `function_call_output` keyed by `call_id`.
+            let kind = object.get("type").and_then(serde_json::Value::as_str);
+            let is_response = kind.is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "tool_call_response" | "tool_result" | "function_call_output"
+                )
+            }) || object.get("role").and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && object.contains_key("tool_call_id");
             if is_response {
-                for key in ["id", "tool_call_id", "tool_use_id"] {
+                for key in ["id", "tool_call_id", "tool_use_id", "call_id"] {
                     if let Some(id) = object.get(key).and_then(serde_json::Value::as_str) {
                         ids.insert(id.to_string());
                     }

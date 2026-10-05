@@ -84,6 +84,7 @@ impl OptLlmConfig {
     }
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
+        preserve_unparseable_config(path)?;
         // Never persist the API key as plaintext — 0o600 does not survive
         // backups, snapshots, or root compromise (see super::secret).
         let mut on_disk = self.clone();
@@ -146,6 +147,38 @@ impl OptLlmConfig {
             }
         })
     }
+}
+
+/// Back up a config file this process could not parse before `save` replaces it.
+///
+/// [`OptLlmConfig::load`] treats a file that does not deserialize into the
+/// typed config — truncated JSON *or* valid JSON with a wrong field type — as
+/// an empty configuration, so its settings — including the sealed API key —
+/// never enter memory: the next save would overwrite them without a trace.
+/// Keep a copy first, the same way `config.rs::ensure_default_agents_config`
+/// refuses to replace invalid JSON outright (issue #1502).
+fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        // Absent or unreadable: there is nothing this process is about to lose.
+        return Ok(());
+    };
+    // Validating against the typed struct, not just `serde_json::Value`, is
+    // what makes a file like `{"search_timeout_secs": "60"}` unparseable here
+    // too: `load` drops it to the default config, so its contents are just as
+    // lost as truncated JSON if `save` overwrites it unpreserved.
+    if serde_json::from_str::<OptLlmConfig>(&content).is_ok() {
+        return Ok(());
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.bak.{ts}"));
+    std::fs::copy(path, &backup)?;
+    log::warn!(
+        "Kept the unparseable optimization config at {backup:?} before overwriting {path:?}"
+    );
+    Ok(())
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -883,6 +916,12 @@ pub async fn list_optimization_history(
     data: web::Data<AppState>,
     query: web::Query<HistoryQuery>,
 ) -> impl Responder {
+    // Validated before anything else: an inverted window is a malformed
+    // request whatever the optimizer's state, exactly as on the sibling
+    // endpoints.
+    if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let state = match optimize_state(&data) {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -1061,6 +1100,33 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn history_rejects_an_inverted_window() {
+        use actix_web::{App, test as awtest};
+
+        // Validated before the optimizer's state is consulted, so an
+        // unconfigured instance answers 400 like every sibling endpoint
+        // instead of its own "not configured" error.
+        let dir = tmp_dir("inverted-window");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(list_optimization_history),
+        )
+        .await;
+        let request = awtest::TestRequest::get()
+            .uri("/optimize/results?start_ns=2000&end_ns=1000")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+    }
+
+    #[actix_web::test]
     async fn config_endpoint_persists_and_returns_search_timeout() {
         use actix_web::{App, test as awtest};
 
@@ -1227,6 +1293,94 @@ mod tests {
         assert!(!needs_reseal);
         assert_eq!(loaded.api_key, None);
         assert_eq!(loaded.model.as_deref(), Some("m"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Return the backups a config path left beside it, sorted.
+    fn config_backups(dir: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("optimization_config.json.bak."))
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// `load` treats a file that does not parse as an empty configuration, so
+    /// its settings never enter memory. Saving over it used to destroy those
+    /// settings — including the sealed API key — without a trace.
+    #[test]
+    fn save_keeps_a_config_it_could_not_parse() {
+        let dir = tmp_dir("unparseable-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        // An interrupted write leaves exactly this: truncated JSON that still
+        // holds the sealed key and the other settings.
+        let truncated = "{\n  \"api_key\": \"enc:v1:AAAA:BBBB\",\n  \"model\": \"qwen\"\n";
+        std::fs::write(&path, truncated).unwrap();
+
+        let config = OptLlmConfig {
+            api_key: Some("sk-fresh".into()),
+            model: Some("gpt-4o".into()),
+            base_url: None,
+            search_timeout_secs: None,
+        };
+        config.save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(backups.len(), 1, "the unparseable file must be kept");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), truncated);
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the new config is written: {stored}"
+        );
+
+        // Once the file parses again there is nothing left to preserve.
+        config.save(&path).unwrap();
+        assert_eq!(config_backups(&dir).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Valid JSON that does not deserialize into `OptLlmConfig` (here
+    /// `search_timeout_secs` is a string) is folded into the default config by
+    /// `load` exactly like truncated JSON, dropping the sealed key and every
+    /// other setting. `save` must keep a copy before overwriting it.
+    #[test]
+    fn save_keeps_a_typed_invalid_config_it_could_not_parse() {
+        let dir = tmp_dir("typed-invalid-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let typed_invalid =
+            r#"{"api_key":"enc:v1:AAAA:BBBB","model":"qwen","search_timeout_secs":"60"}"#;
+        std::fs::write(&path, typed_invalid).unwrap();
+
+        let config = OptLlmConfig {
+            api_key: Some("sk-fresh".into()),
+            model: Some("gpt-4o".into()),
+            base_url: None,
+            search_timeout_secs: None,
+        };
+        config.save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(
+            backups.len(),
+            1,
+            "a config that fails OptLlmConfig deserialization must be kept"
+        );
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), typed_invalid);
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the new config is written: {stored}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

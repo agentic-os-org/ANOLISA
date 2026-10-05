@@ -1099,6 +1099,95 @@ mod tests {
     }
 
     #[test]
+    fn credential_acknowledgement_without_structured_mode_is_accepted() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let request = credential_request(Uuid::new_v4(), 300);
+        store
+            .begin_credential_policy_intent(&request)
+            .expect("typed intent should seed");
+        let mut acknowledgement = transition_binding(BindingState::Enforced);
+        acknowledgement.request.binding_id = request.binding_id;
+        acknowledgement.request.policy_id = request.policy.policy_id.clone();
+        acknowledgement.request.policy_revision = request.policy.revision.to_string();
+        // Enforcers built before `policy_mode` existed never echo the field,
+        // so it decodes as `None` over the unchanged protocol version.
+        acknowledgement.request.policy_mode = None;
+
+        store
+            .upsert_credential_binding(&acknowledgement, &request.policy)
+            .expect("pre-mode acknowledgement should be accepted");
+        assert_eq!(
+            store
+                .binding(request.binding_id)
+                .expect("accepted acknowledgement should persist")
+                .expect("accepted acknowledgement should exist")
+                .request
+                .policy_mode,
+            None
+        );
+    }
+
+    #[test]
+    fn open_backfills_a_credential_snapshot_recorded_without_structured_mode() {
+        let database = TestDatabase::new();
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        let request = credential_request(Uuid::new_v4(), 300);
+        store
+            .begin_credential_policy_intent(&request)
+            .expect("typed intent should seed");
+        let mut acknowledgement = transition_binding(BindingState::Enforced);
+        acknowledgement.request.binding_id = request.binding_id;
+        acknowledgement.request.policy_id = request.policy.policy_id.clone();
+        acknowledgement.request.policy_revision = request.policy.revision.to_string();
+        acknowledgement.request.policy_mode = Some(request.policy.mode);
+        store
+            .upsert_credential_binding(&acknowledgement, &request.policy)
+            .expect("current acknowledgement should persist");
+        drop(store);
+
+        // Rewrite the persisted acknowledgement exactly as an older release
+        // wrote it: without the `policy_mode` field.
+        let connection =
+            rusqlite::Connection::open(&database.path).expect("test database should reopen");
+        let desired_json: String = connection
+            .query_row(
+                "SELECT desired_json FROM enforcement_bindings WHERE binding_id = ?1",
+                params![request.binding_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("persisted acknowledgement should load");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&desired_json).expect("persisted acknowledgement should parse");
+        assert!(
+            value["request"]["policy_mode"].is_string(),
+            "fixture acknowledgement should start structured"
+        );
+        value["request"]
+            .as_object_mut()
+            .expect("request should be an object")
+            .remove("policy_mode");
+        connection
+            .execute(
+                "UPDATE enforcement_bindings SET desired_json = ?1 WHERE binding_id = ?2",
+                params![
+                    serde_json::to_string(&value).unwrap(),
+                    request.binding_id.to_string()
+                ],
+            )
+            .expect("legacy acknowledgement should be written");
+        drop(connection);
+
+        let reopened = EnforcementStore::open(&database.path)
+            .expect("store should reopen over a pre-mode acknowledgement");
+        let intents = reopened
+            .credential_policy_intents()
+            .expect("migrated intents should load");
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].request, request);
+        assert_eq!(intents[0].state, BindingState::Enforced);
+    }
+
+    #[test]
     fn detached_binding_cannot_be_resurrected_by_degradation() {
         let database = TestDatabase::new();
         let store = EnforcementStore::open(&database.path).expect("test store should open");

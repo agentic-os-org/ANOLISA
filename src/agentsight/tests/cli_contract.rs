@@ -52,6 +52,105 @@ fn discover_list_known_json_is_a_non_empty_agent_array() {
 }
 
 #[test]
+fn discover_list_known_json_reports_matched_pids() {
+    // `--list-known` documents itself as listing the known agents *and the
+    // PIDs they currently match*, and the text mode prints them; the JSON mode
+    // dropped them, so a script could not tell "nothing matched" from "the
+    // field is never emitted".
+    let dir = tmp("known_pids");
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    let config = dir.join("config.json");
+    std::fs::write(
+        &config,
+        r#"{"cmdline":{"allow":[{"rule":["*discover_probe_*"],"agent_name":"Probe"}]}}"#,
+    )
+    .expect("write config");
+    // The probe's own file name carries the pattern, so this rule can only
+    // match that process. The name is unique per run because a file another
+    // process still holds open is ETXTBSY to exec, and `tmp` reuses its
+    // directory across runs.
+    let probe = format!(
+        "discover_probe_{}_bin",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    );
+    let exe = dir.join(&probe);
+    std::fs::copy("/bin/sleep", &exe).expect("copy a probe binary");
+    // ETXTBSY is the documented, transient result of exec'ing a file that was
+    // just written; it is not a test failure.
+    let mut child = {
+        let mut attempt = 0;
+        loop {
+            match Command::new(&exe).arg("30").spawn() {
+                Ok(child) => break child,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 100 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn the probe process: {error:?}"),
+            }
+        }
+    };
+
+    // `spawn` returns before the child has been exec'd, and the scanner reads
+    // `/proc/<pid>/cmdline`: wait until the probe is actually visible so the
+    // assertion below cannot race the exec.
+    let ready = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let cmdline = std::fs::read(format!("/proc/{}/cmdline", child.id())).unwrap_or_default();
+        if cmdline.windows(probe.len()).any(|w| w == probe.as_bytes()) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < ready,
+            "the probe process never became visible in /proc"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let out = agentsight()
+        .args([
+            "discover",
+            "--list-known",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ])
+        .output()
+        .expect("run agentsight");
+    let probe_pid = child.id();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--list-known --json must emit valid JSON");
+    let arr = v.as_array().expect("known agents must be a JSON array");
+    let probe = arr
+        .iter()
+        .find(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("Probe"))
+        .expect("the configured rule must be listed");
+    let pids = probe
+        .get("matched_pids")
+        .and_then(|p| p.as_array())
+        .expect("the JSON mode must report the PIDs the text mode prints");
+    assert!(
+        pids.iter()
+            .any(|pid| pid.as_u64() == Some(u64::from(probe_pid))),
+        "the running probe (pid {probe_pid}) must be reported, got {pids:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn discover_list_known_text_prints_header() {
     let out = agentsight()
         .args(["discover", "--list-known"])
@@ -98,6 +197,52 @@ fn discover_scan_text_runs_cleanly() {
 }
 
 // ── token ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn skill_metrics_json_on_empty_db_is_the_report_shape() {
+    // `--json` must answer with the report whatever the range holds: a caller
+    // reads `event_count` and cannot be asked to tell a bare notice object
+    // apart from a report. The notice stays in the human mode.
+    let db = tmp("skill_metrics_empty.db");
+    // The query path opens the store read-only, so the schema has to exist
+    // before the command runs: create an empty store through the library API.
+    agentsight::storage::sqlite::genai::GenAISqliteStore::new_with_path(
+        &db,
+        agentsight::config::PeriodicStoragePolicy::default(),
+    )
+    .expect("create an empty genai store");
+    let out = agentsight()
+        .args([
+            "skill-metrics",
+            "all",
+            "--db",
+            db.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("run agentsight");
+    let _ = std::fs::remove_file(&db);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json must emit valid JSON");
+    assert_eq!(
+        v["event_count"],
+        serde_json::json!(0),
+        "an empty range must still report the count: {v}"
+    );
+    assert!(
+        v.get("computed_at").is_some() && v.get("time_range_ns").is_some(),
+        "the report fields must be present: {v}"
+    );
+    assert!(
+        v.get("message").is_none(),
+        "the notice object must not be the --json contract: {v}"
+    );
+}
 
 #[test]
 fn token_missing_data_file_exits_nonzero_with_message() {

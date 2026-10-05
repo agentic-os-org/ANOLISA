@@ -189,6 +189,7 @@ impl Detector for VerifyBeforeDoneStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy::detector::JudgmentLog;
     use crate::accuracy::extract::SharedExtraction;
     use crate::llm::LlmClient;
     use crate::trace::TraceInventory;
@@ -214,12 +215,14 @@ mod tests {
         inv: &'a TraceInventory,
         client: &'a LlmClient,
         extraction: &'a SharedExtraction,
+        judgments: &'a JudgmentLog,
     ) -> AnalysisCtx<'a> {
         AnalysisCtx {
             inv,
             client,
             repo_root: None,
             extraction,
+            judgments,
         }
     }
 
@@ -240,7 +243,8 @@ mod tests {
         };
         let client = make_client();
         let extraction = SharedExtraction::default();
-        let ctx = make_ctx(&inv, &client, &extraction);
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
 
         let issues = VerifyBeforeDoneStrategy::find_unrecovered_errors(&ctx, &claims());
         assert_eq!(issues.len(), 1);
@@ -261,7 +265,8 @@ mod tests {
         };
         let client = make_client();
         let extraction = SharedExtraction::default();
-        let ctx = make_ctx(&inv, &client, &extraction);
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
 
         let issues = VerifyBeforeDoneStrategy::find_unrecovered_errors(&ctx, &claims());
         assert!(issues.is_empty());

@@ -189,6 +189,49 @@ fn flat_layout_uses_directory_basename_not_frontmatter_name() {
 }
 
 #[test]
+fn thematic_break_opener_keeps_body_sections() {
+    let source_dir = tempfile::tempdir().unwrap();
+
+    // A SKILL.md that opens with a 4-dash thematic break (a valid
+    // Markdown horizontal rule, not a frontmatter fence) and contains a
+    // Parameters contract section before a later `---` rule. The old
+    // prefix-based fence matching treated the thematic break as an
+    // opening fence and silently dropped everything up to the `---` rule
+    // — including the Parameters section — from the parsed body, so the
+    // structured contract vanished from the store's view of the skill.
+    add_skill(
+        source_dir.path(),
+        "thematic-break-skill",
+        concat!(
+            "----\n\n",
+            "Some intro text.\n\n",
+            "## Parameters\n\n",
+            "- `query` (string, required): The search query\n\n",
+            "---\n\n",
+            "Trailing prose.\n",
+        ),
+    );
+
+    let (store, _errors) = load_store(source_dir.path());
+
+    let entry = store
+        .get("thematic-break-skill")
+        .expect("degraded entries still load into the store");
+    assert!(
+        entry.body.contains("## Parameters"),
+        "the Parameters section must survive in the body: {:?}",
+        entry.body
+    );
+    assert_eq!(
+        entry.parameters.len(),
+        1,
+        "the parameter before the `---` rule must be extracted, not dropped"
+    );
+    assert_eq!(entry.parameters[0].name, "query");
+    assert!(entry.parse_status.is_degraded()); // still no usable frontmatter
+}
+
+#[test]
 fn categorized_layout_uses_directory_basename_not_frontmatter_name() {
     let source_dir = tempfile::tempdir().unwrap();
 
@@ -218,4 +261,154 @@ fn categorized_layout_uses_directory_basename_not_frontmatter_name() {
     let entry = store.get("tianqi-weather").unwrap();
     assert_eq!(entry.metadata.name, "tianqi-weather");
     assert!(store.get("天气").is_none());
+}
+
+// -----------------------------------------------------------------------
+// Adopted directory names must obey the skill-name grammar
+// -----------------------------------------------------------------------
+
+/// Mirrors the grammar the parser enforces for skill names: non-empty
+/// kebab-case (`[a-z0-9-]`), no leading/trailing hyphen, max 64 chars.
+fn is_kebab_case_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+#[test]
+fn invalid_directory_name_degrades_the_skill() {
+    let source_dir = tempfile::tempdir().unwrap();
+
+    // Underscored directory name with fully valid frontmatter: the store
+    // still adopts the directory name as the skill identity, so the entry
+    // must be degraded rather than presented as cleanly parsed.
+    add_skill(
+        source_dir.path(),
+        "foo_bar",
+        "---\nname: foo-bar\ndescription: valid frontmatter\n---\n",
+    );
+
+    let (store, errors) = load_store(source_dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(store.len(), 1);
+    let entry = store.get("foo_bar").expect("skill must not be skipped");
+    assert!(
+        entry.parse_status.is_degraded(),
+        "non-kebab directory name must degrade the entry, got {:?}",
+        entry.parse_status
+    );
+}
+
+#[test]
+fn stored_skill_names_are_kebab_or_degraded() {
+    let source_dir = tempfile::tempdir().unwrap();
+
+    add_skill(
+        source_dir.path(),
+        "good-skill",
+        "---\nname: good-skill\ndescription: fine\n---\n",
+    );
+    add_skill(
+        source_dir.path(),
+        "foo_bar",
+        "---\nname: foo-bar\ndescription: valid frontmatter\n---\n",
+    );
+
+    // Same invariant for the categorized layout loader.
+    let cat_dir = source_dir.path().join("weather");
+    let nested_good = cat_dir.join("nested-good");
+    std::fs::create_dir_all(&nested_good).unwrap();
+    std::fs::write(
+        nested_good.join("SKILL.md"),
+        "---\nname: nested-good\ndescription: fine\n---\n",
+    )
+    .unwrap();
+    let nested_bad = cat_dir.join("Nested_Bad");
+    std::fs::create_dir_all(&nested_bad).unwrap();
+    std::fs::write(
+        nested_bad.join("SKILL.md"),
+        "---\nname: nested-bad\ndescription: fine\n---\n",
+    )
+    .unwrap();
+
+    let (store, _errors) = load_store(source_dir.path());
+
+    assert_eq!(store.len(), 4);
+    for (name, entry) in store.iter() {
+        assert!(
+            entry.parse_status.is_degraded() || is_kebab_case_skill_name(name),
+            "skill `{name}` is neither kebab-case nor degraded: {:?}",
+            entry.parse_status
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Shared directory-name adoption entry point
+// -----------------------------------------------------------------------
+
+/// The loaders, the FUSE sync worker, and the rename path all adopt a
+/// directory name through `store::adopt_directory_name`; these tests pin
+/// the contract of that shared entry point directly.
+fn make_entry(parse_status: skillfs_core::ParseStatus) -> skillfs_core::SkillEntry {
+    skillfs_core::SkillEntry {
+        metadata: skillfs_core::SkillMetadata {
+            name: "frontmatter-name".to_string(),
+            ..skillfs_core::SkillMetadata::default()
+        },
+        parameters: vec![],
+        returns: vec![],
+        body: String::new(),
+        parse_status,
+        source_path: std::path::PathBuf::new(),
+        last_modified: std::time::SystemTime::UNIX_EPOCH,
+    }
+}
+
+#[test]
+fn adopt_directory_name_valid_name_stays_clean() {
+    let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+    skillfs_core::store::adopt_directory_name(&mut entry, "good-skill");
+    assert_eq!(entry.metadata.name, "good-skill");
+    assert!(entry.parse_status.is_ok());
+}
+
+#[test]
+fn adopt_directory_name_invalid_dir_degrades_clean_entry() {
+    let mut entry = make_entry(skillfs_core::ParseStatus::Ok);
+    skillfs_core::store::adopt_directory_name(&mut entry, "foo_bar");
+    assert_eq!(entry.metadata.name, "foo_bar");
+    assert!(entry.parse_status.is_degraded());
+    let msg = entry.parse_status.message();
+    assert!(
+        msg.contains("foo_bar"),
+        "issue must name the directory: {msg}"
+    );
+    assert!(msg.contains("kebab"), "issue must name the grammar: {msg}");
+}
+
+#[test]
+fn adopt_directory_name_merges_with_existing_degradation() {
+    let mut entry = make_entry(skillfs_core::ParseStatus::Degraded(
+        "pre-existing issue".to_string(),
+    ));
+    skillfs_core::store::adopt_directory_name(&mut entry, "foo_bar");
+    let msg = entry.parse_status.message();
+    assert!(
+        msg.contains("pre-existing issue") && msg.contains("foo_bar"),
+        "degradations must merge, got: {msg}"
+    );
+}
+
+#[test]
+fn adopt_directory_name_preserves_error_status() {
+    let mut entry = make_entry(skillfs_core::ParseStatus::Error("boom".to_string()));
+    skillfs_core::store::adopt_directory_name(&mut entry, "foo_bar");
+    assert_eq!(entry.metadata.name, "foo_bar");
+    assert!(entry.parse_status.is_error());
 }

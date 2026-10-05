@@ -484,14 +484,19 @@ export const SystemAuditPage: React.FC = () => {
 
   const loadMoreEvents = async () => {
     if (eventNextOffset === null || loadingMore) return;
+    const version = loadRequestVersion.current;
     setLoadingMore(true);
     try {
       const result = await fetchAuditEvents({ limit: EVENT_PAGE_SIZE, offset: eventNextOffset, include_details: true });
+      // The list may have been reloaded while this page was in flight (another
+      // page selected, a filter changed). Appending then would splice an old
+      // page into the new list and duplicate rows.
+      if (loadRequestVersion.current !== version) return;
       setEvents((prev) => [...prev, ...result.data.items]);
       setEventTotal(result.data.total);
       setEventNextOffset(result.data.next_offset ?? null);
     } catch (e) {
-      setError(errorText(e, t));
+      if (loadRequestVersion.current === version) setError(errorText(e, t));
     } finally {
       setLoadingMore(false);
     }

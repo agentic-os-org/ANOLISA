@@ -1,3 +1,4 @@
+use super::events::PREFERENCE_WINDOW_MAX_ROWS;
 use super::*;
 use crate::genai::semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
@@ -386,6 +387,93 @@ fn test_get_token_timeseries_returns_buckets() {
 }
 
 #[test]
+fn test_get_token_timeseries_respects_requested_bucket_count() {
+    // A span of 5 steps over 3 buckets floors bucket_ns to 5*STEP/3, and the
+    // calls at offsets 0..5 land in indices 0,0,1,1,2,3 - four buckets for a
+    // request of three. The width must be rounded up so the count cannot
+    // exceed the parameter.
+    let (store, path) = create_populated_store("ts_bucket_cap");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 5 * STEP_NS, None, 3)
+        .unwrap();
+    assert!(
+        r.len() <= 3,
+        "requested 3 buckets, got {}: {:?}",
+        r.len(),
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_model_timeseries_respects_requested_bucket_count() {
+    let (store, path) = create_populated_store("mts_bucket_cap");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 5 * STEP_NS, None, 3)
+        .unwrap();
+    let distinct: std::collections::HashSet<i64> = r.iter().map(|b| b.bucket_start_ns).collect();
+    assert!(
+        distinct.len() <= 3,
+        "requested 3 buckets, got {}",
+        distinct.len()
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_token_timeseries_row_at_end_ns_stays_within_bucket_count() {
+    // When the range is an exact multiple of the bucket count, the ceil-based
+    // width is exact, and the inclusive BETWEEN lets a row at end_ns compute
+    // index == bucket_count - a phantom bucket starting at end_ns itself
+    // (call-4 sits exactly at BASE+3*STEP, so buckets=3 over a 3*STEP span
+    // produced four buckets on main). The index must clamp into the last
+    // requested bucket.
+    let (store, path) = create_populated_store("ts_end_ns_cap");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 3 * STEP_NS, None, 3)
+        .unwrap();
+    assert!(
+        r.len() <= 3,
+        "requested 3 buckets, got {}: {:?}",
+        r.len(),
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    assert!(
+        r.iter().all(|b| b.bucket_start_ns < BASE_NS + 3 * STEP_NS),
+        "a bucket starts at or beyond end_ns: {:?}",
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    // The end-aligned row merges into the last bucket instead of opening a
+    // phantom one.
+    let last = r.last().unwrap();
+    assert_eq!(last.bucket_start_ns, BASE_NS + 2 * STEP_NS);
+    assert_eq!(last.total_tokens, 675); // 225 (call-3) + 450 (call-4)
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_model_timeseries_row_at_end_ns_stays_within_bucket_count() {
+    // Model twin: the phantom bucket at end_ns inflated the distinct bucket
+    // starts beyond the requested count.
+    let (store, path) = create_populated_store("mts_end_ns_cap");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 3 * STEP_NS, None, 3)
+        .unwrap();
+    let distinct: std::collections::HashSet<i64> = r.iter().map(|b| b.bucket_start_ns).collect();
+    assert!(
+        distinct.len() <= 3,
+        "requested 3 buckets, got {}",
+        distinct.len()
+    );
+    assert!(
+        distinct.iter().all(|s| *s < BASE_NS + 3 * STEP_NS),
+        "a bucket starts at or beyond end_ns: {:?}",
+        distinct
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_token_timeseries_empty_range() {
     let (store, path) = create_populated_store("ts_empty");
     let r = store.get_token_timeseries(0, 1, None, 1).unwrap();
@@ -453,6 +541,166 @@ fn test_get_model_timeseries_with_agent_filter() {
         .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"), 1)
         .unwrap();
     assert_eq!(r.len(), 2); // gpt-4, gpt-4o
+    cleanup_db(&path);
+}
+
+// ─── agent filter parity with latency metrics (#4394) ────────────────────────
+
+/// Insert one llm_call row whose agent identity survives only in process_name
+/// (agent_name NULL) — the shape latency metrics and agent activity already
+/// attribute via COALESCE(agent_name, process_name).
+fn insert_process_only_row(store: &GenAISqliteStore, call_id: &str, process_name: &str) {
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,'openai','gpt-4',?5,?6,?7,\
+               ?8,?9,?10,NULL,100,'complete',NULL,'{}',?11,NULL)";
+    let conn = store.conn.lock().unwrap();
+    conn.execute(
+        sql,
+        params![
+            call_id,
+            BASE_NS,
+            BASE_NS + STEP_NS,
+            STEP_NS,
+            111_i64,
+            222_i64,
+            333_i64,
+            "sess-x",
+            "trace-x",
+            "conv-x",
+            process_name
+        ],
+    )
+    .unwrap();
+}
+
+#[test]
+fn token_timeseries_agent_filter_falls_back_to_process_name() {
+    let (store, path) = create_populated_store("ts_fallback");
+    insert_process_only_row(&store, "call-x", "proc-x");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"), 1)
+        .unwrap();
+    assert_eq!(r.len(), 1, "process-name rows must be attributable");
+    assert_eq!(r[0].total_tokens, 333);
+    cleanup_db(&path);
+}
+
+#[test]
+fn token_timeseries_agent_filter_matches_case_insensitively() {
+    let (store, path) = create_populated_store("ts_case");
+    let lower = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"), 1)
+        .unwrap();
+    let upper = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-A"), 1)
+        .unwrap();
+    assert_eq!(
+        upper.len(),
+        lower.len(),
+        "agent match must be case-insensitive"
+    );
+    assert_eq!(upper[0].total_tokens, lower[0].total_tokens);
+    cleanup_db(&path);
+}
+
+#[test]
+fn model_timeseries_agent_filter_falls_back_to_process_name() {
+    let (store, path) = create_populated_store("mts_fallback");
+    insert_process_only_row(&store, "call-x", "proc-x");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"), 1)
+        .unwrap();
+    assert_eq!(r.len(), 1, "process-name rows must be attributable");
+    assert_eq!(r[0].model, "gpt-4");
+    assert_eq!(r[0].total_tokens, 333);
+    cleanup_db(&path);
+}
+
+#[test]
+fn model_timeseries_agent_filter_matches_case_insensitively() {
+    let (store, path) = create_populated_store("mts_case");
+    let lower = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"), 1)
+        .unwrap();
+    let upper = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-A"), 1)
+        .unwrap();
+    assert_eq!(
+        upper.len(),
+        lower.len(),
+        "agent match must be case-insensitive"
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn savings_sessions_agent_filter_falls_back_to_process_name() {
+    let (store, path) = create_populated_store("sav_fallback");
+    insert_process_only_row(&store, "call-x", "proc-x");
+    let r = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"))
+        .unwrap();
+    assert_eq!(r.len(), 1, "process-name rows must be attributable");
+    assert_eq!(r[0].session_id, "sess-x");
+    assert_eq!(r[0].request_count, 1);
+    cleanup_db(&path);
+}
+
+#[test]
+fn savings_sessions_report_the_resolved_agent_name() {
+    // #4394 made the savings filter attribute process-only rows; the label the
+    // queries return for the same rows must resolve the same way, otherwise
+    // the savings page shows an empty agent for a session that latency and the
+    // agent activity list attribute to proc-x.
+    let (store, path) = create_populated_store("sav_label");
+    insert_process_only_row(&store, "call-x", "proc-x");
+
+    let listed = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"))
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].agent_name.as_deref(),
+        Some("proc-x"),
+        "the returned label must resolve like the filter does"
+    );
+
+    let single = store
+        .get_session_for_savings("sess-x")
+        .unwrap()
+        .expect("the session must exist");
+    assert_eq!(single.agent_name.as_deref(), Some("proc-x"));
+
+    let sessions = store
+        .list_sessions(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    let session = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-x")
+        .expect("the session must be listed");
+    assert_eq!(session.agent_name.as_deref(), Some("proc-x"));
+    cleanup_db(&path);
+}
+
+#[test]
+fn savings_sessions_agent_filter_matches_case_insensitively() {
+    let (store, path) = create_populated_store("sav_case");
+    let lower = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"))
+        .unwrap();
+    let upper = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-A"))
+        .unwrap();
+    assert_eq!(
+        upper.len(),
+        lower.len(),
+        "agent match must be case-insensitive"
+    );
+    assert_eq!(upper[0].session_id, lower[0].session_id);
     cleanup_db(&path);
 }
 
@@ -611,6 +859,68 @@ fn test_token_aggregations_apply_provider_cache_rule() {
 }
 
 #[test]
+fn agent_token_summary_merges_case_variants_like_agent_activity() {
+    // These summaries back the Prometheus `agent="..."` labels, and the agent
+    // activity list groups the same rows case-insensitively; a case variant
+    // used to expose one agent as two series with partial counts.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_agent_tokens_case_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,'openai','gpt-4',?5,?6,?7,\
+               ?8,?9,?10,?11,100,'complete',NULL,'{}',NULL,NULL)";
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, agent, input, output) in [
+            ("upper", "Qoder", 10_i64, 5_i64),
+            ("lower", "qoder", 20_i64, 8_i64),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    BASE_NS,
+                    BASE_NS + STEP_NS,
+                    STEP_NS,
+                    input,
+                    output,
+                    input + output,
+                    "sess-q",
+                    "trace-q",
+                    "conv-q",
+                    agent
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let summaries = store.get_agent_token_summary().unwrap();
+    let qoder: Vec<_> = summaries
+        .iter()
+        .filter(|s| s.agent_name.eq_ignore_ascii_case("qoder"))
+        .collect();
+    assert_eq!(
+        qoder.len(),
+        1,
+        "one agent must not become two series: {summaries:?}"
+    );
+    assert_eq!(qoder[0].agent_name, "Qoder");
+    assert_eq!(qoder[0].request_count, 2);
+    assert_eq!(qoder[0].total_tokens, 43);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_agent_token_summary_empty() {
     let path = std::env::temp_dir().join(format!("test_genai_ats_empty_{}.db", std::process::id()));
     cleanup_db(&path);
@@ -712,6 +1022,49 @@ fn test_get_tool_call_turn_indices() {
     cleanup_db(&path);
 }
 
+/// A single `llm_call` row with a NULL `call_id` must not error the whole
+/// turn map (which `get_token_savings` would then drop via `unwrap_or_default`
+/// for EVERY session). The Rust writer always binds a non-NULL call_id, so a
+/// NULL row can only come from a foreign writer of the same DB; the reader
+/// must still keep all valid entries.
+#[test]
+fn turn_indices_survive_a_null_call_id_row() {
+    let (store, path) = create_populated_store("tc_null_call_id");
+    {
+        // Fixture-only raw insert: simulate a foreign writer's malformed
+        // pending row, timestamped after every valid sess-1 row so the
+        // expected turn indices below are order-independent.
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (\
+             call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+             provider, model, input_tokens, output_tokens, total_tokens,\
+             session_id, trace_id, conversation_id, agent_name, pid,\
+             status, tool_call_ids, event_json, process_name, user_query\
+             ) VALUES (NULL,'llm_call',?1,?2,?3,'openai','gpt-4',1,1,2,\
+             'sess-1','trace-1','conv-1','agent-a',100,'pending',NULL,'{}','proc-a',NULL)",
+            params![BASE_NS + 6 * STEP_NS, BASE_NS + 7 * STEP_NS, STEP_NS],
+        )
+        .unwrap();
+    }
+
+    let m = store
+        .get_tool_call_turn_indices(&["sess-1", "sess-2"])
+        .unwrap();
+
+    // Valid sess-1 entries survive with their expected turns.
+    assert_eq!(m["tc-1"].turn_index, 1);
+    assert_eq!(m["tc-2"].turn_index, 1);
+    assert_eq!(m["call-1"].turn_index, 1);
+    assert_eq!(m["call-2"].turn_index, 2);
+    assert_eq!(m["call-3"].turn_index, 3);
+    assert_eq!(m["call-6"].turn_index, 4);
+    // The malformed row must not poison other sessions either.
+    assert_eq!(m["call-4"].turn_index, 1);
+    assert!(m.contains_key("call-5"));
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_list_traces_by_session() {
     let (store, path) = create_populated_store("traces");
@@ -725,6 +1078,72 @@ fn test_list_traces_by_session() {
     let c2 = r.iter().find(|t| t.conversation_id == "conv-2").unwrap();
     assert_eq!(c2.call_count, 1);
     assert_eq!(c2.user_query.as_deref(), Some("what is rust"));
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_list_traces_by_session_user_query_is_the_earliest() {
+    // MIN(user_query) is a lexicographic aggregate: with the conversation
+    // opening on "zebra" and a later turn asking "apple" it reported "apple"
+    // as the conversation's first query.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_trace_first_query_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+               ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18)";
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, offset, query) in [
+            ("call-zebra", 0_i64, "zebra"),
+            ("call-apple", STEP_NS, "apple"),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    BASE_NS + offset,
+                    BASE_NS + offset + STEP_NS,
+                    STEP_NS,
+                    "openai",
+                    "gpt-4",
+                    1_i64,
+                    1_i64,
+                    2_i64,
+                    "sess-q",
+                    "trace-q",
+                    "conv-q",
+                    "agent-a",
+                    100_i64,
+                    "complete",
+                    "[]",
+                    "proc",
+                    query
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let r = store
+        .list_traces_by_session("sess-q", None, None, true)
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        r[0].user_query.as_deref(),
+        Some("zebra"),
+        "the first query is the earliest in time, not the smallest string"
+    );
     cleanup_db(&path);
 }
 
@@ -746,6 +1165,71 @@ fn test_list_agent_names() {
         .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
         .unwrap();
     assert_eq!(r, vec!["agent-a", "agent-b"]);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_list_agent_names_merges_case_variants() {
+    // The agent-names list feeds the dashboard's agent filter, and every
+    // agent-filtered query matches case-insensitively, so case variants of
+    // one agent must be a single entry — two spellings offered the same agent
+    // twice while every other view (latency, timeseries, savings) merges it.
+    let (store, path) = create_populated_store("agent_names_case");
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+                   provider, model, input_tokens, output_tokens, total_tokens,\
+                   session_id, trace_id, conversation_id, agent_name, pid,\
+                   status, tool_call_ids, event_json, process_name, user_query\
+                   ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+                   ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18)";
+        for (call_id, agent, start) in [
+            ("case-1", "Qoder", BASE_NS),
+            ("case-2", "qoder", BASE_NS + STEP_NS),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    start,
+                    start + STEP_NS,
+                    STEP_NS,
+                    "openai",
+                    "gpt-4",
+                    10_i64,
+                    10_i64,
+                    20_i64,
+                    "sess-case",
+                    "trace-case",
+                    "conv-case",
+                    agent,
+                    100_i32,
+                    "complete",
+                    None::<&str>,
+                    "proc-case",
+                    None::<&str>
+                ],
+            )
+            .unwrap();
+        }
+    }
+    let names = store
+        .list_agent_names(BASE_NS, BASE_NS + 6 * STEP_NS)
+        .unwrap();
+    let qoder_entries: Vec<&String> = names
+        .iter()
+        .filter(|n| n.eq_ignore_ascii_case("qoder"))
+        .collect();
+    assert_eq!(
+        qoder_entries.len(),
+        1,
+        "case variants of one agent must be a single filter entry: {names:?}"
+    );
+    assert_eq!(qoder_entries[0].as_str(), "Qoder", "stable MIN spelling");
+    // The pre-existing rows keep their entries.
+    assert!(names.contains(&"agent-a".to_string()));
+    assert!(names.contains(&"agent-b".to_string()));
     cleanup_db(&path);
 }
 
@@ -839,6 +1323,166 @@ fn test_get_events_in_time_range_with_agent_filter() {
     cleanup_db(&path);
 }
 
+#[test]
+fn test_get_events_in_time_range_matches_agent_case_insensitively() {
+    let (store, path) = create_populated_store("range_agent_case");
+    // The stored rows are `agent-b`; a filter in another case must select the
+    // same rows, exactly as `get_latency_metrics` and the timeseries queries
+    // already do (COALESCE(agent_name, process_name) COLLATE NOCASE).
+    let r = store
+        .get_events_in_time_range(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-B"))
+        .unwrap();
+    assert_eq!(r.len(), 2); // call-4, call-5
+    let latency = store
+        .get_latency_metrics(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-B"))
+        .unwrap();
+    assert_eq!(latency.len(), 1);
+    assert_eq!(latency[0].call_count, 1); // call-4 (call-5 is still pending)
+    cleanup_db(&path);
+}
+
+// ─── preference window tests ──────────────────────────────────────────────────
+
+/// Insert `n` completed main-flow llm_call rows with strictly increasing
+/// timestamps starting at `base`, plus optional out-of-filter rows.
+fn insert_window_rows(store: &GenAISqliteStore, n: i64, base: i64, step: i64) {
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query, call_kind\
+               ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+               ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18,?19)";
+    let conn = store.conn.lock().unwrap();
+    for i in 0..n {
+        let ts = base + i * step;
+        conn.execute(
+            sql,
+            params![
+                format!("pw-{i}"),
+                ts,
+                ts + step,
+                step,
+                "openai",
+                "gpt-4",
+                10_i64,
+                10_i64,
+                20_i64,
+                "sess-pw",
+                "trace-pw",
+                "conv-pw",
+                "agent-a",
+                1_i32,
+                "complete",
+                "[]",
+                "proc-a",
+                format!("query {i}"),
+                "main"
+            ],
+        )
+        .unwrap();
+    }
+}
+
+fn window_store(suffix: &str) -> (GenAISqliteStore, std::path::PathBuf) {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_prefwin_{suffix}_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    (store, path)
+}
+
+#[test]
+fn preference_window_keeps_newest_rows_when_capped() {
+    // Over the cap the window must keep the NEWEST rows — the previous
+    // ASC-first LIMIT kept the oldest, freezing every preference view on
+    // the start of the window.
+    let (store, path) = window_store("capped");
+    let n = (PREFERENCE_WINDOW_MAX_ROWS + 40) as i64;
+    let base = 1_000_000_000i64;
+    let step = 1_000_000i64;
+    insert_window_rows(&store, n, base, step);
+
+    let rows = store.get_preference_window_events(0).unwrap();
+    assert_eq!(rows.len(), PREFERENCE_WINDOW_MAX_ROWS);
+    // The newest 300 rows: first row is event #40 (ts = base + 40*step).
+    assert_eq!(rows[0].start_timestamp_ns, base + 40 * step);
+    assert_eq!(rows[0].user_query.as_deref(), Some("query 40"));
+    // Last row is the newest event.
+    assert_eq!(
+        rows[rows.len() - 1].start_timestamp_ns,
+        base + (n - 1) * step
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn preference_window_returns_rows_in_chronological_order() {
+    let (store, path) = window_store("order");
+    insert_window_rows(&store, 10, 1_000_000_000, 1_000_000);
+    let rows = store.get_preference_window_events(0).unwrap();
+    for pair in rows.windows(2) {
+        assert!(
+            pair[0].start_timestamp_ns < pair[1].start_timestamp_ns,
+            "rows must be chronological for consumer compatibility"
+        );
+    }
+    cleanup_db(&path);
+}
+
+#[test]
+fn preference_window_filters_status_and_call_kind() {
+    let (store, path) = window_store("filter");
+    insert_window_rows(&store, 3, 1_000_000_000, 1_000_000);
+    {
+        let conn = store.conn.lock().unwrap();
+        // A pending row: excluded by status.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-pending','llm_call',999_000_000,'pending','main','s','{}')",
+            [],
+        )
+        .unwrap();
+        // An interrupted row: excluded by status.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-int','llm_call',999_000_000,'interrupted','main','s','{}')",
+            [],
+        )
+        .unwrap();
+        // A sub-call row: excluded by call_kind.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-sub','llm_call',999_000_000,'complete','sub','s','{}')",
+            [],
+        )
+        .unwrap();
+        // A non-llm_call row: excluded by event_type.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, status, call_kind, session_id, event_json)              VALUES ('pw-other','tool_call',999_000_000,'complete','main','s','{}')",
+            [],
+        )
+        .unwrap();
+    }
+    let rows = store.get_preference_window_events(0).unwrap();
+    assert_eq!(rows.len(), 3, "only the complete main llm_call rows");
+    for r in &rows {
+        assert!(r.user_query.as_deref().unwrap().starts_with("query"));
+    }
+    cleanup_db(&path);
+}
+
+#[test]
+fn preference_window_empty_when_no_rows_in_range() {
+    let (store, path) = window_store("empty");
+    insert_window_rows(&store, 3, 1_000_000_000, 1_000_000);
+    // All rows are older than since_ns: empty vec, not an error.
+    let rows = store.get_preference_window_events(2_000_000_000).unwrap();
+    assert!(rows.is_empty());
+    cleanup_db(&path);
+}
+
 // ─── pending.rs tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -880,6 +1524,72 @@ fn test_insert_pending() {
         .unwrap();
     assert_eq!(status, "pending");
     drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn adopting_an_interrupted_idle_snapshot_restores_pending() {
+    // The stale sweep flips idle snapshots to interrupted after the timeout,
+    // even while their request is still in flight. When the live capture then
+    // adopts the snapshot, crash correlation must see the row again: it only
+    // lists pending rows for the pid.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_adopt_interrupted_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let pending_info = |call_id: &str, origin: PendingOrigin| PendingCallInfo {
+        call_id: call_id.to_string(),
+        trace_id: Some("t-idle".to_string()),
+        conversation_id: None,
+        session_id: None,
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "test-proc".to_string(),
+        agent_name: None,
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/chat".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: None,
+        is_sse: true,
+        model: None,
+        provider: None,
+        call_kind: "main".to_string(),
+        pending_origin: origin,
+        pending_match_key: Some("match-1".to_string()),
+    };
+
+    store
+        .insert_pending(&pending_info("idle-1", PendingOrigin::IdleDrain))
+        .unwrap();
+    assert_eq!(store.mark_interrupted_stale(0).unwrap(), 1);
+
+    store
+        .insert_pending(&pending_info("live-1", PendingOrigin::RequestCapture))
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let (status, itype): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, interruption_type FROM genai_events WHERE call_id = 'live-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "the adopted row is in flight again");
+        assert_eq!(itype, None, "the stale interruption type must be dropped");
+    }
+
+    let pending = store.list_pending_for_pid(42).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, "live-1");
+
     cleanup_db(&path);
 }
 
@@ -1046,6 +1756,182 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     assert_eq!(origin, "idle_drain");
     assert_eq!(first_output, Some(BASE_NS + STEP_NS / 2));
     drop(conn);
+    cleanup_db(&path);
+}
+
+/// A completion whose parsed request carries no messages must not erase the
+/// evidence the pending row captured: the request view is the only record of
+/// what the caller sent when the semantic parse failed.
+#[test]
+fn test_complete_pending_keeps_captured_request_evidence() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_pending_evidence_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let info = PendingCallInfo {
+        call_id: "captured-1".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-evidence".to_string()),
+        session_id: Some("s-evidence".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(
+            r#"[{"role":"user","content":"what changed in this file?"}]"#.to_string(),
+        ),
+        system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
+        user_query: Some("what changed in this file?".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: Some("match-evidence".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+
+    // The completing event carries no parsed request messages.
+    let mut call = LLMCall::new(
+        "captured-1".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "it changed".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "captured-1".to_string());
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let (input, system): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT input_messages, system_instructions FROM genai_events WHERE call_id = 'captured-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            input
+                .as_deref()
+                .is_some_and(|v| v.contains("what changed in this file?")),
+            "the captured request view must survive a completion without parsed messages, got {input:?}"
+        );
+        assert!(
+            system.as_deref().is_some_and(|v| v.contains("be terse")),
+            "the captured system instructions must survive too, got {system:?}"
+        );
+    }
+
+    // A completion that does carry messages still replaces them.
+    let info = PendingCallInfo {
+        call_id: "captured-2".to_string(),
+        ..info
+    };
+    store.insert_pending(&info).unwrap();
+    let mut call = LLMCall::new(
+        "captured-2".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![crate::genai::semantic::InputMessage {
+                role: "system".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "new system".to_string(),
+                }],
+                name: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "done".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "captured-2".to_string());
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let system: Option<String> = conn
+            .query_row(
+                "SELECT system_instructions FROM genai_events WHERE status = 'complete' AND provider = 'anthropic' AND system_instructions LIKE '%new system%'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert!(
+            system.is_some(),
+            "a parsed system prompt must still be written"
+        );
+    }
+
     cleanup_db(&path);
 }
 
@@ -1309,6 +2195,46 @@ fn test_enrich_pending_from_sse() {
     assert_eq!(tid, "trace-enriched");
     assert_eq!(it, 999);
     assert_eq!(ot, 888);
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_enrich_pending_from_sse_records_tool_call_ids() {
+    // The enrichment writes the output messages the SSE chunks carried, tool
+    // calls included, but the `tool_call_ids` column stayed NULL. A drained
+    // call never reaches complete, so nothing else ever fills it: the tool
+    // call is present in the row's messages yet invisible to every reader of
+    // that column (session turn indices, token-savings attribution, the
+    // session resource timeline).
+    let (store, path) = create_populated_store("enrich_sse_ids");
+    let e = SseEnrichment {
+        model: Some("gpt-4-turbo".to_string()),
+        trace_id: None,
+        provider: None,
+        output_messages: Some(
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"read_file","arguments":{"path":"a"}}]}]"#
+                .to_string(),
+        ),
+        sse_event_count: Some(3),
+        input_tokens: None,
+        output_tokens: None,
+    };
+    store.enrich_pending_from_sse("call-5", &e).unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let ids: Option<String> = conn
+        .query_row(
+            "SELECT tool_call_ids FROM genai_events WHERE call_id = 'call-5'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ids.as_deref(),
+        Some(r#"["call_1"]"#),
+        "the enriched tool call must be recorded in the ids column"
+    );
     drop(conn);
     cleanup_db(&path);
 }
@@ -2103,4 +3029,72 @@ fn agent_activity_summaries_group_names_and_aggregate_calls() {
 
     drop(store);
     cleanup_size_test_db(&path);
+}
+
+/// A `genai_events` table created before the `conversation_id` column existed
+/// must be migrated before the index batch that references it. SQLite resolves
+/// column names when it prepares `CREATE INDEX`, so with the old ordering the
+/// batch aborted with "no such column: conversation_id" and the store never
+/// initialized (same defect as the interruption store's issue #3314).
+#[test]
+fn legacy_db_without_conversation_id_is_migrated_before_index_creation() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_legacy_conversation_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // Shape written by the release before conversation_id was added:
+        // every column the first index batch references except conversation_id.
+        conn.execute_batch(
+            "CREATE TABLE genai_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                call_id TEXT,
+                trace_id TEXT,
+                session_id TEXT,
+                instance TEXT,
+                start_timestamp_ns INTEGER NOT NULL,
+                pid INTEGER,
+                model TEXT,
+                provider TEXT,
+                event_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+    }
+
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .expect("store must initialize on a pre-conversation_id database");
+
+    let conn = store.conn.lock().unwrap();
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('genai_events')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        columns.iter().any(|c| c == "conversation_id"),
+        "migration must add conversation_id, got {columns:?}"
+    );
+    let indexes: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        indexes.iter().any(|i| i == "idx_genai_conversation_id"),
+        "the conversation_id index must exist, got {indexes:?}"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
 }

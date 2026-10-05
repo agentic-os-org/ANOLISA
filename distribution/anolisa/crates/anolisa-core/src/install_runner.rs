@@ -563,12 +563,11 @@ impl<'a> InstallRunner<'a> {
             }
 
             let key = archive_source_key(file)?;
-            let index =
-                staged
-                    .index_for(&key)
-                    .ok_or_else(|| InstallError::MissingArchiveEntry {
-                        basename: key.clone(),
-                    })?;
+            let index = staged
+                .index_for(&key, file.source.is_some())
+                .ok_or_else(|| InstallError::MissingArchiveEntry {
+                    basename: key.clone(),
+                })?;
             // Rendering is the one case that needs the payload in memory: it
             // rewrites the whole content as text. Only single-file sources may
             // render (see `EntrySelector::build`), so a large directory
@@ -812,10 +811,10 @@ fn ensure_destination_vacant(dest: &Path) -> Result<(), InstallError> {
 /// Built before the archive is decoded so an entry no destination maps to is
 /// skipped without ever being written to staging.
 struct EntrySelector {
-    /// Exact keys: normalized full archive paths and legacy destination
-    /// basenames. Matched against an entry's full path *and* its basename,
-    /// mirroring the dual-keyed lookup this replaces.
-    keys: BTreeSet<String>,
+    /// Explicit single-file sources match only normalized full archive paths.
+    paths: BTreeSet<String>,
+    /// Legacy destination-only contracts match archive entry basenames.
+    basenames: BTreeSet<String>,
     /// Directory sources, trailing slash trimmed. An empty prefix (source
     /// `"/"`) selects the whole archive, as before.
     prefixes: Vec<String>,
@@ -823,7 +822,8 @@ struct EntrySelector {
 
 impl EntrySelector {
     fn build(files: &[ResolvedInstallFile]) -> Result<Self, InstallError> {
-        let mut keys = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        let mut basenames = BTreeSet::new();
         let mut prefixes = Vec::new();
         for file in files {
             match file.source.as_deref() {
@@ -843,17 +843,24 @@ impl EntrySelector {
                     let prefix = normalize_archive_key(source);
                     prefixes.push(prefix.trim_end_matches('/').to_string());
                 }
-                _ => {
-                    keys.insert(archive_source_key(file)?);
+                Some(_) => {
+                    paths.insert(archive_source_key(file)?);
+                }
+                None => {
+                    basenames.insert(archive_source_key(file)?);
                 }
             }
         }
-        Ok(Self { keys, prefixes })
+        Ok(Self {
+            paths,
+            basenames,
+            prefixes,
+        })
     }
 
     fn selects(&self, path_key: &str, basename: &str) -> bool {
-        self.keys.contains(path_key)
-            || self.keys.contains(basename)
+        self.paths.contains(path_key)
+            || self.basenames.contains(basename)
             || self.prefixes.iter().any(|prefix| {
                 archive_relative_under(path_key, prefix).is_some_and(|rel| !rel.is_empty())
             })
@@ -885,12 +892,12 @@ struct StagedEntry {
 struct StagedArchive {
     staging: StagingDir,
     entries: Vec<StagedEntry>,
-    /// Full archive path -> entry index. Drives directory-source expansion;
-    /// sorted iteration gives that expansion a stable order.
+    /// Full archive path -> entry index. Resolves explicit single-file sources
+    /// and drives directory expansion in a stable sorted order.
     full_paths: BTreeMap<String, usize>,
-    /// Basename *and* full archive path -> entry index. Duplicate keys are
-    /// last-write-wins in archive order, matching the previous behavior.
-    lookup: BTreeMap<String, usize>,
+    /// Legacy basename -> entry index. Duplicate basenames remain
+    /// last-write-wins in archive order, independently of explicit paths.
+    basenames: BTreeMap<String, usize>,
     /// Whether an entry has been reserved for a destination. A second claim
     /// gets its own hard link so each destination owns its staged file.
     claimed: Vec<bool>,
@@ -915,7 +922,7 @@ impl StagedArchive {
             staging,
             entries: Vec::new(),
             full_paths: BTreeMap::new(),
-            lookup: BTreeMap::new(),
+            basenames: BTreeMap::new(),
             claimed: Vec::new(),
             next_id: 0,
         };
@@ -943,11 +950,9 @@ impl StagedArchive {
                 continue;
             }
             let index = staged.spool_entry(&mut entry, &path_key, mode)?;
-            // Basename first, then the full path — the same insertion order as
-            // the map this replaces, so which entry wins a basename/full-path
-            // collision does not change.
-            staged.lookup.insert(basename, index);
-            staged.lookup.insert(path_key.clone(), index);
+            // Keep path and basename namespaces separate: a nested entry must
+            // not replace an explicit root-level source with the same basename.
+            staged.basenames.insert(basename, index);
             staged.full_paths.insert(path_key, index);
         }
         Ok(staged)
@@ -1004,8 +1009,12 @@ impl StagedArchive {
     }
 
     /// Entry index for an explicit archive `source` or legacy dest basename.
-    fn index_for(&self, key: &str) -> Option<usize> {
-        self.lookup.get(key).copied()
+    fn index_for(&self, key: &str, explicit_source: bool) -> Option<usize> {
+        if explicit_source {
+            self.full_paths.get(key).copied()
+        } else {
+            self.basenames.get(key).copied()
+        }
     }
 
     /// Entries under a directory source, as `(archive key, relative path,
@@ -3103,6 +3112,137 @@ mod tests {
             staging_dirs(&layout).is_empty(),
             "staging must be cleaned on the failure path"
         );
+    }
+
+    #[test]
+    fn explicit_archive_sources_do_not_collide_with_legacy_basenames() {
+        for nested_last in [true, false] {
+            let home = tempdir().unwrap();
+            let cache = tempdir().unwrap();
+            let layout = layout_for(home.path());
+            let runner = InstallRunner::new(&layout);
+            let root: &[u8] = b"root-payload";
+            let nested: &[u8] = b"nested-payload";
+            let entries = if nested_last {
+                [("tool", root), ("share/tool", nested)]
+            } else {
+                [("share/tool", nested), ("tool", root)]
+            };
+            let cached = write_cached(cache.path(), "payload.tar.gz", &build_tar_gz(&entries));
+            let root_dest = layout.bin_dir.join("root-tool");
+            let normalized_dest = layout.bin_dir.join("normalized-tool");
+            let nested_dest = layout.bin_dir.join("nested-tool");
+            let legacy_dest = layout.bin_dir.join("tool");
+            let entry = |source: &str, dest: PathBuf| ResolvedInstallFile {
+                source: Some(source.to_string()),
+                dest,
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            };
+            let files = [
+                entry("tool", root_dest.clone()),
+                entry("./tool", normalized_dest.clone()),
+                entry("share/tool", nested_dest.clone()),
+                ResolvedInstallFile::dest_only(legacy_dest.clone()),
+            ];
+            runner
+                .install_mapped_fixture("tar_gz", &cached, &files)
+                .expect("install exact sources and legacy basename together");
+            assert_eq!(fs::read(root_dest).unwrap(), root);
+            assert_eq!(fs::read(normalized_dest).unwrap(), root);
+            assert_eq!(fs::read(nested_dest).unwrap(), nested);
+            assert_eq!(
+                fs::read(legacy_dest).unwrap(),
+                if nested_last { nested } else { root }
+            );
+            assert!(staging_dirs(&layout).is_empty());
+        }
+    }
+
+    #[test]
+    fn explicit_archive_source_skips_unrequested_matching_basenames() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("tool", b"root"), ("share/tool", b"unrequested")]),
+        );
+        let file = ResolvedInstallFile {
+            source: Some("tool".to_string()),
+            dest: layout.bin_dir.join("tool"),
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+        let selector = EntrySelector::build(std::slice::from_ref(&file)).unwrap();
+        assert!(selector.selects("tool", "tool"));
+        assert!(!selector.selects("share/tool", "tool"));
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &[file])
+            .expect("prepare the exact source only");
+        assert_eq!(staged_files(&layout).len(), 1);
+        assert_eq!(prepared.regular[0].sha256, sha256_of(b"root"));
+        drop(prepared);
+        assert!(staging_dirs(&layout).is_empty());
+    }
+
+    #[test]
+    fn explicit_archive_source_requires_exact_path() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("share/tool", b"wrong-source")]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let file = ResolvedInstallFile {
+            source: Some("tool".to_string()),
+            dest: dest.clone(),
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+        let error = runner
+            .prepare_files("tar_gz", &cached, &[file])
+            .expect_err("a matching basename does not satisfy an explicit source");
+        assert!(
+            matches!(error, InstallError::MissingArchiveEntry { basename } if basename == "tool")
+        );
+        assert!(!dest.exists());
+        assert!(staging_dirs(&layout).is_empty());
+    }
+
+    #[test]
+    fn explicit_archive_source_keeps_duplicate_full_path_last_write_wins() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("tool", b"first"), ("tool", b"last")]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let file = ResolvedInstallFile {
+            source: Some("tool".to_string()),
+            dest: dest.clone(),
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+        runner
+            .install_mapped_fixture("tar_gz", &cached, &[file])
+            .expect("install the last entry at the exact source path");
+        assert_eq!(fs::read(dest).unwrap(), b"last");
+        assert!(staging_dirs(&layout).is_empty());
     }
 
     #[test]

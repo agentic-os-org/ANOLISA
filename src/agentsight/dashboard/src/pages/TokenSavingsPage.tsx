@@ -4,6 +4,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
+import { downloadSavingsCsv } from '../utils/savingsCsv';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
@@ -381,7 +382,9 @@ const SessionRow: React.FC<{
   session: SessionSavings;
   initialExpanded?: boolean;
   rowRef?: React.Ref<HTMLTableRowElement>;
-}> = ({ session, initialExpanded = false, rowRef }) => {
+  selected?: boolean;
+  onToggleSelected?: (sessionId: string) => void;
+}> = ({ session, initialExpanded = false, rowRef, selected = false, onToggleSelected }) => {
   const { t } = useI18n();
   const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(initialExpanded);
@@ -395,6 +398,17 @@ const SessionRow: React.FC<{
         }`}
         onClick={() => setExpanded(!expanded)}
       >
+        <td className="px-4 lg:px-6 py-4 w-10 text-center">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onToggleSelected?.(session.session_id)}
+            // Keep the click from bubbling into the row's expand toggle.
+            onClick={(e) => e.stopPropagation()}
+            aria-label={t('ts.selectSessionForExport', { id: session.session_id })}
+            className="w-4 h-4 accent-green-600 cursor-pointer"
+          />
+        </td>
         <td className="px-4 lg:px-6 py-4">
           <div className="flex items-center gap-2">
             <span className="text-gray-400 text-xs flex-shrink-0">
@@ -441,7 +455,7 @@ const SessionRow: React.FC<{
       {/* Expanded detail */}
       {expanded && (
         <tr className="bg-blue-50">
-          <td colSpan={6} className="px-4 lg:px-8 py-4">
+          <td colSpan={7} className="px-4 lg:px-8 py-4">
             {/* Optimization items table */}
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <table className="w-full min-w-[700px]">
@@ -505,6 +519,10 @@ export const TokenSavingsPage: React.FC = () => {
 
   // API data state
   const [sessions, setSessions] = useState<SessionSavings[]>([]);
+  // Session ids picked for the subset CSV export. Selection is keyed by id so
+  // it survives detail expansion, is served from the loaded snapshot only and
+  // never triggers requests of its own.
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [summary, setSummary] = useState<SavingsSummary | null>(null);
   const [statsAvailable, setStatsAvailable] = useState(true);
   const [tips, setTips] = useState<OptimizationTip[]>([]);
@@ -557,6 +575,44 @@ export const TokenSavingsPage: React.FC = () => {
       targetRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [expandedSessionId, sessions]);
+
+  // A new successful query replaces the displayed snapshot, so any selection
+  // made against the previous one is dropped (a failed query keeps the
+  // snapshot on screen and therefore keeps its selection).
+  useEffect(() => {
+    setSelectedSessionIds(new Set());
+  }, [sessions]);
+
+  const toggleSessionSelected = useCallback((sessionId: string) => {
+    setSelectedSessionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  }, []);
+
+  const allSessionsSelected = sessions.length > 0
+    && sessions.every((sess) => selectedSessionIds.has(sess.session_id));
+
+  const toggleAllSessions = useCallback(() => {
+    setSelectedSessionIds((prev) => {
+      const everySelected = sessions.length > 0
+        && sessions.every((sess) => prev.has(sess.session_id));
+      return everySelected ? new Set<string>() : new Set(sessions.map((sess) => sess.session_id));
+    });
+  }, [sessions]);
+
+  // Half-selected state for the header checkbox (not expressible in HTML).
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedSessionIds.size > 0 && !allSessionsSelected;
+    }
+  }, [selectedSessionIds, allSessionsSelected]);
+
+  // Subset export source: keeps displayed row order, snapshot only.
+  const selectedSessions = sessions.filter((sess) => selectedSessionIds.has(sess.session_id));
 
   const totalInput = summary?.total_input_tokens ?? 0;
   const totalOutput = summary?.total_output_tokens ?? 0;
@@ -853,10 +909,38 @@ export const TokenSavingsPage: React.FC = () => {
 
       {/* ── Session table ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex justify-end gap-2 px-4 py-3 border-b border-gray-200">
+          <button
+            type="button"
+            onClick={() => downloadSavingsCsv(sessions)}
+            disabled={loading || !!error || sessions.length === 0}
+            className="px-3 py-1.5 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {t('ts.exportCsv')}
+          </button>
+          <button
+            type="button"
+            onClick={() => downloadSavingsCsv(selectedSessions)}
+            disabled={loading || !!error || selectedSessions.length === 0}
+            className="px-3 py-1.5 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {t('ts.exportSelectedCsv', { n: selectedSessions.length })}
+          </button>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[800px]">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
+                <th className="px-4 lg:px-6 py-3 w-10 text-center">
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    checked={allSessionsSelected}
+                    onChange={toggleAllSessions}
+                    aria-label={t('ts.selectAllSessions')}
+                    className="w-4 h-4 accent-green-600 cursor-pointer"
+                  />
+                </th>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
                   <span className="inline-flex items-center gap-1.5">
                     <span>{t('ts.sessionId')}</span>
@@ -887,6 +971,8 @@ export const TokenSavingsPage: React.FC = () => {
                   session={sess}
                   initialExpanded={sess.session_id === expandedSessionId}
                   rowRef={sess.session_id === expandedSessionId ? targetRowRef : undefined}
+                  selected={selectedSessionIds.has(sess.session_id)}
+                  onToggleSelected={toggleSessionSelected}
                 />
               ))}
             </tbody>

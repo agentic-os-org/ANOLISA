@@ -116,11 +116,17 @@ impl TokenParser {
         let anthropic_cache_read = find_u64(data, "cache_read_input_tokens");
         let cache_read_input_tokens =
             anthropic_cache_read.or_else(|| find_u64(data, "cached_tokens"));
-        // `cache_creation_input_tokens` / `cache_read_input_tokens` field names
-        // only occur in Anthropic's schema, where cache tokens are billed on
-        // top of input_tokens; OpenAI-compatible providers keep cache inside
-        // the input count (`cached_tokens`).
-        let provider = if cache_creation_input_tokens.is_some() || anthropic_cache_read.is_some() {
+        // Provider decides whether the cache counters are billed on top of the
+        // input count (Anthropic) or sit inside it (OpenAI-compatible). The
+        // cache field names alone are not enough: DashScope's compatible mode
+        // nests `cache_creation_input_tokens` under `prompt_tokens_details`,
+        // where `prompt_tokens` already includes it, so inferring Anthropic
+        // from the name alone roughly doubles the billed input. Anthropic
+        // spells the input count `input_tokens`; `prompt_tokens` is the
+        // OpenAI-compatible spelling.
+        let provider = if find_u64(data, "prompt_tokens").is_none()
+            && (cache_creation_input_tokens.is_some() || anthropic_cache_read.is_some())
+        {
             LLMProvider::Anthropic
         } else {
             LLMProvider::OpenAI
@@ -174,12 +180,21 @@ impl TokenParser {
             return extract_usage_object(usage, provider, json);
         }
 
-        // 5. Responses API: usage nested in response.completed event
-        if json.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+        // 5. Responses API: usage nested in the terminal response event —
+        // `response.completed`, or `response.incomplete` when the output cap
+        // cut the stream. The terminal event carries the final usage either
+        // way (the live message parser reads both, e534bec1b). The event
+        // type is the endpoint knowledge detect_provider_from_usage lacks:
+        // the Responses usage object reuses Anthropic's field names, and one
+        // without `*_details` would otherwise be mislabeled Anthropic and
+        // double-count its cache hits in billed_input_tokens.
+        if matches!(
+            json.get("type").and_then(|v| v.as_str()),
+            Some("response.completed" | "response.incomplete")
+        ) {
             if let Some(resp) = json.get("response") {
                 if let Some(usage) = resp.get("usage") {
-                    let provider = detect_provider_from_usage(usage);
-                    return extract_usage_object(usage, provider, json);
+                    return extract_usage_object(usage, LLMProvider::OpenAI, json);
                 }
             }
         }
@@ -539,6 +554,41 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, Some(0));
     }
 
+    /// A truncated DashScope-compatible body (the continuation buffer left by
+    /// a process that died mid-stream) must keep the OpenAI-compatible billing
+    /// rule: `prompt_tokens` already contains the cache counters nested under
+    /// `prompt_tokens_details`, so adding them again doubles the input.
+    #[test]
+    fn test_partial_dashscope_usage_keeps_openai_billing() {
+        let parser = TokenParser::new();
+        // Deliberately not valid JSON: the last TLS record was cut.
+        let data = r#"{"id":"chatcmpl-ds-003","model":"qwen3.6-plus","usage":{"prompt_tokens":29719,"completion_tokens":435,"total_tokens":30154,"prompt_tokens_details":{"cache_creation_input_tokens":29713,"cached_tokens":0}"#;
+
+        let usage = parser
+            .parse_data(data)
+            .expect("partial usage must be recovered");
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+        assert_eq!(usage.input_tokens, 29719);
+        assert_eq!(usage.cache_creation_input_tokens, Some(29713));
+
+        let record = crate::analyzer::token::record::TokenRecord::new(
+            1,
+            "qwen".to_string(),
+            usage.provider.to_string(),
+            usage.input_tokens,
+            0,
+        )
+        .with_cache_tokens(
+            usage.cache_creation_input_tokens.unwrap_or(0),
+            usage.cache_read_input_tokens.unwrap_or(0),
+        );
+        assert_eq!(
+            record.billed_input_tokens(),
+            29719,
+            "nested cache counters are already part of prompt_tokens"
+        );
+    }
+
     #[test]
     fn test_parse_dashscope_usage_without_prompt_tokens_details() {
         // DashScope response lacking prompt_tokens_details — cache fields
@@ -629,6 +679,25 @@ mod tests {
         );
         // Guard the ordering the fallback already pinned for the truncated
         // variant: an OpenAI-style nested counter must not relabel the provider.
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
+    fn test_parse_responses_incomplete_usage() {
+        // A capped Responses stream terminates with `response.incomplete`,
+        // not `response.completed` — and the terminal event carries the
+        // final usage either way. The strict path recognized `completed`
+        // only, so everywhere TokenParser feeds usage (the drain
+        // enrichment, the analyzer's SSE usage aggregation) a capped call
+        // recorded no tokens at all, while the live message parser
+        // recovered them (e534bec1b).
+        let data = r#"{"sequence_number":7,"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"total_tokens":15,"input_tokens":10,"output_tokens":5},"model":"qwen3-coder-plus"}}"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("usage should parse");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        // OpenAI-style usage keys must keep the OpenAI provider label so
+        // billed_input_tokens does not switch to the Anthropic formula.
         assert_eq!(usage.provider, LLMProvider::OpenAI);
     }
 

@@ -171,6 +171,45 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // Anthropic Messages streams text, thinking and tool input as
+            // `content_block_delta` events, each carrying its own
+            // `delta.type`. The drained-stream and analyze-chatml paths
+            // aggregate the same shape, so leaving it unextracted makes the
+            // callers count a response with content as zero output tokens.
+            "content_block_delta" => {
+                if let Some(delta) = resp.get("delta") {
+                    match delta.get("type").and_then(|t| t.as_str()) {
+                        Some("text_delta") => {
+                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    return Some((text.to_string(), None, Vec::new()));
+                                }
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                if !thinking.is_empty() {
+                                    return Some((
+                                        String::new(),
+                                        Some(thinking.to_string()),
+                                        Vec::new(),
+                                    ));
+                                }
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            if let Some(partial) =
+                                delta.get("partial_json").and_then(|t| t.as_str())
+                            {
+                                if !partial.is_empty() {
+                                    return Some((String::new(), None, vec![partial.to_string()]));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -385,6 +424,65 @@ mod tests {
             "response": {"id": "abc"},
         });
         assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    /// Anthropic streams content as `content_block_delta` events; the drained
+    /// and analyze-chatml paths aggregate them, so the shared extractor must
+    /// not count the whole response as zero output tokens.
+    #[test]
+    fn test_anthropic_text_delta() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hel"},
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract the text delta");
+        assert_eq!(content, "Hel");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_thinking_delta() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "step by step"},
+        });
+        let (content, reasoning, _) =
+            extract_response_content(Some(&chunk)).expect("should extract the thinking delta");
+        assert!(content.is_empty());
+        assert_eq!(reasoning.as_deref(), Some("step by step"));
+    }
+
+    #[test]
+    fn test_anthropic_input_json_delta() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"city\":"},
+        });
+        let (content, _, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract the tool input fragment");
+        assert!(content.is_empty());
+        assert_eq!(tools, vec!["{\"city\":".to_string()]);
+    }
+
+    #[test]
+    fn test_anthropic_non_content_events_are_not_extracted() {
+        // Guard: a message_start/message_delta/ping carries no assistant text
+        // and must keep returning None instead of a fabricated empty payload.
+        for chunk in [
+            serde_json::json!({"type": "message_start", "message": {"id": "msg_1"}}),
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            serde_json::json!({"type": "ping"}),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
     }
 
     #[test]
