@@ -385,7 +385,8 @@ def test_output_files_created(tmp_path: Path) -> None:
     assert rdata["instance_id"] == "instance-6"
     assert rdata["success"] is True
     assert rdata["patch_produced"] is True
-    manifest_file = tmp_path / "input-manifests" / "instance-6" / "input_manifest.json"
+    manifest_file = Path(rdata["metadata"]["input_manifest_path"])
+    assert manifest_file.parent.parent == tmp_path / "input-manifests"
     assert manifest_file.exists()
     manifest = json.loads(manifest_file.read_text())
     assert manifest["instance_id"] == "instance-6"
