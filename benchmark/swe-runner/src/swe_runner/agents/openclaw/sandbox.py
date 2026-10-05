@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -143,13 +144,13 @@ def _iter_host_tokenless_binary_candidates(binary_name: str) -> Iterator[Path]:
 def _resolve_host_tokenless_binary(binary_name: str) -> Path:
     candidates = list(_iter_host_tokenless_binary_candidates(binary_name))
     for candidate in candidates:
-        if candidate.is_file():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
 
     searched = ", ".join(str(candidate) for candidate in candidates) or "<none>"
     raise RuntimeError(
-        f"Tokenless binary {binary_name!r} not found on host. "
-        f"Ensure it is on PATH or installed in a known tokenless/OpenClaw plugin directory. Searched: {searched}"
+        f"Executable Tokenless binary {binary_name!r} not found on host. "
+        f"Ensure it is executable on PATH or in a known tokenless/OpenClaw plugin directory. Searched: {searched}"
     )
 
 
@@ -195,13 +196,13 @@ def _tokenless_binary_record(binary_name: str, source: Path, target: Path) -> di
 
 
 def _inject_tokenless_binaries(workspace: Path) -> None:
+    sources = {name: _resolve_host_tokenless_binary(name) for name in _TOKENLESS_BINARY_NAMES}
     tokenless_root = workspace / ".runner" / "tokenless"
     tokenless_target = tokenless_root / "bin"
     tokenless_target.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
 
-    for binary_name in _TOKENLESS_BINARY_NAMES:
-        source = _resolve_host_tokenless_binary(binary_name)
+    for binary_name, source in sources.items():
         logger.info("OPENCLAW_TOKENLESS_BINARY_RESOLVED name=%s path=%s", binary_name, source)
         target = tokenless_target / binary_name
         shutil.copy2(source, target)
