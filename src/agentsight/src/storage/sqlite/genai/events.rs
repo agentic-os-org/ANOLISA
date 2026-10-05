@@ -582,7 +582,7 @@ impl GenAISqliteStore {
             GenAISemanticEvent::ToolUse(tool) => {
                 conn.execute(
                     "INSERT INTO genai_events (
-                        event_type, call_id, timestamp_ns, pid,
+                        event_type, call_id, start_timestamp_ns, pid,
                         event_json
                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
@@ -597,7 +597,7 @@ impl GenAISqliteStore {
             GenAISemanticEvent::AgentInteraction(interaction) => {
                 conn.execute(
                     "INSERT INTO genai_events (
-                        event_type, timestamp_ns, pid,
+                        event_type, start_timestamp_ns, pid,
                         event_json
                     ) VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -611,7 +611,7 @@ impl GenAISqliteStore {
             GenAISemanticEvent::StreamChunk(chunk) => {
                 conn.execute(
                     "INSERT INTO genai_events (
-                        event_type, call_id, timestamp_ns, pid,
+                        event_type, call_id, start_timestamp_ns, pid,
                         event_json
                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![

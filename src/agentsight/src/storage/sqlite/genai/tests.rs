@@ -3509,3 +3509,86 @@ fn legacy_db_without_conversation_id_is_migrated_before_index_creation() {
     drop(conn);
     let _ = std::fs::remove_file(&path);
 }
+
+/// Non-LLMCall events must land in `genai_events`: the INSERTs named a
+/// `timestamp_ns` column that the table does not have (the column is
+/// `start_timestamp_ns`, NOT NULL), so `store_event` returned Err and
+/// `flush` only logged — such events were silently dropped.
+#[test]
+fn non_llm_events_are_persisted_with_the_schema_timestamp_column() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_nonllm_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    store
+        .store_event(&GenAISemanticEvent::ToolUse(
+            crate::genai::semantic::ToolUse {
+                tool_use_id: "t1".to_string(),
+                timestamp_ns: 1_700_000_000_000_000_111,
+                tool_name: "read".to_string(),
+                arguments: serde_json::json!({}),
+                result: None,
+                duration_ns: None,
+                success: true,
+                error: None,
+                parent_llm_call_id: Some("call-1".to_string()),
+                pid: 42,
+            },
+        ))
+        .expect("a ToolUse event must be persisted");
+    store
+        .store_event(&GenAISemanticEvent::AgentInteraction(
+            crate::genai::semantic::AgentInteraction {
+                interaction_id: "i1".to_string(),
+                timestamp_ns: 1_700_000_000_000_000_222,
+                agent_name: "claude".to_string(),
+                interaction_type: "plan".to_string(),
+                content: "step".to_string(),
+                parent_llm_call_id: None,
+                pid: 42,
+            },
+        ))
+        .expect("an AgentInteraction event must be persisted");
+    store
+        .store_event(&GenAISemanticEvent::StreamChunk(
+            crate::genai::semantic::StreamChunk {
+                stream_id: "s1".to_string(),
+                chunk_index: 0,
+                timestamp_ns: 1_700_000_000_000_000_333,
+                content: "tok".to_string(),
+                parent_llm_call_id: "call-1".to_string(),
+                pid: 42,
+            },
+        ))
+        .expect("a StreamChunk event must be persisted");
+
+    let conn = store.conn.lock().unwrap();
+    let rows: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT event_type, start_timestamp_ns FROM genai_events \
+             WHERE event_type IN ('tool_use', 'agent_interaction', 'stream_chunk') \
+             ORDER BY start_timestamp_ns",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("tool_use".to_string(), 1_700_000_000_000_000_111),
+            ("agent_interaction".to_string(), 1_700_000_000_000_000_222),
+            ("stream_chunk".to_string(), 1_700_000_000_000_000_333),
+        ]
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+}
