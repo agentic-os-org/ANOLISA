@@ -45,6 +45,7 @@ pub mod types;
 
 pub use anthropic::AnthropicParser;
 pub use openai::OpenAIParser;
+pub(crate) use openai::ResponsesToolCalls;
 pub use sysom::SysomParser;
 pub use types::*;
 

@@ -38,21 +38,137 @@ use super::types::{
 /// keeps a malformed or hostile value from selecting an unrelated slot.
 const MAX_TOOL_CALL_SLOTS: u64 = 256;
 
-/// Emit an in-flight Responses-API function call, if there is one.
+/// Bounded per-item state shared by live parsing and drain enrichment.
 ///
-/// Called both when the stream says the call is finished and before a new call
-/// starts, because a Responses stream may carry several calls at once (parallel
-/// tool use) and is not required to send `function_call_arguments.done` for each
-/// of them.
-fn push_tool_call(tool_calls: &mut Vec<serde_json::Value>, id: &str, name: &str, arguments: &str) {
-    if name.is_empty() {
-        return;
+/// Responses argument events identify their output item, so a new call must
+/// not flush a previous call that can still receive deltas. Unidentified
+/// compatible-provider events retain the sequential, most-recent-call fallback.
+#[derive(Default)]
+pub(crate) struct ResponsesToolCalls {
+    calls: Vec<ResponseToolCall>,
+    current: Option<usize>,
+}
+
+struct ResponseToolCall {
+    index: Option<u64>,
+    item_id: Option<String>,
+    id: String,
+    name: String,
+    arguments: String,
+    done: bool,
+}
+
+impl ResponsesToolCalls {
+    /// Apply a call lifecycle event without redirecting unknown item IDs.
+    pub(crate) fn observe(&mut self, event: &serde_json::Value) {
+        let kind = event.get("type").and_then(|v| v.as_str());
+        let index = event.get("output_index").and_then(|v| v.as_u64());
+        if event.get("output_index").is_some() && index.is_none() {
+            return;
+        }
+        let added = kind == Some("response.output_item.added");
+        let item = event.get("item");
+        let item_id = if added {
+            item.and_then(|i| i.get("id"))
+        } else {
+            event.get("item_id")
+        }
+        .and_then(|v| v.as_str());
+        let identified = index.is_some() || item_id.is_some();
+        let position = if identified {
+            self.calls.iter().position(|call| {
+                let matches = index.is_some_and(|i| call.index == Some(i))
+                    || item_id.is_some_and(|id| call.item_id.as_deref() == Some(id));
+                let conflict = index.zip(call.index).is_some_and(|(a, b)| a != b)
+                    || item_id
+                        .zip(call.item_id.as_deref())
+                        .is_some_and(|(a, b)| a != b);
+                matches && !conflict
+            })
+        } else {
+            self.current
+        };
+
+        match kind {
+            Some("response.output_item.added") => {
+                let Some(item) = item else { return };
+                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                    return;
+                }
+                // A reused index with a different item ID is contradictory;
+                // retaining both would make index-only deltas ambiguous.
+                if identified
+                    && position.is_none()
+                    && self.calls.iter().any(|call| {
+                        index.is_some_and(|i| call.index == Some(i))
+                            || item_id.is_some_and(|id| call.item_id.as_deref() == Some(id))
+                    })
+                {
+                    return;
+                }
+                // Repeated identified add events must not duplicate the call.
+                if identified && position.is_some() {
+                    self.current = position;
+                    return;
+                }
+                if self.calls.len() >= MAX_TOOL_CALL_SLOTS as usize {
+                    self.current = None;
+                    return;
+                }
+                self.calls.push(ResponseToolCall {
+                    index,
+                    item_id: item_id.map(str::to_owned),
+                    id: item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    arguments: item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    done: false,
+                });
+                self.current = Some(self.calls.len() - 1);
+            }
+            Some("response.function_call_arguments.delta") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    if !call.done {
+                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                            call.arguments.push_str(delta);
+                        }
+                    }
+                }
+            }
+            Some("response.function_call_arguments.done") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    // A full done payload supersedes partial captured deltas.
+                    if let Some(arguments) = event.get("arguments").and_then(|v| v.as_str()) {
+                        call.arguments = arguments.to_owned();
+                    }
+                    call.done = true;
+                }
+                if !identified {
+                    self.current = None;
+                }
+            }
+            _ => {}
+        }
     }
-    tool_calls.push(serde_json::json!({
-        "id": id,
-        "type": "function",
-        "function": {"name": name, "arguments": arguments}
-    }));
+
+    /// Emit every known call once, in output-item arrival order.
+    pub(crate) fn into_calls(self) -> impl Iterator<Item = (String, String, String)> {
+        self.calls
+            .into_iter()
+            .filter(|call| !call.name.is_empty())
+            .map(|call| (call.id, call.name, call.arguments))
+    }
 }
 
 /// Parser for OpenAI Chat Completions API
@@ -371,10 +487,7 @@ impl OpenAIParser {
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
-        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-        let mut tc_name = String::new();
-        let mut tc_id = String::new();
-        let mut tc_args = String::new();
+        let mut calls = ResponsesToolCalls::default();
         let mut model = String::new();
         let mut resp_id = String::new();
         let mut usage: Option<serde_json::Value> = None;
@@ -383,6 +496,7 @@ impl OpenAIParser {
         let mut output_capped = false;
 
         for chunk in chunks {
+            calls.observe(chunk);
             let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "response.output_text.delta" => {
@@ -399,48 +513,6 @@ impl OpenAIParser {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         reasoning_buf.push_str(delta);
                     }
-                }
-                "response.output_item.added" => {
-                    if let Some(item) = chunk.get("item") {
-                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                            // A Responses stream can carry several calls in
-                            // flight (parallel tool use) and is not required to
-                            // send `function_call_arguments.done` for each, so
-                            // starting a new call must not discard the previous
-                            // one's name, id and arguments.
-                            push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
-                            tc_name = item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tc_id = item
-                                .get("call_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tc_args.clear();
-                        }
-                    }
-                }
-                "response.function_call_arguments.delta" => {
-                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        tc_args.push_str(delta);
-                    }
-                }
-                "response.function_call_arguments.done" => {
-                    // The done event carries the complete arguments; the
-                    // deltas are a stream that may be missing (capture
-                    // started mid-stream, events dropped). Prefer the
-                    // authoritative value when it is there.
-                    if let Some(arguments) = chunk.get("arguments").and_then(|a| a.as_str()) {
-                        tc_args.clear();
-                        tc_args.push_str(arguments);
-                    }
-                    push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
-                    tc_name.clear();
-                    tc_id.clear();
-                    tc_args.clear();
                 }
                 "response.completed" => {
                     if let Some(resp) = chunk.get("response") {
@@ -513,7 +585,13 @@ impl OpenAIParser {
         }
 
         // Flush any in-flight tool call (truncated stream without "done" event)
-        push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
+        let tool_calls: Vec<_> = calls
+            .into_calls()
+            .map(|(id, name, arguments)| {
+                serde_json::json!({"id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments}})
+            })
+            .collect();
 
         let mut message = serde_json::json!({
             "role": "assistant",

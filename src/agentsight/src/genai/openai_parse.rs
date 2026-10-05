@@ -8,6 +8,7 @@
 
 use super::GenAIBuilder;
 use super::semantic::{InputMessage, LLMRequest, MessagePart, OutputMessage};
+use crate::analyzer::message::ResponsesToolCalls;
 use crate::analyzer::message::types::OpenAIChatMessage;
 use crate::analyzer::{HttpRecord, ParsedApiMessage};
 use std::collections::HashMap;
@@ -733,41 +734,18 @@ impl GenAIBuilder {
     /// stream lost its entire output (`output_messages = None`) while the same
     /// stream captured live kept it.
     ///
-    /// Mirrors the analyzer's aggregation, including its parallel-tool-use
-    /// semantics: an in-flight call is flushed when the next call starts,
-    /// because the stream is not required to send
-    /// `response.function_call_arguments.done` for each call.
+    /// Shares the analyzer's per-item tool state so interleaved arguments and
+    /// done payloads stay attached to their own call. Incomplete calls survive
+    /// without a per-call done event.
     pub(super) fn merge_responses_sse_chunks(
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
-        fn push_tool_call(parts: &mut Vec<MessagePart>, id: &str, name: &str, arguments: &str) {
-            if name.is_empty() {
-                return;
-            }
-            let arguments = if arguments.trim().is_empty() {
-                None
-            } else {
-                serde_json::from_str(arguments).ok()
-            };
-            parts.push(MessagePart::ToolCall {
-                id: if id.is_empty() {
-                    None
-                } else {
-                    Some(id.to_string())
-                },
-                name: name.to_string(),
-                arguments,
-            });
-        }
-
         let mut text_buf = String::new();
-        let mut tool_parts: Vec<MessagePart> = Vec::new();
-        let mut tc_id = String::new();
-        let mut tc_name = String::new();
-        let mut tc_args = String::new();
+        let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
 
         for chunk in chunks {
+            calls.observe(chunk);
             let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "response.output_text.delta" => {
@@ -776,39 +754,7 @@ impl GenAIBuilder {
                         text_buf.push_str(delta);
                     }
                 }
-                "response.output_item.added" => {
-                    saw_responses_event = true;
-                    if let Some(item) = chunk.get("item") {
-                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                            // Parallel tool use: a new call starting must not
-                            // discard the previous one (same invariant the
-                            // analyzer's aggregator holds).
-                            push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
-                            tc_name = item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tc_id = item
-                                .get("call_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tc_args.clear();
-                        }
-                    }
-                }
-                "response.function_call_arguments.delta" => {
-                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        tc_args.push_str(delta);
-                    }
-                }
-                "response.function_call_arguments.done" => {
-                    push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
-                    tc_name.clear();
-                    tc_id.clear();
-                    tc_args.clear();
-                }
+                "response.output_item.added" => saw_responses_event = true,
                 _ => {}
             }
         }
@@ -817,8 +763,14 @@ impl GenAIBuilder {
             return None;
         }
 
-        // Flush any in-flight call (truncated stream without the done event).
-        push_tool_call(&mut tool_parts, &tc_id, &tc_name, &tc_args);
+        let tool_parts: Vec<_> = calls
+            .into_calls()
+            .map(|(id, name, arguments)| MessagePart::ToolCall {
+                id: if id.is_empty() { None } else { Some(id) },
+                name,
+                arguments: serde_json::from_str(&arguments).ok(),
+            })
+            .collect();
 
         let mut parts = Vec::new();
         if !text_buf.is_empty() {
