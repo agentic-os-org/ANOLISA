@@ -942,6 +942,54 @@ mod tests {
         );
     }
 
+    /// Reasoning models on the Responses protocol stream their thinking as
+    /// `response.reasoning_text.delta` (qwen3-coder via dashscope) or
+    /// `response.reasoning_summary_text.delta` (o-series), the same events
+    /// the live analyzer folds into the chat view's `reasoning_content`.
+    /// Ignoring them left `ResponseData.reasoning_content` at `None`, so the
+    /// breakdown reported a zero-token reasoning child and understated the
+    /// response total that the percentages are computed from.
+    #[test]
+    fn sse_responses_reasoning_deltas_feed_breakdown() {
+        let events = vec![
+            sse(r#"{"type":"response.created","response":{"id":"resp_1"}}"#),
+            sse(r#"{"type":"response.reasoning_summary_text.delta","delta":"hello "}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"there"}"#),
+            sse(r#"{"type":"response.output_text.delta","delta":"final"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("hello there"),
+            "both reasoning event kinds must accumulate in stream order"
+        );
+        assert_eq!(resp.content, vec!["final".to_string()]);
+
+        let tokenizer = fixture_tokenizer();
+        let blocks = vec![crate::token_breakdown::types::ChatMLBlock {
+            role: "user".to_string(),
+            raw_content: "hello".to_string(),
+        }];
+        let doc = classify_document(&blocks, Some(resp));
+        let breakdown =
+            compute_breakdown(&doc, &tokenizer, "qwen3.5-plus").expect("breakdown computes");
+        let response_event = breakdown
+            .events
+            .iter()
+            .find(|event| event.event_type == "response")
+            .expect("response event present");
+        let reasoning = response_event
+            .children
+            .iter()
+            .find(|child| child.name == "reasoning_content")
+            .expect("reasoning child present");
+        assert!(
+            reasoning.tokens > 0,
+            "reasoning tokens must be counted, got {reasoning:?}"
+        );
+    }
+
     /// Parallel Responses calls without per-call done events must all
     /// survive, in stream order.
     #[test]
