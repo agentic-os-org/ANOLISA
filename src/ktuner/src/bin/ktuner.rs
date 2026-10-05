@@ -434,7 +434,15 @@ fn cmd_rollback(list: bool) -> Result<i32> {
         "status": format!("{status:?}"),
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(if outcome.is_complete() { 0 } else { 1 })
+    Ok(rollback_exit_code(&outcome))
+}
+
+fn rollback_exit_code(outcome: &tuner::RollbackOutcome) -> i32 {
+    if outcome.is_complete() {
+        0
+    } else {
+        1
+    }
 }
 
 fn gather() -> Result<(detect::SystemInfo, rules::EvalResult)> {
@@ -465,6 +473,27 @@ fn rec_json(r: &Recommendation) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_exit_code_reports_complete_and_incomplete_outcomes() {
+        for (name, restored, failed, skipped, expected) in [
+            ("empty ledger", 0, 0, 0, 0),
+            ("fully restored", 3, 0, 0, 0),
+            ("all failed", 0, 2, 0, 1),
+            ("all skipped", 0, 0, 2, 1),
+            ("failed and skipped", 0, 1, 1, 1),
+            ("partially failed", 2, 1, 0, 1),
+            ("partially skipped", 2, 0, 1, 1),
+            ("mixed incomplete", 2, 1, 1, 1),
+        ] {
+            let outcome = tuner::RollbackOutcome {
+                restored,
+                failed,
+                skipped,
+            };
+            assert_eq!(rollback_exit_code(&outcome), expected, "{name}");
+        }
+    }
 
     #[test]
     fn rollback_list_output_empty() {
