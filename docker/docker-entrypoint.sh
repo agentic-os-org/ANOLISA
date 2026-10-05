@@ -7,7 +7,13 @@ echo "[anolisa] Starting ANOLISA Agentic OS container..."
 # AgentSight: start if binary is available and eBPF capabilities are present
 # ---------------------------------------------------------------------------
 if command -v agentsight &>/dev/null; then
-  if capsh --print 2>/dev/null | grep -qE 'cap_bpf|cap_sys_admin'; then
+  # Judge only the effective capability set ("Current:"), not the bounding
+  # set, and require both CAP_BPF and CAP_PERFMON (kernel >= 5.8 needs
+  # CAP_PERFMON for perf-based eBPF) unless CAP_SYS_ADMIN is present.
+  current_caps="$(capsh --print 2>/dev/null | grep '^Current:' || true)"
+  if echo "$current_caps" | grep -q 'cap_sys_admin' \
+     || { echo "$current_caps" | grep -q 'cap_bpf' \
+          && echo "$current_caps" | grep -q 'cap_perfmon'; }; then
     echo "[anolisa] eBPF capabilities detected, starting agentsight..."
     if command -v agentsight-start &>/dev/null; then
       agentsight-start &
