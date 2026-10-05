@@ -594,12 +594,17 @@ impl Http2Stream {
 
     /// Check if response content-type indicates SSE stream
     pub fn is_response_sse(&self) -> bool {
+        // RFC 9110 media types are case-insensitive, so the value must be
+        // matched case-insensitively — in lockstep with the HTTP/1 parser's
+        // `ParsedResponse::is_sse`, which lowercases the value first. A
+        // server spelling the header `Content-Type: Text/Event-Stream` must
+        // be classified as SSE on both stacks.
         if let Some(headers) = self.decoded_response_headers.as_ref() {
             if let Some((_, value)) = headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
             {
-                return value.contains("text/event-stream");
+                return value.to_ascii_lowercase().contains("text/event-stream");
             }
         }
         self.response_headers
@@ -610,7 +615,7 @@ impl Http2Stream {
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                     .and_then(|(_, value)| value.clone())
-                    .map(|ct| ct.contains("text/event-stream"))
+                    .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -2405,6 +2410,55 @@ mod tests {
             stream.response_headers_json().contains("content-encoding"),
             "headers JSON must not drop the dynamic-table header: {}",
             stream.response_headers_json()
+        );
+    }
+
+    #[test]
+    fn is_response_sse_matches_content_type_case_insensitively() {
+        // RFC 9110 media types are case-insensitive, and the HTTP/1 parser
+        // already lowercases the value before matching
+        // (`parser::http::response::ParsedResponse::is_sse`). The HTTP/2
+        // check must agree: a server spelling the header
+        // `Content-Type: Text/Event-Stream` on an HTTP/2 response must be
+        // classified as SSE exactly like the same bytes over HTTP/1.1.
+        let connection_id = ConnectionId { pid: 1, ssl_ptr: 1 };
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.decoded_response_headers = Some(vec![
+            (":status".to_string(), "200".to_string()),
+            ("content-type".to_string(), "Text/Event-Stream".to_string()),
+        ]);
+        assert!(
+            stream.is_response_sse(),
+            "a case-variant SSE media type must still mark the response as SSE"
+        );
+    }
+
+    #[test]
+    fn is_response_sse_matches_content_type_case_insensitively_stateless() {
+        // Same response, but only the raw HEADERS frame is available (no
+        // stateful decode): the stateless fallback branch of
+        // `is_response_sse` reads the literal value off the wire and must
+        // match it case-insensitively too.
+        //
+        // The header block is hand-encoded in the form real HTTP/2 servers
+        // emit for a content-type override: `:status: 200` as a static
+        // indexed field (0x88), then content-type (static name index 31)
+        // as a literal with incremental indexing (0x40 | 31 = 0x5f) whose
+        // value is a 32-byte plain literal.
+        let mut encoded = vec![0x88, 0x5f, 0x20];
+        encoded.extend_from_slice(b"Text/Event-Stream; charset=utf-8");
+        let event = create_test_event(1, 0x1000, 0, 1000);
+        let frame = create_test_frame(1, 0x01, 0x04, encoded, event);
+
+        let connection_id = ConnectionId {
+            pid: 1,
+            ssl_ptr: 0x1000,
+        };
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.response_headers = Some(frame);
+        assert!(
+            stream.is_response_sse(),
+            "the stateless fallback must classify a case-variant SSE media type as SSE"
         );
     }
 
