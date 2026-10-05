@@ -237,6 +237,41 @@ def test_daemon_client_preserves_explicit_trace_id(
     assert trace_context == {"trace_id": "trace-1", "session_id": "session-1"}
 
 
+def test_daemon_client_camelcase_trace_alias_persists_snake_case(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """The traceId alias must surface as trace_id on the wire payload.
+
+    The alias branch accepted the value but assigned it to a local, so the
+    serialized request carried traceId only — the helper's "always inject a
+    trace_id" invariant was violated on exactly this branch (snake-case and
+    empty inputs worked).
+    """
+    clear_invocation_context_for_tests()
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "invocation-1")
+    init_invocation_context()
+    client = DaemonClient(socket_path=tmp_path / "unused.sock")
+    captured = {}
+
+    def fake_send_request(request: DaemonRequest, _timeout_ms: int) -> DaemonResponse:
+        captured["request"] = request
+        return DaemonResponse(request_id=request.request_id, ok=True)
+
+    monkeypatch.setattr(client, "_send_request", fake_send_request)
+
+    try:
+        client.call(
+            "scan-prompt",
+            trace_context={"traceId": "alias-1", "session_id": "session-1"},
+        )
+    finally:
+        clear_invocation_context_for_tests()
+
+    request = captured["request"]
+    assert request.trace_context.get("trace_id") == "alias-1"
+
+
 def test_daemon_client_requires_explicit_trace_context(tmp_path: Path):
     client = DaemonClient(socket_path=tmp_path / "unused.sock")
 
