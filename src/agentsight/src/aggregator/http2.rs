@@ -891,6 +891,19 @@ impl Http2StreamAggregator {
                                 direction,
                             },
                         );
+                    } else {
+                        log::warn!(
+                            "HEADERS block for stream {stream_id:?} exceeds \
+                             MAX_CONTINUATION_BUFFER ({} bytes), dropping",
+                            fragment.len()
+                        );
+                        // The peer's encoder still applied this block's
+                        // dynamic-table insertions, so keeping the stale decoder
+                        // would mis-resolve every later dynamic index on the
+                        // connection. Reset like a decode error: later blocks
+                        // that need the lost entries are rejected instead of
+                        // silently mis-decoded.
+                        self.reset_hpack_decoder(connection_id, direction);
                     }
                     None
                 };
@@ -1008,8 +1021,15 @@ impl Http2StreamAggregator {
             if buffer.data.len() + payload.len() <= MAX_CONTINUATION_BUFFER {
                 buffer.data.extend_from_slice(payload);
             } else {
+                let direction = buffer.direction;
                 log::warn!("CONTINUATION buffer overflow for stream {stream_id:?}, dropping");
                 self.continuation_buffers.remove(&stream_id);
+                // Dropping the block without decoding it leaves the decoder's
+                // dynamic table behind the peer's encoder, which did apply its
+                // insertions. Reset like a decode error so later blocks that
+                // reference the lost entries fail closed instead of resolving
+                // them against stale entries.
+                self.reset_hpack_decoder(conn_id, direction);
                 return;
             }
 
@@ -1096,22 +1116,34 @@ impl Http2StreamAggregator {
                 // Reset decoder for this direction. The fresh table is
                 // empty and re-pinned to the connection's effective cap;
                 // the retained-bytes estimate starts over from zero.
-                let state = self
-                    .hpack_states
-                    .get_or_insert_mut(conn_id, HpackConnectionState::new);
-                match direction {
-                    StreamDirection::Request => {
-                        state.req_decoder = Decoder::new();
-                        state.req_decoder.set_max_table_size(state.req_table_cap);
-                        state.req_table_bytes = 0;
-                    }
-                    StreamDirection::Response => {
-                        state.resp_decoder = Decoder::new();
-                        state.resp_decoder.set_max_table_size(state.resp_table_cap);
-                        state.resp_table_bytes = 0;
-                    }
-                }
+                self.reset_hpack_decoder(conn_id, direction);
                 None
+            }
+        }
+    }
+
+    /// Drop one direction's decoder state back to its initial table.
+    ///
+    /// Used both when a block fails to decode and when a block is abandoned for
+    /// size: the peer's encoder applied that block's dynamic-table insertions
+    /// either way, so the old table is no longer trustworthy. A fresh decoder
+    /// refuses unknown dynamic indices instead of resolving them to stale
+    /// entries — a later block is dropped rather than silently mis-decoded
+    /// (wrong `:path`, `:status`, `content-type`).
+    fn reset_hpack_decoder(&mut self, conn_id: ConnectionId, direction: StreamDirection) {
+        let state = self
+            .hpack_states
+            .get_or_insert_mut(conn_id, HpackConnectionState::new);
+        match direction {
+            StreamDirection::Request => {
+                state.req_decoder = Decoder::new();
+                state.req_decoder.set_max_table_size(state.req_table_cap);
+                state.req_table_bytes = 0;
+            }
+            StreamDirection::Response => {
+                state.resp_decoder = Decoder::new();
+                state.resp_decoder.set_max_table_size(state.resp_table_cap);
+                state.resp_table_bytes = 0;
             }
         }
     }
@@ -2611,6 +2643,134 @@ mod tests {
         assert!(decoded.is_some());
         let hdrs = decoded.unwrap();
         assert_eq!(hdrs.iter().find(|(n, _)| n == ":method").unwrap().1, "GET");
+    }
+
+    const SENTINEL_VALUE: &str = "prime";
+    const FINAL_VALUE: &str = "final";
+
+    /// Encode a header block larger than `MAX_CONTINUATION_BUFFER` whose last
+    /// insertion is (`x-final`, FINAL_VALUE), so the encoder's dynamic index 62
+    /// refers to that entry afterwards. The filler names are all distinct, so
+    /// every header is an incremental-indexing insertion and the total evicts
+    /// any previously primed entry.
+    fn encode_oversized_block(encoder: &mut Encoder) -> Vec<u8> {
+        let filler_value = vec![b'f'; 350];
+        let mut headers: Vec<(Vec<u8>, Vec<u8>)> = (0..400)
+            .map(|i| (format!("x-fill-{i:03}").into_bytes(), filler_value.clone()))
+            .collect();
+        headers.push((b"x-final".to_vec(), FINAL_VALUE.as_bytes().to_vec()));
+        encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])))
+    }
+
+    /// Prime the connection's decoder with a sentinel entry at dynamic index 62.
+    fn prime_sentinel_decoder(
+        aggregator: &mut Http2StreamAggregator,
+        conn_id: ConnectionId,
+        encoder: &mut Encoder,
+    ) {
+        let prime = encoder.encode([(&b"x-sentinel"[..], SENTINEL_VALUE.as_bytes())]);
+        assert_eq!(
+            aggregator.decode_header_block(conn_id, StreamDirection::Request, &prime),
+            Some(vec![("x-sentinel".to_string(), SENTINEL_VALUE.to_string())])
+        );
+    }
+
+    /// After an oversized block was dropped, the peer's next block may
+    /// reference dynamic entries our decoder never saw. The decoder must not
+    /// answer such a reference from a stale table, and must still work for a
+    /// fully self-contained block.
+    fn assert_decoder_survived_dropped_block(
+        aggregator: &mut Http2StreamAggregator,
+        conn_id: ConnectionId,
+        encoder: &mut Encoder,
+    ) {
+        // Same encoder as the dropped block: this block's only dynamic
+        // reference is index 62, the dropped block's newest entry.
+        let follow_up = encoder.encode([(&b"x-final"[..], FINAL_VALUE.as_bytes())]);
+        assert_eq!(
+            follow_up,
+            vec![0xBE],
+            "indexed reference to dynamic index 62"
+        );
+        let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Request, &follow_up);
+        if let Some(headers) = &decoded {
+            assert!(
+                headers
+                    .iter()
+                    .any(|(name, value)| name == "x-final" && value == FINAL_VALUE),
+                "a dropped block's stale dynamic entry was resolved: {headers:?}"
+            );
+        }
+
+        // A self-contained block (literals only) must still decode: the reset
+        // keeps the decoder usable, it just refuses to guess lost entries.
+        let self_contained = Encoder::new().encode([(&b"x-after"[..], &b"ok"[..])]);
+        let decoded =
+            aggregator.decode_header_block(conn_id, StreamDirection::Request, &self_contained);
+        assert_eq!(
+            decoded,
+            Some(vec![("x-after".to_string(), "ok".to_string())]),
+            "the decoder must stay usable after the reset"
+        );
+    }
+
+    /// Regression: a HEADERS frame without END_HEADERS whose fragment exceeds
+    /// `MAX_CONTINUATION_BUFFER` was discarded without touching the connection's
+    /// HPACK decoder. The peer's encoder still applied the block's dynamic-table
+    /// insertions, so our stale table resolved the next block's dynamic indices
+    /// to evicted entries (wrong `:path`, `:status`, content-type). The drop
+    /// path must reset the decoder the way a decode error does, turning the
+    /// silent corruption into a rejection.
+    #[test]
+    fn oversized_headers_drop_does_not_leave_stale_hpack_state() {
+        let conn_id = ConnectionId {
+            pid: 810,
+            ssl_ptr: 0x8100,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut encoder);
+
+        let oversized = encode_oversized_block(&mut encoder);
+        assert!(
+            oversized.len() > MAX_CONTINUATION_BUFFER,
+            "test block must exceed the continuation buffer: {} bytes",
+            oversized.len()
+        );
+        let event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        // flags 0x00: no END_HEADERS, so the oversized fragment is only a
+        // buffering candidate — and too large, so it is dropped.
+        aggregator.process_frames(vec![create_test_frame(1, 1, 0x00, oversized, event)]);
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
+    }
+
+    /// Regression: the CONTINUATION overflow path dropped the accumulated
+    /// HEADERS+CONTINUATION block without decoding it, leaving the same stale
+    /// HPACK table as the oversized-HEADERS path.
+    #[test]
+    fn continuation_overflow_does_not_leave_stale_hpack_state() {
+        let conn_id = ConnectionId {
+            pid: 820,
+            ssl_ptr: 0x8200,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut encoder);
+
+        let oversized = encode_oversized_block(&mut encoder);
+        // The HEADERS part fits the buffer; the CONTINUATION that completes the
+        // block pushes the accumulated size over the limit.
+        let (head, tail) = oversized.split_at(60000);
+        assert!(head.len() <= MAX_CONTINUATION_BUFFER);
+        assert!(head.len() + tail.len() > MAX_CONTINUATION_BUFFER);
+        let event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        aggregator.process_frames(vec![
+            create_test_frame(1, 1, 0x00, head.to_vec(), event.clone()),
+            create_test_frame(1, 9, 0x04, tail.to_vec(), event),
+        ]);
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
     }
 
     #[test]
