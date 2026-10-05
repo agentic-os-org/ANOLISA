@@ -125,6 +125,49 @@ impl ParsedHttp2Frame {
         ) && (self.flags & 0x04) != 0
     }
 
+    /// The HPACK header block fragment of a HEADERS frame, with the RFC 7540
+    /// framing prefixes removed.
+    ///
+    /// A HEADERS payload is not raw HPACK: the PADDED flag (0x08) adds a
+    /// leading pad-length byte and that many trailing padding bytes, and the
+    /// PRIORITY flag (0x20) adds a five-byte stream-dependency/weight prefix.
+    /// Any header decode has to start after those bytes — decoding from the
+    /// raw payload would walk the framing as if it were HPACK. Frames that
+    /// cannot carry a header block have none.
+    pub fn header_block_fragment(&self) -> &[u8] {
+        if !self.is_headers() && self.frame_type != Http2FrameType::Continuation {
+            return &[];
+        }
+        let payload = self.payload();
+        let mut offset = 0;
+        let mut end = payload.len();
+
+        // PADDED (0x08): first byte is the pad length, that many trailing
+        // bytes are padding (RFC 7540 section 6.2).
+        if self.flags & 0x08 != 0 {
+            let Some((&pad_length, _)) = payload.split_first() else {
+                return &[];
+            };
+            let pad_length = pad_length as usize;
+            offset += 1;
+            if end <= pad_length {
+                return &[];
+            }
+            end -= pad_length;
+        }
+
+        // PRIORITY (0x20): 4-byte stream dependency plus 1-byte weight.
+        if self.flags & 0x20 != 0 {
+            offset += 5;
+        }
+
+        if offset >= end {
+            return &[];
+        }
+
+        &payload[offset..end]
+    }
+
     /// Human-readable frame type name
     pub fn type_name(&self) -> &'static str {
         self.frame_type.name()
@@ -199,7 +242,7 @@ impl ParsedHttp2Frame {
             return None;
         }
 
-        let payload = self.payload();
+        let payload = self.header_block_fragment();
         if payload.is_empty() {
             return Some(Vec::new());
         }
@@ -229,7 +272,7 @@ impl ParsedHttp2Frame {
             return Vec::new();
         }
 
-        let payload = self.payload();
+        let payload = self.header_block_fragment();
         if payload.is_empty() {
             return Vec::new();
         }
@@ -797,5 +840,94 @@ mod tests {
                 .decode_headers_stateless()
                 .is_empty()
         );
+    }
+
+    /// A HEADERS frame with explicit flags, for tests that exercise the
+    /// PADDED / PRIORITY framing prefixes.
+    fn headers_frame_with_flags(flags: u8, payload: Vec<u8>) -> ParsedHttp2Frame {
+        let mut frame = data_frame(payload);
+        frame.frame_type = Http2FrameType::Headers;
+        frame.flags = flags;
+        frame
+    }
+
+    /// `:status: 200` (static index 8) plus a literal `content-type` header:
+    /// an HPACK block the stateless walker resolves without dynamic state.
+    fn hpack_status_and_content_type() -> Vec<u8> {
+        let mut block = vec![0x88]; // indexed field 8: :status: 200
+        block.push(0x00); // literal, new name
+        block.push(b"content-type".len() as u8);
+        block.extend_from_slice(b"content-type");
+        let value = b"text/event-stream";
+        block.push(value.len() as u8);
+        block.extend_from_slice(value);
+        block
+    }
+
+    fn assert_status_and_content_type(headers: &[(String, Option<String>)]) {
+        assert!(
+            headers.contains(&(":status".to_string(), Some("200".to_string()))),
+            "expected :status in {headers:?}"
+        );
+        assert!(
+            headers.contains(&(
+                "content-type".to_string(),
+                Some("text/event-stream".to_string())
+            )),
+            "expected content-type in {headers:?}"
+        );
+    }
+
+    /// PADDED (0x08) frames carry a leading pad-length byte and trailing
+    /// padding around the HPACK block. The stateless walk — the fallback when
+    /// the dynamic table is missing, e.g. on mid-connection captures — used
+    /// to start at the pad-length byte and decode garbage.
+    #[test]
+    fn stateless_walk_strips_padding() {
+        let mut payload = vec![5u8]; // pad length
+        payload.extend(hpack_status_and_content_type());
+        payload.extend(std::iter::repeat_n(0u8, 5));
+        let frame = headers_frame_with_flags(0x0c, payload); // END_HEADERS | PADDED
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// PRIORITY (0x20) frames carry a five-byte stream dependency/weight
+    /// prefix before the HPACK block.
+    #[test]
+    fn stateless_walk_skips_priority_prefix() {
+        let mut payload = vec![0x00, 0x00, 0x00, 0x00, 0x10]; // dep 0, weight 16
+        payload.extend(hpack_status_and_content_type());
+        let frame = headers_frame_with_flags(0x24, payload); // END_HEADERS | PRIORITY
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// PADDED and PRIORITY together (0x28): pad-length byte, priority prefix,
+    /// HPACK block, trailing padding.
+    #[test]
+    fn stateless_walk_strips_priority_and_padding() {
+        let mut payload = vec![2u8]; // pad length
+        payload.extend([0x00, 0x00, 0x00, 0x00, 0x10]); // priority prefix
+        payload.extend(hpack_status_and_content_type());
+        payload.extend(std::iter::repeat_n(0u8, 2));
+        let frame = headers_frame_with_flags(0x2c, payload); // END_HEADERS | PADDED | PRIORITY
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// A bare HEADERS block (no framing flags) must keep decoding exactly as
+    /// before.
+    #[test]
+    fn stateless_walk_keeps_bare_block_intact() {
+        let payload = hpack_status_and_content_type();
+        let frame = headers_frame_with_flags(0x04, payload); // END_HEADERS only
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// A payload that is all framing (pad length covers everything) has no
+    /// header block to decode.
+    #[test]
+    fn stateless_walk_on_padding_only_payload_is_empty() {
+        let payload = vec![5u8, 0, 0, 0, 0, 0]; // pad length covers everything
+        let frame = headers_frame_with_flags(0x0c, payload);
+        assert!(frame.decode_headers_stateless().is_empty());
     }
 }

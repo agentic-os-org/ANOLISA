@@ -86,7 +86,8 @@ impl std::fmt::Debug for HpackConnectionState {
 ///
 /// A padded DATA frame carries a one-byte pad length followed by the body and
 /// that many padding bytes; both belong to the framing, not to the body. The
-/// HEADERS side already strips its framing (`strip_headers_framing`), and DATA
+/// HEADERS side already strips its framing (the frame exposes the
+/// header_block_fragment accessor), and DATA
 /// frames have no PRIORITY field, so only the padding applies here.
 fn strip_data_padding(payload: &[u8], flags: u8) -> &[u8] {
     if flags & 0x08 == 0 {
@@ -107,38 +108,6 @@ fn strip_data_padding(payload: &[u8], flags: u8) -> &[u8] {
 struct ContinuationBuffer {
     data: Vec<u8>,
     direction: StreamDirection,
-}
-
-/// Strip PADDED and PRIORITY framing from a HEADERS frame payload,
-/// returning the raw header block fragment.
-fn strip_headers_framing(payload: &[u8], flags: u8) -> &[u8] {
-    let mut offset = 0;
-    let mut end = payload.len();
-
-    // PADDED flag (0x08): first byte is pad_length, last pad_length bytes are padding
-    if flags & 0x08 != 0 {
-        if payload.is_empty() {
-            return &[];
-        }
-        let pad_length = payload[0] as usize;
-        offset += 1;
-        if end > pad_length {
-            end -= pad_length;
-        } else {
-            return &[];
-        }
-    }
-
-    // PRIORITY flag (0x20): 5 bytes (4-byte stream dependency + 1 byte weight)
-    if flags & 0x20 != 0 {
-        offset += 5;
-    }
-
-    if offset >= end {
-        return &[];
-    }
-
-    &payload[offset..end]
 }
 
 /// Stream identifier within an HTTP/2 connection
@@ -880,11 +849,11 @@ impl Http2StreamAggregator {
             // Handle HEADERS frames: strip framing, possibly buffer for CONTINUATION
             if frame.is_headers() {
                 let decoded = if frame.has_end_headers() {
-                    let fragment = strip_headers_framing(frame.payload(), frame.flags);
+                    let fragment = frame.header_block_fragment();
                     self.decode_header_block(connection_id, direction, fragment)
                 } else {
                     // No END_HEADERS — start buffering for CONTINUATION
-                    let fragment = strip_headers_framing(frame.payload(), frame.flags);
+                    let fragment = frame.header_block_fragment();
                     if fragment.len() <= MAX_CONTINUATION_BUFFER {
                         self.continuation_buffers.insert(
                             stream_id,
@@ -2136,50 +2105,6 @@ mod tests {
             create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 33),
         ));
         assert_eq!(stream_with_sse.first_output_timestamp_ns(), Some(33));
-    }
-
-    #[test]
-    fn test_strip_headers_framing_bare() {
-        let payload = b"\x82\x86\x84";
-        assert_eq!(strip_headers_framing(payload, 0x00), payload.as_slice());
-    }
-
-    #[test]
-    fn test_strip_headers_framing_padded() {
-        // PADDED flag = 0x08: first byte = pad_length, last N bytes = padding
-        let mut payload = vec![3]; // pad_length = 3
-        payload.extend_from_slice(b"\x82\x86\x84"); // header block fragment
-        payload.extend_from_slice(&[0, 0, 0]); // 3 bytes of padding
-        let result = strip_headers_framing(&payload, 0x08);
-        assert_eq!(result, b"\x82\x86\x84");
-    }
-
-    #[test]
-    fn test_strip_headers_framing_priority() {
-        // PRIORITY flag = 0x20: 5 bytes (4-byte dependency + 1 byte weight)
-        let mut payload = vec![0x80, 0x00, 0x00, 0x01, 0x10]; // priority data
-        payload.extend_from_slice(b"\x82\x86"); // header block fragment
-        let result = strip_headers_framing(&payload, 0x20);
-        assert_eq!(result, b"\x82\x86");
-    }
-
-    #[test]
-    fn test_strip_headers_framing_padded_and_priority() {
-        // Both PADDED (0x08) and PRIORITY (0x20) = 0x28
-        let mut payload = vec![2]; // pad_length = 2
-        payload.extend_from_slice(&[0x80, 0x00, 0x00, 0x01, 0x10]); // priority
-        payload.extend_from_slice(b"\x82"); // header block fragment
-        payload.extend_from_slice(&[0, 0]); // 2 bytes padding
-        let result = strip_headers_framing(&payload, 0x28);
-        assert_eq!(result, b"\x82");
-    }
-
-    #[test]
-    fn test_strip_headers_framing_empty_after_strip() {
-        // Only padding, no actual content
-        let payload = vec![5, 0, 0, 0, 0, 0]; // pad_length=5, then 5 bytes padding
-        let result = strip_headers_framing(&payload, 0x08);
-        assert_eq!(result, &[] as &[u8]);
     }
 
     #[test]
