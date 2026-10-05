@@ -1561,12 +1561,24 @@ impl AgentSight {
     /// Check and drain the pending_logtail mailbox.
     /// If the config watcher deposited a new LogtailExporter, register it.
     fn check_pending_logtail(&mut self) {
-        if let Some(exporter) = crate::background::take_pending_logtail(&self.pending_logtail) {
+        Self::register_pending_logtail(&mut self.genai_exporters, &self.pending_logtail);
+    }
+
+    /// Drain the pending_logtail mailbox into `exporters`.
+    ///
+    /// Split out of [`Self::check_pending_logtail`] so the registration rule —
+    /// a re-activated dynamic exporter replaces its predecessor instead of
+    /// being registered next to it — is testable without a running monitor.
+    fn register_pending_logtail(
+        exporters: &mut Vec<Box<dyn GenAIExporter>>,
+        pending_logtail: &Mutex<Option<Box<dyn GenAIExporter>>>,
+    ) {
+        if let Some(exporter) = crate::background::take_pending_logtail(pending_logtail) {
             log::info!(
                 "Registering dynamically-activated LogtailExporter: '{}'",
                 exporter.name()
             );
-            self.genai_exporters.push(exporter);
+            install_exporter(exporters, exporter);
         }
     }
 
@@ -2373,7 +2385,9 @@ impl AgentSight {
     /// Add a custom GenAI exporter at runtime
     pub fn add_genai_exporter(&mut self, exporter: Box<dyn GenAIExporter>) {
         log::info!("Registered GenAI exporter: '{}'", exporter.name());
-        self.genai_exporters.push(exporter);
+        // Same identity rule as the mailbox path: a same-named exporter is
+        // replaced, otherwise every registration would write the batch again.
+        install_exporter(&mut self.genai_exporters, exporter);
     }
 
     /// Get reference to agent scanner
@@ -2544,6 +2558,27 @@ fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
             GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
             _ => false,
         })
+}
+
+/// Register `exporter`, replacing a registered exporter that has the same
+/// name.
+///
+/// `GenAIExporter::name` is the exporter's identity, which is why the Logtail
+/// exporter answers `logtail-file-dynamic` for a dynamically activated one:
+/// "so the runtime can replace an existing dynamic exporter instead of
+/// accumulating duplicates when the SLS path is deactivated and re-activated
+/// repeatedly". The mailbox registration pushed unconditionally, so every
+/// deactivate/reactivate cycle of `runtime.sls_logtail_path` added another
+/// dynamic exporter; each of them re-reads the process-global path and writes
+/// the same batch, so a record was written once per cycle.
+fn install_exporter(exporters: &mut Vec<Box<dyn GenAIExporter>>, exporter: Box<dyn GenAIExporter>) {
+    let name = exporter.name().to_string();
+    if let Some(existing) = exporters.iter_mut().find(|e| e.name() == name) {
+        log::info!("Replacing the registered '{name}' GenAI exporter");
+        *existing = exporter;
+        return;
+    }
+    exporters.push(exporter);
 }
 
 fn complete_deferred_genai(
@@ -3329,6 +3364,53 @@ mod tests {
         fn export(&self, events: &[GenAISemanticEvent]) {
             self.events.lock().unwrap().extend_from_slice(events);
         }
+    }
+
+    /// A re-activated dynamic Logtail exporter must replace its predecessor.
+    /// The mailbox registration pushed unconditionally, so every deactivate /
+    /// reactivate cycle of `runtime.sls_logtail_path` left one more exporter
+    /// registered, and every one of them writes the same batch to the same
+    /// file — a record was duplicated once per cycle.
+    #[test]
+    fn pending_logtail_registration_replaces_a_reactivated_exporter() {
+        let mailbox: Mutex<Option<Box<dyn GenAIExporter>>> = Mutex::new(None);
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+
+        // Two activation cycles deposit a fresh dynamic exporter each time.
+        for _ in 0..2 {
+            *mailbox.lock().unwrap() =
+                Some(Box::new(RecordingExporter::new("logtail-file-dynamic")));
+            AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        }
+        assert_eq!(
+            exporters.len(),
+            1,
+            "the re-activated exporter must replace its predecessor, not accumulate"
+        );
+
+        // A different exporter is still registered alongside it.
+        *mailbox.lock().unwrap() = Some(Box::new(RecordingExporter::new("logtail-file")));
+        AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        assert_eq!(exporters.len(), 2);
+    }
+
+    /// `install_exporter` resolves an exporter by `name()`, the identity the
+    /// Logtail exporter documents ("so the runtime can replace an existing
+    /// dynamic exporter instead of accumulating duplicates").
+    #[test]
+    fn install_exporter_replaces_an_exporter_of_the_same_name() {
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters[0].name(), "logtail-file-dynamic");
+
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters.len(), 1, "same name → replace");
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {
