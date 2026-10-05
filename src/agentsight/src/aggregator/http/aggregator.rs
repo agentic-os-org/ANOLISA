@@ -14,7 +14,7 @@ use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::sslsniff::SslEvent;
 use crate::utils::decompress::ZstdStreamDecoder;
 use lru::LruCache;
-use pending_response::PendingResponse;
+use pending_response::{PendingResponse, is_informational};
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -718,7 +718,7 @@ impl HttpConnectionAggregator {
     pub fn process_response(&mut self, mut response: ParsedResponse) -> Option<AggregatedResult> {
         let connection_id = ConnectionId::from_ssl_event(&response.source_event);
 
-        while (100..200).contains(&response.status_code) && response.status_code != 101 {
+        while is_informational(response.status_code) {
             if response.body().is_empty() {
                 return None;
             }
@@ -1737,6 +1737,68 @@ mod tests {
         } else {
             panic!("Expected HttpComplete result");
         }
+    }
+
+    #[test]
+    fn test_expect_continue_interim_response_keeps_pending_body() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let pid = 4321;
+        let ssl_ptr = 0xC000;
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+
+        // `Expect: 100-continue` client: headers first, body withheld until the
+        // interim response. body_len=0 keeps the connection in RequestBodyPending.
+        let headers = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let header_end = headers.len();
+        let request_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, headers.into_bytes(), 1);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 11,
+            headers: HashMap::from([
+                ("content-length".to_string(), body.len().to_string()),
+                ("expect".to_string(), "100-continue".to_string()),
+            ]),
+            body_offset: header_end,
+            body_len: 0,
+            source_event: request_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+        assert!(matches!(
+            aggregator.connections.peek(&ConnectionId { pid, ssl_ptr }),
+            Some(ConnectionState::RequestBodyPending { .. })
+        ));
+
+        // Interim response routed by content state (not the stateless parser),
+        // as happens when it is split or coalesced with following bytes.
+        let interim = create_mock_ssl_event_with_buf(
+            pid,
+            ssl_ptr,
+            b"HTTP/1.1 100 Continue\r\n\r\n".to_vec(),
+            0,
+        );
+        assert!(aggregator.process_raw_body_data(&interim).is_none());
+
+        // The body withheld by the client follows the interim response.
+        let body_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, body.to_vec(), 1);
+        assert!(aggregator.process_raw_body_data(&body_event).is_none());
+
+        // The final response must complete the pair with the captured prompt.
+        let response_event = create_mock_ssl_event_with_buf(
+            pid,
+            ssl_ptr,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            0,
+        );
+        let result = aggregator.process_raw_body_data(&response_event);
+        let Some(AggregatedResult::HttpComplete(pair)) = result else {
+            panic!("expected HttpComplete, got {result:?}");
+        };
+        assert_eq!(pair.request.body(), body);
     }
 
     #[test]

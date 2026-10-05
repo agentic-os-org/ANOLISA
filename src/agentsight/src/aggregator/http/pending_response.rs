@@ -11,6 +11,14 @@ use std::rc::Rc;
 
 const MAX_RESPONSE_HEADERS: usize = 64 * 1024;
 
+/// Interim 1xx statuses that do not finalize the request they answer.
+///
+/// 101 is excluded: it switches protocols and the response state machine
+/// treats it as a final response.
+pub(super) fn is_informational(status: u16) -> bool {
+    (100..200).contains(&status) && status != 101
+}
+
 impl ConnectionState {
     /// Request evidence shared by idle, process-exit and dead-PID persistence.
     pub(crate) fn pending_request(&self) -> Option<&ParsedRequest> {
@@ -316,14 +324,33 @@ impl HttpConnectionAggregator {
             ),
             ConnectionState::RequestBodyPending {
                 mut request,
+                expected_body_len,
                 body_buffer,
-                ..
             } => {
+                let assembly = PendingResponse::Headers(Rc::new(event.clone()));
+                // An interim 1xx response (`100 Continue`) does not answer the
+                // request: a client that sent `Expect: 100-continue` writes the
+                // body only after receiving it. Collapsing to RequestPending
+                // here would expose `reassembled_body` as the empty partial
+                // body and every body continuation afterwards would hit the
+                // no-op fallback of `process_raw_body_data`, silently dropping
+                // the prompt. Keep the pending body state instead.
+                if matches!(
+                    assembly.parsed_headers(),
+                    Ok(Some(ref response)) if is_informational(response.status_code)
+                ) {
+                    self.insert(
+                        id,
+                        ConnectionState::RequestBodyPending {
+                            request,
+                            expected_body_len,
+                            body_buffer,
+                        },
+                    );
+                    return None;
+                }
                 request.reassembled_body = Some(body_buffer);
-                (
-                    Some(request),
-                    PendingResponse::Headers(Rc::new(event.clone())),
-                )
+                (Some(request), assembly)
             }
             other => {
                 self.insert(id, other);
