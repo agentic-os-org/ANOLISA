@@ -1802,11 +1802,26 @@ fn eval_rp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/panic";
+    eval_panic_at(info, recs, "/proc/sys/kernel/panic")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the signed read is
+/// unit-testable against a temp file. `kernel/reboot.c` registers
+/// kernel.panic through plain `proc_dointvec`, which copies the table with
+/// no min/max, and -1 is the documented "reboot immediately, without
+/// syncing" setting (`panic=-1` in kernel-parameters.txt). The unsigned
+/// reader parses "-1" to Err and falls back to 0, which here is the
+/// *never-reboot* value, so the rule fired on exactly the most
+/// crash-resilient hosts — and the current_value it recorded, "0", is what
+/// a rollback would restore, silently discarding the immediate-reboot
+/// policy.
+fn eval_panic_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // panic is a plain int; -1 reboots immediately, so it must be read signed
+    // or the unsigned fallback maps it to 0 (never reboot) and fires the rule.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "kernel.panic".to_string(),
@@ -8976,6 +8991,56 @@ mod tests {
         let checked = eval_sysrq_at(&info, &mut recs, "/proc/sys/kernel/ktuner_absent_sysrq");
         assert_eq!(checked, 1);
         assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn test_panic_minus_one_reads_signed() {
+        // `panic=-1` is the kernel's documented "reboot immediately, without
+        // syncing" setting (kernel-parameters.txt; the sysctl is a plain
+        // proc_dointvec int with no bounds). The unsigned reader parsed "-1"
+        // to Err, fell back to 0 — the *never-reboot* value — so the rule
+        // fired on exactly the most crash-resilient hosts and the
+        // current_value it recorded, "0", is what a rollback would restore.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_panic_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked = eval_panic_at(&info, &mut recs, path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(checked, 1);
+        assert!(
+            recs.is_empty(),
+            "-1 reboots immediately, so the host needs no recommendation: {recs:?}"
+        );
+    }
+
+    #[test]
+    fn test_panic_boundaries() {
+        // 0 (loop forever after a panic) is the only unhardened value; a
+        // positive timeout and the immediate-reboot -1 are already reboot
+        // policies and must not be flagged.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (10, false), (60, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_panic_bound_{}_{:?}_{}",
+                std::process::id(),
+                std::thread::current().id(),
+                value
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_panic_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 (never reboot) is unhardened"
+            );
+        }
     }
 
     #[test]
