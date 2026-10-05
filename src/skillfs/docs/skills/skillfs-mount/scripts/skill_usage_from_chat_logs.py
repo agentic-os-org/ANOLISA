@@ -38,9 +38,17 @@ def parse_function_calls(file_path):
             except json.JSONDecodeError:
                 continue
 
-            parts = obj.get("message", {}).get("parts", [])
+            # 聊天日志由外部工具产出：畸形行（message 非对象、parts 非列表、
+            # part 非对象）只跳过该行，不中止整个分析——与
+            # skill_usage_from_session_logs.py 的容错行为一致。
+            if not isinstance(obj, dict):
+                continue
+            message = obj.get("message")
+            parts = message.get("parts", []) if isinstance(message, dict) else []
             ts = obj.get("timestamp", "")
             for part in parts:
+                if not isinstance(part, dict):
+                    continue
                 fc = part.get("functionCall")
                 if not fc:
                     continue
