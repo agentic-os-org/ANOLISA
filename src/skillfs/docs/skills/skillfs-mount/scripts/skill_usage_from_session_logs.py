@@ -130,20 +130,27 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
             for line in f:
                 if not line.strip():
                     continue
+                # 会话日志由外部工具产出：畸形行（message 非对象、content
+                # 非列表、item 非对象）只跳过该行继续处理后续行——整文件级
+                # try/except 会在首个畸形行中止，静默丢弃其后全部调用计数。
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
                     continue
 
                 ts = data.get("timestamp", "")
                 if ts:
                     session_date = parse_timestamp(ts)
 
-                message = data.get("message", {})
-                content = message.get("content", [])
+                message = data.get("message")
+                content = message.get("content", []) if isinstance(message, dict) else []
 
                 if isinstance(content, list):
                     for item in content:
+                        if not isinstance(item, dict):
+                            continue
                         if item.get("type") == "toolCall":
                             args = item.get("arguments", {})
                             command = args.get("command", "")
