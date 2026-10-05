@@ -72,6 +72,15 @@ pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
 fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyOutcome> {
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?; // Refuse an unreadable ledger before any live write.
+    apply_locked(recommendations, quiet, &guard)
+}
+
+// Keep the transaction guard alive through every write and persistence step.
+fn apply_locked(
+    recommendations: &[Recommendation],
+    quiet: bool,
+    guard: &LedgerLock,
+) -> Result<ApplyOutcome> {
     let total = recommendations.len();
     let mut applied_recs: Vec<Recommendation> = Vec::new();
     let mut failed: Vec<ApplyFailure> = Vec::new();
@@ -131,8 +140,8 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyO
     }
 
     if !applied_recs.is_empty() {
-        save_rollback(&guard, &applied_recs)?;
-        persist_from_rollback(&guard)?;
+        save_rollback(guard, &applied_recs)?;
+        persist_from_rollback(guard)?;
         if !quiet {
             println!();
             println!(
@@ -1321,7 +1330,13 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let outcome = apply_quiet(&recs).expect("apply_quiet must not fail on per-param errors");
+        let dir =
+            std::env::temp_dir().join(format!("ktuner_missing_params_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        let outcome = apply_locked(&recs, true, &guard)
+            .expect("apply_quiet must not fail on per-param errors");
         assert_eq!(outcome.applied, 0);
         assert_eq!(outcome.failed.len(), 2, "both failures must be reported");
         assert_eq!(outcome.failed[0].param, "vm.ktuner_no_such_a");
@@ -1329,6 +1344,12 @@ mod tests {
             !outcome.failed[0].error.is_empty(),
             "error text must survive quiet mode"
         );
+        assert!(
+            !ledger.exists(),
+            "failed parameters must not publish a ledger"
+        );
+        drop(guard);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2326,7 +2347,7 @@ mod tests {
     fn test_apply_quiet_reports_no_clamps_when_nothing_lands() {
         // Two nonexistent params: nothing is written, so nothing can be
         // clamped, and the outcome must report zero applied with an empty
-        // clamped list (no ledger/persist side effects even as root).
+        // clamped list. Only the private fixture lock may be created.
         let recs: Vec<Recommendation> = ["vm.ktuner_no_such_a", "vm.ktuner_no_such_b"]
             .iter()
             .map(|p| Recommendation {
@@ -2337,10 +2358,21 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let outcome = apply_quiet(&recs).expect("apply must not fail on per-param errors");
+        let dir = std::env::temp_dir().join(format!("ktuner_no_clamps_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        let outcome =
+            apply_locked(&recs, true, &guard).expect("apply must not fail on per-param errors");
         assert_eq!(outcome.applied, 0);
         assert_eq!(outcome.failed.len(), 2);
         assert!(outcome.clamped.is_empty());
+        assert!(
+            !ledger.exists(),
+            "failed parameters must not publish a ledger"
+        );
+        drop(guard);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
