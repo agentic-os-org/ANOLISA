@@ -257,6 +257,19 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     let mut first_message = String::new();
     let mut has_human_text = false;
 
+    // Match the converter's era detection across the whole rollout: injected
+    // role=user context may precede the authoritative user_message event.
+    let has_codex_user_events = source.agent_id == "codex"
+        && content
+            .lines()
+            .filter(|line| line.contains("user_message"))
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| {
+                event.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+                    && event.pointer("/payload/type").and_then(|v| v.as_str())
+                        == Some("user_message")
+            });
+
     // Fast pass: count user/assistant lines without full JSON parse.
     // Only parse JSON for the first match to extract session_id and first_message.
     let mut parsed_first_user = false;
@@ -275,19 +288,37 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         // response_item/message payloads with role "assistant".
         let is_codex_user = trimmed.contains(r#""type":"user_message""#)
             || trimmed.contains(r#""type": "user_message""#);
+        let is_codex_legacy_user = source.agent_id == "codex"
+            && !has_codex_user_events
+            && (trimmed.contains(r#""role":"user""#) || trimmed.contains(r#""role": "user""#));
         let is_codex_assistant =
             trimmed.contains(r#""role":"assistant""#) || trimmed.contains(r#""role": "assistant""#);
 
-        if !is_user && !is_assistant && !is_codex_user && !is_codex_assistant {
+        if !is_user
+            && !is_assistant
+            && !is_codex_user
+            && !is_codex_legacy_user
+            && !is_codex_assistant
+        {
             // Still try to extract session_id from early lines: Qoder
             // runtime-config records carry a top-level `sessionId`, Codex
-            // session_meta envelopes carry `payload.session_id`.
+            // session_meta envelopes carry `payload.session_id` or legacy `id`.
             if session_id.is_empty()
                 && (trimmed.contains("sessionId") || trimmed.contains("session_meta"))
                 && let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed)
                 && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str()).or_else(|| {
                     event
                         .pointer("/payload/session_id")
+                        .or_else(|| {
+                            if source.agent_id == "codex"
+                                && event.get("type").and_then(|v| v.as_str())
+                                    == Some("session_meta")
+                            {
+                                event.pointer("/payload/id")
+                            } else {
+                                None
+                            }
+                        })
                         .and_then(|v| v.as_str())
                 })
             {
@@ -299,22 +330,23 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         message_count += 1;
 
         // Parse JSON only for the first user message to extract first_message
-        if (is_user || is_codex_user) && !parsed_first_user {
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if session_id.is_empty()
-                    && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str())
-                {
-                    session_id = sid.to_string();
+        if (is_user || is_codex_user || is_codex_legacy_user)
+            && !parsed_first_user
+            && let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            if session_id.is_empty()
+                && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str())
+            {
+                session_id = sid.to_string();
+            }
+            if let Some(text) = user_event_text(&event) {
+                if first_message.is_empty() {
+                    first_message = truncate(&text, 200);
                 }
-                if let Some(text) = user_event_text(&event) {
-                    if first_message.is_empty() {
-                        first_message = truncate(&text, 200);
-                    }
-                    has_human_text = true;
-                }
-                if has_human_text {
-                    parsed_first_user = true;
-                }
+                has_human_text = true;
+            }
+            if has_human_text {
+                parsed_first_user = true;
             }
         }
     }
@@ -328,6 +360,11 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
                 continue;
             }
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if has_codex_user_events
+                    && event.get("type").and_then(|v| v.as_str()) == Some("response_item")
+                {
+                    continue;
+                }
                 if let Some(text) = user_event_text(&event) {
                     if first_message.is_empty() {
                         first_message = truncate(&text, 200);
@@ -416,7 +453,8 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
 /// Two session schemas reach the listing: Claude-style `user` events carry
 /// `message.content` (a string, or an array whose `text` blocks hold the
 /// input), while Codex `event_msg`/`user_message` envelopes carry
-/// `payload.message`. Returns the first non-empty text found, or `None`.
+/// `payload.message`. Legacy Codex role=user response items carry text blocks
+/// in `payload.content`. The caller decides whether that fallback is eligible.
 fn user_event_text(event: &serde_json::Value) -> Option<String> {
     let event_type = event.get("type").and_then(|v| v.as_str())?;
     match event_type {
@@ -438,11 +476,32 @@ fn user_event_text(event: &serde_json::Value) -> Option<String> {
                 _ => None,
             }
         }
-        "event_msg" => event
-            .pointer("/payload/message")
-            .and_then(|v| v.as_str())
-            .map(strip_system_context)
-            .filter(|s| !s.is_empty()),
+        "response_item"
+            if event.pointer("/payload/type").and_then(|v| v.as_str()) == Some("message")
+                && event.pointer("/payload/role").and_then(|v| v.as_str()) == Some("user") =>
+        {
+            let content = event.pointer("/payload/content")?;
+            let text = match content {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => return None,
+            };
+            let stripped = strip_system_context(&text);
+            (!stripped.is_empty()).then_some(stripped)
+        }
+        "event_msg"
+            if event.pointer("/payload/type").and_then(|v| v.as_str()) == Some("user_message") =>
+        {
+            event
+                .pointer("/payload/message")
+                .and_then(|v| v.as_str())
+                .map(strip_system_context)
+                .filter(|s| !s.is_empty())
+        }
         _ => None,
     }
 }
@@ -780,6 +839,101 @@ mod tests {
             .iter()
             .find(|s| s.agent_id == "codex")
             .expect("codex source registered")
+    }
+
+    fn codex_preview(records: &[serde_json::Value]) -> Option<LocalSession> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-file-stem.jsonl");
+        let content = records.iter().map(|e| format!("{e}\n")).collect::<String>();
+        fs::write(&path, content).unwrap();
+        parse_session_file(&path, codex_source(), "synthetic")
+    }
+
+    fn codex_meta() -> serde_json::Value {
+        serde_json::json!({"type":"session_meta","payload":{"id":"legacy-id"}})
+    }
+
+    fn codex_response_user(text: &str) -> serde_json::Value {
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"message","role":"user",
+            "content":[{"type":"input_text","text":text}]
+        }})
+    }
+
+    fn codex_user_event(text: &str) -> serde_json::Value {
+        serde_json::json!({"type":"event_msg","payload":{
+            "type":"user_message","message":text
+        }})
+    }
+
+    #[test]
+    fn codex_compat_lists_legacy_response_users_with_metadata_identity() {
+        let records = [codex_meta(), codex_response_user("legacy request")];
+        let preview = codex_preview(&records).expect("supported legacy input must be listed");
+        let content = records.iter().map(|e| format!("{e}\n")).collect::<String>();
+        let doc =
+            crate::local::collector::converter::convert_jsonl_content_to_atif(&content).unwrap();
+        assert_eq!(preview.session_id, "legacy-id");
+        assert_eq!(Some(preview.session_id), doc.session_id);
+        assert_eq!(preview.first_message, "legacy request");
+        assert_eq!(preview.message_count, 1);
+        assert_eq!(doc.steps[0].message, preview.first_message);
+    }
+
+    #[test]
+    fn codex_compat_prefers_authoritative_user_events_over_injected_context() {
+        let records = [
+            codex_meta(),
+            codex_response_user("injected environment context"),
+            codex_user_event("real human request"),
+        ];
+        let preview = codex_preview(&records).unwrap();
+        assert_eq!(preview.session_id, "legacy-id");
+        assert_eq!(preview.first_message, "real human request");
+        assert_eq!(preview.message_count, 1);
+    }
+
+    #[test]
+    fn codex_compat_empty_authoritative_user_does_not_promote_context() {
+        assert!(
+            codex_preview(&[
+                codex_meta(),
+                codex_response_user("injected environment context"),
+                codex_user_event(""),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_compat_large_file_does_not_promote_injected_context() {
+        let context = "x".repeat(MAX_PARSE_SIZE_BYTES as usize + 1);
+        assert!(
+            codex_preview(&[
+                codex_meta(),
+                codex_response_user(&context),
+                codex_user_event(""),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_compat_prefers_session_id_and_ignores_non_user_events() {
+        let meta = serde_json::json!({"type":"session_meta","payload":{
+            "id":"legacy-id","session_id":"current-id"
+        }});
+        let preview = codex_preview(&[meta, codex_user_event("human")]).unwrap();
+        assert_eq!(preview.session_id, "current-id");
+        assert!(
+            codex_preview(&[
+                codex_meta(),
+                serde_json::json!({"type":"event_msg","payload":{
+                    "type":"background_event","message":"not human"
+                }}),
+            ])
+            .is_none()
+        );
     }
 
     #[test]
