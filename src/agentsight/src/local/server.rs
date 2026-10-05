@@ -240,8 +240,9 @@ async fn agent_process_health() -> impl Responder {
         Ok(summary) => {
             let mut rows = Vec::new();
             for agent in summary.agents {
-                for pid in agent.pids.iter().copied() {
-                    rows.push(agent_health_row(&agent, pid, summary.scanned_at));
+                // One row per process, built from that process's own paths.
+                for process in &agent.processes {
+                    rows.push(agent_health_row(&agent, process, summary.scanned_at));
                 }
             }
             HttpResponse::Ok().json(serde_json::json!({
@@ -263,13 +264,22 @@ async fn agent_process_health() -> impl Responder {
 /// cwd used to be reported as `exe_path`, so the page showed a directory
 /// where it expects a binary and had no default protection directory (it
 /// reads `workspace_path`).
-fn agent_health_row(agent: &agents::AgentInfo, pid: u32, scanned_at: u64) -> serde_json::Value {
+///
+/// The row is built from the specific `process`: two instances of one agent
+/// (two Cursor windows) have distinct workspaces, and the dashboard seeds its
+/// protection directory from `workspace_path`, so an aggregate first-seen path
+/// would point half the rows at the wrong project.
+fn agent_health_row(
+    agent: &agents::AgentInfo,
+    process: &agents::AgentProcess,
+    scanned_at: u64,
+) -> serde_json::Value {
     serde_json::json!({
-        "pid": pid,
+        "pid": process.pid,
         "agent_name": agent.name,
         "category": agent.category,
-        "exe_path": agent.exe_path,
-        "workspace_path": agent.cwd,
+        "exe_path": process.exe_path,
+        "workspace_path": process.cwd,
         "ports": [],
         "status": "no_port",
         "last_check_time": scanned_at * 1000,
@@ -826,31 +836,62 @@ mod tests {
 
     #[test]
     fn agent_health_rows_carry_exe_and_workspace_paths() {
+        // Two instances of one agent (e.g. two Cursor windows) share an agent
+        // id but not a workspace. Each health row must report the paths of the
+        // PID it describes; stamping the first-seen instance on every row made
+        // the dashboard seed the protection directory from an arbitrary
+        // instance whose "first" position depended on hash-map iteration order.
         let agent = agents::AgentInfo {
             id: "qoder".to_string(),
             name: "Qoder".to_string(),
             icon: "q".to_string(),
             category: "coding".to_string(),
             status: "running".to_string(),
-            pids: vec![42],
-            process_count: 1,
+            pids: vec![42, 43],
+            process_count: 2,
             cpu_percent: 1.0,
             mem_mb: 2.0,
             uptime_secs: 3,
             cmdline_preview: "qoder --serve".to_string(),
-            cwd: "/Users/dev/project".to_string(),
+            cwd: "/Users/dev/project-a".to_string(),
             exe_path: "/Applications/Qoder.app/Contents/MacOS/Qoder".to_string(),
+            processes: vec![
+                agents::AgentProcess {
+                    pid: 42,
+                    cwd: "/Users/dev/project-a".to_string(),
+                    exe_path: "/Applications/Qoder.app/Contents/MacOS/Qoder".to_string(),
+                    cmdline_preview: "qoder --serve".to_string(),
+                },
+                agents::AgentProcess {
+                    pid: 43,
+                    cwd: "/Users/dev/project-b".to_string(),
+                    exe_path: "/Applications/Qoder.app/Contents/MacOS/QoderHelper".to_string(),
+                    cmdline_preview: "qoder helper --serve".to_string(),
+                },
+            ],
         };
 
-        let row = agent_health_row(&agent, 42, 1_700_000_000);
+        let first = agent_health_row(&agent, &agent.processes[0], 1_700_000_000);
+        let second = agent_health_row(&agent, &agent.processes[1], 1_700_000_000);
 
+        assert_eq!(first["pid"], 42);
         assert_eq!(
-            row["exe_path"],
+            first["exe_path"],
             "/Applications/Qoder.app/Contents/MacOS/Qoder"
         );
         assert_eq!(
-            row["workspace_path"], "/Users/dev/project",
+            first["workspace_path"], "/Users/dev/project-a",
             "the working directory belongs in workspace_path, which is what the dashboard reads"
+        );
+
+        assert_eq!(second["pid"], 43);
+        assert_eq!(
+            second["exe_path"],
+            "/Applications/Qoder.app/Contents/MacOS/QoderHelper"
+        );
+        assert_eq!(
+            second["workspace_path"], "/Users/dev/project-b",
+            "each row must carry its own instance's workspace, not the first-seen one"
         );
     }
 
