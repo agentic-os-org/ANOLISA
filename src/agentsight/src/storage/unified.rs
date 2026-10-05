@@ -246,9 +246,6 @@ impl Storage {
     /// This hot path only persists data; lifecycle maintenance is owned by the
     /// process-wide database worker.
     pub fn store(&self, result: &AnalysisResult) -> Result<i64> {
-        if let AnalysisResult::Http(_) = result {
-            return Ok(0);
-        }
         if matches!(self.backend, StorageBackend::Noop) {
             log::trace!("Noop storage dropping analysis result");
             return Ok(0);
@@ -474,6 +471,7 @@ fn purge_share(rows: u64, pct: f64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::HttpRecord;
     use crate::analyzer::token::TokenRecord;
 
     #[test]
@@ -515,6 +513,68 @@ mod tests {
         // Just verify it doesn't panic
         let _ = storage.is_noop();
         drop(storage);
+    }
+
+    /// Minimal HTTP record used by the Http persistence contract tests.
+    fn sample_http_record() -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            pid: 4242,
+            comm: "python".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: Some("{}".to_string()),
+            response_headers: "{}".to_string(),
+            response_body: Some("{}".to_string()),
+            duration_ns: 1_000_000,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        }
+    }
+
+    /// `should_persist_analysis_result` routes Http records to `store`, the
+    /// docs list `http_records` as a persistence output, and the table is
+    /// created, indexed and maintained. Pin that Http results are actually
+    /// inserted: a silent early return previously dropped every HTTP record.
+    #[test]
+    fn test_store_http_result_persists_to_http_store() {
+        let dir = unique_base_dir("http_persist");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+
+        let record = sample_http_record();
+        let id = storage
+            .store(&AnalysisResult::Http(record.clone()))
+            .unwrap();
+
+        assert!(
+            id > 0,
+            "Http analysis results must be inserted, not dropped (id={id})"
+        );
+        assert_eq!(storage.http().count().unwrap(), 1);
+        let stored = storage.http().query_since(0).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].path, record.path);
+        assert_eq!(stored[0].method, record.method);
+        assert_eq!(stored[0].pid, record.pid);
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The noop backend silently drops every result type, including Http.
+    /// This pins the other half of the contract so a persist-path fix cannot
+    /// accidentally start writing through the noop backend.
+    #[test]
+    fn test_noop_storage_drops_http_result() {
+        let storage = Storage::noop().unwrap();
+        let id = storage
+            .store(&AnalysisResult::Http(sample_http_record()))
+            .unwrap();
+        assert_eq!(id, 0);
+        assert_eq!(storage.http().count().unwrap(), 0);
     }
 
     /// Unique per-test directory under the system temp dir.
