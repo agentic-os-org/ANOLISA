@@ -247,8 +247,9 @@ pub struct SessionLabel {
     pub llm_reason: Option<String>,
     /// Steps the model's verdict rests on. Empty for anything but `bad`.
     pub llm_cited_steps: Vec<usize>,
-    /// Whether the model said `bad` without citing a step and was reduced to
-    /// `unknown`. Recorded so the rate can be counted rather than guessed at.
+    /// Whether the model said `bad` without citing a step the judged round
+    /// contains and was reduced to `unknown`. Recorded so the rate can be
+    /// counted rather than guessed at.
     pub llm_downgraded: bool,
     pub llm_at_ns: Option<i64>,
     pub metrics: TriageMetrics,
@@ -366,6 +367,13 @@ impl SessionLabel {
     /// endorse it. Pinning the in-force label also keeps `effective_label` to a
     /// single rule: a later recompute cannot move it out from under a decision
     /// somebody already made.
+    ///
+    /// A `Confirm` of a row already `Overridden` endorses the human's own
+    /// verdict, so the state stays `Overridden`. Recording it as `Confirmed`
+    /// would move the row out of the `overridden` bucket in
+    /// [`super::store::ReuseStore::rule_override_stats`], erasing a rule
+    /// misfire a person had already identified — exactly the signal the
+    /// statistics exist to preserve.
     pub fn apply_decision(
         &mut self,
         action: LabelAction,
@@ -374,11 +382,14 @@ impl SessionLabel {
         now_ns: i64,
     ) -> LabelEventKind {
         let (label, state, kind) = match action {
-            LabelAction::Confirm => (
-                self.effective_label(),
-                ConfirmState::Confirmed,
-                LabelEventKind::Confirm,
-            ),
+            LabelAction::Confirm => {
+                let state = if self.was_overridden() {
+                    ConfirmState::Overridden
+                } else {
+                    ConfirmState::Confirmed
+                };
+                (self.effective_label(), state, LabelEventKind::Confirm)
+            }
             LabelAction::Override(label) => {
                 (label, ConfirmState::Overridden, LabelEventKind::Override)
             }
