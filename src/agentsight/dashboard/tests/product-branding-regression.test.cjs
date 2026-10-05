@@ -40,3 +40,26 @@ test('risk summary violation count follows the agent filter', () => {
     'the unfiltered list must not feed the summary card',
   );
 });
+
+test('risk summary active binding count follows the agent filter', () => {
+  // The bindings table renders `filteredBindings`, and `filteredBindings`
+  // degrades to the full list when no agent filter is active, so deriving the
+  // summary card and the binding-limit check from it keeps the unfiltered
+  // behaviour while making the card agree with the visible rows.
+  const source = readSource('src/pages/RiskEnforcementPage.tsx');
+  assert.match(
+    source,
+    /const activeBindings = filteredBindings\.filter\(\(binding\) => binding\.state === 'enforced'\);/,
+    'the active-bindings summary and limit check must use the agent-filtered bindings',
+  );
+  assert.doesNotMatch(
+    source,
+    /const activeBindings = bindings\.filter\(/,
+    'the unfiltered list must not feed the summary card or the binding limit check',
+  );
+  assert.match(
+    source,
+    /const filteredBindings = agentIdFilter[\s\S]*?: bindings;/,
+    'the binding filter must stay a passthrough when no agent filter is active',
+  );
+});

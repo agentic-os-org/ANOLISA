@@ -190,7 +190,11 @@ export const RiskEnforcementPage: React.FC = () => {
     ? violations.filter((v) => v.agent_id === agentIdFilter)
     : violations;
 
-  const activeBindings = bindings.filter((binding) => binding.state === 'enforced');
+  // The bindings table below shows `filteredBindings`, and `filteredBindings`
+  // is the full list when no agent filter is active, so both the summary card
+  // and the binding-limit check must derive from it to agree with the visible
+  // rows and the filter banner.
+  const activeBindings = filteredBindings.filter((binding) => binding.state === 'enforced');
   // The table below shows `filteredViolations`; the summary card must count
   // the same set or it disagrees with the visible rows and the filter banner.
   const displayedViolations = enforcementViolationTotal(filteredViolations, health);
