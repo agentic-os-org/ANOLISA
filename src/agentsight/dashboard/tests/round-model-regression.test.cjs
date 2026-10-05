@@ -350,6 +350,7 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
     '../utils/roundModel': roundModel,
     '../utils/savings': savingsModule,
     '../utils/text': text,
+    '../utils/download': realModule('src/utils/download.ts'),
     '../utils/trajectoryTree': trajectoryTree,
     '../utils/trajectoryTextFilter': trajectoryTextFilter,
     '../utils/optimizationStrategies': optimizationStrategies,
