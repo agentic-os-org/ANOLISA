@@ -1675,14 +1675,30 @@ fn eval_pid_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_sched_migration_cost(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_migration_cost_ns";
+    eval_sched_migration_cost_at(info, recs, "/proc/sys/kernel/sched_migration_cost_ns")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the signed read is
+/// unit-testable against a temp file. `kernel/sched/fair.c` declares
+/// `sysctl_sched_migration_cost` unsigned but registers it through
+/// `proc_dointvec` with no min/max, so "-1" round-trips verbatim — and
+/// `task_hot()` special-cases it: -1 keeps every task cache-hot (migration
+/// effectively disabled) while 0 makes no task cache-hot (always migrate).
+fn eval_sched_migration_cost_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // -1 is the kernel's "never migrate" sentinel, so it must be read signed
+    // or the unsigned fallback maps it to 0, the opposite "always migrate"
+    // policy, and the report misdiagnoses a pinned host.
+    let current = read_sysctl_i64(path);
     if current < 5000000 {
         recs.push(Recommendation {
             param: "kernel.sched_migration_cost_ns".to_string(),
@@ -6924,6 +6940,93 @@ mod tests {
             rec.is_none(),
             "Should not recommend sched_migration_cost for small machines"
         );
+    }
+
+    #[test]
+    fn test_sched_migration_cost_minus_one_reads_signed() {
+        // -1 is task_hot()'s "every task stays cache-hot" sentinel: migration
+        // is effectively disabled (kernel/sched/fair.c special-cases it next
+        // to 0, the "always migrate" value). The unsigned reader parsed
+        // "-1" to Err and fell back to 0 — the *opposite* migration policy —
+        // so the report diagnosed a deliberately pinned host as aggressively
+        // migrating, and current_value lied about the live kernel setting.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_sched_mig_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        let mut recs = Vec::new();
+        let checked = eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(checked, 1);
+        assert_eq!(
+            recs.len(),
+            1,
+            "-1 is far below 5000000, so it must be reported"
+        );
+        assert_eq!(recs[0].param, "kernel.sched_migration_cost_ns");
+        assert_eq!(
+            recs[0].current_value, "-1",
+            "current must be faithful: 0 is the opposite migration policy"
+        );
+        assert_eq!(recs[0].recommended_value, "5000000");
+    }
+
+    #[test]
+    fn test_sched_migration_cost_boundaries() {
+        // 5000000 (the recommendation itself) and anything above is already
+        // tuned; every lower value — including the -1 "never migrate"
+        // sentinel, 0 ("always migrate") and the 500000 default — must be
+        // reported with a faithful signed echo.
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        for (value, expects_rec) in [
+            (-1, true),
+            (0, true),
+            (500000, true),
+            (4999999, true),
+            (5000000, false),
+            (6000000, false),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_sched_mig_bound_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only >= 5000000 is already tuned"
+            );
+            if expects_rec {
+                assert_eq!(
+                    recs[0].current_value,
+                    value.to_string(),
+                    "current_value must echo the signed value verbatim"
+                );
+                assert_eq!(recs[0].recommended_value, "5000000");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sched_migration_cost_absent_counts_as_checked() {
+        // A path that never exists exercises the absent branch: 1 checked,
+        // 0 recommendations, no filesystem dependency in CI.
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        let mut recs = Vec::new();
+        let checked =
+            eval_sched_migration_cost_at(&info, &mut recs, "/proc/sys/kernel/ktuner_absent_sched");
+        assert_eq!(checked, 1);
+        assert!(recs.is_empty());
     }
 
     #[test]
