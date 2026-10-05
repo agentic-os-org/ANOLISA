@@ -62,6 +62,12 @@ describe('SessionService', () => {
     // Mock jsonl-utils
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    // By default, runExclusive just invokes the callback (no real locking)
+    // and appendLine is a no-op; individual tests override as needed.
+    vi.mocked(jsonl.runExclusive).mockImplementation(
+      async (_filePath: string, callback: () => Promise<unknown>) => callback(),
+    );
+    vi.mocked(jsonl.appendLine).mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -573,7 +579,7 @@ describe('SessionService', () => {
         async (filePath: string, count?: number) =>
           (recordsFor(filePath) ?? []).slice(0, count),
       );
-      vi.mocked(jsonl.writeLine).mockImplementation(
+      vi.mocked(jsonl.appendLine).mockImplementation(
         async (filePath: string, data: unknown) => {
           const records = recordsFor(filePath);
           if (records) {
@@ -603,6 +609,138 @@ describe('SessionService', () => {
       ]);
     });
 
+    it('should read the tail and append inside one file-lock critical section', async () => {
+      // The tail selection and the append must be one serialized operation:
+      // an unlocked read between them lets a concurrent writer append a
+      // record the rename then chains "past", omitting it from the resumed
+      // history. The order log proves both happen inside the runExclusive
+      // callback, and that the append bypasses the lock (writeLine inside
+      // the callback would deadlock on the non-reentrant mutex).
+      const order: string[] = [];
+      vi.mocked(jsonl.runExclusive).mockImplementation(
+        async (_filePath: string, callback: () => Promise<unknown>) => {
+          order.push('lock');
+          const result = await callback();
+          order.push('unlock');
+          return result;
+        },
+      );
+      vi.mocked(jsonl.read).mockImplementation(async () => {
+        order.push('read');
+        return [recordB1, recordB2];
+      });
+      vi.mocked(jsonl.appendLine).mockImplementation(async () => {
+        order.push('append');
+      });
+
+      const result = await sessionService.renameSession(sessionIdB, 'new-name');
+
+      expect(result).toBe(true);
+      expect(order).toEqual(['lock', 'read', 'append', 'unlock']);
+      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+    });
+
+    it('should recover a session already severed by the old picker rename', async () => {
+      // The old picker appended its session_name record with parentUuid:
+      // null, disconnecting the terminal chain from the conversation.
+      // Renaming such a file again chains the new record onto the legacy
+      // one, so the walk from the tail must fall back to the last record
+      // still connected to the conversation instead of coming back empty.
+      const legacyNameRecord: ChatRecord = {
+        uuid: 'legacy-name-record',
+        parentUuid: null,
+        sessionId: sessionIdB,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'session_name',
+        systemPayload: { sessionName: 'old picker name' },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+      const store = new Map<string, ChatRecord[]>([
+        [sessionIdB, [recordB1, recordB2, legacyNameRecord]],
+      ]);
+      const recordsFor = (filePath: string): ChatRecord[] | undefined => {
+        for (const [id, records] of store.entries()) {
+          if (filePath.includes(id)) {
+            return records;
+          }
+        }
+        return undefined;
+      };
+      vi.mocked(jsonl.read).mockImplementation(
+        async (filePath: string) => recordsFor(filePath) ?? [],
+      );
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string, count?: number) =>
+          (recordsFor(filePath) ?? []).slice(0, count),
+      );
+      vi.mocked(jsonl.appendLine).mockImplementation(
+        async (filePath: string, data: unknown) => {
+          const records = recordsFor(filePath);
+          if (records) {
+            records.push(data as ChatRecord);
+          }
+        },
+      );
+
+      const result = await sessionService.renameSession(sessionIdB, 'new-name');
+
+      expect(result).toBe(true);
+
+      // The rename still chains onto the physical last record (the legacy
+      // one) — the on-disk layout only ever grows at the tail.
+      const appended = store.get(sessionIdB)?.[3];
+      expect(appended).toBeDefined();
+      expect(appended?.subtype).toBe('session_name');
+      expect(appended?.parentUuid).toBe(legacyNameRecord.uuid);
+
+      // ... but loading the session must recover the full conversation by
+      // falling back past the disconnected terminal chain.
+      const loaded = await sessionService.loadSession(sessionIdB);
+      expect(loaded).toBeDefined();
+      expect(loaded?.conversation.messages.map((m) => m.uuid)).toEqual([
+        recordB1.uuid,
+        recordB2.uuid,
+      ]);
+      expect(loaded?.lastCompletedUuid).toBe(recordB2.uuid);
+    });
+
+    it('should load a session already severed by the old picker rename without renaming it again', async () => {
+      // Pure recovery path: a file last touched by the old picker (no new
+      // rename) must still resume its conversation.
+      const legacyNameRecord: ChatRecord = {
+        uuid: 'legacy-name-record',
+        parentUuid: null,
+        sessionId: sessionIdB,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'session_name',
+        systemPayload: { sessionName: 'old picker name' },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        recordB2,
+        legacyNameRecord,
+      ]);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        recordB1,
+        recordB2,
+        legacyNameRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded).toBeDefined();
+      expect(loaded?.conversation.messages.map((m) => m.uuid)).toEqual([
+        recordB1.uuid,
+        recordB2.uuid,
+      ]);
+      expect(loaded?.lastCompletedUuid).toBe(recordB2.uuid);
+    });
+
     it('should return false when session does not exist', async () => {
       vi.mocked(jsonl.read).mockResolvedValue([]);
 
@@ -612,7 +750,7 @@ describe('SessionService', () => {
       );
 
       expect(result).toBe(false);
-      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+      expect(vi.mocked(jsonl.appendLine)).not.toHaveBeenCalled();
     });
 
     it('should return false for session from different project', async () => {
@@ -630,7 +768,7 @@ describe('SessionService', () => {
       const result = await sessionService.renameSession(sessionIdB, 'new-name');
 
       expect(result).toBe(false);
-      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
+      expect(vi.mocked(jsonl.appendLine)).not.toHaveBeenCalled();
     });
   });
 

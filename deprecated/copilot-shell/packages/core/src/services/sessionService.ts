@@ -415,6 +415,44 @@ export class SessionService {
   ): ChatRecord[] {
     if (records.length === 0) return [];
 
+    const messages = this.walkParentChain(records, leafUuid);
+
+    // A caller-provided leaf is trusted as-is.
+    if (leafUuid !== undefined) {
+      return messages;
+    }
+
+    // Legacy layouts: the old picker rename appended its session_name record
+    // with parentUuid: null, leaving a terminal chain that is disconnected
+    // from the real conversation — and any rename that chained onto that
+    // legacy record keeps the disconnection. When the walk from the last
+    // record yields no user/assistant records at all, fall back to the last
+    // record in file order whose chain still reaches the conversation, so
+    // sessions already broken by the old implementation resume their
+    // history instead of coming back empty.
+    if (!messages.some((m) => m.type === 'user' || m.type === 'assistant')) {
+      for (let i = records.length - 1; i >= 0; i--) {
+        const candidate = this.walkParentChain(records, records[i].uuid);
+        if (
+          candidate.some((m) => m.type === 'user' || m.type === 'assistant')
+        ) {
+          return candidate;
+        }
+      }
+    }
+
+    return messages;
+  }
+
+  /**
+   * Walks the parentUuid chain backwards from `leafUuid` (default: the last
+   * record in the file) and returns the aggregated records in conversation
+   * order.
+   */
+  private walkParentChain(
+    records: ChatRecord[],
+    leafUuid?: string,
+  ): ChatRecord[] {
     const recordsByUuid = new Map<string, ChatRecord[]>();
     for (const record of records) {
       const existing = recordsByUuid.get(record.uuid) || [];
@@ -537,6 +575,13 @@ export class SessionService {
    * ChatRecordingService.recordSessionName() records renames for the
    * current session.
    *
+   * The tail read and the append run as one serialized operation under the
+   * file's write lock: a record appended by another writer (the active
+   * session recorder, or the same session open elsewhere) between an
+   * unlocked read and the append would leave the rename chained to a stale
+   * tail while sitting physically after the new record, silently omitting
+   * that record from the resumed history.
+   *
    * @param sessionId The session ID to rename
    * @param name The new name for the session
    * @returns true if renamed, false if session not found
@@ -546,31 +591,34 @@ export class SessionService {
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      const records = await jsonl.read<ChatRecord>(filePath);
-      if (records.length === 0) {
-        return false;
-      }
+      return await jsonl.runExclusive(filePath, async () => {
+        const records = await jsonl.read<ChatRecord>(filePath);
+        if (records.length === 0) {
+          return false;
+        }
 
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
-        return false;
-      }
+        const recordProjectHash = getProjectHash(records[0].cwd);
+        if (recordProjectHash !== this.projectHash) {
+          return false;
+        }
 
-      // Append a session_name system record chained to the last record
-      const nameRecord: ChatRecord = {
-        uuid: randomUUID(),
-        parentUuid: records[records.length - 1].uuid,
-        sessionId,
-        timestamp: new Date().toISOString(),
-        type: 'system',
-        subtype: 'session_name',
-        systemPayload: { sessionName: name },
-        cwd: records[0].cwd,
-        version: records[0].version,
-      };
+        // Append a session_name system record chained to the last record.
+        // appendLine() because this callback already holds the file lock.
+        const nameRecord: ChatRecord = {
+          uuid: randomUUID(),
+          parentUuid: records[records.length - 1].uuid,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'session_name',
+          systemPayload: { sessionName: name },
+          cwd: records[0].cwd,
+          version: records[0].version,
+        };
 
-      await jsonl.writeLine(filePath, nameRecord);
-      return true;
+        await jsonl.appendLine(filePath, nameRecord);
+        return true;
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return false;
