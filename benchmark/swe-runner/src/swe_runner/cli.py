@@ -63,6 +63,9 @@ def run(
     instance_id: str | None = typer.Option(
         None, "--instance-id", "-i", help="Instance ID(s), comma-separated for multiple"
     ),
+    instances_file: Path | None = typer.Option(
+        None, "--instances-file", help="UTF-8 file of instance IDs, one per line; excludes --instance-id"
+    ),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel workers (default: 1)"),
     docker_pull_registry: str | None = typer.Option(
         None,
@@ -109,6 +112,7 @@ def run(
             slice_range=slice_range,
             filter_regex=filter_regex,
             instance_id=instance_id,
+            instances_file=instances_file,
             workers=workers,
             docker_pull_registry=docker_pull_registry,
             use_skill=use_skill,
