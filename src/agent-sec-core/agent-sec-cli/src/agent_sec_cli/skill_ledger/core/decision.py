@@ -317,7 +317,11 @@ def export_skill(
     snapshot = snapshot_dir_path(io_skill_dir, version_id)
     out_dir = Path(output)
     out_dir_created = not out_dir.exists()
-    if out_dir.exists() and any(out_dir.iterdir()):
+    # A regular file at the output path makes iterdir() raise
+    # NotADirectoryError before the intended typed error fires.
+    if out_dir.exists() and (
+        not out_dir.is_dir() or any(out_dir.iterdir())
+    ):
         raise SkillLedgerError(
             f"export output already exists and is not empty: {out_dir}"
         )
