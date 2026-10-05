@@ -227,23 +227,6 @@ static OPENCLAW_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::
 });
 
 impl GenAIBuilder {
-    /// Whether the path belongs to the DashScope/Bailian native protocol.
-    ///
-    /// Delegates to the shared parser-layer classifier
-    /// (`crate::parser::llm::is_dashscope_native_path`).
-    pub(super) fn is_dashscope_native_path(path: &str) -> bool {
-        crate::parser::llm::is_dashscope_native_path(path)
-    }
-
-    /// Check if the path indicates an LLM API call.
-    ///
-    /// Delegates to the shared parser-layer gate
-    /// (`crate::parser::llm::is_llm_api_path`) so the set of paths that
-    /// create a row and the set that is audited cannot drift apart again.
-    pub(crate) fn is_llm_api_path(path: &str) -> bool {
-        crate::parser::llm::is_llm_api_path(path)
-    }
-
     /// Check if request body contains SysOM POP API markers
     /// SysOM uses path "/" with action in body (llmParamString field)
     pub(super) fn is_sysom_pop_request(request_body: &Option<String>) -> bool {
@@ -251,16 +234,6 @@ impl GenAIBuilder {
             .as_ref()
             .map(|b| b.contains("llmParamString"))
             .unwrap_or(false)
-    }
-
-    /// Normalize the messages array from a parsed request body.
-    ///
-    /// Delegates to the shared parser-layer view
-    /// (`crate::parser::llm::extract_messages_view`).
-    pub(crate) fn extract_messages_view(
-        body: &serde_json::Value,
-    ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
-        crate::parser::llm::extract_messages_view(body)
     }
 
     /// Extract human-readable text from a message's `content` field.
@@ -307,7 +280,7 @@ impl GenAIBuilder {
             Some("openai".to_string())
         } else if path.contains("/api/v1/copilot/generate_copilot") {
             Some("sysom".to_string())
-        } else if Self::is_dashscope_native_path(path) {
+        } else if crate::parser::llm::is_dashscope_native_path(path) {
             Some("dashscope".to_string())
         } else {
             None

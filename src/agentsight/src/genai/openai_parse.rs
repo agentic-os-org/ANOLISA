@@ -28,7 +28,7 @@ impl GenAIBuilder {
 
         // Normalized view: "messages" (chat completions) or "input" + "instructions"
         // (Responses API used by codex 0.137+ via dashscope /v1/responses).
-        let (raw_messages, instructions_text) = Self::extract_messages_view(&v)?;
+        let (raw_messages, instructions_text) = crate::parser::llm::extract_messages_view(&v)?;
 
         let mut messages: Vec<InputMessage> = Vec::new();
 

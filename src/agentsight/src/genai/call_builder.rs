@@ -51,7 +51,7 @@ impl GenAIBuilder {
         );
 
         // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
-        let path_match = Self::is_llm_api_path(&http.path);
+        let path_match = crate::parser::llm::is_llm_api_path(&http.path);
         let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
         let is_llm = path_match || body_match;
         if !is_llm && !http.is_sse {
@@ -859,7 +859,7 @@ impl GenAIBuilder {
                 }
             }
             msgs
-        } else if messages.is_empty() && Self::is_dashscope_native_path(&http.path) {
+        } else if messages.is_empty() && crate::parser::llm::is_dashscope_native_path(&http.path) {
             // Non-streaming DashScope/Bailian native protocol: no typed parser
             // claims `/aigc/*-generation/generation`, so the `output` envelope
             // has to be reconstructed from the raw response body.

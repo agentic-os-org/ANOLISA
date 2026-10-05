@@ -249,7 +249,7 @@ impl GenAIBuilder {
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
-        let path_match = Self::is_llm_api_path(&request.path);
+        let path_match = crate::parser::llm::is_llm_api_path(&request.path);
         let body_str = if request.body_len > 0 {
             Some(request.body_str().to_string())
         } else {
@@ -297,7 +297,10 @@ impl GenAIBuilder {
             first_user_text,
             last_user_text,
             user_message_count,
-        ) = if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
+        ) = if let Some(view) = body
+            .as_ref()
+            .and_then(crate::parser::llm::extract_messages_view)
+        {
             let (messages, instructions_text) = view;
 
             // First user message raw text — used as `session_key` material
