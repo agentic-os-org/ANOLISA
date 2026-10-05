@@ -657,7 +657,8 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
             dataKey={m}
             name={m}
             stackId="model"
-            fill={hidden.has(m) ? 'transparent' : MODEL_COLORS[i % MODEL_COLORS.length]}
+            hide={hidden.has(m)}
+            fill={MODEL_COLORS[i % MODEL_COLORS.length]}
           />
         ))}
       </BarChart>

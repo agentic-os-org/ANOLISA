@@ -280,6 +280,24 @@ export const SecurityObservabilityPage: React.FC = () => {
     }
   }, [t]);
 
+  // The Query button must always re-issue the request. Applying the draft
+  // filters alone is not enough: when the draft object is the same reference
+  // as the applied one, React bails out of the state write, `loadEvents` keeps
+  // its identity and the dep-driven effect above never re-fires — so after a
+  // failed fetch the button could not retry anything.
+  const queryEvents = useCallback(() => {
+    const filtersUnchanged = eventFilters === appliedEventFilters;
+    setAppliedEventFilters(eventFilters);
+    if (filtersUnchanged) {
+      loadEvents(0, eventFilters);
+    }
+  }, [appliedEventFilters, eventFilters, loadEvents]);
+
+  const clearEventFilters = useCallback(() => {
+    setEventFilters(EMPTY_EVENT_FILTERS);
+    setAppliedEventFilters(EMPTY_EVENT_FILTERS);
+  }, []);
+
   useEffect(() => {
     loadStatus();
   }, [loadStatus]);
@@ -529,7 +547,8 @@ export const SecurityObservabilityPage: React.FC = () => {
             <EventsTab
               eventFilters={eventFilters}
               setEventFilters={setEventFilters}
-              setAppliedEventFilters={setAppliedEventFilters}
+              onQuery={queryEvents}
+              onClear={clearEventFilters}
               categoryFilterOptions={categoryFilterOptions}
               resultFilterOptions={resultFilterOptions}
               verdictFilterOptions={verdictFilterOptions}

@@ -133,6 +133,28 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+// Depth-first walk over the classic-runtime element tree produced by the
+// react stub in loadPageModule.
+function findElement(node, predicate) {
+  if (node == null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (predicate(node)) return node;
+  return findElement(node.children, predicate);
+}
+
+function elementText(node) {
+  if (node == null || typeof node === 'boolean') return [];
+  if (typeof node === 'string' || typeof node === 'number') return [String(node)];
+  if (Array.isArray(node)) return node.flatMap(elementText);
+  return elementText(node.children);
+}
+
 // ─── SecurityObservabilityPage ────────────────────────────────────────────────
 //
 // Hook-slot map (useState and useRef share one cursor, exactly like React;
@@ -141,7 +163,7 @@ const componentStub = (name) => ({ [name]: () => null });
 //   2 activeTab ('overview') · 3 status · 20 eventDetail · 23 securitySessions
 //   26 selectedSessionId · 38/39/40/41 overview/events/sessions/eventDetail refs
 // useCallback order: loadStatus, loadOverview, loadEvents, loadSessions,
-//   loadEventDetail, handleRefresh.
+//   loadEventDetail, queryEvents, clearEventFilters, handleRefresh.
 
 function renderSecurityPage() {
   const { calls, stubs } = deferredFetchStubs([
@@ -189,7 +211,7 @@ function renderSecurityPage() {
   // loaders close over the available state.
   driver.slots[3].setter({ state: 'daemon_reachable', data: {} });
   const rendered = driver.render(page);
-  return { calls, driver, rendered };
+  return { calls, driver, rendered, page };
 }
 
 test('security sessions: an older loadSessions response must not survive a newer overview batch', async () => {
@@ -262,6 +284,48 @@ test('security event detail: clicking A then B with A resolving last must still 
     'the detail loading flag must be cleared by the newest request only');
 });
 
+test('security events query: the Query button re-issues the request with unchanged filters', async () => {
+  const { calls, driver, page } = renderSecurityPage();
+
+  // Enter the events tab: the dep-driven effect issues the first page request.
+  driver.slots[2].setter('events');
+  const rendered = driver.render(page);
+  rendered.effects[2]();
+  assert.equal(calls.fetchSecurityEvents.length, 1, 'entering the tab must load the first page');
+  calls.fetchSecurityEvents[0].resolve({
+    state: 'ok',
+    data: { items: [], total: 0, offset: 0, limit: 25, next_offset: null },
+  });
+  await settle();
+
+  // Render the REAL EventsTab with the props the page passed, then invoke the
+  // Query button's actual onClick. The draft filters are still the same object
+  // as the applied ones, which is exactly the case that used to make React
+  // bail out of the state write and skip the reload.
+  const tabElement = findElement(rendered.element, (node) => (
+    node.props && typeof node.props.loadEvents === 'function' && node.props.eventFilters
+  ));
+  assert.ok(tabElement, 'the events tab must be rendered');
+  const eventsTabDriver = createHooksDriver();
+  const eventsTabModule = loadPageModule('src/pages/security/EventsTab.tsx', {
+    '../../i18n': { useI18n: () => ({ t: (key) => key }) },
+    './EventTable': componentStub('EventTable'),
+    './types': { EMPTY_EVENT_FILTERS: {} },
+  }, eventsTabDriver);
+  const tabRendered = eventsTabDriver.render(eventsTabModule.EventsTab, tabElement.props);
+  const queryButton = findElement(tabRendered.element, (node) => (
+    node.type === 'button' && elementText(node).includes('common.query')
+  ));
+  assert.ok(queryButton, 'the Query button must exist');
+  await queryButton.props.onClick();
+
+  assert.equal(
+    calls.fetchSecurityEvents.length,
+    2,
+    'Query must re-issue the request even when the draft filters are unchanged',
+  );
+});
+
 // ─── SkillMetricsPage ─────────────────────────────────────────────────────────
 //
 // Hook-slot map: 0 startMs · 1 endMs · 2 agentName · 3 agents · 4 granularity
@@ -311,6 +375,48 @@ test('skill metrics: an older range agent list must not overwrite the newer rang
 
   assert.deepEqual(driver.slots[3].value, ['beta'],
     'the older range response must not overwrite the newer range agent list');
+});
+
+test('skill metrics: a failed reload must not keep the previous report', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchSkillMetrics', 'fetchAgentNames']);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../i18n': { useI18n: () => ({ t: (key) => key }) },
+    recharts: {
+      ...componentStub('BarChart'), ...componentStub('Bar'), ...componentStub('XAxis'),
+      ...componentStub('YAxis'), ...componentStub('Tooltip'), ...componentStub('ResponsiveContainer'),
+    },
+    '../utils/apiClient': { ...stubs },
+    '../components/DateTimePicker': componentStub('DateTimePicker'),
+  };
+  const pageModule = loadPageModule('src/pages/SkillMetricsPage.tsx', moduleStubs, driver);
+  const page = pageModule.SkillMetricsPage;
+
+  // The first load answers with a report for the default window.
+  let rendered = driver.render(page);
+  const firstLoad = rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 1);
+  calls.fetchSkillMetrics[0].resolve({ event_count: 7, loads: { total_loads: 1, loads: {} } });
+  await firstLoad;
+  await settle();
+  assert.ok(driver.slots[5].value, 'sanity: the first report must be stored');
+
+  // The agent filter changes (slot 2 is agentName); React re-runs the loader
+  // effect and the new request fails.
+  driver.slots[2].setter('alpha');
+  rendered = driver.render(page);
+  const secondLoad = rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 2, 'the filter change must re-issue the load');
+  calls.fetchSkillMetrics[1].reject(new Error('boom'));
+  await secondLoad;
+  await settle();
+
+  assert.equal(
+    driver.slots[5].value,
+    null,
+    "a failed reload must not keep the previous agent's/range's report under the new controls",
+  );
+  assert.equal(driver.slots[7].value, 'boom', 'the error banner must explain the newest failure');
 });
 
 test('security overview: a failed card must not keep the previous range payload', async () => {
