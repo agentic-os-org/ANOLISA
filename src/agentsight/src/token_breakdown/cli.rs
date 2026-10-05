@@ -406,6 +406,20 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
+                        // Reasoning models stream their thinking on the
+                        // same channel (dashscope qwen3-coder sends
+                        // reasoning_text, the o-series summary_text); both
+                        // belong in reasoning_content, like the chat-completions
+                        // reasoning_content delta and the analyzer's Responses
+                        // aggregation.
+                        Some("response.reasoning_text.delta")
+                        | Some("response.reasoning_summary_text.delta") => {
+                            if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
+                                if !delta.is_empty() {
+                                    reasoning_parts.push(delta.to_string());
+                                }
+                            }
+                        }
                         Some("response.output_item.added")
                         | Some("response.function_call_arguments.delta")
                         | Some("response.function_call_arguments.done") => {
@@ -971,6 +985,38 @@ mod tests {
                 "tool_b: {\"b\":2}".to_string()
             ]
         );
+    }
+
+    /// Reasoning models on the Responses API stream their thinking as
+    /// `response.reasoning_text.delta` (dashscope qwen3-coder) or
+    /// `response.reasoning_summary_text.delta` (the o-series); the analyzer
+    /// keeps both, but the trace breakdown dropped them, reporting no
+    /// reasoning at all for a stream that had one.
+    #[test]
+    fn sse_responses_reasoning_deltas_are_kept() {
+        let events = vec![
+            sse(r#"{"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1"}}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"Think "}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"hard."}"#),
+            sse(r#"{"type":"response.output_text.delta","delta":"Hello"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["Hello".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("Think hard."));
+    }
+
+    /// The o-series spelling (`reasoning_summary_text.delta`) carries the
+    /// same reasoning and must reach `reasoning_content` too.
+    #[test]
+    fn sse_responses_reasoning_summary_deltas_are_kept() {
+        let events = vec![
+            sse(r#"{"type":"response.reasoning_summary_text.delta","delta":"summar"}"#),
+            sse(r#"{"type":"response.reasoning_summary_text.delta","delta":"izing"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("summarizing"));
     }
 
     /// The chrome trace stores the request body either as the parsed JSON
