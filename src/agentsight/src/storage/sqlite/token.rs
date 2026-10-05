@@ -250,6 +250,48 @@ pub struct TokenStore {
     table_available: bool,
 }
 
+/// Columns projected by every token reader. A `token_records` table that does
+/// not provide all of them is a foreign or partially created table.
+const REQUIRED_TOKEN_COLUMNS: [&str; 13] = [
+    "id",
+    "timestamp_ns",
+    "pid",
+    "comm",
+    "agent",
+    "model",
+    "provider",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "request_id",
+    "endpoint",
+];
+
+/// Returns whether `table_name` exists with the schema the readers project.
+///
+/// A same-named table with different columns (another tool's database, or a
+/// partially created table) reports as unavailable so readers return empty
+/// results instead of failing to prepare their fixed column list.
+fn token_table_available(conn: &Connection, table_name: &str) -> Result<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+        [table_name],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+
+    let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    let columns: std::collections::HashSet<String> = statement
+        .query_map([table_name], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(REQUIRED_TOKEN_COLUMNS
+        .iter()
+        .all(|column| columns.contains(*column)))
+}
+
 impl TokenStore {
     /// Create a new token store with default table name.
     ///
@@ -323,13 +365,7 @@ impl TokenStore {
                 ..ConnectionOptions::default()
             },
         )?;
-        let table_available = conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
-            )",
-            [table_name],
-            |row| row.get(0),
-        )?;
+        let table_available = token_table_available(&conn, table_name)?;
         Ok(Self {
             conn,
             table_name: table_name.to_string(),
@@ -425,12 +461,14 @@ impl TokenStore {
              FROM {} ORDER BY timestamp_ns DESC",
             self.table_name
         );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .expect("Failed to prepare statement");
+        // The probe above proves the schema only for a stable file; a database
+        // that changes under a read-only handle (or a corrupt schema) still
+        // yields an empty result instead of aborting the process.
+        let Ok(mut stmt) = self.conn.prepare(&sql) else {
+            return Vec::new();
+        };
 
-        stmt.query_map([], |row| {
+        let Ok(rows) = stmt.query_map([], |row| {
             Ok(TokenRecord {
                 id: row.get(0)?,
                 timestamp_ns: row.get::<_, i64>(1)? as u64,
@@ -448,10 +486,10 @@ impl TokenStore {
                 tool_calls: Vec::new(),
                 reasoning_content: None,
             })
-        })
-        .expect("Failed to query")
-        .filter_map(|r| r.ok())
-        .collect()
+        }) else {
+            return Vec::new();
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     /// Get records in time range
@@ -473,12 +511,12 @@ impl TokenStore {
              ORDER BY timestamp_ns DESC",
             self.table_name
         );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .expect("Failed to prepare statement");
+        // See `all`: an unrepairable read returns empty rather than aborting.
+        let Ok(mut stmt) = self.conn.prepare(&sql) else {
+            return Vec::new();
+        };
 
-        stmt.query_map(params![start_ns as i64, end_ns as i64], |row| {
+        let Ok(rows) = stmt.query_map(params![start_ns as i64, end_ns as i64], |row| {
             Ok(TokenRecord {
                 id: row.get(0)?,
                 timestamp_ns: row.get::<_, i64>(1)? as u64,
@@ -496,10 +534,10 @@ impl TokenStore {
                 tool_calls: Vec::new(),
                 reasoning_content: None,
             })
-        })
-        .expect("Failed to query")
-        .filter_map(|r| r.ok())
-        .collect()
+        }) else {
+            return Vec::new();
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     /// Get records for last N hours
@@ -811,6 +849,25 @@ mod tests {
         let records = store.all();
         assert!(!records.is_empty());
 
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn read_only_store_treats_a_mismatched_token_table_as_empty() {
+        // A foreign database (or a partially created table) can contain a
+        // `token_records` table with different columns; the read-only CLI path
+        // must report empty results instead of aborting on a failed prepare.
+        let path = unique_db_path("mismatched_table");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("CREATE TABLE token_records (x INTEGER)", [])
+                .unwrap();
+        }
+
+        let store = TokenStore::open_read_only_existing(&path, "token_records").unwrap();
+
+        assert!(store.by_time_range(0, 1_000_000).is_empty());
+        assert!(store.all().is_empty());
         cleanup_db(&path);
     }
 

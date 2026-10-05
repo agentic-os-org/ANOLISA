@@ -2527,6 +2527,90 @@ fn poison_recovery_flush_still_operational() {
     cleanup_db(&path);
 }
 
+/// A flush that loses the SQLite write race must keep the drained events so a
+/// later flush retries them instead of silently dropping completed LLM calls.
+#[test]
+fn flush_requeues_events_when_the_database_is_locked() {
+    use crate::genai::exporter::GenAIExporter;
+
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_busy_flush_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path_and_batch(
+        &path,
+        Some(crate::config::BatchConfig {
+            max_size: 2,
+            flush_ms: 100,
+        }),
+        crate::config::PeriodicStoragePolicy::default(),
+    )
+    .unwrap();
+
+    // Hold the write lock on a second connection so the synchronous batch flush
+    // fails with SQLITE_BUSY instead of persisting.
+    let blocker = rusqlite::Connection::open(&path).expect("blocker should open");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE;")
+        .expect("blocker should take the write lock");
+
+    let events: Vec<GenAISemanticEvent> = (0..2)
+        .map(|index| {
+            let call = LLMCall::new(
+                format!("busy-flush-{index}"),
+                BASE_NS as u64,
+                "openai".to_string(),
+                "gpt-4".to_string(),
+                LLMRequest {
+                    messages: vec![],
+                    temperature: None,
+                    max_tokens: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    top_p: None,
+                    top_k: None,
+                    seed: None,
+                    stop_sequences: None,
+                    stream: false,
+                    tools: None,
+                    raw_body: None,
+                },
+                100,
+                "test-agent".to_string(),
+            );
+            GenAISemanticEvent::LLMCall(call)
+        })
+        .collect();
+    store.export(&events);
+
+    blocker
+        .execute_batch("COMMIT;")
+        .expect("blocker should release the write lock");
+    store.flush();
+
+    let conn = store.conn.lock().unwrap();
+    for index in 0..2 {
+        let call_id = format!("busy-flush-{index}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM genai_events WHERE call_id = ?1",
+                rusqlite::params![call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "event {call_id} must survive a busy flush retry");
+    }
+    drop(conn);
+    drop(blocker);
+    drop(store);
+    cleanup_db(&path);
+}
+
 // ─── update_fallback_session_id (retroactive session fix-up, issue #2059) ─────────────
 
 /// Read the current session_id of a call directly from the table.
