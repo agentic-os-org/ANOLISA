@@ -347,3 +347,131 @@ test('security overview: a failed card must not keep the previous range payload'
     "a failed card must not show the previous range's events under the new range",
   );
 });
+
+// ─── CausalAttributionPanel ──────────────────────────────────────────────────
+//
+// Hook-slot map: 0 complaint · 1 loading · 2 error · 3 caseData · 4 cached
+// 5 history · 6 selectedAltIdx · 7 stageIdx · 8 elapsed · 9 requestVersion ref
+// Effect per render: [history load + request-version bump].
+
+function findNode(node, predicate) {
+  if (node == null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findNode(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (predicate(node)) return node;
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      const found = findNode(child, predicate);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function renderCausalPanel() {
+  const { calls, stubs } = deferredFetchStubs(['runCausalAttribution']);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../utils/apiClient': { ...stubs },
+  };
+  const module = loadPageModule('src/components/CausalAttributionPanel.tsx', moduleStubs, driver);
+  const panel = module.CausalAttributionPanel;
+  assert.equal(typeof panel, 'function', 'CausalAttributionPanel must be a component');
+  const rendered = driver.render(panel, {
+    sessionId: 'sess-1',
+    roundIndex: 0,
+    roundLabel: '第 1 轮',
+  });
+  assert.equal(driver.slots[0].value, '', 'slot 0 must be the complaint field');
+  assert.equal(driver.slots[3].value, null, 'slot 3 must be caseData');
+  rendered.effects[0](); // mount: load this (session, round)'s history
+  return { calls, driver, panel, rendered };
+}
+
+test('causal attribution: a run superseded by a round switch must discard its result', async () => {
+  // The attribution call takes seconds. If the user switches rounds while it
+  // is in flight, the late response used to write its case, cache flag,
+  // selected alternative, and history entry unconditionally — rendering the
+  // old round's verdict and graph under the new round's label. The run must
+  // be bound to the request version of the (session, round) it was started
+  // for and drop its result once that version is superseded.
+  const previousWindow = global.window;
+  global.window = { setInterval: global.setInterval, clearInterval: global.clearInterval };
+  let calls;
+  try {
+    const setup = renderCausalPanel();
+    const { driver, panel } = setup;
+    calls = setup.calls;
+
+    // Type a complaint and re-render so the run button enables.
+    driver.slots[0].setter('这轮引用靠谱吗？');
+    let rendered = driver.render(panel, {
+      sessionId: 'sess-1',
+      roundIndex: 0,
+      roundLabel: '第 1 轮',
+    });
+    const runButton = findNode(
+      rendered.element,
+      (node) =>
+        node.type === 'button'
+        && Array.isArray(node.children)
+        && node.children.filter((c) => typeof c === 'string').join('').includes('发起归因'),
+    );
+    assert.ok(runButton, 'the run button must exist');
+    assert.equal(typeof runButton.props.onClick, 'function');
+
+    // Round 1's run starts and stays in flight.
+    const runPromise = runButton.props.onClick();
+    assert.equal(calls.runCausalAttribution.length, 1, 'the run must issue one request');
+    assert.equal(calls.runCausalAttribution[0].args[0].round_index, 0);
+
+    // The user switches to round 2 while round 1's attribution is pending.
+    rendered = driver.render(panel, {
+      sessionId: 'sess-1',
+      roundIndex: 1,
+      roundLabel: '第 2 轮',
+    });
+    rendered.effects[0](); // the prop change bumps the request version
+
+    // Round 1's slow response lands last with a distinctive case.
+    calls.runCausalAttribution[0].resolve({
+      case: {
+        id: 'case-round-1',
+        title: 'round 1',
+        verdict: 'round 1 verdict',
+        outcome: 'fail',
+        nodes: [],
+        edges: [],
+      },
+      cached: false,
+    });
+    await runPromise;
+    await settle();
+    await settle();
+
+    assert.equal(
+      driver.slots[3].value,
+      null,
+      "the superseded round's verdict must not render under round 2's label",
+    );
+    assert.deepEqual(
+      driver.slots[5].value,
+      [],
+      "the superseded run's history entry must not be filed under round 1's replacement",
+    );
+    assert.equal(driver.slots[1].value, false, 'round 2 must not be left loading by round 1');
+  } finally {
+    // An assertion before the deferred lands must not leave the run's
+    // interval keeping the test process alive.
+    (calls ? calls.runCausalAttribution : []).forEach((call) =>
+      call.resolve({ case: null, cached: false }),
+    );
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});

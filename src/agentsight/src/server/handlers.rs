@@ -2231,6 +2231,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&label_dir);
     }
 
+    /// `human_backed=false` is a public query field, but the filter used to
+    /// recognise only `Some(true)`: the negative request was silently ignored
+    /// and answered with every trajectory, including human-settled ones —
+    /// indistinguishable from a filter that matched everything.
+    #[actix_web::test]
+    async fn trajectory_human_backed_false_excludes_settled_rows() {
+        let db = unique_handler_db("human-backed-false");
+        let tstore = Arc::new(TrajectoryStore::new_with_path(&db).unwrap());
+        for session in ["settled", "untriaged"] {
+            tstore
+                .upsert_trajectory(&trajectory_record(session, "proj-a", "qoder"))
+                .unwrap();
+        }
+
+        let label_dir = temp_root("reuse-human-backed-false");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+        reuse
+            .upsert_auto_label(
+                "settled",
+                crate::reuse::label::TrajectoryIdentity {
+                    title: Some("settled by a person".to_string()),
+                    project: "proj-a".to_string(),
+                    source: "qoder".to_string(),
+                    agent_name: "qoder".to_string(),
+                    started_at: None,
+                    is_subagent: false,
+                },
+                crate::reuse::TriageOutcome {
+                    label: crate::reuse::TrajectoryLabel::Good,
+                    reason: "fixture".to_string(),
+                    metrics: crate::reuse::TriageMetrics {
+                        n_steps: 2,
+                        n_user_turns: 1,
+                        n_tool_calls: 0,
+                        max_agent_len: 10,
+                    },
+                    n_findings: 0,
+                    rules: Vec::new(),
+                },
+                "fixture-hash",
+                "fixture-version",
+            )
+            .unwrap();
+        reuse
+            .apply_decision("settled", crate::reuse::LabelAction::Confirm, "alice", None)
+            .unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let session_ids = |body: &serde_json::Value| -> Vec<String> {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["session_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?human_backed=false")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows: serde_json::Value = awtest::read_body_json(resp).await;
+        assert_eq!(
+            session_ids(&rows),
+            vec!["untriaged".to_string()],
+            "human_backed=false must exclude the settled row, not ignore the field"
+        );
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?human_backed=true")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows: serde_json::Value = awtest::read_body_json(resp).await;
+        assert_eq!(session_ids(&rows), vec!["settled".to_string()]);
+
+        cleanup_db(&db);
+        let _ = std::fs::remove_dir_all(&label_dir);
+    }
+
     #[actix_web::test]
     async fn trajectory_detail_returns_raw_atif_and_404() {
         let data = test_app_state_with_trajectory_store(Some(seeded_trajectory_store("detail")));
@@ -4883,9 +4977,11 @@ pub async fn list_trajectories(
 ///
 /// Label filters cannot run in SQL because the labels live in a second
 /// database, so this is what tells the caller to scan summaries without the
-/// display cap before filtering.
+/// display cap before filtering. `human_backed` counts in both polarities:
+/// `false` excludes human-settled rows and needs the label store just as much
+/// as `true` needs it.
 fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
-    query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true)
+    query.label.is_some() || query.exclude_label.is_some() || query.human_backed.is_some()
 }
 
 /// Applies the reuse-label query parameters to trajectory summary rows.
@@ -4934,6 +5030,8 @@ fn filter_rows_by_reuse_labels(
     let Some(labels) = data.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
         // matches nothing. Serve the empty truth rather than unfiltered rows.
+        // `human_backed=false` is the opposite polarity — nothing is settled,
+        // so every row belongs in the answer.
         if query.label.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
@@ -4953,24 +5051,29 @@ fn filter_rows_by_reuse_labels(
             .into_iter()
             .collect()
     });
-    let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
-        Some(
-            labels
-                .list_labels(&crate::reuse::LabelFilter::default())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|l| l.is_human_backed())
-                .map(|l| l.session_id)
-                .collect(),
-        )
-    } else {
-        None
-    };
+    // `human_backed` is a tri-state filter: absent keeps every row, `true`
+    // keeps only human-settled rows, and `false` keeps only rows no person has
+    // settled — including never-triaged rows, which have no label row at all.
+    // Recognising only `Some(true)` used to ignore `false` completely and
+    // answer with every trajectory, which the caller cannot tell from a filter
+    // that matched everything.
+    let human_backed = query.human_backed;
+    let settled: Option<std::collections::HashSet<String>> = human_backed.map(|_| {
+        labels
+            .list_labels(&crate::reuse::LabelFilter::default())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| l.is_human_backed())
+            .map(|l| l.session_id)
+            .collect()
+    });
     rows.retain(|row| {
         let id = row.session_id.as_str();
         keep.as_ref().is_none_or(|set| set.contains(id))
             && drop.as_ref().is_none_or(|set| !set.contains(id))
-            && backed.as_ref().is_none_or(|set| set.contains(id))
+            && settled
+                .as_ref()
+                .is_none_or(|set| human_backed == Some(set.contains(id)))
     });
     Ok(())
 }
