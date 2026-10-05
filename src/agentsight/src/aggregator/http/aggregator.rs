@@ -169,13 +169,14 @@ impl ConnectionMetrics {
 #[derive(Debug)]
 pub struct HttpConnectionAggregator {
     connections: LruCache<ConnectionId, ConnectionState>,
-    /// Raw bytes received as RawData while the connection is in SseActive
-    /// state. Some providers (e.g. OpenAI Responses API via dashscope) emit
-    /// a final `response.completed` SSE event whose data payload spans
+    /// Raw bytes received as RawData while the connection is in an
+    /// uncompressed SseActive state. Any provider's SSE event can span
     /// multiple TLS records: the first chunk parses as a SseEvent (with
-    /// truncated data), and subsequent chunks have no `data:` prefix so
-    /// they arrive as RawData. Buffering them lets us reconstruct the
-    /// original event for token-usage extraction when the stream ends.
+    /// truncated data), and subsequent chunks have no `data:` prefix so they
+    /// arrive as RawData. Buffering them lets us reconstruct the original
+    /// event for token-usage extraction when the stream ends. Without this,
+    /// a split event's fragment is dropped and the reconstructed content is
+    /// silently corrupted.
     sse_continuation_buffers: LruCache<ConnectionId, Vec<u8>>,
     /// Last `source_event` pointer appended into the continuation buffer per
     /// connection. Used to dedup when a single SSL_read produces multiple
@@ -191,26 +192,6 @@ pub struct HttpConnectionAggregator {
     idle_timeout: Duration,
     /// Cumulative automatic eviction count for diagnostics.
     eviction_count: u64,
-}
-
-/// Returns true if oversized-SSE-event continuation buffering should run for
-/// this SSE stream. Currently only the OpenAI Responses API
-/// (`/v1/responses`, dashscope `/compatible-mode/v1/responses`) emits a
-/// final `response.completed` event whose data field routinely spans
-/// multiple TLS records, so we restrict the extra buffering to that path.
-///
-/// Matching is intentionally precise: `ends_with("/responses")` catches
-/// exact path endings (covers both `/v1/responses` and
-/// `/compatible-mode/v1/responses`), while `contains("/responses?")`
-/// catches query-string variants. We must NOT use a broad `contains`
-/// because sub-paths like `/v1/responses/{id}/items` would be false
-/// positives.
-fn needs_sse_continuation_buffer(request: Option<&ParsedRequest>) -> bool {
-    let Some(req) = request else {
-        return false;
-    };
-    let path = req.path.as_str();
-    path.ends_with("/responses") || path.contains("/responses?")
 }
 
 /// Default per-connection body buffer cap (8 MiB).
@@ -985,30 +966,28 @@ impl HttpConnectionAggregator {
                 }
             }
             other => {
-                // Not in RequestBodyPending / compressed-SSE state. If we are
-                // in an uncompressed SseActive stream targeting the OpenAI
-                // Responses API, buffer the bytes as a continuation of the
-                // last SSE event so we can recover token-usage from
-                // oversized events (e.g. `response.completed`) that span
-                // multiple TLS records. Other providers fit usage in a
-                // single small event, so skip the extra copy.
+                // Not in RequestBodyPending / compressed-SSE state. On any
+                // uncompressed SseActive stream, buffer RawData bytes as a
+                // continuation of the last SSE event: a TLS record can split
+                // an event (an oversized `response.completed` carrying the
+                // full prompt + tools, but equally any provider's event) and
+                // the parser keeps no cross-read remainder, so dropping the
+                // fragment would silently corrupt the reconstructed content
+                // and any usage it carries.
                 if let ConnectionState::SseActive {
-                    request,
                     compressed_buffer: None,
                     ..
                 } = &other
                 {
-                    if needs_sse_continuation_buffer(request.as_ref()) {
-                        const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
-                        let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
-                        let buf = self
-                            .sse_continuation_buffers
-                            .get_or_insert_mut(connection_id, Vec::new);
-                        let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
-                        let take = data.len().min(remaining);
-                        if take > 0 {
-                            buf.extend_from_slice(&data[..take]);
-                        }
+                    const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
+                    let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
+                    let buf = self
+                        .sse_continuation_buffers
+                        .get_or_insert_mut(connection_id, Vec::new);
+                    let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
+                    let take = data.len().min(remaining);
+                    if take > 0 {
+                        buf.extend_from_slice(&data[..take]);
                     }
                 }
                 self.insert(connection_id, other);
@@ -1072,36 +1051,36 @@ impl HttpConnectionAggregator {
                 );
 
                 // Append the underlying SSL chunk bytes to the continuation
-                // buffer so that oversized events (whose first chunk arrives
-                // here with truncated data) can still be reconstructed by
-                // downstream extractors. Only enable for the OpenAI
-                // Responses API — other providers emit usage in single
-                // small events. Dedup by source_event pointer so a single
-                // SSL_read producing multiple SSE events contributes only
-                // once — EXCEPT for the done event, which we always append
-                // because its source chunk carries usage data that must not
-                // be lost to dedup.
-                if needs_sse_continuation_buffer(request.as_ref()) {
-                    const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
-                    let src = sse_event.source_event();
-                    let src_ptr = src as *const _ as usize;
-                    let src_buf_len = src.buf_size() as usize;
-                    let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
-                    let should_append = is_done
-                        || (last_ptr != Some(src_ptr)
-                            && src_buf_len > 0
-                            && src_buf_len <= src.buf.len());
-                    if should_append && src_buf_len > 0 && src_buf_len <= src.buf.len() {
-                        let buf = self
-                            .sse_continuation_buffers
-                            .get_or_insert_mut(*connection_id, Vec::new);
-                        let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
-                        let take = src_buf_len.min(remaining);
-                        if take > 0 {
-                            buf.extend_from_slice(&src.buf[..take]);
-                        }
-                        self.last_appended_src_ptr.put(*connection_id, src_ptr);
+                // buffer so that split or oversized events (whose first chunk
+                // arrives here with truncated data) can still be reconstructed
+                // by downstream extractors. This runs for every uncompressed
+                // SSE stream: a TLS record boundary can fall inside an event
+                // for any provider, and the parser keeps no cross-read
+                // remainder, so a dropped fragment would silently corrupt the
+                // reconstructed content (and any usage it carries). Dedup by
+                // source_event pointer so a single SSL_read producing multiple
+                // SSE events contributes only once — EXCEPT for the done
+                // event, which we always append because its source chunk
+                // carries usage data that must not be lost to dedup.
+                const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
+                let src = sse_event.source_event();
+                let src_ptr = src as *const _ as usize;
+                let src_buf_len = src.buf_size() as usize;
+                let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
+                let should_append = is_done
+                    || (last_ptr != Some(src_ptr)
+                        && src_buf_len > 0
+                        && src_buf_len <= src.buf.len());
+                if should_append && src_buf_len > 0 && src_buf_len <= src.buf.len() {
+                    let buf = self
+                        .sse_continuation_buffers
+                        .get_or_insert_mut(*connection_id, Vec::new);
+                    let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
+                    let take = src_buf_len.min(remaining);
+                    if take > 0 {
+                        buf.extend_from_slice(&src.buf[..take]);
                     }
+                    self.last_appended_src_ptr.put(*connection_id, src_ptr);
                 }
 
                 // Add SSE event to the list
@@ -2722,20 +2701,26 @@ mod tests {
         assert_eq!(aggregator.active_connections(), 0);
     }
 
-    #[test]
-    fn test_needs_sse_continuation_buffer_none_request() {
-        assert!(!needs_sse_continuation_buffer(None));
-    }
-
     fn enter_uncompressed_responses_sse_active(
         aggregator: &mut HttpConnectionAggregator,
         pid: u32,
         ssl_ptr: u64,
     ) -> ConnectionId {
+        enter_uncompressed_sse_active(aggregator, pid, ssl_ptr, "/v1/responses")
+    }
+
+    /// Drive `aggregator` into `SseActive` for an uncompressed SSE response
+    /// to a POST on `path`; returns the connection id.
+    fn enter_uncompressed_sse_active(
+        aggregator: &mut HttpConnectionAggregator,
+        pid: u32,
+        ssl_ptr: u64,
+        path: &str,
+    ) -> ConnectionId {
         let req_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, Vec::new(), 1);
         let request = ParsedRequest {
             method: "POST".to_string(),
-            path: "/v1/responses".to_string(),
+            path: path.to_string(),
             version: 11,
             headers: HashMap::new(),
             body_offset: 0,
@@ -2822,39 +2807,83 @@ mod tests {
         assert!(buf.windows(payload.len()).any(|w| w == payload));
     }
 
-    // ── Boundary tests requested in PR review (#8) ──────────────────────
+    #[test]
+    fn test_sse_continuation_buffer_chat_completions_split_event() {
+        // A TLS record boundary can split an SSE event on any provider, not
+        // just the OpenAI Responses API. The parser keeps no cross-read
+        // remainder, so the fragment arrives as RawData; for the stream to be
+        // reconstructable once it completes, those bytes must be retained.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id =
+            enter_uncompressed_sse_active(&mut aggregator, 40, 0xF000, "/v1/chat/completions");
+        assert!(aggregator.is_sse_active(&conn_id));
+
+        // First read: event head without the terminating blank line.
+        let head = b"event: message\ndata: {\"usage\":{\"input_tokens\":57";
+        let raw = create_mock_ssl_event_with_buf(40, 0xF000, head.to_vec(), 0);
+        assert!(
+            aggregator.process_raw_body_data(&raw).is_none(),
+            "raw body data on SseActive should keep buffering"
+        );
+
+        // Second read completes the event.
+        let tail = b",\"output_tokens\":7}}";
+        let raw = create_mock_ssl_event_with_buf(40, 0xF000, tail.to_vec(), 0);
+        assert!(aggregator.process_raw_body_data(&raw).is_none());
+
+        // Complete the stream and inspect the continuation buffer.
+        let done_event =
+            create_mock_ssl_event_with_buf(40, 0xF000, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should be present for any SSE stream");
+        let expected = [head.as_slice(), tail.as_slice()].concat();
+        assert!(
+            buf.windows(expected.len()).any(|w| w == expected),
+            "split event bytes must be retained"
+        );
+    }
 
     #[test]
-    fn test_needs_sse_continuation_buffer_non_responses_path() {
-        // Negative: chat completions and sub-paths must not trigger buffering.
-        let event = create_mock_ssl_event_with_buf(1, 1, Vec::new(), 1);
-        let make_req = |path: &str| ParsedRequest {
-            method: "POST".to_string(),
-            path: path.to_string(),
-            version: 11,
-            headers: HashMap::new(),
-            body_offset: 0,
-            body_len: 0,
-            source_event: event.clone(),
-            reassembled_body: None,
+    fn test_sse_continuation_buffer_chat_completions_sse_event() {
+        // The parsed-event path carries the same guarantee: the source chunk
+        // of a (possibly truncated) event on any provider must land in the
+        // continuation buffer, not just for the OpenAI Responses API.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id =
+            enter_uncompressed_sse_active(&mut aggregator, 41, 0xF100, "/v1/chat/completions");
+
+        let payload = b"data: {\"usage\":{\"input_tokens\":57";
+        let src_event = create_mock_ssl_event_with_buf(41, 0xF100, payload.to_vec(), 0);
+        let event = ParsedSseEvent::new(None, None, None, 0, payload.len(), src_event);
+        assert!(aggregator.process_sse_event(&conn_id, event).is_none());
+
+        let done_event =
+            create_mock_ssl_event_with_buf(41, 0xF100, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
         };
-        assert!(!needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/chat/completions"
-        ))));
-        assert!(!needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/responses/abc/items"
-        ))));
-        // Positive: exact and query-string variants should match.
-        assert!(needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/responses"
-        ))));
-        assert!(needs_sse_continuation_buffer(Some(&make_req(
-            "/compatible-mode/v1/responses"
-        ))));
-        assert!(needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/responses?stream=true"
-        ))));
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should be present for any SSE stream");
+        assert!(
+            buf.windows(payload.len()).any(|w| w == payload),
+            "parsed event source chunk must be retained"
+        );
     }
+
+    // ── Boundary tests requested in PR review (#8) ──────────────────────
 
     #[test]
     fn test_sse_continuation_buffer_max_bytes_truncation() {
