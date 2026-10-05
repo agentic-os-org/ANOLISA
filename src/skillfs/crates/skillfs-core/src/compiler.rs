@@ -489,6 +489,20 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                     continue;
                 }
                 if TRANSPARENT_PREFIXES.contains(&token) {
+                    if leading_bare_args > 0 {
+                        // The current wrapper still expects its bare
+                        // argument (`timeout`'s duration): this word
+                        // occupies that slot, so it is not a wrapper the
+                        // match runs behind. `timeout nice pip install`
+                        // never reaches `pip` — the duration `nice` is
+                        // invalid — and rewriting the match would corrupt
+                        // user text with no corresponding command
+                        // invocation. Replacing the credit here (instead
+                        // of returning) silently spent it on the wrapper
+                        // name and let the walk claim the match was
+                        // command-positioned.
+                        return false;
+                    }
                     chain = Some(token); // `sudo env ...`, `env FOO=1 nohup ...`
                     leading_bare_args = prefix_leading_bare_args(token);
                     // A new wrapper restarts option recognition: a `--` in
@@ -1211,6 +1225,48 @@ Run: pip install requests
             "timeout -π 30 pip install requests\n",
         );
         assert_eq!(compile(input, &env), input);
+    }
+
+    #[test]
+    fn test_heuristic_timeout_duration_slot_is_not_a_wrapper() {
+        // `timeout` consumes its duration before the command: a transparent
+        // wrapper name sitting in that slot (`timeout nice pip install`) is
+        // an invalid duration, not a wrapper the match runs behind — the
+        // line never reaches the command at all. The walk used to replace
+        // the unspent bare-argument credit when the nested wrapper took the
+        // chain, so the match looked command-positioned and the text was
+        // rewritten for an invocation that never happens.
+        let env = env_darwin_uv();
+        let unchanged = concat!(
+            "timeout nice pip install requests\n",
+            "timeout env pip3 install requests\n",
+            "TIME=1 timeout setsid pip install requests\n",
+            "sudo timeout time pip3 install requests\n",
+            "timeout -- nice pip install requests\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+        assert_eq!(compile(unchanged, &env_linux_no_uv()), unchanged);
+    }
+
+    #[test]
+    fn test_heuristic_timeout_duration_spent_keeps_nested_wrapper_rewrites() {
+        // Control: once a real duration spends the credit, a nested wrapper
+        // after it is a legitimate wrapper layer and the rewrite continues —
+        // `timeout 30 nice pip install` runs pip through nice under timeout.
+        let env = env_darwin_uv();
+        let input = concat!(
+            "timeout 30 nice pip install requests\n",
+            "timeout 30 env pip install requests\n",
+            "nice timeout 30 pip3 install requests\n",
+        );
+        let expected = concat!(
+            "timeout 30 nice uv pip install requests\n",
+            "timeout 30 env uv pip install requests\n",
+            "nice timeout 30 uv pip install requests\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
     }
 
     #[test]
