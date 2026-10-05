@@ -254,6 +254,56 @@ def test_events_accepts_query_value_boundaries() -> None:
     reader.count.assert_called_once()
 
 
+def test_events_count_ignores_offset():
+    """Aggregates must not skip rows: --offset used to understate counts.
+
+    reader.count(offset=N) skipped the N newest rows before counting, so
+    --count --offset 3 over 10 events printed 7; --count-by could drop a
+    whole category. The daemon's sec.events.count handler rejects
+    limit/offset for the same reason — the CLI is the leaking caller.
+    """
+    from unittest.mock import MagicMock, call
+
+    reader = MagicMock()
+    reader.count.return_value = 10
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(app, ["events", "--count", "--offset", "3"])
+
+    assert result.exit_code == 0, result.output
+    reader.count.assert_called_once()
+    assert "offset" not in reader.count.call_args.kwargs
+    assert "10" in result.output
+
+
+def test_events_count_by_ignores_offset():
+    from unittest.mock import MagicMock
+
+    reader = MagicMock()
+    reader.count_by.return_value = {"alpha": 5, "beta": 5}
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app, ["events", "--count-by", "category", "--offset", "8"]
+        )
+
+    assert result.exit_code == 0, result.output
+    reader.count_by.assert_called_once()
+    assert "offset" not in reader.count_by.call_args.kwargs
+
+
+def test_events_list_still_applies_offset():
+    from unittest.mock import MagicMock
+
+    reader = MagicMock()
+    reader.query.return_value = []
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        CliRunner().invoke(app, ["events", "--offset", "8", "--limit", "10"])
+
+    assert reader.query.call_args.kwargs.get("offset") == 8
+
+
 def test_extract_trace_context_arg_stops_at_posix_double_dash():
     assert (
         _extract_trace_context_arg(
