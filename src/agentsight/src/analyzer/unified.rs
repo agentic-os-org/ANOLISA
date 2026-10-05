@@ -63,13 +63,13 @@ pub struct ResponseTokenCount {
 ///
 /// Both local extractors in this module used to recognize only the shapes they
 /// were written against, so a request the capture pipeline understood was
-/// counted as if it carried no messages at all. Share the genai request parser
-/// so every protocol shape is counted the same way: OpenAI `messages`,
+/// counted as if it carried no messages at all. Share the parser-layer
+/// request view so every protocol shape is counted the same way: OpenAI `messages`,
 /// Responses `input` (array or string) with `instructions`, DashScope native
 /// `input.messages`, and an Anthropic top-level `system`, which is prepended as
 /// a system message because the template expects it inside the array.
 fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
-    let (mut messages, instructions) = crate::genai::GenAIBuilder::extract_messages_view(body)?;
+    let (mut messages, instructions) = crate::parser::llm::extract_messages_view(body)?;
     if let Some(system) = instructions.filter(|text| !text.is_empty()) {
         messages.insert(0, serde_json::json!({"role": "system", "content": system}));
     }

@@ -265,8 +265,8 @@ impl AnalyzeChatmlCommand {
     ///
     /// The body is stored either as a JSON string (the trace writer's
     /// fallback for non-JSON bodies) or as the parsed object. The message
-    /// list itself comes from the same protocol shapes the genai request
-    /// parser understands (`GenAIBuilder::extract_messages_view`): a plain
+    /// list itself comes from the same protocol shapes the parser-layer
+    /// request view understands (`parser::llm::extract_messages_view`): a plain
     /// `messages` array, the OpenAI Responses `input` array with its
     /// `instructions`, or an Anthropic `messages` array with the system
     /// prompt in the top-level `system` field. Without this, a Responses
@@ -286,7 +286,7 @@ impl AnalyzeChatmlCommand {
 
         let tools = body.get("tools").and_then(|t| t.as_array().cloned());
 
-        let (mut msgs, system_text) = crate::genai::GenAIBuilder::extract_messages_view(body)?;
+        let (mut msgs, system_text) = crate::parser::llm::extract_messages_view(body)?;
         if let Some(system) = system_text {
             if !system.is_empty() {
                 msgs.insert(0, serde_json::json!({"role": "system", "content": system}));
