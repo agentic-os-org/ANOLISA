@@ -669,6 +669,11 @@ impl AgentSight {
             }
         }
 
+        // Apply the configured tokenizer cache size before any token count can
+        // create the global manager; the `tokenizer_enabled` flag itself gates
+        // the drain fallback at its call site.
+        crate::tokenizer::configure_global_tokenizer(config.features.tokenizer_cache_size);
+
         // Create analyzer with tokenizer if configured
         let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
             if Path::new(tokenizer_path).exists() {
@@ -2093,8 +2098,8 @@ impl AgentSight {
                                     .as_deref()
                                     .or(pending.model.as_deref())
                                     .unwrap_or("unknown");
-                                if let Ok(tokenizer) =
-                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                if let Some(tokenizer) =
+                                    drain_fallback_tokenizer(&self.features, model_name)
                                 {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
@@ -2151,11 +2156,6 @@ impl AgentSight {
                                             enrichment.output_tokens = Some(total as i64);
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref())
-                                    );
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
@@ -2845,6 +2845,36 @@ fn record_agent_crash_interruptions(
         let itype = if is_oom { "oom_crash" } else { "agent_crash" };
         if let Err(e) = store.mark_pending_interrupted_for_pid(pid as i32, itype) {
             log::warn!("[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}");
+        }
+    }
+}
+
+/// Resolve the tokenizer used by the dead-PID drain fallback.
+///
+/// Returns `None` when `features.tokenizer.enabled` is off: a disabled feature
+/// must not be instantiated at all, so the global manager is never touched and
+/// no tokenizer is constructed or downloaded. Also `None` when the lookup or
+/// download fails for an enabled feature.
+///
+/// Extracted as a free function so the feature gate is unit-testable without
+/// constructing a full `AgentSight` instance.
+pub(crate) fn drain_fallback_tokenizer(
+    features: &crate::config::FeatureFlags,
+    model_name: &str,
+) -> Option<Arc<LlmTokenizer>> {
+    if !features.tokenizer_enabled {
+        log::debug!(
+            "[DrainCheck] tokenizer feature disabled, skipping token computation for {model_name:?}"
+        );
+        return None;
+    }
+    match crate::tokenizer::get_global_tokenizer(model_name) {
+        Ok(tokenizer) => Some(tokenizer),
+        Err(e) => {
+            log::warn!(
+                "[DrainCheck] tokenizer unavailable for model {model_name:?}, skipping token computation: {e}"
+            );
+            None
         }
     }
 }

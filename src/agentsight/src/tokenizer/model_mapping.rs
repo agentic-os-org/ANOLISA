@@ -176,9 +176,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("baichuan-7b", "baichuan-inc/Baichuan-7B");
 
     // ============== Moonshot Models ==============
-    m.insert("moonshot-v1-8k", "moonshot-v1-8k");
-    m.insert("moonshot-v1-32k", "moonshot-v1-32k");
-    m.insert("moonshot-v1-128k", "moonshot-v1-128k");
+    // Moonshot ships a custom tokenizer with no public HF repo. A bare model
+    // name (no `/`) is not a valid repo ID, so `register_from_hf` always
+    // failed for these API names — strictly worse than having no entry at all,
+    // because the unknown-model fallback yields a valid repo.
+    m.insert("moonshot-v1-8k", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("moonshot-v1-32k", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("moonshot-v1-128k", "Qwen/Qwen2.5-7B-Instruct");
     // Moonshot uses custom tokenizer, fallback to similar model
     m.insert("moonshot-v1", "Qwen/Qwen2.5-7B-Instruct");
 
@@ -400,6 +404,26 @@ mod tests {
             MODEL_MAPPING.get("qwen3.8-max").is_some(),
             "production model qwen3.8-max must be mapped explicitly"
         );
+    }
+
+    /// These are real API model names, so they are looked up explicitly. Every
+    /// mapped value must look like a HuggingFace repo ID (contain `/`);
+    /// otherwise `register_from_hf` fails on every call and token metering
+    /// silently breaks for the model.
+    #[test]
+    fn test_moonshot_mappings_are_valid_hf_repo_ids() {
+        for name in [
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k",
+            "moonshot-v1",
+        ] {
+            let mapped = map_to_hf_model_id(name);
+            assert!(
+                mapped.contains('/'),
+                "{name} maps to {mapped:?}, which is not a valid HF repo ID"
+            );
+        }
     }
 
     #[test]
