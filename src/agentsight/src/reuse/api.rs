@@ -6,6 +6,8 @@
 //! apart in what a label means, and a rule that lives in one handler inevitably
 //! does.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -156,7 +158,8 @@ pub struct JudgeReport {
     /// Calls that failed. Reported rather than aborting the run, so one bad
     /// response does not waste the requests already paid for.
     pub failed: usize,
-    /// Verdicts reduced to `unknown` for citing no step.
+    /// Verdicts reduced to `unknown` for citing no step, or only steps the
+    /// judged round does not contain.
     pub downgraded: usize,
     pub judged_good: usize,
     pub judged_bad: usize,
@@ -183,7 +186,9 @@ pub struct SessionsQuery {
 /// What one triage run did.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TriageReport {
-    /// Trajectories considered, including the ones skipped.
+    /// Trajectories considered, including the ones skipped. A repeat run can
+    /// exceed the requested `limit` here: freshly labelled rows are walked
+    /// over without consuming the batch window, but they are still counted.
     pub examined: usize,
     /// Labels written or refreshed.
     pub labelled: usize,
@@ -205,7 +210,9 @@ pub struct TriageReport {
     pub human_overrides_in_force: usize,
     /// Rule version the run recorded; see [`TriageConfig::version`].
     pub triage_version: String,
-    /// True when `limit` cut the run short, so the caller knows to continue.
+    /// True when more trajectories still needed triage than the `limit` window
+    /// could hold, so the caller knows to continue. No cursor is needed: a
+    /// repeat request resumes past the rows this one already handled.
     pub truncated: bool,
 }
 
@@ -318,6 +325,12 @@ fn clamp(requested: Option<i64>, default: i64, max: i64) -> i64 {
 /// matched document, which its own documentation warns can be tens of
 /// megabytes. A batch job has no reason to pay that.
 ///
+/// In batch mode the `limit` window is filled with trajectories that still need
+/// work, newest first, rather than with the newest rows whatever their state.
+/// Freshly labelled rows are counted `unchanged` and passed over without
+/// consuming the window, so a repeat request moves on to older trajectories
+/// instead of re-examining the same page forever.
+///
 /// # Errors
 /// Returns [`ReuseApiError::TrajectoriesUnavailable`] when collection has not
 /// run, or a store error on SQL failure.
@@ -331,31 +344,57 @@ pub fn run_triage(
     let limit = clamp(query.limit, DEFAULT_TRIAGE_LIMIT, MAX_TRIAGE_LIMIT);
     let version = config.version();
 
-    let (session_ids, truncated): (Vec<String>, bool) = match &query.session_id {
-        Some(id) => (vec![id.clone()], false),
-        None => {
-            // Fetch one row past the page so "exactly `limit` rows exist" is
-            // distinguishable from "`limit` cut the run short": the store caps
-            // the result, so a full page alone proves nothing.
-            let mut ids: Vec<String> = trajectories
-                .list_summaries(None, None, None, limit.saturating_add(1))
-                .map_err(|e| ReuseApiError::Trajectories(e.to_string()))?
-                .into_iter()
-                .map(|summary| summary.session_id)
-                .collect();
-            let truncated = ids.len() as i64 > limit;
-            ids.truncate(limit as usize);
-            (ids, truncated)
-        }
-    };
-
     let mut report = TriageReport {
         triage_version: version.clone(),
-        truncated,
         ..TriageReport::default()
     };
 
-    for session_id in session_ids {
+    // The trajectories this run will read, each paired with its stored label as
+    // it stood when the window was filled. A targeted run's window is the one
+    // requested id; a batch run fills it during the scan below.
+    let window: Vec<(String, Option<SessionLabel>)> = match &query.session_id {
+        Some(id) => vec![(id.clone(), labels.get_label(id)?)],
+        None => {
+            // Label lookup is by primary key, so the whole set can be read once
+            // instead of asking per summary during the scan.
+            let mut known: HashMap<String, SessionLabel> = labels
+                .list_labels(&LabelFilter::default())?
+                .into_iter()
+                .map(|label| (label.session_id.clone(), label))
+                .collect();
+            // Payload-free rows, and the trajectory handlers already list the
+            // whole set this way when a filter cannot run in SQL; the scan must
+            // see every row to tell a labelled prefix from the work behind it.
+            let summaries = trajectories
+                .list_summaries(None, None, None, i64::MAX)
+                .map_err(|e| ReuseApiError::Trajectories(e.to_string()))?;
+            let mut window = Vec::new();
+            for summary in summaries {
+                let existing = known.remove(&summary.session_id);
+                let fresh = existing
+                    .as_ref()
+                    .filter(|label| is_fresh(label, &version, summary.collected_at_ns));
+                if let Some(label) = fresh {
+                    // Same rules and no re-collection since the label was
+                    // written, so a recompute could only repeat the stored
+                    // verdict. Passed over so older work still fits the
+                    // window, but counted so a poll run stays informative.
+                    report.examined += 1;
+                    report.unchanged += 1;
+                    tally_override(label, &mut report);
+                    continue;
+                }
+                if window.len() as i64 >= limit {
+                    report.truncated = true;
+                    break;
+                }
+                window.push((summary.session_id, existing));
+            }
+            window
+        }
+    };
+
+    for (session_id, existing) in window {
         report.examined += 1;
         let Some(record) = trajectories
             .get(&session_id)
@@ -376,7 +415,7 @@ pub fn run_triage(
         // Identity is refreshed even on that path: it is denormalised display
         // data, so a row labelled before these columns existed would otherwise
         // keep showing a bare session id forever.
-        if let Some(existing) = labels.get_label(&session_id)? {
+        if let Some(existing) = existing {
             if existing.source_content_hash == hash && existing.triage_version == version {
                 if existing.identity != identity {
                     labels.set_identity(&session_id, &identity)?;
@@ -399,6 +438,19 @@ pub fn run_triage(
     }
 
     Ok(report)
+}
+
+/// Whether a stored label can be trusted without reading the trajectory.
+///
+/// The content digest cannot be recomputed from a payload-free summary, so
+/// `collected_at_ns` is the next best signal: the collector bumps it on every
+/// upsert, so a record written after the label's last update is spotted here
+/// and goes on to the exact hash comparison. A decision recorded after a
+/// re-collection can move `updated_at_ns` past `collected_at_ns` and postpone
+/// the recompute until the next re-collection; postponing leaves the stored
+/// verdict in place, so a skip can never surface a different one.
+fn is_fresh(label: &SessionLabel, version: &str, collected_at_ns: i64) -> bool {
+    label.triage_version == version && collected_at_ns <= label.updated_at_ns
 }
 
 /// Counts a row whose human decision is in force and contradicts the rules.
