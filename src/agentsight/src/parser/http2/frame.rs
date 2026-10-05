@@ -352,11 +352,16 @@ impl ParsedHttp2Frame {
             }
         }
 
-        if pos + length > payload.len() {
+        // `length` can saturate to usize::MAX through the continuation chain
+        // above, so the end offset must be computed without overflowing.
+        let Some(end) = pos.checked_add(length) else {
+            return (String::new(), pos - start);
+        };
+        if end > payload.len() {
             return (String::new(), pos - start);
         }
 
-        let string_bytes = &payload[pos..pos + length];
+        let string_bytes = &payload[pos..end];
 
         let result = if is_huffman {
             // Huffman decode
@@ -365,7 +370,7 @@ impl ParsedHttp2Frame {
             String::from_utf8_lossy(string_bytes).to_string()
         };
 
-        (result, pos + length - start)
+        (result, end - start)
     }
 
     /// Number of octets in the HPACK integer beginning at `start`.
@@ -712,6 +717,23 @@ mod tests {
     /// corrupt/truncated input is a lossy result, not a panic — this input is
     /// reachable from captured bytes (HPACK header blocks are decoded from
     /// observed traffic).
+    /// A chain of continuation bytes can saturate `length` to `usize::MAX`
+    /// through `saturating_add`. `pos + length` then overflows: it panics in a
+    /// debug build and wraps in release, where the wrapped end still fails the
+    /// bounds check and the following slice panics. Reachable from captured
+    /// HPACK bytes, so it must degrade to a lossy result.
+    #[test]
+    fn test_decode_literal_string_saturated_extended_length_does_not_panic() {
+        let mut payload = vec![0x7f];
+        payload.extend(std::iter::repeat_n(0xffu8, 10));
+        payload.push(0x00);
+
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&payload, 0);
+
+        assert_eq!(value, "");
+        assert_eq!(consumed, payload.len(), "the whole payload is consumed");
+    }
+
     #[test]
     fn test_decode_literal_string_truncated_extended_length_does_not_panic() {
         let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&[0xff, 0x80], 0);
