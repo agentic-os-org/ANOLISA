@@ -2024,6 +2024,10 @@ impl AgentSight {
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
                             &response_headers,
                         );
+                    // A dead connection retains no completing read, so the
+                    // header event is the only provenance left for the
+                    // synthetic events; these feed pending-row usage
+                    // extraction only, not duration accounting.
                     crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
                         &buf,
                         content_encoding.as_deref(),
