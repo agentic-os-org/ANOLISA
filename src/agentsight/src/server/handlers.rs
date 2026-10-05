@@ -18,6 +18,7 @@ use crate::grader::{
     RuleGrader, TargetType, load_conversation_input,
 };
 use crate::health::AgentHealthStatus;
+use crate::interruption::InterruptionType;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
 
@@ -2684,6 +2685,61 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// `interruption_type` and `severity` name closed sets: every stored row
+    /// carries a token written by `InterruptionType::as_str` / `Severity`, and
+    /// the CLI binds both filters with `possible_values`. An unknown token can
+    /// therefore never match a row, and the empty 200 it produced was
+    /// indistinguishable from a genuinely empty window.
+    #[actix_web::test]
+    async fn interruption_list_rejects_unknown_filter_tokens() {
+        let interruption_path = unique_handler_db("interruptions-filter-tokens");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        istore
+            .insert(&make_interruption_event(
+                "int-filter-1",
+                "sess-filter",
+                "conv-filter",
+                crate::interruption::InterruptionType::RateLimit,
+            ))
+            .unwrap();
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions),
+        )
+        .await;
+
+        for uri in [
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&interruption_type=rate_limit_typo",
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&severity=sevrity",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            assert!(
+                body["error"].is_string(),
+                "the 400 must say which filter is wrong: {body}"
+            );
+        }
+
+        // Valid tokens still filter, and a valid token with no matching row is
+        // the one case that is legitimately an empty 200.
+        for uri in [
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&interruption_type=rate_limit",
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&severity=medium",
+            "/interruptions?start_ns=0&end_ns=9223372036854775807&interruption_type=auth_error",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&interruption_path);
+    }
+
     /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
     /// makes the default 24 h start wrap into a huge positive bound. The query
     /// then runs on an inverted (always empty) window and still answers 200,
@@ -3665,6 +3721,45 @@ mod tests {
         cleanup_db(&db_path);
     }
 
+    /// `granularity` is a closed set ("day" or "week"): the trend applied a
+    /// literal `== "day"` and fell back to weekly for everything else, so a
+    /// typo answered weekly buckets that look exactly like a valid `week`.
+    #[actix_web::test]
+    async fn skill_metrics_rejects_unknown_granularity() {
+        let db_path = unique_handler_db("skill_metrics_granularity");
+        write_completed_conversation_event(&db_path, "conv-skill-granularity");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(skill_metrics_all)
+                .service(skill_metrics_hotness),
+        )
+        .await;
+
+        for uri in [
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=dayy",
+            "/skill-metrics/hotness?start_ns=0&end_ns=9223372036854775807&granularity=weekk",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Both documented values keep working, and omitting it keeps the
+        // documented weekly default.
+        for uri in [
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=day",
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=week",
+            "/skill-metrics/hotness?start_ns=0&end_ns=9223372036854775807",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&db_path);
+    }
+
     #[actix_web::test]
     async fn storage_backed_handlers_report_database_open_errors() {
         let root = temp_root("handler_open_errors");
@@ -4287,8 +4382,9 @@ pub struct InterruptionQuery {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
     pub agent_name: Option<String>,
-    /// Filter by type: llm_error | sse_truncated | agent_crash | token_limit | context_overflow
+    /// Filter by type: any `InterruptionType::as_str` value.
     pub interruption_type: Option<String>,
+    /// Filter by severity: critical | high | medium | low.
     pub severity: Option<String>,
     pub resolved: Option<bool>,
     pub limit: Option<i64>,
@@ -4297,6 +4393,39 @@ pub struct InterruptionQuery {
 /// Default and hard-cap for the interruption list `limit` parameter.
 const INTERRUPTION_DEFAULT_LIMIT: i64 = 200;
 const INTERRUPTION_MAX_LIMIT: i64 = 1000;
+
+/// Reject `interruption_type` / `severity` values the store can never match.
+///
+/// Both name closed sets: every row's type is written by
+/// `InterruptionType::as_str` and its severity by `Severity::as_str`, and the
+/// CLI binds the same two filters with `possible_values`. Accepting an unknown
+/// token and answering an empty 200 makes a typo indistinguishable from a
+/// genuinely empty window, so it is refused up front — the same direction as
+/// the trajectory `category` filter below and the audit read filters.
+fn reject_unknown_interruption_filters(query: &InterruptionQuery) -> Option<HttpResponse> {
+    if let Some(raw) = query.interruption_type.as_deref() {
+        if InterruptionType::from_str(raw).is_none() {
+            return Some(HttpResponse::BadRequest().json(json!({
+                "error": "invalid_interruption_type",
+                "message": format!("Unknown interruption type '{raw}'"),
+                "valid_types": InterruptionType::ALL
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>(),
+            })));
+        }
+    }
+    if let Some(raw) = query.severity.as_deref() {
+        if !matches!(raw, "critical" | "high" | "medium" | "low") {
+            return Some(HttpResponse::BadRequest().json(json!({
+                "error": "invalid_severity",
+                "message": format!("Unknown severity '{raw}'"),
+                "valid_severities": ["critical", "high", "medium", "low"],
+            })));
+        }
+    }
+    None
+}
 
 /// GET /api/interruptions
 ///
@@ -4312,6 +4441,9 @@ pub async fn list_interruptions(
     };
 
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
+    if let Some(response) = reject_unknown_interruption_filters(&query) {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -5023,7 +5155,8 @@ pub struct SkillMetricsQuery {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
     pub agent_name: Option<String>,
-    /// Granularity for hotness trend: "day" or "week" (default: "week")
+    /// Granularity for hotness trend: "day" or "week" (default: "week").
+    /// An unknown value is rejected rather than silently served as weekly.
     pub granularity: Option<String>,
 }
 
@@ -5120,17 +5253,37 @@ pub async fn skill_metrics_hotness(
     )
 }
 
+/// Reject a `granularity` the hotness trend cannot bucket by.
+///
+/// The parameter names a closed set ("day" or "week"), and the trend applied a
+/// literal `== "day"` with everything else falling back to the weekly default:
+/// `granularity=dayy` answered weekly buckets that look exactly like a valid
+/// `week` request.
+fn reject_unknown_granularity(query: &SkillMetricsQuery) -> Option<HttpResponse> {
+    let raw = query.granularity.as_deref()?;
+    if raw != "day" && raw != "week" {
+        return Some(HttpResponse::BadRequest().json(json!({
+            "error": "invalid_granularity",
+            "message": format!("Unknown granularity '{raw}'"),
+            "valid_granularities": ["day", "week"],
+        })));
+    }
+    None
+}
+
 /// Shared implementation for all skill metrics endpoints.
 fn compute_skill_metrics_response(
     genai_store: Option<&GenAISqliteStore>,
     query: &SkillMetricsQuery,
     mut options: crate::skill_metrics::MetricOptions,
 ) -> HttpResponse {
-    // Apply granularity from query params
-    if let Some(ref g) = query.granularity {
-        if g == "day" {
-            options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
-        }
+    if let Some(response) = reject_unknown_granularity(query) {
+        return response;
+    }
+    // Apply granularity from query params; validation above admits only the
+    // two documented values, the weekly default stays for an absent one.
+    if query.granularity.as_deref() == Some("day") {
+        options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
     }
 
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
