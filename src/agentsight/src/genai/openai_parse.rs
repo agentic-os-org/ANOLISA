@@ -826,9 +826,12 @@ impl GenAIBuilder {
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
     /// `response.*` events: text arrives as `response.output_text.delta`,
-    /// function calls as `response.output_item.added` (type `function_call`)
+    /// reasoning as `response.reasoning_text.delta` /
+    /// `response.reasoning_summary_text.delta`, function calls as
+    /// `response.output_item.added` (type `function_call`)
     /// plus `response.function_call_arguments.delta`, and the stream closes
-    /// with `response.completed`. The live path reconstructs this through the
+    /// with `response.completed` or, when the output cap ended it,
+    /// `response.incomplete`. The live path reconstructs this through the
     /// analyzer's message parser (`aggregate_responses_sse_chunks`), but the
     /// dead-pid/flush drain path persists through `extract_sse_enrichment` →
     /// `merge_sse_chunks`, which understood none of it — a drained Responses
@@ -845,6 +848,7 @@ impl GenAIBuilder {
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
@@ -860,6 +864,9 @@ impl GenAIBuilder {
             std::collections::HashSet::new();
         let mut added_indexes: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut orphan_done: Vec<(String, String, String)> = Vec::new();
+        // Set by the terminal `response.incomplete` event when the stream was
+        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`.
+        let mut output_capped = false;
 
         for chunk in chunks {
             calls.observe(chunk);
@@ -869,6 +876,16 @@ impl GenAIBuilder {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         text_buf.push_str(delta);
+                    }
+                }
+                // Reasoning models stream their thinking as text deltas on the
+                // same event channel (qwen3-coder via dashscope sends
+                // reasoning_text, the o-series summary_text); both become a
+                // `Reasoning` part like the live parser's reasoning_content.
+                "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                    saw_responses_event = true;
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        reasoning_buf.push_str(delta);
                     }
                 }
                 "response.output_item.added" => {
@@ -944,6 +961,21 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                // A capped stream terminates with response.incomplete instead
+                // of response.completed; the cap reason must surface as the
+                // chat-completions "length" finish rather than a clean "stop".
+                "response.incomplete" => {
+                    if let Some(resp) = chunk.get("response") {
+                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
+                            && resp
+                                .pointer("/incomplete_details/reason")
+                                .and_then(|v| v.as_str())
+                                == Some("max_output_tokens")
+                        {
+                            output_capped = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -981,6 +1013,12 @@ impl GenAIBuilder {
         }
 
         let mut parts = Vec::new();
+        // Reasoning first, same order as the OpenAI chat-completions merger.
+        if !reasoning_buf.is_empty() {
+            parts.push(MessagePart::Reasoning {
+                content: reasoning_buf,
+            });
+        }
         if !text_buf.is_empty() {
             parts.push(MessagePart::Text { content: text_buf });
         }
@@ -991,8 +1029,12 @@ impl GenAIBuilder {
         }
         parts.extend(tool_parts);
 
-        // Same finish-reason convention as the analyzer's aggregator.
-        let finish_reason = if parts
+        // Same finish-reason convention as the analyzer's aggregator: the cap
+        // wins even when a tool call was in flight, because its arguments may
+        // be cut mid-JSON.
+        let finish_reason = if output_capped {
+            Some("length".to_string())
+        } else if parts
             .iter()
             .any(|p| matches!(p, MessagePart::ToolCall { .. }))
         {
@@ -1703,6 +1745,51 @@ mod tests {
             other => panic!("expected ToolCall part, got {other:?}"),
         }
         assert_eq!(finish.as_deref(), Some("tool_calls"));
+    }
+
+    /// A drained Responses stream must keep reasoning deltas the same way the
+    /// live parser does (`aggregate_responses_sse_chunks` in
+    /// `analyzer/message/openai.rs`); the merger ignored both reasoning event
+    /// types, so the persisted `output_messages` lost the thinking while the
+    /// same stream captured live kept it as a `Reasoning` part.
+    #[test]
+    fn test_responses_sse_reasoning_deltas_keep_reasoning_part() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_1","model":"qwen3-coder-plus"}},
+            {"type":"response.reasoning_summary_text.delta","delta":"think "},
+            {"type":"response.reasoning_text.delta","delta":"harder"},
+            {"type":"response.output_text.delta","delta":"answer"},
+            {"type":"response.completed","response":{"id":"resp_1"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2, "reasoning part + text part");
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Reasoning { content } if content == "think harder"
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::Text { content } if content == "answer"
+        ));
+    }
+
+    /// A token-capped Responses stream terminates with `response.incomplete`
+    /// and `incomplete_details.reason = "max_output_tokens"`. The live parser
+    /// maps that to the chat-completions "length"; the merger hardcoded "stop",
+    /// so a drained row under-reported truncation.
+    #[test]
+    fn test_responses_sse_incomplete_max_output_tokens_is_length() {
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"partial"},
+            {"type":"response.incomplete","response":{"id":"resp_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert_eq!(finish.as_deref(), Some("length"));
     }
 
     #[test]
