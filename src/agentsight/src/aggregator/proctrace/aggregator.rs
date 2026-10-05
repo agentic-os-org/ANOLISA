@@ -345,4 +345,42 @@ mod tests {
         agg.clear();
         assert!(agg.session_map.is_empty());
     }
+
+    fn stdout_event(pid: u32, ts: u64, data: &str) -> ParsedProcEvent {
+        ParsedProcEvent {
+            event_type: ProcEventType::Stdout,
+            pid,
+            tid: pid,
+            ppid: 0,
+            ptid: 0,
+            comm: "chatty".to_string(),
+            timestamp_ns: ts,
+            args: None,
+            stdout_data: Some(data.to_string()),
+            fd: Some(1),
+        }
+    }
+
+    #[test]
+    fn test_process_stdout_retention_is_bounded() {
+        // Regression: stdout/stderr accumulated for the whole process lifetime
+        // (and the whole buffer is serialised into the chrome trace args), so a
+        // long-lived chatty process retained everything.
+        const EXPECTED_CAP: usize = 64 * 1024;
+        let mut agg = ProcessEventAggregator::new();
+        agg.process_parsed_event(&exec_event(4242, 0, "chatty", "chatty", 1000));
+
+        let chunk = "x".repeat(32 * 1024);
+        for i in 0..16 {
+            agg.process_parsed_event(&stdout_event(4242, 2000 + i, &chunk));
+        }
+
+        let proc = agg.aggregates.get(&4242).unwrap();
+        assert!(
+            proc.stdout_size() <= EXPECTED_CAP,
+            "stdout retention must be capped: {} bytes > {}",
+            proc.stdout_size(),
+            EXPECTED_CAP
+        );
+    }
 }
