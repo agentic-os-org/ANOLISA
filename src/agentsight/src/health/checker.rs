@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -57,8 +58,21 @@ fn infer_agent_role(
     AgentRole::Gateway
 }
 
+/// Read the process working directory from the configured procfs root.
+///
+/// Returns None when `<PID>/cwd` cannot be read, e.g. the pid is gone.
 fn read_workspace_path(pid: u32) -> Option<String> {
-    fs::read_link(format!("/proc/{pid}/cwd"))
+    read_workspace_path_from(crate::utils::procfs::proc_root(), pid)
+}
+
+/// Read `<root>/<pid>/cwd` as a symlink target.
+///
+/// The root is a parameter so the lookup can be tested against a fixture
+/// procfs, mirroring [`read_ppid_from`]. Reading `cwd` through the configured
+/// root keeps `workspace_path` pointing at the agent's actual working
+/// directory when the observer reads a bind-mounted host procfs.
+fn read_workspace_path_from(root: &Path, pid: u32) -> Option<String> {
+    fs::read_link(root.join(pid.to_string()).join("cwd"))
         .ok()
         .and_then(|path| path.to_str().map(str::to_owned))
 }
@@ -777,6 +791,27 @@ mod tests {
             parent_pid: None,
             has_crash: false,
         }
+    }
+
+    /// `workspace_path` is the documented default protection scope, so it must
+    /// resolve through the configurable procfs root like `read_ppid` does;
+    /// hardcoding `/proc` reports the observer namespace's unrelated process.
+    #[test]
+    fn read_workspace_path_resolves_through_the_given_root() {
+        let root = unique_tmp_dir("workspace-root");
+        let pid = 2_000_000_000;
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace dir");
+        let pid_dir = root.join(pid.to_string());
+        std::fs::create_dir_all(&pid_dir).expect("create pid dir");
+        std::os::unix::fs::symlink(&workspace, pid_dir.join("cwd")).expect("symlink cwd");
+
+        assert_eq!(
+            read_workspace_path_from(&root, pid).as_deref(),
+            workspace.to_str()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
