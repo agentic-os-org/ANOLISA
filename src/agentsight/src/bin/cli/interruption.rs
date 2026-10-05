@@ -133,8 +133,8 @@ pub enum InterruptionAction {
         #[structopt(long, conflicts_with = "unresolved")]
         resolved: bool,
 
-        /// Maximum number of results (default: 100)
-        #[structopt(long, default_value = "100")]
+        /// Maximum number of results (default: 100, max: 1000)
+        #[structopt(long, default_value = "100", parse(try_from_str = parse_list_limit))]
         limit: i64,
 
         /// Output as JSON (one JSON array)
@@ -486,6 +486,24 @@ impl InterruptionCommand {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Upper bound for `--limit`, mirroring `AuditStore::list_events`' documented
+/// `1..=1000` range. The store itself accepts any positive LIMIT (the `count`
+/// subcommand deliberately passes `i64::MAX`), so the bound lives on the flag.
+const MAX_LIST_LIMIT: i64 = 1000;
+
+/// Parse `--limit`: reject values below 1 with a clear error — SQLite reads a
+/// negative LIMIT as "no limit", which would dump every matching event — and
+/// cap oversized values at [`MAX_LIST_LIMIT`].
+fn parse_list_limit(raw: &str) -> Result<i64, String> {
+    let value: i64 = raw
+        .parse()
+        .map_err(|_| format!("--limit must be an integer, got {raw:?}"))?;
+    if value < 1 {
+        return Err(format!("--limit must be at least 1, got {value}"));
+    }
+    Ok(value.min(MAX_LIST_LIMIT))
+}
+
 /// Default database path for interruption events.
 fn default_db_path() -> std::path::PathBuf {
     GenAISqliteStore::default_path()
@@ -672,6 +690,29 @@ mod tests {
         // ASCII behaviour is unchanged.
         assert_eq!(truncate_id("abcdefghij", 14), "abcdefghij");
         assert_eq!(truncate_id("abcdefghijklmnop", 14), "abcdefghijk...");
+    }
+
+    #[test]
+    fn list_limit_rejects_negative_and_caps_oversized() {
+        // SQLite reads a negative LIMIT as "no limit", so `--limit=-1` used
+        // to dump every matching event; the flag must not reach the store
+        // as-is (the sibling AuditStore::list_events clamps to 1..=1000).
+        let negative = InterruptionCommand::from_iter_safe(["interruption", "list", "--limit=-1"]);
+        let err = negative.expect_err("a negative limit must be rejected");
+        assert!(
+            err.to_string().contains("--limit"),
+            "the error must name the flag: {err}"
+        );
+
+        let oversized =
+            InterruptionCommand::from_iter_safe(["interruption", "list", "--limit", "100000"])
+                .expect("an oversized limit still parses");
+        match oversized.action {
+            InterruptionAction::List { limit, .. } => {
+                assert_eq!(limit, 1000, "an oversized limit must be capped")
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
     }
 
     #[test]
