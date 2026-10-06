@@ -534,20 +534,27 @@ impl Analyzer {
                             .iter()
                             .filter_map(|event| parser.parse_json(event))
                             .fold(None, merge_usage);
-                        token_result = usage.map(|usage| {
-                            TokenRecord::new(
-                                http_record.pid,
-                                http_record.comm.clone(),
-                                usage.provider.to_string(),
-                                usage.input_tokens,
-                                usage.output_tokens,
-                            )
-                            .with_model(usage.model.clone().unwrap_or_default())
-                            .with_cache_tokens(
-                                usage.cache_creation_input_tokens.unwrap_or(0),
-                                usage.cache_read_input_tokens.unwrap_or(0),
-                            )
-                        });
+                        token_result = usage
+                            .map(|usage| {
+                                TokenRecord::new(
+                                    http_record.pid,
+                                    http_record.comm.clone(),
+                                    usage.provider.to_string(),
+                                    usage.input_tokens,
+                                    usage.output_tokens,
+                                )
+                                .with_model(usage.model.clone().unwrap_or_default())
+                                .with_cache_tokens(
+                                    usage.cache_creation_input_tokens.unwrap_or(0),
+                                    usage.cache_read_input_tokens.unwrap_or(0),
+                                )
+                            })
+                            // This site runs only because the primary
+                            // extraction already returned `None`, and both
+                            // extractors refuse an all-zero usage. Without the
+                            // same guard a zero-placeholder stream reappears
+                            // here as a bogus zero row in the token database.
+                            .filter(|record| record.total_tokens() > 0);
                     }
                 }
             }
@@ -1700,6 +1707,40 @@ mod tests {
         assert_eq!(record.output_tokens, 42, "output comes from message_delta");
         assert_eq!(record.cache_read_tokens, Some(90));
         assert_eq!(record.provider, "anthropic");
+    }
+
+    /// The h2 SSE fallback runs exactly when the primary extraction returned
+    /// `None`, so it must apply the same all-zero guard as
+    /// `extract_token_from_sse` and `extract_token_from_json_body`. A stream
+    /// whose only parseable usage is zeroed (a proxy's zero-placeholder
+    /// `message_start` plus an aborted terminal `message_delta`) was rejected by
+    /// the primary extraction and then re-created here, leaving a bogus
+    /// zero-token row in the token database.
+    #[test]
+    fn http2_sse_zero_usage_does_not_produce_a_token_record() {
+        let analyzer = Analyzer::new();
+        let request_body = br#"{"model":"claude-sonnet-4-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}"#;
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,",
+            "\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+            "\"usage\":{\"output_tokens\":0}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let stream = build_http2_stream(
+            "/v1/messages",
+            request_body,
+            body.as_bytes().to_vec(),
+            "text/event-stream",
+        );
+
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+        assert!(
+            !results
+                .iter()
+                .any(|result| matches!(result, AnalysisResult::Token(_))),
+            "an all-zero h2 SSE usage must not yield a TokenRecord: {results:?}"
+        );
     }
 
     #[test]
