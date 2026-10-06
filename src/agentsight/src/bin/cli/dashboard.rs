@@ -9,7 +9,7 @@ use agentsight::ecs_metadata::{EcsMetadata, probe_ecs_metadata};
 use agentsight::server::auth::DashboardAuth;
 use structopt::StructOpt;
 
-use super::{DEFAULT_CONFIG_PATH, load_server_auth_config};
+use super::{DEFAULT_CONFIG_PATH, load_server_config};
 
 /// Display the AgentSight dashboard URL and ECS access guide
 #[derive(Debug, StructOpt, Clone)]
@@ -75,19 +75,28 @@ impl DashboardCommand {
             probe_ecs_metadata()
         };
 
-        let storage_base = self
+        // `serve` keeps every store — and the dashboard credential — in the
+        // directory of the database it serves: `--db`, else
+        // `storage.genai_path()`. Reading the token from the compile-time
+        // default instead minted a *new* credential in the default directory
+        // whenever `storage.base_path` was configured, and the URLs printed
+        // here then carried a token the running server rejects. The config is
+        // parsed once and shared with the auth lookup below.
+        let server_config = load_server_config(&self.config);
+        let storage_path = self
             .db
             .as_ref()
             .map(std::path::PathBuf::from)
-            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
-            .unwrap_or_else(|| {
-                agentsight::storage::sqlite::GenAISqliteStore::default_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                    .to_path_buf()
-            });
+            .unwrap_or_else(|| server_config.storage.genai_path());
+        // Mirrors `server::storage_data_dir`, including the bare relative
+        // `--db name.db` case, which means the current directory.
+        let storage_base = match storage_path.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => std::path::PathBuf::from("."),
+            Some(parent) => parent.to_path_buf(),
+            None => std::path::PathBuf::from("/var/log/sysak/.agentsight"),
+        };
 
-        let auth_config = load_server_auth_config(&self.config);
+        let auth_config = server_config.server_auth;
         let auth = DashboardAuth::init(&auth_config, &storage_base);
         let token = auth.read_token_from_file();
 
@@ -567,6 +576,25 @@ mod tests {
         config_path.to_string_lossy().to_string()
     }
 
+    /// Write a temp config that also pins `storage.base_path`.
+    fn write_temp_config_with_storage_base(
+        auth_enabled: bool,
+        suffix: &str,
+        base_path: &str,
+    ) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("agentsight_test_{}_{}", std::process::id(), suffix));
+        std::fs::create_dir_all(&dir).ok();
+        let config_path = dir.join("config.json");
+        let content = serde_json::json!({
+            "schema_version": agentsight::config::CURRENT_SCHEMA_VERSION,
+            "server": {"auth": {"enabled": auth_enabled}},
+            "storage": {"base_path": base_path},
+        });
+        std::fs::write(&config_path, content.to_string()).unwrap();
+        config_path.to_string_lossy().to_string()
+    }
+
     /// Return a unique temp storage directory for a given suffix.
     fn temp_storage_dir(suffix: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -632,6 +660,42 @@ mod tests {
         assert!(output.lines.iter().any(|l| l.contains("无需认证")));
         // Should contain tip
         assert!(output.lines.iter().any(|l| l.contains("提示")));
+    }
+
+    #[test]
+    fn build_output_reads_the_token_from_the_configured_storage_base() {
+        // `serve` keeps `.dashboard_token` in the directory of the database it
+        // serves — `--db`, else `storage.genai_path()`. The dashboard looked
+        // only at `--db` or the compile-time default, so with a custom
+        // `storage.base_path` it minted a *new* token in the default directory
+        // and printed URLs the running server rejects.
+        let storage = temp_storage_dir("configured-base");
+        let seeded = "a".repeat(64);
+        std::fs::write(storage.join(".dashboard_token"), &seeded).unwrap();
+        let config = write_temp_config_with_storage_base(
+            true,
+            "configured-base",
+            &storage.to_string_lossy(),
+        );
+
+        let cmd = DashboardCommand {
+            db: None,
+            // A concrete host guarantees the network URL line, which is where
+            // the token is rendered.
+            host: "10.0.0.5".to_string(),
+            port: 7396,
+            no_open: true,
+            skip_sg_guide: true,
+            config,
+        };
+
+        let output = cmd.build_output();
+
+        assert!(
+            output.lines.iter().any(|line| line.contains(&seeded)),
+            "the printed token must be the one the server reads, got {:?}",
+            output.lines
+        );
     }
 
     #[test]

@@ -42,14 +42,6 @@ pub fn print_json<T: serde::Serialize>(value: &T) {
 #[cfg(all(feature = "server", target_os = "linux"))]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentsight/config.json";
 
-/// Load `ServerAuthConfig` from the agentsight config file.
-///
-/// Falls back to defaults if the file cannot be read or parsed.
-#[cfg(all(feature = "server", target_os = "linux"))]
-pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerAuthConfig {
-    load_server_config(config_path).server_auth
-}
-
 /// Loads the server configuration, falling back to safe defaults.
 ///
 /// Not Linux-only: every function it calls is platform-independent, and the
