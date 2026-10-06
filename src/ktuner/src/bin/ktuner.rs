@@ -429,7 +429,7 @@ fn why_with(
     // sysfs names are filesystem identities, while sysctl names accept aliases.
     let normalized = normalize_param(param);
     if let Some(rec) = find_recommendation(eval, param) {
-        let output = json!({
+        let mut output = json!({
             "param": rec.param,
             "current": rec.current_value,
             "recommended": rec.recommended_value,
@@ -439,6 +439,15 @@ fn why_with(
             "subcategory": category::param_subcategory(&rec.param),
             "writable": rec.writable,
         });
+        // The same skip classification the plan uses (#6134's would_skip):
+        // a recommendation `why` explains can be one no write path will ever
+        // take — unwritable here, or runtime-dangerous, which tune skips and
+        // fix refuses outright. Without the reason, `writable: true` on a
+        // runtime-dangerous knob told the agent the opposite of what every
+        // apply path does.
+        if let Some(reason) = skip_reason(rec) {
+            output["skip_reason"] = json!(reason);
+        }
         return Ok((output, 1));
     }
     let path = tuner::param_to_path(&normalized);
@@ -1128,6 +1137,46 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn why_names_the_reason_the_plan_skips_a_recommendation() {
+        // The same classification the plan publishes (#6134's would_skip): a
+        // recommendation `why` explains can be one no write path will ever
+        // take. `writable: true` on vm.nr_hugepages without the skip reason
+        // told an agent the opposite of what every apply path does — tune
+        // skips it (would_skip names it runtime_dangerous) and fix refuses it
+        // outright — so the explanation command must carry the reason too.
+        let eval = evaluation(vec![
+            rec("vm.nr_hugepages", true),
+            rec("vm.swappiness", false),
+        ]);
+        let (output, code) = why_with("vm.nr_hugepages", &eval, |_| {
+            panic!("a recommendation must not fall through to a filesystem read")
+        })
+        .unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(output["skip_reason"], json!("runtime_dangerous"));
+        assert_eq!(output["writable"], json!(true));
+
+        let (output, _) = why_with("vm.swappiness", &eval, |_| {
+            panic!("a recommendation must not fall through to a filesystem read")
+        })
+        .unwrap();
+        assert_eq!(output["skip_reason"], json!("unwritable"));
+        assert_eq!(output["writable"], json!(false));
+
+        // An applicable recommendation carries no skip reason: the plan will
+        // write it, so there is nothing to explain away.
+        let eval = evaluation(vec![rec("fs.file-max", true)]);
+        let (output, _) = why_with("fs.file-max", &eval, |_| {
+            panic!("a recommendation must not fall through to a filesystem read")
+        })
+        .unwrap();
+        assert!(
+            output.get("skip_reason").is_none(),
+            "an applicable entry must not claim a skip reason: {output}"
+        );
     }
 
     #[test]

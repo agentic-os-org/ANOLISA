@@ -104,6 +104,10 @@ count:
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
 ```
 
+`ktuner why` carries the same reason on a recommendation no write path will
+take (`skip_reason`: `unwritable` or `runtime_dangerous`; absent when the
+plan would write it), so the explanation never contradicts the plan.
+
 ### rollback output
 
 ```json

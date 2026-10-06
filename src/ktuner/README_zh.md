@@ -101,6 +101,10 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
 ```
 
+`ktuner why` 对没有任何写路径会采纳的推荐同样携带该原因
+（`skip_reason`：`unwritable` 或 `runtime_dangerous`；计划会写入的项无此
+字段），使解释输出与计划不矛盾。
+
 ### rollback 输出
 
 ```json
