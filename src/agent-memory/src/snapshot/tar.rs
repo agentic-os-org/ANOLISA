@@ -193,6 +193,13 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     if staging.exists() {
         crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging)?;
     }
+    // A prior restore of this id may have crashed between the rename-aside
+    // step and the trash move, leaving `.{id}.rollback.*` entries in the
+    // meta directory. Every later restore of the same id then fails the
+    // rename-aside with ENOTEMPTY (a non-empty directory cannot be replaced
+    // by rename) and nothing ever clears the residue. Park it under trash
+    // so the retry can proceed and the displaced content stays recoverable.
+    clear_prior_rollback_residue(mount, id)?;
     std::fs::create_dir_all(&staging)?;
     {
         let f = File::open(&archive_path)?;
@@ -343,6 +350,45 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         crate::safe_fs::remove_dir_all_safe(mount.root_fd.as_fd(), staging_rel, &staging)
     {
         tracing::warn!("staging cleanup {}: {e}", staging.display());
+    }
+    Ok(())
+}
+
+/// Move `.{id}.rollback.*` entries left behind by a crashed prior restore
+/// of `id` into the trash area so a retry can proceed.
+///
+/// Those entries hold the tree a previous restore displaced; the retry
+/// replaces that state again, so the residue is stale by definition — but
+/// it is still user data, so it is parked under
+/// `.anolisa/trash/residue-{id}-<ulid>/` instead of being deleted, matching
+/// how a successful restore treats its own rollbacks.
+fn clear_prior_rollback_residue(mount: &MountPoint, id: &str) -> Result<()> {
+    let prefix = format!(".{id}.rollback.");
+    let mut stale: Vec<(std::ffi::OsString, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&mount.meta_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(&prefix) {
+            stale.push((name, entry.path()));
+        }
+    }
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let trash_dir = mount
+        .meta_dir
+        .join("trash")
+        .join(format!("residue-{id}-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&trash_dir)?;
+    for (name, path) in stale {
+        // Park under the original entry name (prefix stripped), matching how
+        // a successful restore parks its own rollbacks in trash.
+        let leaf = name
+            .to_string_lossy()
+            .strip_prefix(&prefix)
+            .map(std::ffi::OsString::from)
+            .unwrap_or(name);
+        std::fs::rename(&path, trash_dir.join(&leaf))?;
     }
     Ok(())
 }
