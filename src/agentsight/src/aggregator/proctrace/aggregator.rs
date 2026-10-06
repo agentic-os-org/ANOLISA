@@ -134,10 +134,21 @@ impl ProcessEventAggregator {
                         event.timestamp_ns,
                     )
                 });
-                if let Some(ref args) = event.args {
-                    let filename = event.comm.clone();
-                    aggregated.add_exec(filename, args.clone(), event.timestamp_ns);
-                }
+                // The probe reports the executable path; `comm` is only the
+                // 16-byte task name. Substituting it here made every audit
+                // record and chrome-trace `filename` read `bash` where the
+                // process actually ran `/bin/bash`, and skipping the call for
+                // an args-less exec left both fields unset entirely.
+                let filename = event
+                    .filename
+                    .clone()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| event.comm.clone());
+                aggregated.add_exec(
+                    filename,
+                    event.args.clone().unwrap_or_default(),
+                    event.timestamp_ns,
+                );
                 if is_new {
                     if aggregated.session_id.is_none() {
                         aggregated.session_id = parent_session;
@@ -218,6 +229,7 @@ mod tests {
             ppid,
             ptid: ppid,
             comm: comm.to_string(),
+            filename: None,
             timestamp_ns: ts,
             args: Some(args.to_string()),
             stdout_data: None,
@@ -233,11 +245,48 @@ mod tests {
             ppid: 0,
             ptid: 0,
             comm: String::new(),
+            filename: None,
             timestamp_ns: ts,
             args: None,
             stdout_data: None,
             fd: None,
         }
+    }
+
+    /// The parsed path used `comm` as the executable name and skipped the exec
+    /// entirely when the probe reported no args, so the audit record's
+    /// `filename` (and the chrome-trace one) said `bash` where the process ran
+    /// `/bin/bash` — or stayed empty.
+    #[test]
+    fn parsed_exec_records_the_probe_filename() {
+        let mut agg = ProcessEventAggregator::new();
+        let mut event = exec_event(200, 100, "bash", "echo hi", 1000);
+        event.filename = Some("/usr/bin/bash".to_string());
+
+        agg.process_parsed_event(&event);
+
+        let proc = agg.aggregates.get(&200).unwrap();
+        assert_eq!(
+            proc.filename.as_deref(),
+            Some("/usr/bin/bash"),
+            "the executable path the probe reported must survive the parsed path"
+        );
+    }
+
+    /// An exec whose args buffer yielded nothing still happened: the filename
+    /// must be recorded (from `comm`, the only identity left) instead of being
+    /// dropped along with the exec.
+    #[test]
+    fn parsed_exec_without_args_still_records_the_execution() {
+        let mut agg = ProcessEventAggregator::new();
+        let mut event = exec_event(200, 100, "bash", "", 1000);
+        event.args = None;
+
+        agg.process_parsed_event(&event);
+
+        let proc = agg.aggregates.get(&200).unwrap();
+        assert_eq!(proc.filename.as_deref(), Some("bash"));
+        assert_eq!(proc.args.as_deref(), Some(""));
     }
 
     #[test]
@@ -327,6 +376,7 @@ mod tests {
             args: None,
             stdout_data: Some("boom\n".to_string()),
             fd: Some(2),
+            filename: None,
         };
         agg.process_parsed_event(&stderr);
 
