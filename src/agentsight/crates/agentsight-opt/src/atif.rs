@@ -273,6 +273,20 @@ impl AtifToolCall {
         truncate_chars(&json, max_chars)
     }
 
+    /// The command this call ran, when it carries one.
+    ///
+    /// Distinct from [`Self::command_summary`], which is the whole `arguments`
+    /// object: matching command keywords against the summary let *arguments*
+    /// decide the verdict — a `Grep` whose pattern reads `git stash pop`, an
+    /// `Edit` whose replacement text quotes 回退 — and missed a real command
+    /// whose text fell outside the summary window.
+    pub fn command(&self) -> Option<&str> {
+        ["command", "cmd", "script"]
+            .iter()
+            .find_map(|key| self.arguments.get(key).and_then(|value| value.as_str()))
+            .filter(|command| !command.is_empty())
+    }
+
     /// Tool name enriched with subagent type, e.g. `Agent(Explore)`.
     pub fn display_name(&self) -> String {
         let base = if self.function_name.is_empty() {
