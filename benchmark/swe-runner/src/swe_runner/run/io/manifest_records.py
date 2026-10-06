@@ -133,7 +133,15 @@ def directory_tree_record(path: Path | str | None) -> dict[str, Any]:
 def _is_sensitive_key(key: str) -> bool:
     snake = re.sub(r"(?<!^)(?=[A-Z])", "_", key)
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", snake).strip("_").lower()
-    return normalized in _SENSITIVE_EXACT_KEYS or normalized.endswith(_SENSITIVE_KEY_SUFFIXES)
+    if normalized in _SENSITIVE_EXACT_KEYS or normalized.endswith(_SENSITIVE_KEY_SUFFIXES):
+        return True
+    # Acronym-heavy casing ("APIKey", "AUTH_TOKEN") snake-cases into runs of
+    # single letters ("a_p_i_key", "a_u_t_h__t_o_k_e_n") that never match the
+    # exact keys or suffixes. Compare again with separators removed so those
+    # variants are redacted too.
+    collapsed = normalized.replace("_", "")
+    collapsed_suffixes = tuple(s.replace("_", "") for s in _SENSITIVE_KEY_SUFFIXES)
+    return collapsed in _SENSITIVE_EXACT_KEYS or collapsed.endswith(collapsed_suffixes)
 
 
 def _redact_sensitive(value: Any, *, key: str = "") -> Any:
