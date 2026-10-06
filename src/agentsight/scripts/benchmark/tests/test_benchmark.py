@@ -464,6 +464,45 @@ def test_load_expected_skips_malformed_optional_status(tmp_path: Path) -> None:
     assert successful == {"metric-then-malformed", "valid-later"}
 
 
+def test_load_expected_skips_malformed_optional_data(tmp_path: Path) -> None:
+    """A malformed optional ``data`` envelope contributes no success evidence.
+
+    ``data`` and its ``tags`` are optional load-generator metadata whose shape
+    is not guaranteed: a list, string or null value raised AttributeError from
+    ``.get`` and aborted the whole read, so every later request ID was lost and
+    the comparison failed with a traceback instead of reporting the run. A
+    non-dict value must contribute no evidence while the top-level request ID,
+    the ``tags.request_id`` fallback and the success metrics keep working.
+    """
+    rows = [
+        {"request_id": "bad-data-list", "data": []},
+        {"request_id": "bad-data-null", "data": None},
+        {"request_id": "bad-data-string", "data": "200"},
+        {"data": {"tags": []}},
+        {"data": {"tags": "request_id=tags-id"}},
+        {"data": {"tags": {"request_id": "tags-id"}}},
+        {
+            "request_id": "metric-then-malformed",
+            "metric": "benchmark_http_success",
+            "data": {"value": 1},
+        },
+        {"request_id": "valid-later", "data": {"status": 204}},
+    ]
+    path = tmp_path / "malformed-data.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    expected, successful = validate_results.load_expected(path)
+    assert expected == {
+        "bad-data-list",
+        "bad-data-null",
+        "bad-data-string",
+        "tags-id",
+        "metric-then-malformed",
+        "valid-later",
+    }
+    assert successful == {"metric-then-malformed", "valid-later"}
+
+
 @pytest.mark.parametrize(
     ("status", "expected_success"),
     [

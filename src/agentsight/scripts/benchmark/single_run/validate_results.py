@@ -46,15 +46,23 @@ def load_expected(path: Path) -> tuple[set[str], set[str]]:
     expected: set[str] = set()
     successful: set[str] = set()
     for item in json_lines(path):
-        tags = item.get("data", {}).get("tags", {})
+        # `data` and its `tags` are optional load-generator metadata whose shape
+        # is not guaranteed. A list, string or null used to raise
+        # AttributeError from `.get` and abort the read, losing every later
+        # record (and the whole comparison); a non-dict value contributes no
+        # evidence instead.
+        data = item.get("data")
+        data = data if isinstance(data, dict) else {}
+        tags = data.get("tags")
+        tags = tags if isinstance(tags, dict) else {}
         request_id = item.get("request_id") or tags.get("request_id")
         if not request_id:
             continue
         request_id = str(request_id)
         expected.add(request_id)
         metric = item.get("metric")
-        value = item.get("data", {}).get("value")
-        status = item.get("data", {}).get("status")
+        value = data.get("value")
+        status = data.get("status")
         if metric == "benchmark_http_success" and value:
             successful.add(request_id)
         status_code = _coerce_optional_status(status)
