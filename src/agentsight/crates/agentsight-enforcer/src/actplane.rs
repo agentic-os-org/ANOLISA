@@ -818,10 +818,13 @@ fn unsupported_runtime_handoff(source: &Binding) -> ReplaceOutcome {
 /// Translates the stable credential-exfiltration model into pinned ActPlane DSL.
 ///
 /// The current ActPlane endpoint-condition ABI can represent one trusted target
-/// per rule. Observe and audit policies use notify rules plus adapter-side TTL
-/// and `public_ipv4` filtering. Enforce mode emits a `block` rule with an
-/// `expires` clause so the pinned ABI honours taint TTL directly, and requires
-/// at least one trusted endpoint to avoid blocking all outbound connections.
+/// per rule, so more than one is rejected. Observe and audit policies use notify
+/// rules plus adapter-side TTL and `public_ipv4` filtering.
+///
+/// Enforce mode is rejected by design: the pinned kernel `block ... endpoint "*"`
+/// rule cannot tell a public destination from a private one, so it would deny
+/// loopback and RFC1918 traffic before userspace could classify it. Compilation
+/// fails closed until the ABI can express public-only scope.
 ///
 /// # Errors
 ///
@@ -1556,25 +1559,47 @@ mod tests {
     }
 
     #[test]
-    fn enforce_policy_compiles_block_rule_with_expires() {
-        let policy = credential_policy();
-        let dsl = compile_credential_exfiltration_policy(&policy)
-            .expect("enforce policy with a trusted endpoint should compile");
+    fn enforce_policy_is_rejected_until_public_scope_is_representable() {
+        // Enforce (block) compilation is deliberately fail-closed: the pinned
+        // kernel rule blocks every endpoint, private ones included, before
+        // userspace can classify the destination. Pin the rejection so
+        // re-enabling it has to update this test consciously.
+        let error = compile_credential_exfiltration_policy(&credential_policy())
+            .expect_err("enforce mode must fail closed");
 
-        assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
-        assert!(dsl.contains("unless target \"10.0.0.8\""));
-        assert!(dsl.contains("expires 900s"));
-        assert!(compile_str(&dsl).is_ok());
+        assert!(
+            error
+                .to_string()
+                .contains("enforce mode is not yet supported"),
+            "unexpected rejection: {error}"
+        );
     }
 
     #[test]
-    fn enforce_policy_requires_trusted_endpoint() {
+    fn enforce_policy_without_a_trusted_endpoint_is_rejected_too() {
+        // Trusted endpoints do not change the verdict: the mode is rejected
+        // whether or not an exception was configured.
         let mut policy = credential_policy();
         policy.trusted_endpoints.clear();
-        let error = compile_credential_exfiltration_policy(&policy)
-            .expect_err("enforce mode without a trusted endpoint must fail closed");
 
-        assert!(error.to_string().contains("trusted_endpoint"));
+        assert!(
+            compile_credential_exfiltration_policy(&policy).is_err(),
+            "enforce mode must fail closed without a trusted endpoint as well"
+        );
+    }
+
+    #[test]
+    fn more_than_one_trusted_endpoint_is_rejected() {
+        // The single-exception limit is checked before the mode, so it is
+        // reachable — assert it in audit mode, where compilation proceeds.
+        let mut policy = credential_policy();
+        policy.mode = PolicyMode::Audit;
+        policy.trusted_endpoints = vec!["10.0.0.8".into(), "10.0.0.9".into()];
+
+        let error = compile_credential_exfiltration_policy(&policy)
+            .expect_err("the pinned ABI takes one trusted endpoint per rule");
+
+        assert!(error.to_string().contains("one trusted endpoint"));
     }
 
     #[test]
