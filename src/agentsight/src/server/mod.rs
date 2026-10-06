@@ -685,6 +685,18 @@ fn path_extractor_config() -> web::PathConfig {
         .error_handler(|error, _req| extractor_error(format!("invalid path parameter: {error}")))
 }
 
+/// Builds the typed query extractor config registered on the server `App`.
+///
+/// `web::Query`'s default rejection is a `text/plain` serde message, so a
+/// mistyped query parameter was the one extractor failure that answered with a
+/// body no API consumer can parse — `?limit=abc` on a list route returned
+/// `Query deserialize error: invalid digit found in string` while the same
+/// mistake in a request body or a path got the `{"error":{...}}` envelope.
+fn query_extractor_config() -> web::QueryConfig {
+    web::QueryConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid query parameter: {error}")))
+}
+
 /// Wraps an extractor failure into a 400 response with the shared envelope.
 fn extractor_error(message: String) -> actix_web::Error {
     let response = system_audit::error_response(
@@ -1167,6 +1179,7 @@ pub async fn run_server(
             .app_data(database_manager_data.clone())
             .app_data(json_extractor_config())
             .app_data(path_extractor_config())
+            .app_data(query_extractor_config())
             .configure(configure_routes)
     })
     .bind((host, port))
@@ -1271,8 +1284,8 @@ mod tests {
     use super::auth::DashboardAuth;
     use super::{
         AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes,
-        json_extractor_config, path_extractor_config, private_state_dir, serve_frontend,
-        serve_frontend_root,
+        json_extractor_config, path_extractor_config, private_state_dir, query_extractor_config,
+        serve_frontend, serve_frontend_root,
     };
     use crate::config::{ServerAuthConfig, StorageConfig};
 
@@ -1547,6 +1560,29 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_bad_request_envelope(response, "invalid path parameter").await;
+    }
+
+    #[actix_web::test]
+    async fn query_extractor_errors_return_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .app_data(query_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        // Without the QueryConfig handler actix answers `text/plain` with the
+        // raw serde message, so a client that parses the shared error envelope
+        // (and reads `error.code`) loses the reason for the 400.
+        let request = awtest::TestRequest::get()
+            .uri("/api/interruptions?limit=abc")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid query parameter").await;
     }
 
     #[actix_web::test]
