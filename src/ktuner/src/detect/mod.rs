@@ -159,7 +159,40 @@ pub fn is_param_writable(path: &str) -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
-    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+    // Every ktuner write path runs as root (tune/fix/rollback refuse
+    // otherwise), so `writable` describes the ROOT run, not the invoking
+    // user. An unprivileged `check`/`why`/`tune --dry-run` — all documented
+    // as root-free — used to evaluate access(W_OK) as the caller, so a
+    // non-root preview reported EVERY recommendation unwritable and answered
+    // "blocked" on a host where `sudo ktuner tune` applies them all. For a
+    // non-root caller decide from the facts that bound root instead: the
+    // file's write bits (root owns proc sysctls) and the mount's read-only
+    // flag, which statvfs reports to anyone.
+    if unsafe { libc::geteuid() } == 0 {
+        return unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 };
+    }
+    root_run_can_write(path)
+}
+
+/// Whether ROOT can write `path`, judged without being root: the file grants
+/// a write bit (a proc sysctl is root-owned 0644, so the owner bit covers it;
+/// a write-only 0200 knob also passes) and the mount is not read-only (the
+/// container case, which a root access(W_OK) also reports as unwritable).
+fn root_run_can_write(path: &str) -> bool {
+    let mode = match fs::metadata(path) {
+        Ok(metadata) => std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()),
+        Err(_) => return false,
+    };
+    if mode & 0o222 == 0 {
+        return false;
+    }
+    let c_path = match std::ffi::CString::new(path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    // f_flag is unsigned long on Linux; ST_RDONLY is the low bit.
+    unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) == 0 && buf.f_flag & libc::ST_RDONLY == 0 }
 }
 
 pub fn gather_system_info() -> Result<SystemInfo> {
@@ -1157,6 +1190,103 @@ mod tests {
         assert_eq!(sanitize_speed_mbps(1000), 1000);
         assert_eq!(sanitize_speed_mbps(10000), 10000);
         assert_eq!(sanitize_speed_mbps(25000), 25000);
+    }
+
+    #[test]
+    fn root_run_can_write_follows_the_mode_bits() {
+        // The unprivileged branch's judgement is caller-independent: a file
+        // with a write bit on a read-write mount is writable by root (proc
+        // sysctls are root-owned 0644, write-only knobs 0200), a file with
+        // no write bit is not, and a missing file never is.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_root_write_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        for (name, mode) in [
+            ("writable", 0o644),
+            ("write_only", 0o200),
+            ("sealed", 0o444),
+        ] {
+            let file = dir.join(name);
+            fs::write(&file, b"0").unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert!(root_run_can_write(dir.join("writable").to_str().unwrap()));
+        assert!(root_run_can_write(dir.join("write_only").to_str().unwrap()));
+        assert!(!root_run_can_write(dir.join("sealed").to_str().unwrap()));
+        assert!(!root_run_can_write(dir.join("missing").to_str().unwrap()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `writable` describes the root run, not the invoking user: every write
+    /// path requires root, so an unprivileged `check` / `why` /
+    /// `tune --dry-run` (all documented root-free) must not report a
+    /// root-owned writable knob as unwritable — the preview would answer
+    /// "blocked" on a host where `sudo ktuner tune` applies everything.
+    /// The parent (root) prepares root-owned fixtures; the assertions run in
+    /// an unprivileged child so the caller-relative access(W_OK) is what
+    /// breaks, not the fixtures.
+    #[test]
+    #[ignore = "requires root to prepare root-owned fixtures; only fixture files are written"]
+    fn writability_describes_the_root_run_for_an_unprivileged_caller() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "KTUNER_WRITABILITY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            assert_eq!(unsafe { libc::geteuid() }, 0, "requires root");
+            let dir = std::env::temp_dir().join(format!(
+                "ktuner_writable_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            fs::remove_dir_all(&dir).ok();
+            fs::create_dir_all(&dir).unwrap();
+            for (name, mode) in [("writable", 0o644), ("sealed", 0o444)] {
+                let file = dir.join(name);
+                fs::write(&file, b"0").unwrap();
+                fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let output = std::process::Command::new("setpriv")
+                .args(["--reuid=65534", "--regid=65534", "--clear-groups"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "detect::tests::writability_describes_the_root_run_for_an_unprivileged_caller",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("KTUNER_WRITABILITY_DIR", &dir)
+                .output()
+                .unwrap();
+            fs::remove_dir_all(&dir).ok();
+            assert!(
+                output.status.success(),
+                "unprivileged child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("KTUNER_WRITABILITY_DIR").expect("fixture dir"),
+        );
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            65534,
+            "child must run unprivileged"
+        );
+        // A root-owned 0644 knob (the shape of every proc sysctl): the value
+        // an unprivileged caller sees must match what the root run can do.
+        assert!(
+            is_param_writable(dir.join("writable").to_str().unwrap()),
+            "the preview describes the root run, not the invoking user"
+        );
+        // No write bit at all: unwritable for the root run too.
+        assert!(!is_param_writable(dir.join("sealed").to_str().unwrap()));
     }
 
     #[test]
