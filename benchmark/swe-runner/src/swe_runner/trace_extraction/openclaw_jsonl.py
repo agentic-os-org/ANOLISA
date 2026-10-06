@@ -359,15 +359,15 @@ def _exec_command_from_tool_call(part: dict[str, Any]) -> str | None:
 
 
 def _is_pytest_command(command: str) -> bool:
-    return bool(re.search(r"(^|[\s;&|])(?:python\s+-m\s+)?(?:pytest|py\.test)(\s|$)", command))
+    return bool(re.search(r"(^|[\s;&|])(?:python\s+-m\s+)?(?:pytest|py\.test)([\s;&|]|$)", command))
 
 
 def _is_git_diff_command(command: str) -> bool:
-    return bool(re.search(r"(^|[\s;&|])git\s+diff(\s|$)", command))
+    return bool(re.search(r"(^|[\s;&|])git\s+diff([\s;&|]|$)", command))
 
 
 def _is_search_command(command: str) -> bool:
-    return bool(re.search(r"(^|[\s;&|])(?:rg|grep)(\s|$)", command))
+    return bool(re.search(r"(^|[\s;&|])(?:rg|grep)([\s;&|]|$)", command))
 
 
 def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:

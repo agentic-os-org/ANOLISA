@@ -850,3 +850,68 @@ class TestTraceAnalysis:
         assert detail_dir.exists()
         assert not stale_file.exists()
         assert (detail_dir / "astropy__astropy-1.csv").exists()
+
+
+class TestChainedExecCommandClassification:
+    """Exec commands chained without spaces must still be classified."""
+
+    @staticmethod
+    def _session_with_exec_command(tmp_path, command):
+        sessions_dir = tmp_path / "astropy__astropy-12907" / "agents" / "astropy__astropy-12907" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        session_file = sessions_dir / "session-1.jsonl"
+        session_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "session", "id": "session-1", "timestamp": "2026-04-24T00:00:00+00:00"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "id": "assistant-1",
+                            "role": "assistant",
+                            "timestamp": "2026-04-24T00:00:01+00:00",
+                            "usage": {"input_tokens": 10, "output_tokens": 5},
+                            "parts": [
+                                {"type": "toolCall", "name": "exec", "arguments": {"cmd": command}},
+                            ],
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return session_file
+
+    def test_counts_pytest_chained_without_spaces(self, tmp_path):
+        from swe_runner.trace_extraction.openclaw_jsonl import reconstruct_openclaw_jsonl_session
+
+        session_file = self._session_with_exec_command(tmp_path, "pytest;echo done")
+        data = reconstruct_openclaw_jsonl_session(session_file)
+        assert data is not None
+        assert data["exec_command_count"] == 1
+        assert data["pytest_command_count"] == 1
+
+    def test_counts_git_diff_chained_without_spaces(self, tmp_path):
+        from swe_runner.trace_extraction.openclaw_jsonl import reconstruct_openclaw_jsonl_session
+
+        session_file = self._session_with_exec_command(tmp_path, "git diff|cat")
+        data = reconstruct_openclaw_jsonl_session(session_file)
+        assert data is not None
+        assert data["git_diff_command_count"] == 1
+
+    def test_counts_search_chained_without_spaces(self, tmp_path):
+        from swe_runner.trace_extraction.openclaw_jsonl import reconstruct_openclaw_jsonl_session
+
+        session_file = self._session_with_exec_command(tmp_path, "rg|wc -l")
+        data = reconstruct_openclaw_jsonl_session(session_file)
+        assert data is not None
+        assert data["search_command_count"] == 1
+
+    def test_does_not_count_pytest_as_word_substring(self, tmp_path):
+        from swe_runner.trace_extraction.openclaw_jsonl import reconstruct_openclaw_jsonl_session
+
+        session_file = self._session_with_exec_command(tmp_path, "notpytest arg")
+        data = reconstruct_openclaw_jsonl_session(session_file)
+        assert data is not None
+        assert data["pytest_command_count"] == 0
