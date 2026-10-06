@@ -37,6 +37,8 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
     // Process-based heuristics
     let has_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd; the same OLTP workload as MySQL.
+        || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     let has_cache = info.has_process("redis-server")
@@ -44,6 +46,10 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("etcd");
     let has_web = info.has_process("nginx")
         || info.has_process("httpd")
+        // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; RHEL and
+        // the httpd name cover the same server. Without this branch every
+        // Debian Apache host classified as mixed, not network-intensive.
+        || info.has_process("apache2")
         || info.has_process("envoy")
         || info.has_process("haproxy")
         || info.has_process("caddy");
@@ -148,6 +154,41 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["envoy"])),
             WorkloadType::NetworkIntensive
+        );
+    }
+
+    #[test]
+    fn test_classify_apache_under_its_debian_name() {
+        // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; the RHEL
+        // name `httpd` is the same server. A pure Apache host is a web
+        // workload under either name — not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["apache2"])),
+            WorkloadType::NetworkIntensive
+        );
+        assert_eq!(
+            classify(&make_info(vec!["httpd"])),
+            WorkloadType::NetworkIntensive
+        );
+        // apache2 wins over nothing: a db still classifies first.
+        assert_eq!(
+            classify(&make_info(vec!["apache2", "postgres"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_mariadb() {
+        // MariaDB's daemon comm is `mariadbd`; a MariaDB-only host is an
+        // OLTP database workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["mariadbd"])),
+            WorkloadType::IoLatency
+        );
+        // Role-suffixed worker comms classify the same.
+        assert_eq!(
+            classify(&make_info(vec!["mariadbd: writer"])),
+            WorkloadType::IoLatency
         );
     }
 

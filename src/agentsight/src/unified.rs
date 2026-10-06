@@ -669,6 +669,11 @@ impl AgentSight {
             }
         }
 
+        // Apply the configured tokenizer cache size before any token count can
+        // create the global manager; the `tokenizer_enabled` flag itself gates
+        // the drain fallback at its call site.
+        crate::tokenizer::configure_global_tokenizer(config.features.tokenizer_cache_size);
+
         // Create analyzer with tokenizer if configured
         let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
             if Path::new(tokenizer_path).exists() {
@@ -1561,12 +1566,24 @@ impl AgentSight {
     /// Check and drain the pending_logtail mailbox.
     /// If the config watcher deposited a new LogtailExporter, register it.
     fn check_pending_logtail(&mut self) {
-        if let Some(exporter) = crate::background::take_pending_logtail(&self.pending_logtail) {
+        Self::register_pending_logtail(&mut self.genai_exporters, &self.pending_logtail);
+    }
+
+    /// Drain the pending_logtail mailbox into `exporters`.
+    ///
+    /// Split out of [`Self::check_pending_logtail`] so the registration rule —
+    /// a re-activated dynamic exporter replaces its predecessor instead of
+    /// being registered next to it — is testable without a running monitor.
+    fn register_pending_logtail(
+        exporters: &mut Vec<Box<dyn GenAIExporter>>,
+        pending_logtail: &Mutex<Option<Box<dyn GenAIExporter>>>,
+    ) {
+        if let Some(exporter) = crate::background::take_pending_logtail(pending_logtail) {
             log::info!(
                 "Registering dynamically-activated LogtailExporter: '{}'",
                 exporter.name()
             );
-            self.genai_exporters.push(exporter);
+            install_exporter(exporters, exporter);
         }
     }
 
@@ -2097,8 +2114,8 @@ impl AgentSight {
                                     .as_deref()
                                     .or(pending.model.as_deref())
                                     .unwrap_or("unknown");
-                                if let Ok(tokenizer) =
-                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                if let Some(tokenizer) =
+                                    drain_fallback_tokenizer(&self.features, model_name)
                                 {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
@@ -2155,11 +2172,6 @@ impl AgentSight {
                                             enrichment.output_tokens = Some(total as i64);
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref())
-                                    );
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
@@ -2382,7 +2394,9 @@ impl AgentSight {
     /// Add a custom GenAI exporter at runtime
     pub fn add_genai_exporter(&mut self, exporter: Box<dyn GenAIExporter>) {
         log::info!("Registered GenAI exporter: '{}'", exporter.name());
-        self.genai_exporters.push(exporter);
+        // Same identity rule as the mailbox path: a same-named exporter is
+        // replaced, otherwise every registration would write the batch again.
+        install_exporter(&mut self.genai_exporters, exporter);
     }
 
     /// Get reference to agent scanner
@@ -2553,6 +2567,27 @@ fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
             GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
             _ => false,
         })
+}
+
+/// Register `exporter`, replacing a registered exporter that has the same
+/// name.
+///
+/// `GenAIExporter::name` is the exporter's identity, which is why the Logtail
+/// exporter answers `logtail-file-dynamic` for a dynamically activated one:
+/// "so the runtime can replace an existing dynamic exporter instead of
+/// accumulating duplicates when the SLS path is deactivated and re-activated
+/// repeatedly". The mailbox registration pushed unconditionally, so every
+/// deactivate/reactivate cycle of `runtime.sls_logtail_path` added another
+/// dynamic exporter; each of them re-reads the process-global path and writes
+/// the same batch, so a record was written once per cycle.
+fn install_exporter(exporters: &mut Vec<Box<dyn GenAIExporter>>, exporter: Box<dyn GenAIExporter>) {
+    let name = exporter.name().to_string();
+    if let Some(existing) = exporters.iter_mut().find(|e| e.name() == name) {
+        log::info!("Replacing the registered '{name}' GenAI exporter");
+        *existing = exporter;
+        return;
+    }
+    exporters.push(exporter);
 }
 
 fn complete_deferred_genai(
@@ -2917,6 +2952,36 @@ fn record_agent_crash_interruptions(
     }
 }
 
+/// Resolve the tokenizer used by the dead-PID drain fallback.
+///
+/// Returns `None` when `features.tokenizer.enabled` is off: a disabled feature
+/// must not be instantiated at all, so the global manager is never touched and
+/// no tokenizer is constructed or downloaded. Also `None` when the lookup or
+/// download fails for an enabled feature.
+///
+/// Extracted as a free function so the feature gate is unit-testable without
+/// constructing a full `AgentSight` instance.
+pub(crate) fn drain_fallback_tokenizer(
+    features: &crate::config::FeatureFlags,
+    model_name: &str,
+) -> Option<Arc<LlmTokenizer>> {
+    if !features.tokenizer_enabled {
+        log::debug!(
+            "[DrainCheck] tokenizer feature disabled, skipping token computation for {model_name:?}"
+        );
+        return None;
+    }
+    match crate::tokenizer::get_global_tokenizer(model_name) {
+        Ok(tokenizer) => Some(tokenizer),
+        Err(e) => {
+            log::warn!(
+                "[DrainCheck] tokenizer unavailable for model {model_name:?}, skipping token computation: {e}"
+            );
+            None
+        }
+    }
+}
+
 /// Count the input tokens of a drained request from its captured body.
 ///
 /// The drain fallback runs for streams that ended before the terminal usage
@@ -2949,8 +3014,13 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
             }
         }
     }
+    // DashScope/Bailian native requests nest their tool definitions under
+    // "parameters" (the OpenAI-compatible spelling is top level), the same
+    // fallback `GenAIBuilder::parse_request_body` reads them through. Without
+    // this the drained call is estimated without tools the template renders.
     let tools_json: Option<Vec<serde_json::Value>> = body
         .get("tools")
+        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
         .and_then(|t| t.as_array())
         .map(|a| a.to_vec());
     let count =
@@ -3437,6 +3507,53 @@ mod tests {
         fn export(&self, events: &[GenAISemanticEvent]) {
             self.events.lock().unwrap().extend_from_slice(events);
         }
+    }
+
+    /// A re-activated dynamic Logtail exporter must replace its predecessor.
+    /// The mailbox registration pushed unconditionally, so every deactivate /
+    /// reactivate cycle of `runtime.sls_logtail_path` left one more exporter
+    /// registered, and every one of them writes the same batch to the same
+    /// file — a record was duplicated once per cycle.
+    #[test]
+    fn pending_logtail_registration_replaces_a_reactivated_exporter() {
+        let mailbox: Mutex<Option<Box<dyn GenAIExporter>>> = Mutex::new(None);
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+
+        // Two activation cycles deposit a fresh dynamic exporter each time.
+        for _ in 0..2 {
+            *mailbox.lock().unwrap() =
+                Some(Box::new(RecordingExporter::new("logtail-file-dynamic")));
+            AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        }
+        assert_eq!(
+            exporters.len(),
+            1,
+            "the re-activated exporter must replace its predecessor, not accumulate"
+        );
+
+        // A different exporter is still registered alongside it.
+        *mailbox.lock().unwrap() = Some(Box::new(RecordingExporter::new("logtail-file")));
+        AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        assert_eq!(exporters.len(), 2);
+    }
+
+    /// `install_exporter` resolves an exporter by `name()`, the identity the
+    /// Logtail exporter documents ("so the runtime can replace an existing
+    /// dynamic exporter instead of accumulating duplicates").
+    #[test]
+    fn install_exporter_replaces_an_exporter_of_the_same_name() {
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters[0].name(), "logtail-file-dynamic");
+
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters.len(), 1, "same name → replace");
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {

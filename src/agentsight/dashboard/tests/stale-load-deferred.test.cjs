@@ -133,6 +133,10 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+// RichText only sanitizes its text for display, and the sanitizer has its own
+// suite; here it yields the text so the page tree keeps the same content.
+const richTextStub = { RichText: ({ children }) => children };
+
 // Depth-first walk over the classic-runtime element tree produced by the
 // react stub in loadPageModule.
 function findElement(node, predicate) {
@@ -258,6 +262,7 @@ function renderOptimizationPage() {
       '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en' },
       '../utils/accuracyAttribution': {},
       '../components/TokenFlameChart': {},
+      '../utils/richText': richTextStub,
     },
     driver,
   );

@@ -580,19 +580,45 @@ fn eval_tcp_fastopen(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
     if !info.param_exists("/proc/sys/net/ipv4/tcp_fastopen") {
         return 1;
     }
-
-    if info.has_listen_sockets() && info.sysctl.tcp_fastopen < 3 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_fastopen".to_string(),
-            current_value: info.sysctl.tcp_fastopen.to_string(),
-            recommended_value: "3".to_string(),
-            reason: "启用 TCP Fast Open（客户端+服务端）减少连接建立延迟".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if !info.has_listen_sockets() {
+        return 1;
+    }
+    if let Some(rec) = tcp_fastopen_recommendation(info.sysctl.tcp_fastopen) {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the `net.ipv4.tcp_fastopen` rule, split from the live
+/// probe so every branch is assertable on any host (the sysctl is read from
+/// the real `/proc`).
+///
+/// The sysctl is a bitmask (`include/net/tcp.h`): 0x1 enables the client,
+/// 0x2 the server, and 0x400 forces TFO on all listeners, "i.e., not
+/// requiring the TCP_FASTOPEN socket option". Passive TFO needs 0x2 AND
+/// 0x400 together: `__inet_listen_sk` only fills a listener's
+/// `fastopenq.max_qlen` when both are set, and `tcp_fastopen_queue_check`
+/// then refuses every SYN that carries data while that length is still 0.
+/// The rule used to recommend 3 and treat any value >= 3 as done, so on the
+/// host it had just tuned, a listener that never called the TCP_FASTOPEN
+/// socket option got no passive TFO at all — the opposite of what the reason
+/// promised. The value is written as a whole word, so flags the
+/// administrator set (0x4 `TFO_CLIENT_NO_COOKIE`, 0x200
+/// `TFO_SERVER_COOKIE_NOT_REQD`, ...) are kept rather than cleared.
+fn tcp_fastopen_recommendation(current: u64) -> Option<Recommendation> {
+    const REQUIRED: u64 = 0x1 | 0x2 | 0x400;
+    if current & REQUIRED == REQUIRED {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_fastopen".to_string(),
+        current_value: current.to_string(),
+        recommended_value: (current | REQUIRED).to_string(),
+        reason: "启用 TCP Fast Open 的客户端与服务端，并让未调用 TCP_FASTOPEN socket 选项的监听套接字也生效（内核要求 0x400，仅写 3 时服务端 TFO 实际不生效）".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_min_free_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -2085,11 +2111,22 @@ fn recommend_unprivileged_bpf(current: u64, recs: &mut Vec<Recommendation>) {
 }
 
 fn eval_core_uses_pid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/core_uses_pid";
+    eval_core_uses_pid_at(info, recs, "/proc/sys/kernel/core_uses_pid")
+}
+
+/// Path-injectable form of [`eval_core_uses_pid`] (the `eval_*_at` idiom).
+/// `fs/coredump.c` registers kernel.core_uses_pid through plain
+/// `proc_dointvec` with no min/max, and the same file consumes it as a
+/// boolean (`if (!ispipe && !pid_in_pattern && core_uses_pid)`), so -1 is a
+/// legal, already-enabled value. The unsigned reader turns "-1" into the
+/// fallback 0 — the *not-enabled* value — so the `== 0` gate invented the
+/// recommendation on a host that already appends the PID.
+fn eval_core_uses_pid_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "kernel.core_uses_pid".to_string(),
@@ -2126,11 +2163,24 @@ fn eval_yama_ptrace_scope(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 }
 
 fn eval_log_martians(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/log_martians";
+    eval_log_martians_at(info, recs, "/proc/sys/net/ipv4/conf/all/log_martians")
+}
+
+/// Path-injectable form of [`eval_log_martians`] (the `eval_*_at` idiom).
+/// `net/ipv4/devinet.c`'s `devinet_conf_proc` routes every `conf/<iface>/…`
+/// entry through a plain `proc_dointvec` on an `int` slot of
+/// `struct ipv4_devconf` (include/linux/inetdevice.h), with no min/max, so -1
+/// is a legal value; `IN_DEV_LOG_MARTIANS` (inetdevice.h) reads it through
+/// `IN_DEV_ORCONF` — a truthiness test — and `net/ipv4/route.c` consumes it as
+/// `if (IN_DEV_LOG_MARTIANS(in_dev))`. The unsigned reader parses "-1" to Err
+/// and falls back to 0, the *disabled* value, so the `== 0` gate invented the
+/// recommendation on a host that already logs martians.
+fn eval_log_martians_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.log_martians".to_string(),
@@ -2496,12 +2546,28 @@ fn eval_optmem_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     1
 }
 
-fn eval_oom_kill_allocating_task(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/oom_kill_allocating_task";
-    if !std::path::Path::new(path).exists() {
+fn eval_oom_kill_allocating_task(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_oom_kill_allocating_task_at(info, recs, "/proc/sys/vm/oom_kill_allocating_task")
+}
+
+/// Path-injectable form of [`eval_oom_kill_allocating_task`] (the
+/// `eval_*_at` idiom). `mm/oom_kill.c` registers vm.oom_kill_allocating_task
+/// through plain `proc_dointvec` with no min/max, and the same file consumes
+/// it as a boolean (`if (!is_memcg_oom(oc) && sysctl_oom_kill_allocating_task
+/// && ...)`), so -1 is a legal, already-enabled value. The unsigned reader
+/// turns "-1" into the fallback 0 — the *disabled* value — so the `== 0` gate
+/// invented the recommendation on a host that already kills the allocating
+/// task.
+fn eval_oom_kill_allocating_task_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "vm.oom_kill_allocating_task".to_string(),
@@ -2694,12 +2760,28 @@ fn eval_tcp_rfc1337(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
     1
 }
 
-fn eval_secure_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/secure_redirects";
-    if !std::path::Path::new(path).exists() {
+fn eval_secure_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_secure_redirects_at(info, recs, "/proc/sys/net/ipv4/conf/all/secure_redirects")
+}
+
+/// Path-injectable form of [`eval_secure_redirects`] (the `eval_*_at` idiom).
+/// The `conf/all/secure_redirects` entry is a plain `proc_dointvec` int slot
+/// (`devinet_conf_proc` in net/ipv4/devinet.c, no min/max), and
+/// `IN_DEV_SEC_REDIRECTS` (include/linux/inetdevice.h) reads it through
+/// `IN_DEV_ORCONF`, a truthiness test consumed by `net/ipv4/route.c` as
+/// `if (IN_DEV_SEC_REDIRECTS(in_dev) && ...)`. -1 is therefore enabled and
+/// must be flagged, but the unsigned reader parsed "-1" to Err — its fallback
+/// 0 skipped the rule on exactly the host whose secure redirects are on.
+fn eval_secure_redirects_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.secure_redirects".to_string(),
@@ -2808,21 +2890,37 @@ fn eval_tcp_challenge_ack_limit(_info: &SystemInfo, recs: &mut Vec<Recommendatio
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current <= 100 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_challenge_ack_limit".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "999999999".to_string(),
-            reason:
-                "默认值 100 存在 CVE-2016-5696 边信道攻击风险，攻击者可推断 TCP 连接状态并注入数据"
-                    .to_string(),
-            confidence: Confidence::High,
-            category: Category::Security,
-            writable: true,
-        });
+    if let Some(rec) = challenge_ack_limit_recommendation(read_sysctl_u64(path)) {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the challenge-ACK rule, split from the live probe so
+/// the boundary and the value the kernel special-cases are assertable on any
+/// host.
+///
+/// `tcp_send_challenge_ack` (`net/ipv4/tcp_input.c`) reads this sysctl into a
+/// u32 and takes the unlimited path only at `INT_MAX`
+/// (`if (ack_limit == INT_MAX) goto send_ack;`); every other value installs
+/// the randomized per-second budget that the CVE-2016-5696 side channel
+/// measures, and `tcp_ipv4.c` initializes the sysctl to `INT_MAX`. The reason
+/// used to warn about a default of 100, which no kernel sets; the
+/// recommendation was 999999999, which still installs the limiter.
+fn challenge_ack_limit_recommendation(current: u64) -> Option<Recommendation> {
+    if current > 100 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_challenge_ack_limit".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "2147483647".to_string(),
+        reason: "该上限被设得很低：内核只把 INT_MAX 当作不限速，更小的值会启用每秒随机预算的 RFC 5961 限速，攻击者可据此推断 TCP 连接状态（CVE-2016-5696）；内核默认本就是 INT_MAX"
+            .to_string(),
+        confidence: Confidence::High,
+        category: Category::Security,
+        writable: true,
+    })
 }
 
 fn eval_rp_filter_all(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -2984,31 +3082,58 @@ fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
     1
 }
 
+/// Whether a fork-heavy server workload runs here: the web servers and
+/// databases whose children immediately do useful work, so
+/// `sched_child_runs_first=1` costs an unnecessary COW copy. Debian/Ubuntu
+/// run the Apache binary as `apache2` — RHEL's `httpd` is the same server,
+/// and the gate must not go quiet on a Debian Apache host.
+fn fork_server_present(info: &SystemInfo) -> bool {
+    info.has_process("nginx")
+        || info.has_process("httpd")
+        || info.has_process("apache2")
+        || info.has_process("postgres")
+        || info.has_process("mysqld")
+}
+
 fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_child_runs_first";
     if !info.param_exists(path) {
         return 1;
     }
-    let has_server = info.has_process("nginx")
-        || info.has_process("httpd")
-        || info.has_process("postgres")
-        || info.has_process("mysqld");
-    if !has_server {
+    if !fork_server_present(info) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current != 0 {
-        recs.push(Recommendation {
-            param: "kernel.sched_child_runs_first".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "0".to_string(),
-            reason: "服务器场景下 fork 后父进程先运行更优，避免 COW 页面不必要的复制".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) =
+        sched_child_runs_first_recommendation(read_sysctl_u64(path), &info.kernel_version)
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `kernel.sched_child_runs_first` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+fn sched_child_runs_first_recommendation(
+    current: u64,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    // Linux 6.6 merged EEVDF: commit e8f331bcc2 ("sched/smp: Use lag to
+    // simplify cross-runqueue placement") removed the only reader of this
+    // knob from task_fork_fair(). The sysctl node still exists and accepts
+    // writes, but nothing consumes the value, so telling an administrator to
+    // set it back to 0 promises COW-copy savings that can no longer happen.
+    if kernel_at_least(kernel_version, 6, 6) || current == 0 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "kernel.sched_child_runs_first".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "0".to_string(),
+        reason: "服务器场景下 fork 后父进程先运行更优，避免 COW 页面不必要的复制".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3160,20 +3285,32 @@ fn eval_unix_max_dgram_qlen(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current < 1024 {
-        recs.push(Recommendation {
-            param: "net.unix.max_dgram_qlen".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "1024".to_string(),
-            reason: "Unix socket 数据报队列默认 512 太小，systemd/journald 等高负载下可能丢失消息"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = max_dgram_qlen_recommendation(read_sysctl_u64(path)) {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the unix datagram queue rule, split from the live
+/// probe so the recommendation is assertable on any host.
+///
+/// The kernel default is 10, not the 512 the reason used to cite:
+/// `unix_net_init` (`net/unix/af_unix.c`) sets `sysctl_max_dgram_qlen = 10`
+/// for every net namespace.
+fn max_dgram_qlen_recommendation(current: u64) -> Option<Recommendation> {
+    if current >= 1024 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.unix.max_dgram_qlen".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "1024".to_string(),
+        reason: "Unix socket 数据报队列上限默认只有 10，systemd/journald 等高负载下可能丢失消息"
+            .to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_rps_sock_flow_entries(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3467,12 +3604,27 @@ fn eval_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     1
 }
 
-fn eval_default_log_martians(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/default/log_martians";
-    if !std::path::Path::new(path).exists() {
+fn eval_default_log_martians(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_default_log_martians_at(info, recs, "/proc/sys/net/ipv4/conf/default/log_martians")
+}
+
+/// Path-injectable form of [`eval_default_log_martians`] (the `eval_*_at`
+/// idiom). `conf/default/*` is the same `devinet_conf_proc` plain
+/// `proc_dointvec` int slot as `conf/all/*` (net/ipv4/devinet.c, no
+/// min/max), inherited by every new interface, and `IN_DEV_LOG_MARTIANS`
+/// (include/linux/inetdevice.h) is an `IN_DEV_ORCONF` truthiness test — -1
+/// is legal and enabled. The unsigned reader's fallback 0 made the `== 0`
+/// gate report new interfaces as blind to martians.
+fn eval_default_log_martians_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.log_martians".to_string(),
@@ -3572,12 +3724,24 @@ fn eval_sched_tunable_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>)
     1
 }
 
-fn eval_panic_on_oops(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/panic_on_oops";
-    if !std::path::Path::new(path).exists() {
+fn eval_panic_on_oops(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_panic_on_oops_at(info, recs, "/proc/sys/kernel/panic_on_oops")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the signed read is
+/// unit-testable against a temp file. `kernel/sysctl.c` registers
+/// kernel.panic_on_oops through plain `proc_dointvec`, which copies the table
+/// with no min/max, so -1 is a legal value; `arch/x86/kernel/dumpstack.c`
+/// consumes it as a boolean (`if (panic_on_oops) panic(...)`), and -1 is
+/// already enabled. The unsigned reader parses "-1" to Err and falls back to
+/// 0, the *not-enabled* value, so the `== 0` gate invented the recommendation
+/// on a host that already panics on oops.
+fn eval_panic_on_oops_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "kernel.panic_on_oops".to_string(),
@@ -3592,12 +3756,23 @@ fn eval_panic_on_oops(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
     1
 }
 
-fn eval_oom_dump_tasks(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/oom_dump_tasks";
-    if !std::path::Path::new(path).exists() {
+fn eval_oom_dump_tasks(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_oom_dump_tasks_at(info, recs, "/proc/sys/vm/oom_dump_tasks")
+}
+
+/// Path-injectable form of [`eval_oom_dump_tasks`] (the `eval_*_at` idiom).
+/// `mm/oom_kill.c` registers vm.oom_dump_tasks through plain `proc_dointvec`
+/// with no min/max, and its consumer is a boolean (`if (sysctl_oom_dump_tasks)`
+/// in the same file), so -1 is a legal, already-enabled value. The unsigned
+/// reader turns "-1" into the fallback 0 — the *disabled* value — so the
+/// `== 0` gate invented the recommendation on a host that already dumps the
+/// task list.
+fn eval_oom_dump_tasks_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "vm.oom_dump_tasks".to_string(),
@@ -4003,14 +4178,26 @@ fn eval_icmp_ignore_bogus(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_arp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/arp_filter";
-    if !std::path::Path::new(path).exists() {
+    eval_arp_filter_at(info, recs, "/proc/sys/net/ipv4/conf/all/arp_filter")
+}
+
+/// Path-injectable form of [`eval_arp_filter`] (the `eval_*_at` idiom).
+/// `conf/all/arp_filter` is a plain `proc_dointvec` int slot
+/// (`devinet_conf_proc` in net/ipv4/devinet.c, no min/max) read through
+/// `IN_DEV_ARPFILTER` (include/linux/inetdevice.h), an `IN_DEV_ORCONF`
+/// truthiness test consumed by `net/ipv4/arp.c` as
+/// `if (!dont_send && IN_DEV_ARPFILTER(in_dev))`. -1 is legal and enabled,
+/// so the unsigned reader's fallback 0 made the `== 0` gate report a
+/// multi-NIC host as unfiltered.
+fn eval_arp_filter_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.arp_filter".to_string(),
@@ -4304,14 +4491,19 @@ fn eval_shm_rmid_forced(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 }
 
 fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sem";
+    eval_sem_at(info, recs, "/proc/sys/kernel/sem")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+fn eval_sem_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let has_db = info
-        .processes
-        .iter()
-        .any(|p| p.name == "postgres" || p.name == "mysqld" || p.name == "oracle");
+    // The shared boundary-aware predicate, not raw name equality: worker
+    // comms are role-suffixed ("postgres: writer") and collectors are not
+    // the database — is_database_present already encodes both.
+    let has_db = is_database_present(info);
     if !has_db {
         return 1;
     }
@@ -4364,14 +4556,19 @@ fn eval_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_shmmni(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/shmmni";
+    eval_shmmni_at(info, recs, "/proc/sys/kernel/shmmni")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+fn eval_shmmni_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let has_db = info
-        .processes
-        .iter()
-        .any(|p| p.name == "postgres" || p.name == "mysqld" || p.name == "oracle");
+    // The shared boundary-aware predicate, not raw name equality: worker
+    // comms are role-suffixed ("postgres: writer") and collectors are not
+    // the database — is_database_present already encodes both.
+    let has_db = is_database_present(info);
     if !has_db && info.memory_total_gb < 128 {
         return 1;
     }
@@ -5460,11 +5657,28 @@ fn eval_bpf_jit_enable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_bpf_jit_harden(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/bpf_jit_harden";
-    if !std::path::Path::new(path).exists() {
+    eval_bpf_jit_harden_at("/proc/sys/net/core/bpf_jit_harden", recs)
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the unreadable branch is
+/// assertable on any host, without root.
+///
+/// `net.core.bpf_jit_harden` is created 0600 root-owned and its handler
+/// (`proc_dointvec_minmax_bpf_restricted`, net/core/sysctl_net_core.c)
+/// returns -EPERM unless the caller holds CAP_SYS_ADMIN, so the read fails
+/// for every unprivileged `ktuner check`. `read_sysctl_u64` maps a failed
+/// read to 0, which is this rule's firing value: the report claimed "BPF JIT
+/// 加固未启用" for a host whose value was never read, and the same run marks
+/// the parameter `"writable": false`. `why` already refuses to present a
+/// failed read as a value ("A failed read is an error, never a value"); the
+/// rule must not invent one either. A readable 0 is still a finding.
+fn eval_bpf_jit_harden_at(path: &str, recs: &mut Vec<Recommendation>) -> usize {
+    let Ok(raw) = std::fs::read_to_string(path) else {
         return 1;
-    }
-    let current = read_sysctl_u64(path);
+    };
+    let Ok(current) = raw.trim().parse::<u64>() else {
+        return 1;
+    };
     if current == 0 {
         recs.push(Recommendation {
             param: "net.core.bpf_jit_harden".to_string(),
@@ -5521,12 +5735,32 @@ fn eval_somaxconn_large(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
     1
 }
 
-fn eval_promote_secondaries(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/default/promote_secondaries";
-    if !std::path::Path::new(path).exists() {
+fn eval_promote_secondaries(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_promote_secondaries_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/default/promote_secondaries",
+    )
+}
+
+/// Path-injectable form of [`eval_promote_secondaries`] (the `eval_*_at`
+/// idiom). `conf/default/promote_secondaries` is a plain `proc_dointvec` int
+/// slot (`devinet_conf_proc` in net/ipv4/devinet.c, no min/max) read through
+/// `IN_DEV_PROMOTE_SECONDARIES` (include/linux/inetdevice.h), an
+/// `IN_DEV_ORCONF` truthiness test that `net/ipv4/devinet.c` consumes as
+/// `int do_promote = IN_DEV_PROMOTE_SECONDARIES(in_dev)`. -1 is legal and
+/// enabled, so the unsigned reader's fallback 0 made the `== 0` gate claim
+/// secondary addresses are dropped on primary removal.
+fn eval_promote_secondaries_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.promote_secondaries".to_string(),
@@ -5746,7 +5980,11 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 /// class #4100 removed from `has_process` (etcdctl satisfied "etcd"), left
 /// behind at this direct-iteration site.
 fn is_database_present(info: &SystemInfo) -> bool {
-    info.has_process("postgres") || info.has_process("mysqld") || info.has_process("oracle")
+    info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database.
+        || info.has_process("mariadbd")
+        || info.has_process("oracle")
 }
 
 /// Pure core of the `vm.overcommit_ratio` rule: a strict-mode
@@ -5859,6 +6097,50 @@ mod tests {
     use crate::detect::*;
 
     #[test]
+    fn tcp_fastopen_requires_the_all_listeners_flag() {
+        // 0x1|0x2 is the value this rule used to write. Passive (server-side)
+        // TFO needs 0x400 as well: __inet_listen_sk only fills a listener's
+        // fastopenq.max_qlen when 0x2 AND 0x400 are both set, and
+        // tcp_fastopen_queue_check refuses every SYN with data while that
+        // length is 0 — so a listener that never called the TCP_FASTOPEN
+        // socket option got no passive TFO from a host at 3.
+        let rec = tcp_fastopen_recommendation(3).expect("3 does not enable server TFO");
+        assert_eq!(rec.current_value, "3");
+        assert_eq!(rec.recommended_value, "1027");
+        assert_eq!(rec.param, "net.ipv4.tcp_fastopen");
+    }
+
+    #[test]
+    fn tcp_fastopen_completes_the_kernel_default() {
+        // Default 0x1 (client only): both the server flag and the
+        // all-listeners flag are missing.
+        let rec = tcp_fastopen_recommendation(1).expect("the kernel default is incomplete");
+        assert_eq!(rec.recommended_value, "1027");
+        // Server only.
+        let rec = tcp_fastopen_recommendation(2).expect("server without 0x400 is incomplete");
+        assert_eq!(rec.recommended_value, "1027");
+    }
+
+    #[test]
+    fn tcp_fastopen_keeps_the_flags_the_host_set() {
+        // 0x4 is TFO_CLIENT_NO_COOKIE and 0x200 is
+        // TFO_SERVER_COOKIE_NOT_REQD; the sysctl is written as one word, so a
+        // recommendation must not clear a flag the administrator chose.
+        let rec = tcp_fastopen_recommendation(0x4).expect("0x4 alone is incomplete");
+        assert_eq!(rec.recommended_value, "1031");
+        // 0x201 | 0x1|0x2|0x400 = 0x603: the 0x200 flag survives too.
+        let rec = tcp_fastopen_recommendation(0x200 | 0x1).expect("0x200|0x1 is incomplete");
+        assert_eq!(rec.recommended_value, "1539");
+    }
+
+    #[test]
+    fn tcp_fastopen_is_silent_once_every_required_flag_is_set() {
+        assert!(tcp_fastopen_recommendation(0x1 | 0x2 | 0x400).is_none());
+        // Extra flags on top of the required set stay complete.
+        assert!(tcp_fastopen_recommendation(0x1 | 0x2 | 0x4 | 0x200 | 0x400).is_none());
+    }
+
+    #[test]
     fn sem_recommendation_only_raises_fields() {
         // Everything at or above the floors: no recommendation.
         assert_eq!(sem_recommendation(&[32000, 1024000000, 500, 32000]), None);
@@ -5898,6 +6180,23 @@ mod tests {
                 .collect();
             info
         }
+        // MariaDB's daemon comm (10.4+) is the same OLTP database as
+        // mysqld; without it in the shared predicate a MariaDB host got
+        // none of the db-gated rules (sem, shmmni, overcommit_ratio).
+        assert!(
+            is_database_present(&info_with(&["mariadbd"])),
+            "mariadbd is a database"
+        );
+        assert!(
+            is_database_present(&info_with(&["mariadbd: writer"])),
+            "a role-suffixed MariaDB worker is the database"
+        );
+        // The client tool is not the server.
+        assert!(
+            !is_database_present(&info_with(&["mariadb-dump"])),
+            "mariadb-dump is not the database"
+        );
+
         // Real database servers, including role-prefixed worker comms.
         for name in ["postgres", "postgres: writer", "mysqld", "oracle"] {
             assert!(
@@ -5919,6 +6218,64 @@ mod tests {
             );
         }
         assert!(!is_database_present(&info_with(&[])));
+    }
+
+    #[test]
+    fn sysv_ipc_rules_gate_on_boundary_aware_db_detection() {
+        // The sem/shmmni gates re-implemented db detection with raw
+        // `p.name ==` equality instead of is_database_present, so a process
+        // list holding only role-suffixed worker comms ("postgres: writer",
+        // the shape /proc shows for a busy PostgreSQL) skipped the SysV IPC
+        // sizing recommendations entirely.
+        fn info_with(names: &[&str]) -> SystemInfo {
+            let mut info = make_test_info();
+            info.processes = names
+                .iter()
+                .map(|n| ProcessInfo {
+                    name: n.to_string(),
+                })
+                .collect();
+            info
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_ipc_gate_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sem_path = dir.join("sem");
+        std::fs::write(&sem_path, b"250 32000 32 128\n").unwrap();
+        let shmmni_path = dir.join("shmmni");
+        std::fs::write(&shmmni_path, b"4096\n").unwrap();
+
+        // Role-suffixed worker comms are the database: the recommendations
+        // must fire.
+        for name in ["postgres: writer", "mysqld: foo"] {
+            let info = info_with(&[name]);
+            let mut recs = Vec::new();
+            eval_sem_at(&info, &mut recs, sem_path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "kernel.sem"),
+                "{name} must gate the sem rule in"
+            );
+            let mut recs = Vec::new();
+            eval_shmmni_at(&info, &mut recs, shmmni_path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "kernel.shmmni"),
+                "{name} must gate the shmmni rule in"
+            );
+        }
+
+        // Client tools are not the database (guard): nothing fires.
+        for name in ["mysqldump", "pg_dump"] {
+            let info = info_with(&[name]);
+            let mut recs = Vec::new();
+            eval_sem_at(&info, &mut recs, sem_path.to_str().unwrap());
+            eval_shmmni_at(&info, &mut recs, shmmni_path.to_str().unwrap());
+            assert!(recs.is_empty(), "{name} must not gate the IPC rules in");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -6272,7 +6629,11 @@ mod tests {
         info.sysctl.dirty_ratio = 10;
         info.sysctl.dirty_background_ratio = 5;
         info.sysctl.somaxconn = 65535;
-        info.sysctl.tcp_fastopen = 3;
+        // 0x1|0x2|0x400: client, server, and TFO on every listener without
+        // the TCP_FASTOPEN socket option. 3 (0x1|0x2) is NOT optimal — the
+        // kernel only pre-fills a listener's fastopenq.max_qlen when 0x400 is
+        // set too, so passive TFO silently stays off.
+        info.sysctl.tcp_fastopen = 0x403;
         info.processes = vec![];
         info.network = vec![];
 
@@ -7675,6 +8036,47 @@ mod tests {
     }
 
     #[test]
+    fn fork_server_present_covers_the_apache_names() {
+        // The rule's gate, driven directly: whether a server name opens the
+        // gate is pure, while the live sysctl read inside the rule is not.
+        // Debian/Ubuntu run Apache as `apache2`; RHEL's `httpd` is the same
+        // server, and the gate must open under both names.
+        for name in ["nginx", "httpd", "apache2", "postgres", "mysqld"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            assert!(fork_server_present(&info), "{name} must open the gate");
+        }
+        // A client tool with a shared prefix is not the server...
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "apache2ctl".to_string(),
+        }];
+        assert!(!fork_server_present(&info), "apache2ctl is a control tool");
+        // ...and neither is an empty process list.
+        let mut info = make_test_info();
+        info.processes = vec![];
+        assert!(!fork_server_present(&info));
+    }
+
+    #[test]
+    fn sched_child_runs_first_recommendation_gates_on_kernel_version() {
+        // Pre-6.6 kernels still consume the knob: task_fork_fair() reads it.
+        let rec = sched_child_runs_first_recommendation(1, "5.15.0-91-generic")
+            .expect("pre-6.6 kernels still honor sched_child_runs_first");
+        assert_eq!(rec.recommended_value, "0");
+        assert_eq!(rec.current_value, "1");
+        assert!(sched_child_runs_first_recommendation(2, "6.5.0").is_some());
+        // 6.6+ merged EEVDF and task_fork_fair() no longer reads the knob:
+        // the recommendation can never change any behavior.
+        assert!(sched_child_runs_first_recommendation(1, "6.6.0").is_none());
+        assert!(sched_child_runs_first_recommendation(1, "6.8.0-40-generic").is_none());
+        // Already at the target on any version.
+        assert!(sched_child_runs_first_recommendation(0, "4.19.0").is_none());
+    }
+
+    #[test]
     fn test_default_accept_redirects() {
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -7735,10 +8137,49 @@ mod tests {
             .iter()
             .find(|r| r.param == "net.ipv4.tcp_challenge_ack_limit")
         {
-            assert_eq!(rec.recommended_value, "999999999");
+            assert_eq!(rec.recommended_value, "2147483647");
             assert_eq!(rec.confidence, Confidence::High);
             assert_eq!(rec.category, Category::Security);
         }
+    }
+
+    #[test]
+    fn challenge_ack_limit_recommends_the_unlimited_sentinel() {
+        // tcp_send_challenge_ack (net/ipv4/tcp_input.c) takes the unlimited
+        // path only at INT_MAX (`if (ack_limit == INT_MAX) goto send_ack;`);
+        // every other value installs the randomized per-second budget the
+        // side channel measures. 999999999 still installs it, so the
+        // recommendation is the value the kernel checks.
+        let rec = challenge_ack_limit_recommendation(100).expect("a 100/second cap is a finding");
+        assert_eq!(rec.current_value, "100");
+        assert_eq!(rec.recommended_value, "2147483647");
+        // The reason used to warn about a default of 100; tcp_ipv4.c
+        // initializes the sysctl to INT_MAX, so no such default exists.
+        assert!(
+            !rec.reason.contains("默认值 100"),
+            "reason must not cite a default the kernel does not have: {}",
+            rec.reason
+        );
+        // The kernel default is already the recommendation.
+        assert!(challenge_ack_limit_recommendation(2147483647).is_none());
+        // The boundary itself is unchanged.
+        assert!(challenge_ack_limit_recommendation(101).is_none());
+        assert!(challenge_ack_limit_recommendation(0).is_some());
+    }
+
+    #[test]
+    fn max_dgram_qlen_quotes_the_kernel_default() {
+        // unix_net_init (net/unix/af_unix.c) sets sysctl_max_dgram_qlen = 10,
+        // not the 512 the reason used to cite.
+        let rec = max_dgram_qlen_recommendation(10).expect("the kernel default is a finding");
+        assert_eq!(rec.recommended_value, "1024");
+        assert!(
+            !rec.reason.contains("默认 512"),
+            "reason must not cite a default the kernel does not have: {}",
+            rec.reason
+        );
+        assert!(max_dgram_qlen_recommendation(1024).is_none());
+        assert!(max_dgram_qlen_recommendation(1023).is_some());
     }
 
     #[test]
@@ -8832,15 +9273,65 @@ mod tests {
         let info = make_test_info();
         let mut recs = Vec::new();
         let checked = eval_bpf_jit_harden(&info, &mut recs);
-        if std::path::Path::new("/proc/sys/net/core/bpf_jit_harden").exists() {
-            assert_eq!(checked, 1);
-            let val = read_sysctl_u64("/proc/sys/net/core/bpf_jit_harden");
-            let triggered = recs.iter().any(|r| r.param == "net.core.bpf_jit_harden");
-            if val == 0 {
-                assert!(triggered, "Should trigger when bpf_jit_harden=0");
-                assert_eq!(recs.last().unwrap().category, Category::Security);
+        assert_eq!(checked, 1);
+        let triggered = recs.iter().any(|r| r.param == "net.core.bpf_jit_harden");
+        // The sysctl is 0600 root-owned and its handler needs CAP_SYS_ADMIN,
+        // so an unprivileged run cannot read it at all. Distinguish a
+        // readable 0 (a finding) from a failed read (no value, no finding) —
+        // read_sysctl_u64 maps the failure to 0 and cannot tell them apart.
+        match std::fs::read_to_string("/proc/sys/net/core/bpf_jit_harden") {
+            Ok(raw) => {
+                assert_eq!(triggered, raw.trim() == "0", "readable value {raw:?}");
+                if triggered {
+                    assert_eq!(recs.last().unwrap().category, Category::Security);
+                }
             }
+            Err(_) => assert!(
+                !triggered,
+                "an unreadable sysctl is not the value 0: {recs:?}"
+            ),
         }
+    }
+
+    #[test]
+    fn bpf_jit_harden_skips_an_unreadable_sysctl() {
+        // A directory is the portable stand-in for "exists but cannot be
+        // read" (EISDIR), which works for root and unprivileged runs alike.
+        let mut recs = Vec::new();
+        assert_eq!(eval_bpf_jit_harden_at("/", &mut recs), 1);
+        assert!(
+            recs.is_empty(),
+            "a failed read must not report a hardening gap: {recs:?}"
+        );
+    }
+
+    #[test]
+    fn bpf_jit_harden_reads_real_values() {
+        let dir = std::env::temp_dir().join(format!("ktuner-bpf-harden-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("bpf_jit_harden");
+        let path = path.to_str().expect("utf-8 temp path");
+
+        std::fs::write(path, "0\n").expect("write fixture");
+        let mut recs = Vec::new();
+        eval_bpf_jit_harden_at(path, &mut recs);
+        assert_eq!(recs.len(), 1, "a readable 0 is still a finding");
+        assert_eq!(recs[0].param, "net.core.bpf_jit_harden");
+        assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[0].recommended_value, "1");
+
+        std::fs::write(path, "1\n").expect("write fixture");
+        let mut recs = Vec::new();
+        eval_bpf_jit_harden_at(path, &mut recs);
+        assert!(recs.is_empty(), "a hardened host has no finding");
+
+        // Garbage is a failed parse, not a value either.
+        std::fs::write(path, "not-a-number\n").expect("write fixture");
+        let mut recs = Vec::new();
+        eval_bpf_jit_harden_at(path, &mut recs);
+        assert!(recs.is_empty(), "unparseable content is not the value 0");
+        std::fs::remove_file(path).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 
     #[test]
@@ -9143,6 +9634,303 @@ mod tests {
                 usize::from(expects_rec),
                 "value {value}: only 0 (never reboot) is unhardened"
             );
+        }
+    }
+
+    #[test]
+    fn test_panic_on_oops_reads_truthiness_signed() {
+        // kernel.panic_on_oops is a plain proc_dointvec int with no min/max
+        // (kernel/sysctl.c), consumed as a boolean by
+        // arch/x86/kernel/dumpstack.c ("if (panic_on_oops) panic(...)"): any
+        // nonzero value, -1 included, is enabled. The unsigned reader parsed
+        // "-1" to Err, fell back to 0 — the *not-enabled* value — so the
+        // `== 0` gate invented the recommendation on a host that already
+        // panics on oops.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_panic_on_oops_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_panic_on_oops_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 is unhardened; any nonzero value is enabled"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "kernel.panic_on_oops");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_core_uses_pid_reads_truthiness_signed() {
+        // kernel.core_uses_pid is a plain proc_dointvec int with no min/max
+        // (fs/coredump.c), consumed by the same file as
+        // "if (!ispipe && !pid_in_pattern && core_uses_pid)". -1 is legal and
+        // enabled, so the unsigned reader's fallback 0 made the `== 0` gate
+        // report a PID-less core pattern on a host that appends the PID.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_core_uses_pid_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_core_uses_pid_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 leaves core files unnamed"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "kernel.core_uses_pid");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_oom_kill_allocating_task_reads_truthiness_signed() {
+        // vm.oom_kill_allocating_task is a plain proc_dointvec int with no
+        // min/max (mm/oom_kill.c), consumed by the same file as
+        // "if (!is_memcg_oom(oc) && sysctl_oom_kill_allocating_task && ...)".
+        // -1 is legal and enabled, so the unsigned reader's fallback 0 made
+        // the `== 0` gate report the opposite OOM policy.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_oom_kill_allocating_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked =
+                eval_oom_kill_allocating_task_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 selects a victim from the task list"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "vm.oom_kill_allocating_task");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_oom_dump_tasks_reads_truthiness_signed() {
+        // vm.oom_dump_tasks is a plain proc_dointvec int with no min/max
+        // (mm/oom_kill.c), consumed by the same file as
+        // "if (sysctl_oom_dump_tasks)". -1 is legal and enabled, so the
+        // unsigned reader's fallback 0 made the `== 0` gate claim the OOM
+        // report is missing on a host that dumps it.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_oom_dump_tasks_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_oom_dump_tasks_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 suppresses the OOM task dump"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "vm.oom_dump_tasks");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_log_martians_reads_truthiness_signed() {
+        // net/ipv4/devinet.c's devinet_conf_proc routes this entry through a
+        // plain proc_dointvec on an int slot (no min/max), and
+        // IN_DEV_LOG_MARTIANS (include/linux/inetdevice.h) reads it through
+        // IN_DEV_ORCONF, a truthiness test consumed by net/ipv4/route.c. Any
+        // nonzero value is enabled, so -1 must not read as the value 0.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_log_martians_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_log_martians_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 leaves martians unlogged"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.conf.all.log_martians");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_log_martians_reads_truthiness_signed() {
+        // Same devinet_conf_proc slot as conf/all, inherited by new
+        // interfaces; -1 is legal and enabled.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_default_log_martians_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_default_log_martians_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 leaves new interfaces blind to martians"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.conf.default.log_martians");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_promote_secondaries_reads_truthiness_signed() {
+        // devinet_conf_proc int slot; IN_DEV_PROMOTE_SECONDARIES is an
+        // IN_DEV_ORCONF truthiness test used as `int do_promote = ...`.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_promote_secondaries_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_promote_secondaries_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 drops secondary addresses"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.conf.default.promote_secondaries");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_secure_redirects_reads_truthiness_signed() {
+        // The gate is `!= 0`, so the unsigned reader's collapse of -1 to 0
+        // silently skipped the rule on a host whose secure redirects are on
+        // (IN_DEV_SEC_REDIRECTS is an ORCONF truthiness test).
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, true), (0, false), (1, true)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_secure_redirects_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_secure_redirects_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: any nonzero value accepts secure redirects"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.conf.all.secure_redirects");
+                assert_eq!(
+                    recs[0].current_value,
+                    value.to_string(),
+                    "current_value must echo the signed value verbatim"
+                );
+                assert_eq!(recs[0].recommended_value, "0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_arp_filter_reads_truthiness_signed() {
+        // devinet_conf_proc int slot; IN_DEV_ARPFILTER is an ORCONF
+        // truthiness test consumed by net/ipv4/arp.c. The multi-NIC gate
+        // needs two interfaces and no bond on the host, so the 0 case is
+        // asserted only when that gate lets the rule run.
+        let mut info = make_test_info();
+        info.network = vec![
+            NetInfo {
+                name: "eth0".to_string(),
+                speed_mbps: 10000,
+            },
+            NetInfo {
+                name: "eth1".to_string(),
+                speed_mbps: 10000,
+            },
+        ];
+        let bonded = has_bond();
+        for (value, expects_rec) in [(-1, false), (0, !bonded), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_arp_filter_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_arp_filter_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 leaves multi-NIC ARP unfiltered"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.conf.all.arp_filter");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
         }
     }
 

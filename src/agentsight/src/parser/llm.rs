@@ -57,7 +57,21 @@ pub fn is_llm_api_path(path: &str) -> bool {
         || path.contains("/chat/completions")
         || path.contains("/completions")
         || path.contains("/api/v1/copilot/generate_copilot")
+        || is_gemini_generation_path(path)
         || is_dashscope_native_path(path)
+}
+
+/// Gemini's inference endpoints: `:generateContent` and
+/// `:streamGenerateContent`.
+///
+/// The model rides in the path (`/v1beta/models/{model}:streamGenerateContent`,
+/// and Vertex AI's `/publishers/google/models/{model}:generateContent` shares
+/// the tail) while the request body carries `contents`/`generationConfig`
+/// instead of a top-level `model`. `:countTokens` shares the prefix but counts
+/// tokens, it does not infer — the same rule the Anthropic `count_tokens`
+/// branch above applies.
+fn is_gemini_generation_path(path: &str) -> bool {
+    path.contains(":generateContent") || path.contains(":streamGenerateContent")
 }
 
 /// Normalize the messages array from a parsed request body.
@@ -234,6 +248,37 @@ mod tests {
         assert!(!is_llm_api_path(
             "/api/v1/services/aigc/text2image/image-synthesis"
         ));
+    }
+
+    /// Gemini `generateContent` / `streamGenerateContent` share one tail with
+    /// Vertex AI's publisher spelling and put the model in the path, so the
+    /// endpoint has to be recognised here: without it a Gemini stream is
+    /// audited only when its usage was parsed (the audit gate's path set is
+    /// this one), a non-streaming call is dropped at the `build_llm_call` gate,
+    /// and — worse — no pending row is created for a streaming call, so an
+    /// interrupted Gemini call never reaches the drain path. `:countTokens`
+    /// shares the prefix but is not an inference call, the same rule the
+    /// Anthropic count-tokens branch applies.
+    #[test]
+    fn test_is_llm_api_path_gemini_generation() {
+        assert!(is_llm_api_path(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        ));
+        assert!(is_llm_api_path(
+            "/v1beta/models/gemini-2.0-flash:generateContent"
+        ));
+        assert!(is_llm_api_path(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        ));
+        // Vertex AI's publisher spelling shares the same tail.
+        assert!(is_llm_api_path(
+            "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+        ));
+        // Token counting is not inference.
+        assert!(!is_llm_api_path(
+            "/v1beta/models/gemini-2.5-pro:countTokens"
+        ));
+        assert!(!is_llm_api_path("/v1beta/models"));
     }
 
     #[test]

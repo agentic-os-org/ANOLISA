@@ -30,10 +30,14 @@ pub fn param_subcategory(param: &str) -> &'static str {
         match param {
             // SysV shared-memory sizing knobs are a memory resource (the mem
             // filter has always special-cased kernel.shmmax); they must not
-            // fall through to the generic kernel.* "cpu" bucket.
+            // fall through to the generic kernel.* "cpu" bucket. The same
+            // holds for the other SysV IPC sizing knobs (semaphore sets,
+            // message queues): they size IPC memory, not the scheduler, so
+            // --category mem must surface their recommendations.
             "kernel.shmmax" | "kernel.shmall" | "kernel.shmmni" | "kernel.shm_rmid_forced" => {
                 "memory"
             }
+            "kernel.sem" | "kernel.msgmax" | "kernel.msgmnb" | "kernel.msgmni" => "memory",
             "kernel.dmesg_restrict"
             | "kernel.kptr_restrict"
             | "kernel.yama.ptrace_scope"
@@ -327,6 +331,29 @@ mod tests {
         assert_eq!(param_subcategory("kernel.shmall"), "memory");
         assert_eq!(param_subcategory("kernel.shmmni"), "memory");
         assert_eq!(param_subcategory("kernel.shm_rmid_forced"), "memory");
+    }
+
+    #[test]
+    fn sysv_ipc_sizing_knobs_subcategory_is_memory() {
+        // kernel.sem / kernel.msgmax / kernel.msgmnb are the same class of
+        // SysV IPC sizing knob the classifier already routes to "memory"
+        // (kernel.shmmax & co). They have Performance recommendations, so
+        // under the old kernel.* catch-all they were counted and filtered
+        // as "cpu" — `--category mem` silently dropped them while
+        // `--category cpu` surfaced IPC queue sizing next to scheduler
+        // knobs.
+        for param in ["kernel.sem", "kernel.msgmax", "kernel.msgmnb"] {
+            assert_eq!(param_subcategory(param), "memory", "{param}");
+            assert_eq!(
+                filter_by_category(vec![rec(param)], "mem").len(),
+                1,
+                "{param} must surface under --category mem"
+            );
+            assert!(
+                filter_by_category(vec![rec(param)], "cpu").is_empty(),
+                "{param} is not a cpu knob"
+            );
+        }
     }
 
     #[test]

@@ -93,6 +93,18 @@ keeps its JSON counts on stdout and preserves the ledger for retry.
 {"applied": 5, "score_after": 35, "score_before": 30}
 ```
 
+When this environment filters recommendations out (unwritable, or
+runtime-dangerous), a real `tune` names them in `would_skip` with the same
+shape as the dry-run preview, so the output reconciles with `check` — which
+keeps reporting those parameters (exit 1) after a successful partial tune:
+
+```json
+{"applied": 4, "failed": [], "score_after": 35, "score_before": 30, "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
+```
+
+The fully-blocked short-circuit body carries the same `would_skip` list
+alongside its counts.
+
 `tune --dry-run` previews the plan instead; `status` uses the same
 vocabulary as the short-circuit path (`planned` here; `optimal`/`blocked`
 when there is nothing to apply). `would_apply` lists the entries a real run
@@ -103,6 +115,12 @@ count:
 ```json
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
 ```
+
+`ktuner why` carries the same reason on a recommendation no write path will
+take (`skip_reason`: `unwritable` or `runtime_dangerous`; absent when the
+plan would write it), so the explanation never contradicts the plan. `check`
+publishes the same classification on its recommendations, so the diagnosis
+carries the reason without a dry run.
 
 ### rollback output
 
