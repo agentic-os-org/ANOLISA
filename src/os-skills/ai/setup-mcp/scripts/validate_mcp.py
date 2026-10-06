@@ -13,6 +13,28 @@ import os
 
 FORBIDDEN_FIELDS = {"type", "transport", "disabled", "alwaysAllow", "scope"}
 
+TRANSPORT_FIELDS = ("command", "httpUrl", "url")
+
+
+def _validate_servers(servers):
+    """Return per-server error strings; empty list means all servers valid.
+
+    A server must carry EXACTLY ONE transport indicator — none is unusable,
+    and more than one is ambiguous (the reader would have to pick
+    arbitrarily). Shared by merge (before any write) and check.
+    """
+    errors = []
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            errors.append(f"[{name}] not a JSON object")
+            continue
+        present = [f for f in TRANSPORT_FIELDS if f in cfg]
+        if not present:
+            errors.append(f"[{name}] missing transport field (command/httpUrl/url)")
+        elif len(present) > 1:
+            errors.append(f"[{name}] has multiple transport fields ({', '.join(present)}); provide exactly one")
+    return errors
+
 
 def merge(json_str, config_path):
     """Parse input JSON, merge mcpServers into existing config, write back."""
@@ -25,6 +47,14 @@ def merge(json_str, config_path):
     servers = new.get("mcpServers", {})
     if not servers:
         print("ERROR: No mcpServers found in input", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate BEFORE writing: an invalid server must not pollute the
+    # config file only for --check to reject it afterwards.
+    problems = _validate_servers(servers)
+    if problems:
+        for p in problems:
+            print(f"ERROR: {p}", file=sys.stderr)
         sys.exit(1)
 
     # Read existing config
@@ -84,10 +114,13 @@ def check(config_path):
             ok = False
             continue
 
-        # Must have exactly one transport indicator
-        has = [f for f in ("command", "httpUrl", "url") if f in cfg]
-        if not has:
-            print(f"ERROR: [{name}] missing transport field (command/httpUrl/url)", file=sys.stderr)
+        # Must have exactly one transport indicator (see _validate_servers)
+        has = [f for f in TRANSPORT_FIELDS if f in cfg]
+        if len(has) != 1:
+            if not has:
+                print(f"ERROR: [{name}] missing transport field (command/httpUrl/url)", file=sys.stderr)
+            else:
+                print(f"ERROR: [{name}] has multiple transport fields ({', '.join(has)}); provide exactly one", file=sys.stderr)
             ok = False
 
         # No forbidden fields
