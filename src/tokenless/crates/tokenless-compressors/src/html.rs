@@ -1212,7 +1212,13 @@ impl Renderer<'_> {
                     if text.is_empty() {
                         return;
                     }
-                    let ticks = if text.contains('`') { "``" } else { "`" };
+                    // A code span is closed by a backtick run of the same
+                    // length as its fence, so the fence must outgrow the
+                    // longest run in the text, exactly like a code block's.
+                    // One linear scan finds that run; probing with
+                    // `contains` for every prefix length is quadratic in
+                    // the run length, which untrusted HTML controls.
+                    let ticks = "`".repeat(longest_backtick_run(&text) + 1);
                     let _ = write!(out, "{ticks}{text}{ticks}");
                 }
                 "label" => {
@@ -1417,6 +1423,24 @@ fn destination(url: &str) -> Option<String> {
             escaped
         },
     )
+}
+
+/// Length of the longest consecutive backtick run, in one pass over the
+/// text. Fence selection for code spans needs exactly this: the smallest
+/// fence a run cannot close is one tick longer than the longest run.
+fn longest_backtick_run(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for &b in bytes {
+        if b == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    longest
 }
 
 /// Whether text can sit between `[` and `]`: brackets outside code spans
