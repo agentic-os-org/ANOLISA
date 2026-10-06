@@ -1309,23 +1309,32 @@ impl AgentsightConfig {
 
         // 加载加密公钥：优先 public_key（内联 PEM），其次 public_key_path（文件路径）
         if let Some(enc) = parsed.encryption.take() {
-            if let Some(pem) = enc.public_key {
-                let trimmed = pem.trim();
-                if !trimmed.is_empty() {
-                    self.encryption_public_key = Some(trimmed.to_string());
-                }
-            } else if let Some(path) = enc.public_key_path {
-                let trimmed = path.trim();
-                if !trimmed.is_empty() {
-                    match std::fs::read_to_string(trimmed) {
-                        Ok(content) => {
-                            self.encryption_public_key = Some(content);
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to read encryption public_key_path {trimmed:?}: {e}, encryption disabled"
-                            );
-                        }
+            // A blank inline PEM is the shipped default (`"public_key": ""`), so
+            // it must not shadow the path fallback. Branching on the field
+            // rather than on its value made `public_key_path` unreachable
+            // whenever the key was present but empty: a user who added a path
+            // without deleting the blank key silently got no encryption at all.
+            let inline = enc
+                .public_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|pem| !pem.is_empty());
+            if let Some(pem) = inline {
+                self.encryption_public_key = Some(pem.to_string());
+            } else if let Some(trimmed) = enc
+                .public_key_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                match std::fs::read_to_string(trimmed) {
+                    Ok(content) => {
+                        self.encryption_public_key = Some(content);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to read encryption public_key_path {trimmed:?}: {e}, encryption disabled"
+                        );
                     }
                 }
             }
@@ -2066,6 +2075,47 @@ mod tests {
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert_eq!(config.sls_logtail_path, None);
+    }
+
+    #[test]
+    fn test_load_from_json_uses_public_key_path_when_the_inline_key_is_blank() {
+        // The shipped config carries `"encryption": {"public_key": ""}`. Adding
+        // `public_key_path` without deleting that blank key must still enable
+        // encryption: branching on the field rather than on its value made the
+        // path fallback unreachable, so the operator got plaintext fields while
+        // believing a key was configured.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-encryption-key-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("public.pem");
+        std::fs::write(&key_path, "-----BEGIN PUBLIC KEY-----\nfixture\n").unwrap();
+
+        let mut config = AgentsightConfig::new();
+        config
+            .load_from_json(&format!(
+                r#"{{"encryption":{{"public_key":"","public_key_path":"{}"}}}}"#,
+                key_path.display()
+            ))
+            .unwrap();
+        assert_eq!(
+            config.encryption_public_key.as_deref(),
+            Some("-----BEGIN PUBLIC KEY-----\nfixture\n"),
+            "a blank inline key must not shadow the configured path"
+        );
+
+        // An inline key still wins over the path.
+        let mut config = AgentsightConfig::new();
+        config
+            .load_from_json(&format!(
+                r#"{{"encryption":{{"public_key":"inline","public_key_path":"{}"}}}}"#,
+                key_path.display()
+            ))
+            .unwrap();
+        assert_eq!(config.encryption_public_key.as_deref(), Some("inline"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── DeadLoop config tests ───────────────────────────────────────────────
