@@ -5876,7 +5876,11 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 /// class #4100 removed from `has_process` (etcdctl satisfied "etcd"), left
 /// behind at this direct-iteration site.
 fn is_database_present(info: &SystemInfo) -> bool {
-    info.has_process("postgres") || info.has_process("mysqld") || info.has_process("oracle")
+    info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database.
+        || info.has_process("mariadbd")
+        || info.has_process("oracle")
 }
 
 /// Pure core of the `vm.overcommit_ratio` rule: a strict-mode
@@ -6072,6 +6076,23 @@ mod tests {
                 .collect();
             info
         }
+        // MariaDB's daemon comm (10.4+) is the same OLTP database as
+        // mysqld; without it in the shared predicate a MariaDB host got
+        // none of the db-gated rules (sem, shmmni, overcommit_ratio).
+        assert!(
+            is_database_present(&info_with(&["mariadbd"])),
+            "mariadbd is a database"
+        );
+        assert!(
+            is_database_present(&info_with(&["mariadbd: writer"])),
+            "a role-suffixed MariaDB worker is the database"
+        );
+        // The client tool is not the server.
+        assert!(
+            !is_database_present(&info_with(&["mariadb-dump"])),
+            "mariadb-dump is not the database"
+        );
+
         // Real database servers, including role-prefixed worker comms.
         for name in ["postgres", "postgres: writer", "mysqld", "oracle"] {
             assert!(
