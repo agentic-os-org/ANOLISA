@@ -2694,6 +2694,98 @@ mod tests {
         }
     }
 
+    /// Both count endpoints build their arrays from a grouping map, so the row
+    /// order was the map's own: arbitrary, and different between two identical
+    /// requests. Every sibling list endpoint orders its array.
+    #[actix_web::test]
+    async fn interruption_count_breakdowns_have_a_defined_order() {
+        let interruption_path = unique_handler_db("interruptions-count-order");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        // Totals differ (3, 2, 1, 1, 1) and the ids do not line up with the
+        // order the rows are inserted in.
+        for (id, session, total) in [
+            ("a", "sess-zulu", 3),
+            ("b", "sess-mike", 2),
+            ("c", "sess-alpha", 1),
+            ("d", "sess-kilo", 1),
+            ("e", "sess-yankee", 1),
+        ] {
+            for n in 0..total {
+                istore
+                    .insert(&make_interruption_event(
+                        &format!("int-order-{id}-{n}"),
+                        session,
+                        &format!("conv-order-{id}-{n}"),
+                        crate::interruption::InterruptionType::RateLimit,
+                    ))
+                    .unwrap();
+            }
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        let rows_of = |uri: &str| {
+            let uri = uri.to_string();
+            let app = &app;
+            async move {
+                let body = service_response_json(
+                    awtest::call_service(app, awtest::TestRequest::get().uri(&uri).to_request())
+                        .await,
+                )
+                .await;
+                body.as_array()
+                    .expect("the endpoint returns an array")
+                    .iter()
+                    .map(|row| {
+                        (
+                            row["session_id"].as_str().unwrap_or_default().to_string(),
+                            row["total"].as_i64().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let expected = vec![
+            ("sess-zulu".to_string(), 3),
+            ("sess-mike".to_string(), 2),
+            ("sess-alpha".to_string(), 1),
+            ("sess-kilo".to_string(), 1),
+            ("sess-yankee".to_string(), 1),
+        ];
+        let window = "start_ns=0&end_ns=9223372036854775807";
+        assert_eq!(
+            rows_of(&format!("/interruptions/session-counts?{window}")).await,
+            expected,
+            "biggest total first, then the id"
+        );
+        // The per-conversation breakdown groups by (session, conversation), and
+        // this fixture gives every event its own conversation: eight rows, all
+        // with total 1, so the rule falls through to the ids.
+        let conversation_expected = vec![
+            ("sess-alpha".to_string(), 1),
+            ("sess-kilo".to_string(), 1),
+            ("sess-mike".to_string(), 1),
+            ("sess-mike".to_string(), 1),
+            ("sess-yankee".to_string(), 1),
+            ("sess-zulu".to_string(), 1),
+            ("sess-zulu".to_string(), 1),
+            ("sess-zulu".to_string(), 1),
+        ];
+        assert_eq!(
+            rows_of(&format!("/interruptions/conversation-counts?{window}")).await,
+            conversation_expected,
+            "the per-conversation breakdown uses the same rule"
+        );
+    }
+
     #[actix_web::test]
     async fn interruption_count_scopes_to_the_requested_agent() {
         // The overview total is documented and used as the sum of the
@@ -5141,9 +5233,17 @@ pub async fn interruption_session_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map
+            // Biggest first, then by id. The grouping map's order is arbitrary,
+            // so two identical requests returned the same rows in different
+            // positions; every sibling list endpoint orders its array.
+            let mut grouped: Vec<_> = map
                 .into_iter()
-                .map(|(sid, (total, by_sev, types))| {
+                .map(|(sid, (total, by_sev, types))| (sid, total, by_sev, types))
+                .collect();
+            grouped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let json: Vec<_> = grouped
+                .into_iter()
+                .map(|(sid, total, by_sev, types)| {
                     serde_json::json!({
                         "session_id": sid,
                         "total": total,
@@ -5228,9 +5328,18 @@ pub async fn interruption_conversation_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map
+            // Same ordering rule as the per-session breakdown above.
+            let mut grouped: Vec<_> = map
                 .into_iter()
-                .map(|((sid, cid), (total, by_sev, types))| {
+                .map(|((sid, cid), (total, by_sev, types))| (sid, cid, total, by_sev, types))
+                .collect();
+            grouped.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+            });
+            let json: Vec<_> = grouped
+                .into_iter()
+                .map(|(sid, cid, total, by_sev, types)| {
                     serde_json::json!({
                         "session_id": sid,
                         "conversation_id": cid,
