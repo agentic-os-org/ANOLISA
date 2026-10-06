@@ -14,6 +14,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::TimeZone;
+
 use crate::interruption::types::{InterruptionEvent, InterruptionType};
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::InterruptionStore;
@@ -321,6 +323,12 @@ fn parse_oom_kill_structured(line: &str) -> Option<(i32, String)> {
 
 /// Parse timestamp from dmesg -T format: "[Fri Apr 17 15:58:28 2026]"
 /// Returns nanoseconds since Unix epoch, or None if parsing fails.
+///
+/// `dmesg -T` renders the timestamp with `strftime("%c")` over `localtime_r`,
+/// so the fields carry the *local* wall clock, not UTC. Reading them as UTC
+/// shifted every recovered kill by the host's offset, which desynchronized it
+/// from the instant the real-time health checker had already recorded for the
+/// same kill: the `(pid, timestamp)` dedup missed and one OOM was stored twice.
 fn parse_dmesg_timestamp(line: &str) -> Option<i64> {
     // Format: [Fri Apr 17 15:58:28 2026]
     let start = line.find('[')?;
@@ -338,7 +346,13 @@ fn parse_dmesg_timestamp(line: &str) -> Option<i64> {
     // Reconstruct as "17 Apr 2026 15:58:28" for a stable parse
     let normalised = format!("{} {} {} {}", parts[2], parts[1], parts[4], parts[3]);
     let dt = chrono::NaiveDateTime::parse_from_str(&normalised, "%d %b %Y %T").ok()?;
-    let ns = dt.and_utc().timestamp_nanos_opt()?;
+    // `earliest()` resolves a DST fold to the first occurrence and returns
+    // `None` only inside a spring-forward gap, where the kernel never rendered
+    // this timestamp anyway.
+    let ns = chrono::Local
+        .from_local_datetime(&dt)
+        .earliest()?
+        .timestamp_nanos_opt()?;
     Some(ns)
 }
 
@@ -463,6 +477,23 @@ mod tests {
 
     // ─── dmesg output locale (startup recovery timestamps) ────────────────
 
+    #[test]
+    fn parse_dmesg_timestamp_round_trips_through_local_time() {
+        // The fields `dmesg -T` prints are the local wall clock, so the stored
+        // instant must render back to the same wall clock in the host's zone.
+        // Zone-independent on purpose: the fixed-zone case lives in the child
+        // test below, and reading the fields as UTC breaks this invariant on
+        // every non-UTC host.
+        let ns = parse_dmesg_timestamp(SUMMARY_LINE).expect("the timestamp parses");
+        let back = chrono::DateTime::from_timestamp_nanos(ns)
+            .with_timezone(&chrono::Local)
+            .naive_local();
+        assert_eq!(
+            back.format("%d %b %Y %T").to_string(),
+            "17 Apr 2026 10:00:00"
+        );
+    }
+
     /// A `dmesg` stand-in that mimics util-linux: `-T` renders the timestamp
     /// with `strftime("%c")`, so the weekday and month names follow the
     /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`).
@@ -511,6 +542,10 @@ esac
                 .env(CHILD, "1")
                 .env("LC_ALL", "zh_CN.UTF-8")
                 .env("LANG", "zh_CN.UTF-8")
+                // `dmesg -T` renders local time, so the expected instant only
+                // has a single value once the zone is pinned. Asia/Shanghai is
+                // UTC+8 with no DST, which keeps the arithmetic obvious.
+                .env("TZ", "Asia/Shanghai")
                 .env("PATH", path_var)
                 .output()
                 .expect("re-exec the test binary");
@@ -530,10 +565,12 @@ esac
             .iter()
             .find(|event| event.pid == 12345)
             .expect("killed process event");
-        // "[Fri Apr 17 10:00:00 2026]" -> 2026-04-17T10:00:00Z
+        // The rendered field is the *local* wall clock: 2026-04-17 10:00:00 at
+        // UTC+8 is 2026-04-17T02:00:00Z. Reading it as UTC stored 10:00Z, eight
+        // hours after the health checker had recorded the same kill.
         assert_eq!(
-            event.timestamp_ns, 1_776_420_000_000_000_000,
-            "the C-locale timestamp must survive a foreign LC_TIME"
+            event.timestamp_ns, 1_776_391_200_000_000_000,
+            "the C-locale timestamp must survive a foreign LC_TIME and keep its zone"
         );
     }
 
