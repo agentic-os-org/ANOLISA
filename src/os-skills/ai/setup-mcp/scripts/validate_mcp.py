@@ -22,7 +22,14 @@ def merge(json_str, config_path):
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
 
+    if not isinstance(new, dict):
+        print("ERROR: Input JSON must be an object with an mcpServers key", file=sys.stderr)
+        sys.exit(1)
+
     servers = new.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        print("ERROR: mcpServers must be a JSON object mapping server names to configs", file=sys.stderr)
+        sys.exit(1)
     if not servers:
         print("ERROR: No mcpServers found in input", file=sys.stderr)
         sys.exit(1)
@@ -70,6 +77,10 @@ def check(config_path):
             data = json.load(f)
     except json.JSONDecodeError as e:
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(data, dict):
+        print(f"ERROR: {config_path} must contain a JSON object", file=sys.stderr)
         sys.exit(1)
 
     servers = data.get("mcpServers", {})
