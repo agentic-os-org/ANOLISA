@@ -124,6 +124,25 @@ class TestStyleAuditSheetResolution(unittest.TestCase):
             self.assertIn("no worksheets", result.stdout)
             self.assertNotIn("PASS", result.stdout)
 
+    def test_blue_formula_cell_counted_once(self):
+        """A blue-font formula cell is one formula cell, not two.
+
+        The C2 violation branch used to bump the formula_cells tally as well
+        as the per-cell tally at the bottom of the loop, so the summary
+        reported formula_cells=2 for a single-cell sheet.
+        """
+        import json
+        with tempfile.TemporaryDirectory() as root:
+            xlsx = build_xlsx(os.path.join(root, "count.xlsx"),
+                              "/xl/worksheets/sheet1.xml",
+                              "xl/worksheets/sheet1.xml")
+            result = subprocess.run([sys.executable, SCRIPT, xlsx, "--json"],
+                                    capture_output=True, text=True)
+            summary = json.loads(result.stdout)["summary"]
+            self.assertEqual(summary["total_cells_inspected"], 1)
+            self.assertEqual(summary["formula_cells"], 1, summary)
+            self.assertEqual(summary["violations"], 1, summary)
+
 
 if __name__ == "__main__":
     unittest.main()

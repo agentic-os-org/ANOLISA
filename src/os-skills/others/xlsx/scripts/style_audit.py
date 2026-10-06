@@ -312,7 +312,6 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
 
             # Check C2: color-role violation — formula cell with blue font
             if has_formula and _is_blue_font(font):
-                formula_cells += 1
                 f_elem = cell.find(f"{NSP}f")
                 formula_text = f_elem.text if f_elem is not None else ""
                 v.append({
