@@ -61,6 +61,8 @@
 //! behind explicit follow-up packages (H1 hook protocol, C2 active
 //! mapping persistence) and not behind silent fallbacks here.
 
+use std::io::Read;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -806,6 +808,81 @@ impl CliLedgerAdapter {
     }
 }
 
+/// Maximum bytes retained per stream from a decision command.
+///
+/// A decision response is a small JSON document and `scan` diagnostics are
+/// meant for an operator, so a provider that floods a pipe must not grow
+/// the adapter's memory with its output. Bytes beyond the cap are drained
+/// and dropped; the exit status is still reported.
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Switch a piped stream to non-blocking mode.
+///
+/// A drain pass then stops at "no bytes available right now" instead of
+/// waiting for every process holding the write end to close it.
+fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: `fd` is an open pipe read end owned by the caller for the
+    // duration of the call; `fcntl` only reads and updates its file
+    // status flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: same open file description as the `F_GETFL` call above.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// One bounded, non-blocking drain pass over a piped stream.
+///
+/// Reads until the stream reports no more immediately-available bytes, the
+/// writer closes it, or `limit` bytes were consumed — whichever comes
+/// first, so a pass never waits on another process. At most
+/// [`MAX_CAPTURED_OUTPUT_BYTES`] are retained; the rest of the pass still
+/// drains so a flooding writer does not block on a full pipe.
+///
+/// Returns `true` when at least one byte was consumed, and replaces the
+/// reader with `None` once the stream reached EOF (or errored) so the
+/// caller can drop it.
+fn drain_pass<R: Read + AsRawFd>(pipe: &mut Option<R>, buf: &mut Vec<u8>, limit: usize) -> bool {
+    let mut consumed = 0usize;
+    let mut progress = false;
+    let mut scratch = [0u8; 8192];
+    let mut closed = false;
+
+    if let Some(reader) = pipe.as_mut() {
+        while consumed < limit {
+            match reader.read(&mut scratch) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(n) => {
+                    consumed += n;
+                    progress = true;
+                    let room = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(buf.len());
+                    if room > 0 {
+                        buf.extend_from_slice(&scratch[..n.min(room)]);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if closed {
+        *pipe = None;
+    }
+    progress
+}
+
 fn run_with_timeout(
     program: &Path,
     args: &[String],
@@ -822,49 +899,61 @@ fn run_with_timeout(
             source: e,
         })?;
 
-    // Drain stdout/stderr on background threads to avoid pipe
-    // backpressure deadlock when the child produces large output.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    // Drain both pipes from the wait loop itself. The previous version read
+    // them on detached threads and joined those threads once the child
+    // exited, which waited for EOF on the pipes: a grandchild that
+    // inherited them held the call open long past `timeout` (and forever
+    // if it never exited). Non-blocking passes keep the wait bounded by
+    // the deadline and the retained output bounded by the cap.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    for fd in [
+        stdout_pipe.as_ref().map(AsRawFd::as_raw_fd),
+        stderr_pipe.as_ref().map(AsRawFd::as_raw_fd),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        set_nonblocking(fd).map_err(|source| LedgerError::Spawn {
+            binary: program.to_path_buf(),
+            source,
+        })?;
+    }
 
-    let stdout_handle = std::thread::spawn(move || {
-        stdout_pipe
-            .map(|mut r| {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut r, &mut buf).ok();
-                buf
-            })
-            .unwrap_or_default()
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        stderr_pipe
-            .map(|mut r| {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut r, &mut buf).ok();
-                buf
-            })
-            .unwrap_or_default()
-    });
-
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
     let deadline = std::time::Instant::now() + timeout;
+
     loop {
+        let drained_stdout =
+            drain_pass(&mut stdout_pipe, &mut stdout_buf, MAX_CAPTURED_OUTPUT_BYTES);
+        let drained_stderr =
+            drain_pass(&mut stderr_pipe, &mut stderr_buf, MAX_CAPTURED_OUTPUT_BYTES);
+
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = stdout_handle.join().unwrap_or_default();
-                let stderr = stderr_handle.join().unwrap_or_default();
+                // One more bounded pass picks up whatever the child wrote
+                // before exiting; a writer that outlived it can add no more
+                // than one pipe buffer and never extends the call.
+                drain_pass(&mut stdout_pipe, &mut stdout_buf, MAX_CAPTURED_OUTPUT_BYTES);
+                drain_pass(&mut stderr_pipe, &mut stderr_buf, MAX_CAPTURED_OUTPUT_BYTES);
                 return Ok(std::process::Output {
                     status,
-                    stdout,
-                    stderr,
+                    stdout: stdout_buf,
+                    stderr: stderr_buf,
                 });
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Both read ends are dropped on return, so no drain
+                    // outlives the wait.
                     return Err(LedgerError::Timeout { kind, timeout });
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                if !drained_stdout && !drained_stderr {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
             Err(e) => {
                 return Err(LedgerError::Spawn {
@@ -1660,6 +1749,68 @@ mod tests {
             LedgerError::Timeout { kind, .. } => assert_eq!(kind, "resolve"),
             other => panic!("expected Timeout, got {other:?}"),
         }
+    }
+
+    /// A decision command that hands its pipes to a background process and
+    /// exits must not extend the call past its timeout: the deadline bounds
+    /// the whole invocation, not only the wait for the direct child.
+    /// `sh -c 'sleep 3 & exit 0'` exits immediately while the background
+    /// `sleep` keeps the inherited stdout/stderr pipes open.
+    #[test]
+    fn run_with_timeout_is_bounded_by_a_writer_that_outlives_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("detach.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 3 &\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let output = run_with_timeout(
+            Path::new("/bin/sh"),
+            &[script.display().to_string()],
+            Duration::from_millis(200),
+            "scan",
+        )
+        .expect("the direct child exited 0 within the timeout");
+        let elapsed = started.elapsed();
+        assert!(output.status.success());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "a 200 ms deadline must bound the call even when a grandchild holds the \
+             inherited pipes open; the call took {elapsed:?}"
+        );
+    }
+
+    /// A decision command that floods both pipes must not grow the adapter's
+    /// memory with the provider's output. The exit status is still reported.
+    #[test]
+    fn run_with_timeout_bounds_captured_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("flood.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 4194304 /dev/zero | tr '\\0' x\nhead -c 4194304 /dev/zero | tr '\\0' y 1>&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = run_with_timeout(
+            Path::new("/bin/sh"),
+            &[script.display().to_string()],
+            Duration::from_secs(10),
+            "scan",
+        )
+        .expect("the flooding child still exits 0");
+        assert!(output.status.success());
+        assert!(
+            output.stdout.len() <= MAX_CAPTURED_OUTPUT_BYTES,
+            "stdout must stay within the capture cap, got {} bytes",
+            output.stdout.len()
+        );
+        assert!(
+            output.stderr.len() <= MAX_CAPTURED_OUTPUT_BYTES,
+            "stderr must stay within the capture cap, got {} bytes",
+            output.stderr.len()
+        );
     }
 
     #[test]

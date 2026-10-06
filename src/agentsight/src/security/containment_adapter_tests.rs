@@ -79,6 +79,7 @@ struct ApplyingGenerationEnforcer {
     lease_pause: Mutex<Option<LeasePause>>,
     apply_calls: AtomicUsize,
     detach_calls: AtomicUsize,
+    reverse_failures: AtomicUsize,
 }
 
 struct TestReadinessLease;
@@ -87,12 +88,17 @@ impl ContainmentReadinessLease for TestReadinessLease {}
 
 impl ApplyingGenerationEnforcer {
     fn new(source: Binding) -> Self {
-        let source_policy_snapshot = CredentialPolicySnapshot::capture(credential_policy(
-            "/root/secret.txt",
-            300,
-            PolicyMode::Audit,
-        ))
-        .expect("source policy should be valid");
+        Self::new_with_policy(
+            source,
+            credential_policy("/root/secret.txt", 300, PolicyMode::Audit),
+        )
+    }
+
+    /// Like `new`, but with the exact source snapshot, so source-policy
+    /// shapes beyond a single path can be exercised.
+    fn new_with_policy(source: Binding, source_policy: CredentialExfiltrationPolicy) -> Self {
+        let source_policy_snapshot = CredentialPolicySnapshot::capture(source_policy)
+            .expect("source policy should be valid");
         Self {
             generation: Mutex::new(1),
             stamped_generation: Mutex::new(1),
@@ -102,11 +108,16 @@ impl ApplyingGenerationEnforcer {
             lease_pause: Mutex::new(None),
             apply_calls: AtomicUsize::new(0),
             detach_calls: AtomicUsize::new(0),
+            reverse_failures: AtomicUsize::new(0),
         }
     }
 
     fn pause_next_lease(&self) -> LeasePauseHandle {
         pause_next(&self.lease_pause)
+    }
+
+    fn fail_next_reverse(&self) {
+        self.reverse_failures.fetch_add(1, Ordering::AcqRel);
     }
 
     fn stamp(&self) {
@@ -143,12 +154,22 @@ impl ContainmentEnforcer for ApplyingGenerationEnforcer {
         self.stamp();
         self.apply_calls.fetch_add(1, Ordering::AcqRel);
         let binding = match transition.replacement.clone() {
-            ReplacementPolicy::Credential(request) => binding(
-                request.binding_id,
-                request.root_pid,
-                request.process_start_time,
-                enforce_policy(&request.policy.source_patterns[0]),
-            ),
+            ReplacementPolicy::Credential(request) => {
+                // Mirror the real adapter compiler: one `source` line per
+                // source pattern, not just the first one.
+                let sources: Vec<&str> = request
+                    .policy
+                    .source_patterns
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                binding(
+                    request.binding_id,
+                    request.root_pid,
+                    request.process_start_time,
+                    enforce_policy_for(&sources),
+                )
+            }
             ReplacementPolicy::Generic(request) => Binding {
                 request,
                 state: BindingState::Enforced,
@@ -196,6 +217,11 @@ impl ContainmentEnforcer for ApplyingGenerationEnforcer {
         &self,
         action_id: Uuid,
     ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        if self.reverse_failures.swap(0, Ordering::AcqRel) > 0 {
+            return Err(ContainmentEnforcerError::Unavailable(
+                "test enforcer is transiently unavailable".into(),
+            ));
+        }
         let forward_key = TransitionKey {
             action_id,
             direction: TransitionDirection::Forward,
@@ -342,6 +368,64 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
 }
 
 #[test]
+fn restore_budget_is_not_consumed_by_attach_retries() {
+    // `attempt_count` serves two regimes: uncapped pending-attach retries
+    // (one per transient enforcer blip) and the capped audit-restore budget
+    // (terminal Failed at RESTORE_MAX_RETRIES). A containment that survived
+    // four attach blips before activating must still receive the full
+    // restore budget when its first detach hits one transient failure,
+    // instead of going terminal on the first restore attempt.
+    let source_binding_id = Uuid::new_v4();
+    let action_binding_id = Uuid::new_v4();
+    let mut target = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("live test target should start");
+    let pid = i32::try_from(target.id()).expect("test PID should fit in i32");
+    let process_start_time =
+        read_process_start_time(pid).expect("live test process should have a start time");
+    let enforcer = Arc::new(ApplyingGenerationEnforcer::new(binding(
+        source_binding_id,
+        pid,
+        process_start_time,
+        audit_policy("/root/secret.txt"),
+    )));
+    let (security_store, case_id, mut action) = security_fixture(
+        source_binding_id,
+        action_binding_id,
+        pid,
+        process_start_time,
+    );
+    action.lifecycle_state = ContainmentLifecycle::Active;
+    action.attempt_count = 4;
+    action.next_retry_at_ns = None;
+    security_store
+        .update_containment_action(&action)
+        .expect("action should become active");
+    enforcer.fail_next_reverse();
+    let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
+    let containment = ContainmentCoordinator::new(Arc::clone(&security_store), enforcer_trait);
+
+    assert!(matches!(
+        containment.reconcile_once(3 * SECOND_NS),
+        Err(ContainmentError::Enforcer(_))
+    ));
+
+    let restored = latest_action(&security_store, case_id);
+    assert_eq!(
+        restored.lifecycle_state,
+        ContainmentLifecycle::Expiring,
+        "one transient detach failure must schedule a restore retry"
+    );
+    assert!(
+        restored.next_retry_at_ns.is_some(),
+        "the restore budget must not be pre-consumed by attach retries"
+    );
+    target.kill().expect("live test target should stop");
+    target.wait().expect("live test target should be reaped");
+}
+
+#[test]
 fn missing_source_policy_snapshot_retains_the_audit_binding() {
     let source_binding_id = Uuid::new_v4();
     let source = binding(
@@ -373,12 +457,65 @@ fn missing_source_policy_snapshot_retains_the_audit_binding() {
     assert_eq!(enforcer.detach_calls.load(Ordering::Acquire), 0);
 }
 
-fn security_fixture(
+#[test]
+fn multi_source_policy_activates_containment() {
+    // Two-source credential policies are an operator-supported API shape; the
+    // adapter compiles one `source` line per pattern. Containment must accept
+    // that acknowledgement and reach Active instead of rolling back a policy
+    // the enforcer accepted.
+    let source_binding_id = Uuid::new_v4();
+    let mut target = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("live test target should start");
+    let pid = i32::try_from(target.id()).expect("test PID should fit in i32");
+    let process_start_time =
+        read_process_start_time(pid).expect("live test process should have a start time");
+    let sources = ["/root/secret.txt", "/root/token.json"];
+    let enforcer = Arc::new(ApplyingGenerationEnforcer::new_with_policy(
+        binding(
+            source_binding_id,
+            pid,
+            process_start_time,
+            audit_policy_for(&sources),
+        ),
+        credential_policy_for(&sources, 300, PolicyMode::Audit),
+    ));
+    let (security_store, case_id) =
+        security_fixture_without_action(source_binding_id, pid, process_start_time);
+    let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
+    let containment = ContainmentCoordinator::new(Arc::clone(&security_store), enforcer_trait);
+
+    let activated = containment
+        .contain(
+            case_id,
+            ContainmentRequest {
+                root_pid: pid,
+                duration_secs: Some(60),
+            },
+            &[],
+            "principal:test-operator",
+        )
+        .expect("multi-source containment should activate");
+
+    assert_eq!(activated.lifecycle_state, ContainmentLifecycle::Active);
+    let persisted = latest_action(&security_store, case_id);
+    assert_eq!(persisted.action_id, activated.action_id);
+    assert_eq!(persisted.lifecycle_state, ContainmentLifecycle::Active);
+    assert_eq!(
+        enforcer.detach_calls.load(Ordering::Acquire),
+        0,
+        "an accepted multi-source policy must not be detached"
+    );
+    target.kill().expect("live test target should stop");
+    target.wait().expect("live test target should be reaped");
+}
+
+fn security_fixture_without_action(
     source_binding_id: Uuid,
-    action_binding_id: Uuid,
     pid: i32,
     process_start_time: u64,
-) -> (Arc<SecurityStore>, Uuid, ContainmentAction) {
+) -> (Arc<SecurityStore>, Uuid) {
     let store = Arc::new(SecurityStore::open_in_memory().expect("store should open"));
     let event = evidence(source_binding_id, pid, process_start_time);
     store.insert_event(&event).expect("evidence should persist");
@@ -386,6 +523,17 @@ fn security_fixture(
     store
         .upsert_case(&risk_case(case_id), &[event.event_id])
         .expect("case should persist");
+    (store, case_id)
+}
+
+fn security_fixture(
+    source_binding_id: Uuid,
+    action_binding_id: Uuid,
+    pid: i32,
+    process_start_time: u64,
+) -> (Arc<SecurityStore>, Uuid, ContainmentAction) {
+    let (store, case_id) =
+        security_fixture_without_action(source_binding_id, pid, process_start_time);
     let action = pending_action(
         case_id,
         source_binding_id,
@@ -450,14 +598,27 @@ fn audit_policy(source: &str) -> String {
     compiled_policy("notify", source)
 }
 
-fn enforce_policy(source: &str) -> String {
-    compiled_policy("block", source)
+fn audit_policy_for(sources: &[&str]) -> String {
+    compiled_policy_for("notify", sources)
+}
+
+fn enforce_policy_for(sources: &[&str]) -> String {
+    compiled_policy_for("block", sources)
 }
 
 fn compiled_policy(action: &str, source: &str) -> String {
-    format!(
-        "source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{source}\"\nrule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if CREDENTIAL unless target \"trusted.example:443\"\n  because \"credential-derived data reached an untrusted network target\"\n"
-    )
+    compiled_policy_for(action, &[source])
+}
+
+fn compiled_policy_for(action: &str, sources: &[&str]) -> String {
+    let mut dsl = String::from("source AGENT = exec \"**\"\n");
+    for source in sources {
+        dsl.push_str(&format!("source CREDENTIAL = file \"{source}\"\n"));
+    }
+    dsl.push_str(&format!(
+        "rule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if CREDENTIAL unless target \"trusted.example:443\"\n  because \"credential-derived data reached an untrusted network target\"\n"
+    ));
+    dsl
 }
 
 fn credential_policy(
@@ -465,10 +626,18 @@ fn credential_policy(
     taint_ttl_secs: u64,
     mode: PolicyMode,
 ) -> CredentialExfiltrationPolicy {
+    credential_policy_for(&[source], taint_ttl_secs, mode)
+}
+
+fn credential_policy_for(
+    sources: &[&str],
+    taint_ttl_secs: u64,
+    mode: PolicyMode,
+) -> CredentialExfiltrationPolicy {
     CredentialExfiltrationPolicy {
         policy_id: "credential-exfiltration".into(),
         revision: 3,
-        source_patterns: vec![source.into()],
+        source_patterns: sources.iter().map(|source| (*source).into()).collect(),
         trusted_endpoints: vec!["trusted.example:443".into()],
         taint_label: "CREDENTIAL".into(),
         taint_ttl_secs,

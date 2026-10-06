@@ -49,7 +49,7 @@ pub struct LogsArgs {
     // filtering path. Visible so clap advertises `[aliases: --level]` itself.
     #[arg(long, visible_alias = "level", value_name = "LEVEL")]
     pub severity: Option<String>,
-    /// Lexicographic ISO8601 lower bound on `started_at`.
+    /// Inclusive RFC3339 lower bound on `started_at`.
     #[arg(long, value_name = "ISO")]
     pub since: Option<String>,
     /// Cap returned records to the most recent N (default 50, max 1000; 0 returns none).

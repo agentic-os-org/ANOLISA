@@ -16,10 +16,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 static GLOBAL_TOKENIZER: OnceCell<Mutex<MultiModelTokenizer>> = OnceCell::new();
 
 fn get_global_manager() -> MutexGuard<'static, MultiModelTokenizer> {
+    // The guard is held across HuggingFace Hub client construction and tokenizer
+    // downloads, so a panic in that path poisons this mutex. Recover the guard
+    // (like `TrajectoryRecorder` and the enforcer accessors do) instead of
+    // panicking: `.expect` here killed every later token count for the rest of
+    // the process, including for models that are already cached.
     GLOBAL_TOKENIZER
         .get_or_init(|| Mutex::new(MultiModelTokenizer::new()))
         .lock()
-        .expect("Failed to lock global tokenizer")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn get_global_tokenizer(model_id: &str) -> Result<Arc<LlmTokenizer>> {
@@ -210,6 +215,29 @@ impl MultiModelTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panic while the global manager guard was held poisons the mutex for the
+    /// rest of the process. Acquiring it must recover the guard — otherwise
+    /// every later token count dies with the same panic, including for models
+    /// that are already cached.
+    ///
+    /// The guard is held across `ApiBuilder::build()` and the HuggingFace Hub
+    /// download in `register_from_hf`, so one failed tokenizer download is
+    /// enough to poison it.
+    #[test]
+    fn test_poisoned_global_manager_lock_is_recovered() {
+        // Poison it the way a panic inside the critical section would.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = get_global_manager();
+            panic!("intentional poison");
+        }));
+        assert!(poisoned.is_err(), "global manager lock should be poisoned");
+
+        // Before the fix this line panics with "Failed to lock global tokenizer".
+        let mut manager = get_global_manager();
+        // The recovered guard is usable: a lookup still answers.
+        assert!(manager.get("definitely-not-a-registered-model").is_none());
+    }
 
     #[test]
     fn test_default_creates_with_default_capacity() {

@@ -17,7 +17,7 @@ use crate::types::{
 fn short_label(s: &str) -> String {
     let truncated: String = s.chars().take(20).collect();
     if s.chars().count() > 20 {
-        format!("{}…", truncated)
+        format!("{truncated}…")
     } else {
         truncated
     }
@@ -49,6 +49,7 @@ pub async fn identify_issues(
             items: vec![],
             considered: 0,
             dismissed: 0,
+            failed: 0,
             wall_secs: candidates.wall_secs,
             causal_graph: None,
         });
@@ -86,7 +87,7 @@ pub async fn identify_issues(
             let messages = build_strategy_prompt(&candidates, strategy, trajectory);
             let strategy_id = strategy.id;
             let strategy_name = strategy.name;
-            let label = format!("perf:{}", strategy_id);
+            let label = format!("perf:{strategy_id}");
             async move {
                 let result: std::result::Result<PerfStrategyEval, _> = client
                     .chat_json_parsed_labeled(messages, Some(&label))
@@ -97,11 +98,14 @@ pub async fn identify_issues(
         .collect();
 
     let results = futures::future::join_all(futures).await;
+    let judged = results.len();
 
     // Merge results into causal graph + issue rows.
     let mut nodes: Vec<PerfCausalNode> = Vec::new();
     let mut edges: Vec<PerfCausalEdge> = Vec::new();
     let mut items: Vec<PerfIssue> = Vec::new();
+    let mut failed = 0usize;
+    let mut last_err = None;
     let mut idx = 0usize;
 
     for (strategy_id, strategy_name, result) in results {
@@ -122,6 +126,8 @@ pub async fn identify_issues(
             }
             Err(err) => {
                 tracing::warn!("Perf: strategy '{}' LLM call failed: {}", strategy_id, err);
+                failed += 1;
+                last_err = Some(err);
                 continue;
             }
         };
@@ -132,9 +138,9 @@ pub async fn identify_issues(
         }
 
         idx += 1;
-        let sig_id = format!("sig_{}", idx);
-        let cause_id = format!("cause_{}", idx);
-        let strat_id = format!("strat_{}", idx);
+        let sig_id = format!("sig_{idx}");
+        let cause_id = format!("cause_{idx}");
+        let strat_id = format!("strat_{idx}");
 
         let saving = eval.estimated_saving_secs;
         let confidence = if eval.confidence.is_empty() {
@@ -217,7 +223,20 @@ pub async fn identify_issues(
         STRATEGIES.len()
     );
 
-    let dismissed = STRATEGIES.len().saturating_sub(items.len());
+    // A report built from zero successful judgments reads as a clean "no
+    // issues" verdict downstream (it is persisted and rendered as such), so an
+    // all-failed run must surface its error instead.
+    if judged > 0 && failed == judged {
+        let err = last_err.expect("failed count implies an error");
+        return Err(anyhow::anyhow!(
+            "all {failed} perf LLM judgments failed: {err:#}"
+        ));
+    }
+
+    let dismissed = STRATEGIES
+        .len()
+        .saturating_sub(items.len())
+        .saturating_sub(failed);
     let causal_graph = if nodes.is_empty() {
         None
     } else {
@@ -228,7 +247,43 @@ pub async fn identify_issues(
         items,
         considered,
         dismissed,
+        failed,
         wall_secs,
         causal_graph,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// When every per-strategy judgment call fails (endpoint down, bad key),
+    /// the run must surface an error instead of returning a report: the caller
+    /// persists an Ok report as the dimension result and the dashboard renders
+    /// it as "evaluated N strategies, none apply" — a false clean verdict that
+    /// outlives the outage as stored data, the same trap 8c141e618 closed for
+    /// the cost dimension.
+    #[tokio::test]
+    async fn all_failed_judgments_error_instead_of_a_clean_report() {
+        let t = AtifTrajectory::from_json(
+            r#"{"schema_version":"ATIF-v1.6","session_id":"s1",
+                "agent":{"name":"a","version":"1","model_name":"m"},
+                "steps":[
+                  {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:00.000Z",
+                   "tool_calls":[{"tool_call_id":"c1","function_name":"Bash",
+                                  "arguments":{"command":"cargo test"}}],
+                   "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+                  {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:20.000Z",
+                   "message":"done"}
+                ]}"#,
+        )
+        .unwrap();
+        let client = LlmClient::with_config("http://127.0.0.1:1/v1", "key", "test-model");
+        let report = identify_issues(&client, &t).await;
+        assert!(
+            report.is_err(),
+            "every perf strategy failed against a dead endpoint; \
+             expected Err, got {report:?}"
+        );
+    }
 }

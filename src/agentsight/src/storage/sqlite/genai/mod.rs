@@ -170,13 +170,25 @@ impl GenAISqliteStore {
         let events: Vec<_> = pending.drain(..).collect();
         drop(pending); // release lock before writing
 
+        // Events whose insert failed (SQLITE_BUSY/LOCKED/IOERR, a constraint
+        // violation, or SQLITE_FULL after the prune retries) are re-queued at
+        // the front of the buffer so the next flush retries them instead of
+        // dropping up to `max_size` completed LLM calls.
+        let mut failed = Vec::new();
         let mut ok_count = 0usize;
-        for event in &events {
-            if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event in batch flush: {e}");
-            } else {
-                ok_count += 1;
+        for event in events {
+            match self.store_event(&event) {
+                Ok(()) => ok_count += 1,
+                Err(e) => {
+                    log::warn!("Failed to store GenAI event in batch flush: {e}");
+                    failed.push(event);
+                }
             }
+        }
+        if !failed.is_empty() {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            failed.append(&mut pending);
+            *pending = failed;
         }
         if ok_count > 0 {
             log::debug!("Batch-flushed {ok_count} GenAI events");

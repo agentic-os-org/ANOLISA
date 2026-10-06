@@ -385,11 +385,12 @@ fn is_probe(call: &ToolCall) -> bool {
     let Some(command) = command_of(call) else {
         return false;
     };
-    // `&&`, `||`, `;` and `|` are all built from these three characters, so
-    // splitting per character and dropping empty pieces covers every separator
-    // without needing a multi-string pattern.
+    // `&&`, `||`, `;` and `|` are all built from these three characters, and a
+    // newline chains commands the same way they do, so splitting per character
+    // and dropping empty pieces covers every separator without needing a
+    // multi-string pattern.
     let segments: Vec<&str> = command
-        .split([';', '|', '&'])
+        .split([';', '|', '&', '\n'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();

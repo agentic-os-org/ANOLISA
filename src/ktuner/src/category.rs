@@ -28,6 +28,12 @@ pub fn param_subcategory(param: &str) -> &'static str {
         "cpu"
     } else if param.starts_with("kernel.") {
         match param {
+            // SysV shared-memory sizing knobs are a memory resource (the mem
+            // filter has always special-cased kernel.shmmax); they must not
+            // fall through to the generic kernel.* "cpu" bucket.
+            "kernel.shmmax" | "kernel.shmall" | "kernel.shmmni" | "kernel.shm_rmid_forced" => {
+                "memory"
+            }
             "kernel.dmesg_restrict"
             | "kernel.kptr_restrict"
             | "kernel.yama.ptrace_scope"
@@ -71,6 +77,13 @@ pub fn validate_category(cat: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Keep only the recommendations whose parameter belongs to `cat`. The
+/// mem/io/cpu retention predicates are derived from `param_subcategory` — the
+/// same classifier that labels every recommendation in `ktuner check` output
+/// and buckets `RecCounts::from_recs` — so `--category X` never drops a
+/// recommendation the engine itself labels `X`, nor keeps one it labels
+/// differently. The `Category::Security` guard mirrors `RecCounts::from_recs`:
+/// a security recommendation only ever surfaces under `--category security`.
 pub fn filter_by_category(mut recs: Vec<Recommendation>, cat: &str) -> Vec<Recommendation> {
     let cat_lower = cat.to_lowercase();
     recs.retain(|r| match cat_lower.as_str() {
@@ -79,24 +92,13 @@ pub fn filter_by_category(mut recs: Vec<Recommendation>, cat: &str) -> Vec<Recom
                 && (r.param.starts_with("net.") || r.param.contains("conntrack"))
         }
         "memory" | "mem" | "内存" => {
-            r.category != Category::Security
-                && (r.param.starts_with("vm.")
-                    || (r.param.starts_with("fs.")
-                        && !r.param.starts_with("fs.inotify.")
-                        && !r.param.starts_with("fs.aio-"))
-                    || r.param == "kernel.shmmax")
+            r.category != Category::Security && param_subcategory(&r.param) == "memory"
         }
         "io" | "disk" | "磁盘" => {
-            r.param.starts_with("block/")
-                || r.param.starts_with("transparent_hugepage/")
-                || r.param.starts_with("fs.inotify.")
-                || r.param.starts_with("fs.aio-")
+            r.category != Category::Security && param_subcategory(&r.param) == "io"
         }
         "cpu" | "调度" => {
-            r.param.starts_with("kernel.sched")
-                || r.param.contains("pid_max")
-                || r.param.contains("numa")
-                || r.param == "kernel.threads-max"
+            r.category != Category::Security && param_subcategory(&r.param) == "cpu"
         }
         "security" | "sec" | "安全" => r.category == Category::Security,
         _ => true,
@@ -251,6 +253,80 @@ mod tests {
         let filtered = filter_by_category(recs, "net");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].param, "net.core.somaxconn");
+    }
+
+    fn rec(param: &str) -> Recommendation {
+        Recommendation {
+            param: param.into(),
+            current_value: "0".into(),
+            recommended_value: "1".into(),
+            reason: String::new(),
+            confidence: Confidence::High,
+            category: Category::Performance,
+            writable: true,
+        }
+    }
+
+    #[test]
+    fn fs_param_filter_matches_subcategory() {
+        // fs.file-max is labeled "io" by param_subcategory, so it must surface
+        // under --category io — not mem, where it used to land.
+        assert_eq!(param_subcategory("fs.file-max"), "io");
+        assert!(!filter_by_category(vec![rec("fs.file-max")], "io").is_empty());
+        assert!(filter_by_category(vec![rec("fs.file-max")], "mem").is_empty());
+    }
+
+    #[test]
+    fn cpu_filter_keeps_subcategory_cpu_params() {
+        for param in [
+            "kernel.nmi_watchdog",
+            "kernel.watchdog_thresh",
+            "kernel.hung_task_timeout_secs",
+            "kernel.perf_event_paranoid",
+        ] {
+            assert_eq!(param_subcategory(param), "cpu");
+            assert!(
+                !filter_by_category(vec![rec(param)], "cpu").is_empty(),
+                "{param} is labeled cpu by param_subcategory but dropped by --category cpu"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_keeps_established_members_of_each_category() {
+        // Regression guard for the subcategory-derived predicates: the params
+        // every branch has always kept must not be lost in the derivation.
+        assert_eq!(
+            filter_by_category(vec![rec("vm.swappiness")], "mem").len(),
+            1
+        );
+        assert_eq!(
+            filter_by_category(vec![rec("kernel.shmmax")], "mem").len(),
+            1
+        );
+        assert_eq!(
+            filter_by_category(vec![rec("block/sda/scheduler")], "io").len(),
+            1
+        );
+        assert_eq!(
+            filter_by_category(vec![rec("fs.inotify.max_user_watches")], "io").len(),
+            1
+        );
+        assert_eq!(
+            filter_by_category(vec![rec("kernel.sched_latency_ns")], "cpu").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn shm_params_subcategory_is_memory() {
+        // SysV shared-memory knobs are a memory resource, not cpu: the mem
+        // filter special-cases kernel.shmmax, so the classifier must agree
+        // instead of falling through the kernel.* catch-all to "cpu".
+        assert_eq!(param_subcategory("kernel.shmmax"), "memory");
+        assert_eq!(param_subcategory("kernel.shmall"), "memory");
+        assert_eq!(param_subcategory("kernel.shmmni"), "memory");
+        assert_eq!(param_subcategory("kernel.shm_rmid_forced"), "memory");
     }
 
     #[test]

@@ -241,7 +241,9 @@ When FUSE reads `SKILL.md`, SkillFS runs `compiler::compile` and supports:
 When there are no conditional blocks, SkillFS also applies a small set of
 heuristic command normalizations, for example:
 
-- `pip install` -> `uv pip install`
+- Bare `pip install` / `pip3 install` -> `uv pip install`; interpreter-specific
+  `python -m pip` calls stay unchanged. Bare invocations use a conservative
+  command-position heuristic rather than a complete shell parser.
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 

@@ -234,6 +234,9 @@ mod tests {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // Accepted sockets can inherit nonblocking mode on macOS.
+                    // The fixture uses blocking HTTP/TLS I/O with timeouts.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
@@ -251,6 +254,33 @@ mod tests {
                 Err(e) => panic!("test server did not receive a connection: {e}"),
             }
         }
+    }
+
+    #[test]
+    fn accepted_stream_waits_for_delayed_request_bytes() {
+        use std::io::Read;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready, wait_for_reader) = std::sync::mpsc::channel();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            wait_for_reader
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            // The accept helper must wait for bytes that have not arrived yet,
+            // rather than depending on the first request already being buffered.
+            thread::sleep(Duration::from_millis(100));
+            stream.write_all(b"x").unwrap();
+        });
+
+        let mut stream = accept(&listener);
+        ready.send(()).unwrap();
+        let mut byte = [0];
+        let result = stream.read_exact(&mut byte);
+        client.join().unwrap();
+        result.expect("accepted test connections must support blocking reads");
+        assert_eq!(byte, *b"x");
     }
 
     fn request(input: &mut impl BufRead) -> std::io::Result<String> {

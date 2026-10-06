@@ -19,6 +19,78 @@
 
 #include "taint.h"
 
+/* Backend modes: how the running hook evaluates a matched rule. Tracepoint
+ * backends observe operations after the fact and can only report or signal;
+ * BPF LSM hooks additionally deny in line. */
+#define TE_MODE_NOTIFY      0
+#define TE_MODE_BLOCK       1
+#define TE_MODE_KILL        2
+#define TE_MODE_UNSUPPORTED 3
+
+/* Policy feature bit gating the pre-operation (BPF LSM) hook able to deny
+ * `op`. TOP_RECV has no dedicated block bit: its recvmsg hook is attached
+ * whenever recv sources or rules are enabled. 0 when no hook can deny it. */
+static __always_inline unsigned int te_block_feature_bit(unsigned int op)
+{
+	switch (op) {
+	case TOP_EXEC:
+		return TE_POLICY_BLOCK_EXEC;
+	case TOP_OPEN:
+	case TOP_WRITE:
+		return TE_POLICY_BLOCK_FILE;
+	case TOP_CONNECT:
+		return TE_POLICY_BLOCK_CONNECT;
+	case TOP_RECV:
+		return TE_POLICY_RECV;
+	default:
+		return 0;
+	}
+}
+
+/* Whether the loaded engine attached the hook that denies `op` before it
+ * happens. `features` and `enforce` mirror the eBPF globals `policy_features`
+ * and `enforce_mode` (0 when BPF LSM was inactive at load time). */
+static __always_inline int te_block_hook_attached(unsigned int op,
+						  unsigned int features,
+						  unsigned int enforce)
+{
+	return enforce != 0 && (features & te_block_feature_bit(op)) != 0;
+}
+
+/* Action the backend takes for a matched rule `effect`. A block rule on a
+ * notify-only backend degrades to a notify action: the match is reported as
+ * an unblocked violation instead of being silently skipped. */
+static __always_inline unsigned int te_effect_mode(unsigned int backend_mode,
+						   unsigned int effect)
+{
+	if (effect == TEFFECT_NOTIFY)
+		return TE_MODE_NOTIFY;
+	if (effect == TEFFECT_KILL)
+		return TE_MODE_KILL;
+	if (effect == TEFFECT_BLOCK)
+		return backend_mode == TE_MODE_BLOCK ? TE_MODE_BLOCK
+						     : TE_MODE_NOTIFY;
+	return TE_MODE_UNSUPPORTED;
+}
+
+/* Effects the backend may match for `op`. Block rules only match where they
+ * are enforceable; on backends without the pre-op hook they still match, so
+ * the caller degrades them through te_effect_mode() and reports an unblocked
+ * violation. Keeping block rules out of the mask when the hook IS attached
+ * prevents a denied operation from being reported twice (LSM hook with
+ * blocked=1 plus tracepoint with blocked=0). */
+static __always_inline unsigned int te_supported_effects(
+	unsigned int backend_mode, unsigned int op, unsigned int features,
+	unsigned int enforce)
+{
+	if (backend_mode == TE_MODE_BLOCK)
+		return (1U << TEFFECT_BLOCK);
+	if (te_block_hook_attached(op, features, enforce))
+		return (1U << TEFFECT_NOTIFY) | (1U << TEFFECT_KILL);
+	return (1U << TEFFECT_NOTIFY) | (1U << TEFFECT_KILL) |
+	       (1U << TEFFECT_BLOCK);
+}
+
 /* The kernel emits exactly one kind of event: a taint-rule violation. */
 enum event_type {
 	EVENT_TYPE_TAINT_VIOLATION = 3,

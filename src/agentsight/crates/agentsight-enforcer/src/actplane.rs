@@ -222,6 +222,15 @@ impl ActPlaneBackend {
             });
         }
         let compiled = compile_str(&request.policy_dsl).map_err(BackendError::CompileFailure)?;
+        // Surface compile-time warnings (e.g. an endpoint pattern that lowered
+        // to a match-nothing matcher) so the degradation is visible instead of
+        // silently installing a rule that never fires.
+        for warning in &compiled.warnings {
+            log::warn!(
+                "policy compile warning (binding_id={}): {warning}",
+                request.binding_id
+            );
+        }
         if compiled
             .labels
             .get("COMMAND")
@@ -264,6 +273,27 @@ impl ActPlaneBackend {
         self.engine
             .seed_label_in_domain(request.root_pid, id, label)
             .map_err(|error| kernel_error("seed target process domain", error))?;
+
+        // Rebind coverage: detaching a binding clears cap_task but leaves the
+        // tree's per-domain state behind, so processes that joined the session
+        // under the previous binding silently fall out of every policy when
+        // the binding is recreated. Move the surviving tree into the fresh
+        // domain and keep the outcome visible through the binding message.
+        let migration = self
+            .engine
+            .migrate_session_tree(request.root_pid, id)
+            .map_err(|error| {
+                let cleanup = self.cleanup_binding(&request, id, None);
+                kernel_error_with_cleanup("migrate prior session tree", error, cleanup)
+            })?;
+        if !migration.failed_pids.is_empty() {
+            log::warn!(
+                "binding {} domain {}: {}",
+                request.binding_id,
+                id,
+                migration.summary()
+            );
+        }
 
         let control_pid = std::process::id() as i32;
         let control_state = CapState {
@@ -318,7 +348,11 @@ impl ActPlaneBackend {
         let binding = Binding {
             request,
             state: BindingState::Enforced,
-            message: None,
+            message: if migration.is_empty() {
+                None
+            } else {
+                Some(migration.summary())
+            },
             domain_id: Some(id),
         };
         bindings.insert(

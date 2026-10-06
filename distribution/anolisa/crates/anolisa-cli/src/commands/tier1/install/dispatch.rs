@@ -1852,7 +1852,7 @@ fn plan_error_to_cli(err: PlanError, target: &str, command: &str) -> CliError {
         PlanError::UseUpdate => CliError::InvalidArgument {
             command,
             reason: format!(
-                "component '{target}' is already installed at a different version; run `anolisa update {target} --version <version>` to change versions"
+                "component '{target}' is already installed at a different version; run `anolisa update {target}` to update it to the repository's candidate version (a specific version cannot be requested)"
             ),
         },
         PlanError::AlreadyManaged => CliError::InvalidArgument {
@@ -2003,6 +2003,53 @@ mod tests {
             &rpmdb
         ));
         assert!(missing_rpm_tooling_is_fatal(&env(None, None), &rpmdb));
+    }
+
+    #[test]
+    fn use_update_remediation_names_the_supported_update_flow() {
+        // Neither version-carrying command works for an Owned record at a
+        // different version: `UpdateArgs` declares no `--version` flag (with
+        // `propagate_version` clap's built-in intercepts it, DisplayVersion,
+        // exit 0), and `install {target} --version <v>` re-enters
+        // `plan(Intent::Install)`, where planner.rs maps the same Owned
+        // record straight back to `UseUpdate`. The remediation must name
+        // plain `anolisa update {target}` — the workflow update really
+        // supports — and must not promise a specific version.
+        let err = plan_error_to_cli(PlanError::UseUpdate, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &err else {
+            panic!("UseUpdate must render InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("anolisa update cosh"),
+            "remediation must name `anolisa update cosh`, got: {reason}"
+        );
+        assert!(
+            reason.contains("candidate version"),
+            "remediation must say update moves to the repository's candidate version, got: {reason}"
+        );
+        assert!(
+            !reason.contains("--version"),
+            "remediation must not name a version flag: `update --version` is intercepted by clap and `install --version` re-hits UseUpdate, got: {reason}"
+        );
+
+        // Other remediation messages keep their existing commands verbatim.
+        let already_present =
+            plan_error_to_cli(PlanError::AlreadyPresentOnSystem, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &already_present else {
+            panic!("AlreadyPresentOnSystem must render InvalidArgument");
+        };
+        assert!(
+            reason.contains("anolisa adopt cosh"),
+            "adopt remediation unchanged, got: {reason}"
+        );
+        let already_managed = plan_error_to_cli(PlanError::AlreadyManaged, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &already_managed else {
+            panic!("AlreadyManaged must render InvalidArgument");
+        };
+        assert!(
+            reason.contains("anolisa update cosh`"),
+            "AlreadyManaged keeps its `update` (no --version) remediation, got: {reason}"
+        );
     }
 
     #[test]

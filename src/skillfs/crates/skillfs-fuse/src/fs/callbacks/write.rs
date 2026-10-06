@@ -325,12 +325,55 @@ impl SkillFs {
         }
 
         // S3: refuse to create entries beneath a reserved lifecycle
-        // namespace before any physical I/O.
+        // namespace before any physical I/O — and before the virtual
+        // slot rejection below, so `create /skills/.staging` keeps the
+        // historical `EACCES` + `PolicyDenied` audit (and the
+        // policy_denied metric) instead of the generic virtual-slot
+        // `EROFS`/`Create` record.
         if let Some(errno) =
             self.enforce_lifecycle_reservation(&path_type, SkillEventKind::Create, req, None)
         {
             reply.error(errno);
             return;
+        }
+
+        // Virtual-path type confusion: only file-capable leaves may
+        // host a freshly created file — passthrough leaves, the
+        // `SKILL.md` manifest slots, and the Hermes passthrough labels.
+        // Virtual directory slots (Root, SkillsDir, SkillDir,
+        // CategoryDir, Invalid) resolve onto `source/<name>` and would
+        // materialize a plain regular file that `create` reports as a
+        // RegularFile while later lookup/getattr answer ENOENT/Directory
+        // — the same confusion `mknod` and `symlink` reject with EROFS.
+        // `NestedSkillDir` stays allowed: a depth-2 name that does not
+        // exist yet is lexically a nested-skill dir, but creating a
+        // plain file there (`apple/README.md`) is the ordinary new
+        // category-file flow, and once created the child re-parses as
+        // `CategoryPassthrough` so lookups agree with the created type.
+        match &path_type {
+            PathType::SkillMd { .. }
+            | PathType::Passthrough { .. }
+            | PathType::NestedSkillDir { .. }
+            | PathType::NestedSkillMd { .. }
+            | PathType::NestedPassthrough { .. }
+            | PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
+            | PathType::InboxPassthrough { .. } => {}
+            _ => {
+                self.ro_warn("create", &path_str);
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::EROFS),
+                    None,
+                    Some(format!("class=virtual_dir_slot path={path_str}")),
+                );
+                reply.error(libc::EROFS);
+                return;
+            }
         }
 
         // S1: `.skill-meta/**` is mutation-protected. Reject before touching
@@ -349,6 +392,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,
@@ -369,6 +415,15 @@ impl SkillFs {
                 _ => false,
             };
             if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -1088,7 +1143,9 @@ impl SkillFs {
 
         // 3. Handle uid/gid (chown)
         if uid.is_some() || gid.is_some() {
-            let c_path = match std::ffi::CString::new(physical.to_string_lossy().into_owned()) {
+            // Raw OS bytes, not a lossy UTF-8 view: `chown` must address the
+            // exact physical path even when it contains non-UTF-8 bytes.
+            let c_path = match crate::sys::cstring_from_os_str(physical.as_os_str()) {
                 Ok(p) => p,
                 Err(_) => {
                     reply.error(libc::EINVAL);
@@ -1108,7 +1165,8 @@ impl SkillFs {
 
         // 4. Handle atime/mtime (utimensat)
         if atime.is_some() || mtime.is_some() {
-            let c_path = match std::ffi::CString::new(physical.to_string_lossy().into_owned()) {
+            // Same raw-byte path requirement as the chown branch above.
+            let c_path = match crate::sys::cstring_from_os_str(physical.as_os_str()) {
                 Ok(p) => p,
                 Err(_) => {
                     reply.error(libc::EINVAL);

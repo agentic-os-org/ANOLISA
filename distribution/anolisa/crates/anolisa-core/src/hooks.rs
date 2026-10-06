@@ -32,6 +32,7 @@
 //! want the hook outcome reflected in state (e.g. record `last_run_at`
 //! per phase) take care of it themselves under the install lock.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -303,17 +304,58 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
         }
     };
 
+    // Drain both pipes while polling for exit. A hook that writes more
+    // than the OS pipe buffer (64 KiB on Linux) would otherwise block on
+    // write, never exit, and be killed at the timeout even though it was
+    // healthy (the deadlock the `std::process::Child` docs warn about).
+    // The read ends are non-blocking and drained by the poll loop itself,
+    // so nothing keeps reading (and retaining) for a grandchild that
+    // inherited the pipes past this call. stdout is discarded — the
+    // runner only surfaces stderr, and only its final tail.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let mut pipe_error = stdout_pipe
+        .as_ref()
+        .and_then(|pipe| set_nonblocking(pipe).err());
+    if pipe_error.is_none() {
+        pipe_error = stderr_pipe
+            .as_ref()
+            .and_then(|pipe| set_nonblocking(pipe).err());
+    }
+    if let Some(err) = pipe_error {
+        let _ = child.kill();
+        let _ = child.wait();
+        return HookOutcome {
+            component: spec.component.clone(),
+            phase: spec.phase,
+            script: spec.script.clone(),
+            success: false,
+            exit_code: None,
+            duration: started.elapsed(),
+            stderr_tail: String::new(),
+            skip: Some(HookSkipReason::NotExecutable(err.to_string())),
+        };
+    }
+
     // Lightweight polling loop avoids pulling in a full async runtime
     // for what amounts to "wait <30s for one short script". 25ms gives
     // sub-second responsiveness for fast hooks without burning CPU.
     let poll = Duration::from_millis(25);
+    let mut stderr_tail: Vec<u8> = Vec::new();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
+                drain_pipe(&mut stdout_pipe, |_| {});
+                drain_pipe(&mut stderr_pipe, |chunk| push_tail(&mut stderr_tail, chunk));
                 if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Close the read ends instead of waiting for EOF:
+                    // writers the hook left behind cannot extend this
+                    // call's lifetime or feed a drain after it returns.
+                    drop(stdout_pipe.take());
+                    drop(stderr_pipe.take());
                     return HookOutcome {
                         component: spec.component.clone(),
                         phase: spec.phase,
@@ -342,8 +384,8 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
         }
     }
 
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
+    let status = match child.wait() {
+        Ok(status) => status,
         Err(err) => {
             return HookOutcome {
                 component: spec.component.clone(),
@@ -357,10 +399,16 @@ fn execute(spec: &HookSpec, layout: &FsLayout) -> HookOutcome {
             };
         }
     };
-
-    let stderr_tail = tail_lossy(&output.stderr, 4096);
-    let exit_code = output.status.code();
-    let success = output.status.success();
+    // The hook exited. Collect what is already buffered, then close the
+    // read ends: a grandchild still holding the write end must not delay
+    // this outcome.
+    drain_pipe(&mut stdout_pipe, |_| {});
+    drain_pipe(&mut stderr_pipe, |chunk| push_tail(&mut stderr_tail, chunk));
+    drop(stdout_pipe.take());
+    drop(stderr_pipe.take());
+    let exit_code = status.code();
+    let success = status.success();
+    let stderr_tail = String::from_utf8_lossy(&stderr_tail).into_owned();
     HookOutcome {
         component: spec.component.clone(),
         phase: spec.phase,
@@ -384,9 +432,62 @@ fn reason_for(err: &PathBoundaryError) -> String {
     }
 }
 
-fn tail_lossy(bytes: &[u8], max: usize) -> String {
-    let start = bytes.len().saturating_sub(max);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+/// Bytes of stderr retained for the outcome's diagnostic tail. Hooks may
+/// emit far more; only this final window is ever reported.
+const STDERR_TAIL_LIMIT: usize = 4096;
+
+/// Upper bound on bytes one pipe may deliver per poll iteration, so a
+/// hook that writes without end cannot starve the exit/timeout checks.
+const DRAIN_BUDGET_PER_POLL: usize = 1 << 20;
+
+/// Switch a pipe read end to non-blocking mode so the poll loop can drain
+/// it in place instead of parking a helper thread on it.
+fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
+    nix::fcntl::fcntl(
+        pipe.as_raw_fd(),
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .map(|_| ())
+    .map_err(std::io::Error::from)
+}
+
+/// Feed one currently-readable burst of `pipe` to `consume`, returning at
+/// EOF, on `WouldBlock`, or once the per-iteration budget is exhausted.
+/// The pipe must already be non-blocking; callers own that setup so this
+/// helper can never park the caller's poll loop on a stalled writer.
+fn drain_pipe(pipe: &mut Option<impl Read>, mut consume: impl FnMut(&[u8])) {
+    let Some(pipe) = pipe.as_mut() else {
+        return;
+    };
+    let mut budget = DRAIN_BUDGET_PER_POLL;
+    let mut chunk = [0u8; 8192];
+    while budget > 0 {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(read) => {
+                consume(&chunk[..read]);
+                budget = budget.saturating_sub(read);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Append a chunk to the rolling stderr tail, keeping only the most
+/// recent [`STDERR_TAIL_LIMIT`] bytes so hook output cannot accumulate.
+fn push_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
+    if chunk.len() >= STDERR_TAIL_LIMIT {
+        tail.clear();
+        tail.extend_from_slice(&chunk[chunk.len() - STDERR_TAIL_LIMIT..]);
+        return;
+    }
+    if tail.len() + chunk.len() > STDERR_TAIL_LIMIT {
+        let excess = tail.len() + chunk.len() - STDERR_TAIL_LIMIT;
+        tail.drain(..excess);
+    }
+    tail.extend_from_slice(chunk);
 }
 
 fn build_log_record(
@@ -724,6 +825,115 @@ mod tests {
         assert!(
             outcome.duration < Duration::from_secs(5),
             "should not wait full 5s"
+        );
+    }
+
+    /// A hook that writes more than the OS pipe buffer (64 KiB on Linux)
+    /// to stderr must still be able to exit: the runner drains the pipes
+    /// while polling, so the child never blocks on write. Without the
+    /// drain the child stalls, the poll loop never sees an exit, and a
+    /// healthy fast hook is killed at the timeout as `Timeout`.
+    #[test]
+    fn hook_output_larger_than_the_pipe_buffer_still_exits_zero() {
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let script = layout.datadir.join("hooks/foo/post_enable.sh");
+        // 512 KiB of stderr dwarfs the 64 KiB pipe buffer; the trailing
+        // marker proves the tail capture survived the concurrent drain.
+        write_script(
+            &script,
+            "#!/bin/sh\ndd if=/dev/zero bs=65536 count=8 1>&2\necho CHATTY-TAIL >&2\nexit 0\n",
+        );
+
+        let mut spec = HookSpec::new("foo", HookPhase::PostEnable, script.clone());
+        spec.timeout_secs = 2;
+        let outcome = run_hook(&spec, &layout, None, "op-test-9", "tester", "system");
+        assert!(
+            outcome.success,
+            "fast chatty hook must not be killed: {outcome:?}"
+        );
+        assert!(outcome.skip.is_none(), "expected no skip, got {outcome:?}");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.stderr_tail.ends_with("CHATTY-TAIL\n"));
+        assert!(
+            outcome.stderr_tail.len() <= 4096,
+            "stderr retention must stay capped, got {} bytes",
+            outcome.stderr_tail.len()
+        );
+    }
+
+    /// A writer that outlives the hook must not extend the run: the runner
+    /// drains only what is buffered when the child exits, then closes the
+    /// pipes, so a grandchild holding stderr cannot delay the outcome (or
+    /// keep a drain reading after it).
+    #[test]
+    fn lingering_stderr_writer_does_not_delay_the_outcome() {
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let script = layout.datadir.join("hooks/foo/post_enable.sh");
+        // The background subshell inherits stderr and writes well after
+        // the hook itself exited; only its sibling's output belongs to
+        // the hook result.
+        write_script(
+            &script,
+            "#!/bin/sh\n(sleep 2; echo LATE-TAIL >&2) &\necho EARLY-TAIL >&2\nexit 0\n",
+        );
+
+        let mut spec = HookSpec::new("foo", HookPhase::PostEnable, script.clone());
+        spec.timeout_secs = 5;
+        let started = Instant::now();
+        let outcome = run_hook(&spec, &layout, None, "op-test-10", "tester", "system");
+        let elapsed = started.elapsed();
+        assert!(outcome.success, "hook must succeed: {outcome:?}");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "outcome must not wait for the lingering writer: {elapsed:?}"
+        );
+        assert!(
+            outcome.stderr_tail.contains("EARLY-TAIL"),
+            "pre-exit output must be captured: {outcome:?}"
+        );
+    }
+
+    /// After a timeout with a writer that keeps going, the runner must not
+    /// keep accumulating stderr in the background: a detached drain used
+    /// to retain every byte for as long as the writer lived.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_with_a_never_ending_writer_keeps_memory_bounded() {
+        fn rss_kib() -> u64 {
+            let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+                .expect("parse VmRSS")
+        }
+
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let script = layout.datadir.join("hooks/foo/post_enable.sh");
+        // The writer outlives the script the timeout kills; it stops early
+        // on EPIPE once the runner closes the pipe, and is capped at
+        // 256 MiB so a retained-drain regression cannot exhaust the test
+        // host.
+        write_script(
+            &script,
+            "#!/bin/sh\n(\n  i=0\n  while [ \"$i\" -lt 32 ]; do\n    dd if=/dev/zero bs=65536 count=128 1>&2 2>/dev/null || exit 0\n    i=$((i + 1))\n  done\n) &\nsleep 30\n",
+        );
+
+        let mut spec = HookSpec::new("foo", HookPhase::PostEnable, script.clone());
+        spec.timeout_secs = 1;
+        let before = rss_kib();
+        let outcome = run_hook(&spec, &layout, None, "op-test-11", "tester", "system");
+        assert_eq!(outcome.skip, Some(HookSkipReason::Timeout));
+        // Give a retained drain (the old behaviour) time to accumulate.
+        std::thread::sleep(Duration::from_millis(500));
+        let after = rss_kib();
+        assert!(
+            after <= before + 96 * 1024,
+            "stderr drain must stay bounded after a timeout: {before} KiB -> {after} KiB RSS"
         );
     }
 

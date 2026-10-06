@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from statistics import fmean
 from typing import Any
 
@@ -13,7 +14,7 @@ def numeric(value: Any) -> float | None:
         return None
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return result if math.isfinite(result) else None
 
@@ -67,11 +68,16 @@ def rolling_max_increase(
     if len(samples) < 2:
         return None
     largest: float | None = None
-    left = 0
+    minimums: deque[int] = deque()
     for right, (timestamp, value) in enumerate(samples):
-        while left < right and timestamp - samples[left][0] > window_seconds:
-            left += 1
-        minimum = min(sample[1] for sample in samples[left : right + 1])
-        increase = value - minimum
+        while minimums and value < samples[minimums[-1]][1]:
+            minimums.pop()
+        minimums.append(right)
+        while (
+            len(minimums) > 1
+            and timestamp - samples[minimums[0]][0] > window_seconds
+        ):
+            minimums.popleft()
+        increase = value - samples[minimums[0]][1]
         largest = increase if largest is None else max(largest, increase)
     return largest

@@ -850,7 +850,19 @@ fi
 # can inspect and clean up.
 promote_to_prefix() {
   log "promoting staging → $ANOLISA_PREFIX"
+  # The prefix may not exist yet. Create the missing levels under a 022 umask
+  # so they come out 0755 instead of at the caller's umask: a freshly created
+  # prefix under a restrictive umask (e.g. 077) would be 0700 and the staged
+  # 0755 paths below it would stay unreachable for other users. `mkdir -p`
+  # never changes an existing directory's mode, so a pre-existing ancestor
+  # keeps its own mode — and unlike a chmod walk over the raw path string,
+  # this cannot follow `.`/`..` components (`fresh/../target`) and normalize a
+  # directory outside the prefix.
+  local previous_umask
+  previous_umask="$(umask)"
+  umask 022
   mkdir -p "$ANOLISA_PREFIX"
+  umask "$previous_umask"
   # Copy the entire staged layout (bin/, share/) into the final prefix.
   # `cp -a` preserves mode/timestamps. We exclude the .download workspace
   # by copying only the top-level entries we care about.
@@ -860,8 +872,25 @@ promote_to_prefix() {
       continue
     fi
     log "  cp -a $src/. $ANOLISA_PREFIX/$entry/"
+    # A freshly created parent under a restrictive umask (e.g. 077) would be
+    # 0700 and untraversable for other users even though the staged paths
+    # below it are 0755. Normalize only the directory this run creates; a
+    # pre-existing directory owned by other packages keeps its mode. For the
+    # same reason the staged children are copied one by one — `cp -a src/.`
+    # would additionally overwrite the destination directory's own mode with
+    # the staged directory's mode.
+    local created_parent=0
+    if [ ! -d "$ANOLISA_PREFIX/$entry" ]; then
+      created_parent=1
+    fi
     mkdir -p "$ANOLISA_PREFIX/$entry"
-    if ! cp -a "$src/." "$ANOLISA_PREFIX/$entry/"; then
+    if [ "$created_parent" = 1 ]; then
+      chmod 0755 "$ANOLISA_PREFIX/$entry"
+    fi
+    if ! (shopt -s dotglob nullglob
+          for child in "$src"/*; do
+            cp -a "$child" "$ANOLISA_PREFIX/$entry/"
+          done); then
       err "promotion failed while copying $src → $ANOLISA_PREFIX/$entry"
       err "staging had already validated, so partial state in $ANOLISA_PREFIX may need"
       err "manual cleanup. Staging tree preserved for inspection: $STAGING_ROOT"
@@ -869,12 +898,16 @@ promote_to_prefix() {
       trap - EXIT INT TERM HUP
       return 1
     fi
+    # Normalize permissions ONLY on the paths this installer staged. The
+    # prefix is typically shared with other packages (e.g. /usr/local), so a
+    # recursive chmod over all of $ANOLISA_PREFIX/bin or $ANOLISA_PREFIX/share
+    # would clobber modes on pre-existing files owned by other tools (strip
+    # exec bits, loosen 0600 files, or add exec to non-program files).
     if [ "$entry" = "bin" ]; then
-      find "$ANOLISA_PREFIX/$entry" -type d -exec chmod 0755 {} \;
-      find "$ANOLISA_PREFIX/$entry" -type f -exec chmod 0755 {} \;
+      chmod 0755 "$FINAL_BIN_DEST"
     else
-      find "$ANOLISA_PREFIX/$entry" -type d -exec chmod 0755 {} \;
-      find "$ANOLISA_PREFIX/$entry" -type f -exec chmod 0644 {} \;
+      find "$FINAL_DATADIR" -type d -exec chmod 0755 {} \;
+      find "$FINAL_DATADIR" -type f -exec chmod 0644 {} \;
     fi
   done
 }

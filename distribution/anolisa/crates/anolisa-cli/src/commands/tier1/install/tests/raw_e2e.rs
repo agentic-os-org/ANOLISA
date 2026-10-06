@@ -3069,3 +3069,146 @@ fn raw_effect_install_user_scope_keeps_its_manager_routing() {
         ]
     );
 }
+
+/// Serves `root` over HTTP under `/private/`, answering 404 for anything
+/// absent, so a test can reach the raw backend through a credentialed
+/// repository URL.
+fn serve_repo_over_http(root: std::path::PathBuf) -> std::net::SocketAddr {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request_line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            let mut header = String::new();
+            while reader.read_line(&mut header).is_ok_and(|n| n > 2) {
+                header.clear();
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let body = path
+                .strip_prefix("/private/")
+                .and_then(|rel| std::fs::read(root.join(rel)).ok());
+            let _ = match body {
+                Some(body) => write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                )
+                .and_then(|()| stream.write_all(&body)),
+                None => write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                ),
+            };
+        }
+    });
+    addr
+}
+
+/// Resolves and prepares `agentsight` from `http://user:secret@<addr>/private/v1`.
+/// Test builds refuse non-file component indexes, so this enters at the raw
+/// resolver rather than the install command.
+fn prepare_over_credentialed_http(
+    prefix: &std::path::Path,
+    addr: std::net::SocketAddr,
+) -> Result<(), CliError> {
+    let ctx = ctx_with_prefix(false, Some(prefix.to_path_buf()));
+    let layout = FsLayout::system(Some(prefix.to_path_buf()));
+    let resolution = super::super::raw::resolve_raw(
+        &ctx,
+        &layout,
+        &anolisa_env::EnvService::detect(),
+        ResolveInputs {
+            component: "agentsight".to_string(),
+            package: "agentsight".to_string(),
+            backend: "raw".to_string(),
+            base_url: format!("http://user:secret@{addr}/private/v1"),
+            repository_origin: None,
+            version: None,
+            warnings: Vec::new(),
+        },
+    )?;
+    super::super::raw::prepare_raw_execution(&ctx, &layout, resolution).map(drop)
+}
+
+fn assert_no_repository_secret(reason: &str) {
+    assert!(!reason.contains("secret"), "got: {reason}");
+    assert!(!reason.contains("user:"), "got: {reason}");
+    assert!(!reason.contains("/private/"), "got: {reason}");
+}
+
+/// The index row omits `url`, so the artifact URL is derived from the
+/// credentialed `base_url`; an artifact fetch failure must not echo it.
+#[test]
+fn artifact_fetch_failure_does_not_echo_repository_credentials() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let _ = write_conventional_repo(&repo_root);
+    let env = anolisa_env::EnvService::detect();
+    std::fs::remove_file(
+        repo_root
+            .join("v1/agentsight/0.2.0")
+            .join(&env.os)
+            .join(&env.arch)
+            .join(format!("agentsight-0.2.0-{}-{}.tar.gz", env.os, env.arch)),
+    )
+    .expect("remove artifact");
+    let addr = serve_repo_over_http(repo_root);
+
+    let err =
+        prepare_over_credentialed_http(&prefix, addr).expect_err("a missing artifact must fail");
+    let reason = err.reason();
+
+    assert!(
+        reason.contains("failed to download artifact"),
+        "got: {reason}"
+    );
+    assert!(reason.contains(&format!("http://{addr}")), "got: {reason}");
+    assert_no_repository_secret(&reason);
+}
+
+/// An artifact that downloads but carries no readable embedded manifest
+/// must not echo the credentialed artifact URL either.
+#[test]
+fn embedded_manifest_failure_does_not_echo_repository_credentials() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let _ = write_conventional_repo(&repo_root);
+    let env = anolisa_env::EnvService::detect();
+    let artifact_path = repo_root
+        .join("v1/agentsight/0.2.0")
+        .join(&env.os)
+        .join(&env.arch)
+        .join(format!("agentsight-0.2.0-{}-{}.tar.gz", env.os, env.arch));
+    let original = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(&artifact_path).expect("read artifact"))
+    );
+    let corrupt = b"not a gzip stream".to_vec();
+    std::fs::write(&artifact_path, &corrupt).expect("corrupt artifact");
+    let index_path = repo_root.join("v1/index.toml");
+    let index = std::fs::read_to_string(&index_path).expect("read index");
+    std::fs::write(
+        &index_path,
+        index.replace(&original, &format!("{:x}", Sha256::digest(&corrupt))),
+    )
+    .expect("rewrite index");
+    let addr = serve_repo_over_http(repo_root);
+
+    let err = prepare_over_credentialed_http(&prefix, addr)
+        .expect_err("an unreadable artifact must fail");
+    let reason = err.reason();
+
+    assert!(
+        reason.contains("embedded component manifest"),
+        "got: {reason}"
+    );
+    assert_no_repository_secret(&reason);
+}

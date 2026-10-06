@@ -7,13 +7,14 @@
 //! LLM-result merging and the Markdown export — so both handler sets stay
 //! thin and behave identically.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentsight_opt::preference::LlmPreference;
 use serde::Deserialize;
 
+use super::detector::PreferenceEventRow;
 use super::signals::{Preference, PreferenceCategory, PreferenceSource, PreferenceStatus};
 use super::{DEFAULT_WINDOW_DAYS, EXPORT_MIN_CONFIDENCE, MAX_WINDOW_DAYS};
 
@@ -114,6 +115,61 @@ pub const DEFAULT_TURNS_LIMIT: usize = 200;
 /// Hard maximum for `limit` — a misbehaving caller must not be able to pull an
 /// unbounded blob of raw conversation text out of the API.
 pub const MAX_TURNS_LIMIT: usize = 1000;
+
+/// Core turn selection shared by the turns endpoint and the LLM input
+/// path: the deduped, trimmed, non-empty user turns of the window,
+/// NEWEST-first, so a turn repeated across the window dedupes at its
+/// newest position.
+///
+/// `rows` must already arrive newest-first — the same normalization both
+/// source loaders apply: the Linux loader reverses the genai store's
+/// chronological rows, and the trajectory source emits each document's
+/// turns newest-first under the store's DESC document order. Both turns
+/// handlers pass the normalized rows straight through.
+fn select_newest_unique_turns<'a>(
+    rows: impl Iterator<Item = &'a PreferenceEventRow>,
+) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    rows.filter_map(|r| r.user_text.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+/// Select the turns-endpoint response list: the deduped, trimmed, non-empty
+/// user turns of the window, at most `requested_limit` of them (default
+/// [`DEFAULT_TURNS_LIMIT`], capped at [`MAX_TURNS_LIMIT`]).
+///
+/// Iteration order is the response order, so `take(limit)` keeps the
+/// NEWEST slice of an over-limit window, per the endpoint's documented
+/// "newest unique turns first" contract.
+pub fn select_unique_turns<'a>(
+    rows: impl Iterator<Item = &'a PreferenceEventRow>,
+    requested_limit: Option<usize>,
+) -> Vec<String> {
+    let limit = requested_limit
+        .unwrap_or(DEFAULT_TURNS_LIMIT)
+        .clamp(1, MAX_TURNS_LIMIT);
+    select_newest_unique_turns(rows)
+        .into_iter()
+        .take(limit)
+        .collect()
+}
+
+/// Select the LLM layer's input turns: the same deduped, trimmed selection
+/// the turns endpoint reports (the endpoint documents handing back "the
+/// same text the `llm=true` path feeds to the server-side LLM"), reversed
+/// into chronological order so the analysis prompt's "most recent last"
+/// label is true. Unlike the endpoint there is no count limit — the
+/// prompt's own compaction budget (per-turn and total character caps in
+/// `agentsight_opt::preference::build_analysis_input`) bounds how much of
+/// the window survives, dropping the OLDEST turns when it does not fit.
+pub fn llm_input_turns<'a>(rows: impl Iterator<Item = &'a PreferenceEventRow>) -> Vec<String> {
+    let mut turns = select_newest_unique_turns(rows);
+    turns.reverse();
+    turns
+}
 
 /// Clamp the requested window into `1..=MAX_WINDOW_DAYS`, defaulting to
 /// [`DEFAULT_WINDOW_DAYS`].
@@ -565,5 +621,166 @@ mod tests {
         );
         // The same window/llm pair under a different source is a miss.
         assert!(cache_get((29, true, PreferenceSourceParam::Genai)).is_none());
+    }
+
+    // ─── turns selection ────────────────────────────────────────────────────
+
+    fn turn_row(id: i64, text: &str) -> PreferenceEventRow {
+        PreferenceEventRow {
+            id,
+            session_id: Some(format!("s-{id}")),
+            conversation_id: Some(format!("c-{id}")),
+            timestamp_ns: Some(id * 60_000_000_000),
+            user_text: Some(text.to_string()),
+            tool_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn turns_selection_keeps_the_newest_slice_newest_first() {
+        // The audit scenario: five turns one minute apart, limit=3 — the
+        // newest three, newest first. The pre-fix Linux handler iterated its
+        // chronological rows forward and answered one/two/three instead.
+        let rows: Vec<PreferenceEventRow> =
+            (1..=5).map(|i| turn_row(i, &format!("turn {i}"))).collect();
+        let turns = select_unique_turns(rows.iter().rev(), Some(3));
+        assert_eq!(turns, vec!["turn 5", "turn 4", "turn 3"]);
+    }
+
+    #[test]
+    fn turns_selection_dedupes_at_the_newest_position_and_trims() {
+        let rows = [
+            turn_row(1, "always run tests"),
+            turn_row(2, "  always run tests  "),
+            turn_row(3, "prefer concise replies"),
+        ];
+        // Newest-first input: the duplicate collapses onto its newest slot.
+        let turns = select_unique_turns(rows.iter().rev(), None);
+        assert_eq!(turns, vec!["prefer concise replies", "always run tests"]);
+    }
+
+    #[test]
+    fn turns_selection_skips_rows_without_usable_text() {
+        let rows = [
+            turn_row(1, ""),
+            turn_row(2, "   "),
+            turn_row(3, "real turn"),
+        ];
+        let turns = select_unique_turns(rows.iter().rev(), Some(10));
+        assert_eq!(turns, vec!["real turn"]);
+    }
+
+    #[test]
+    fn turns_limit_defaults_to_200_and_caps_at_1000() {
+        // More unique turns than the hard cap, so both bounds are observable.
+        let chronological: Vec<PreferenceEventRow> = (1..=1005)
+            .map(|i| turn_row(i, &format!("turn {i}")))
+            .collect();
+        assert_eq!(
+            select_unique_turns(chronological.iter().rev(), None).len(),
+            DEFAULT_TURNS_LIMIT
+        );
+        assert_eq!(
+            select_unique_turns(chronological.iter().rev(), Some(5000)).len(),
+            MAX_TURNS_LIMIT
+        );
+    }
+
+    #[test]
+    fn turns_selection_is_identical_for_both_source_row_orders() {
+        // Twin consistency at the shared level: the genai store yields
+        // chronological rows (the Linux handler reverses them before
+        // calling) while the trajectory source yields newest-first rows
+        // (the macOS handler passes them through) — both must select the
+        // same newest slice in the same order. The macOS twin is cfg-gated
+        // off Linux, so its handler cannot run there; this pins the shared
+        // contract both handlers call.
+        let texts = [
+            "plan first",
+            "write tests",
+            "keep it short",
+            "use rust",
+            "be concise",
+        ];
+        let chronological: Vec<PreferenceEventRow> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| turn_row(i as i64 + 1, t))
+            .collect();
+        let mut newest_first = chronological.clone();
+        newest_first.reverse();
+        assert_eq!(
+            select_unique_turns(chronological.iter().rev(), Some(3)),
+            select_unique_turns(newest_first.iter(), Some(3)),
+            "genai (reversed chronological) and trajectory (native DESC) \
+             inputs must answer identically"
+        );
+    }
+
+    // ─── LLM input selection ────────────────────────────────────────────────
+
+    #[test]
+    fn llm_input_turns_are_chronological_most_recent_last() {
+        // Newest-first rows (the order both llm handlers pass) come back
+        // in prompt order: the analysis prompt labels the list "most
+        // recent last", so the newest turn must be the LAST entry.
+        let chronological: Vec<PreferenceEventRow> =
+            (1..=5).map(|i| turn_row(i, &format!("turn {i}"))).collect();
+        let mut newest_first = chronological.clone();
+        newest_first.reverse();
+        assert_eq!(
+            llm_input_turns(newest_first.iter()),
+            vec!["turn 1", "turn 2", "turn 3", "turn 4", "turn 5"]
+        );
+    }
+
+    #[test]
+    fn llm_input_turns_share_the_endpoint_selection_rules() {
+        // Same dedupe/trim/skip rules as the turns endpoint, answered in
+        // the opposite order: the scenario of
+        // turns_selection_dedupes_at_the_newest_position_and_trims, with
+        // the duplicate collapsing onto its newest (later) slot.
+        let rows = [
+            turn_row(1, "always run tests"),
+            turn_row(2, "  always run tests  "),
+            turn_row(3, "prefer concise replies"),
+        ];
+        let newest_first: Vec<PreferenceEventRow> = rows.into_iter().rev().collect();
+        assert_eq!(
+            llm_input_turns(newest_first.iter()),
+            vec!["always run tests", "prefer concise replies"]
+        );
+    }
+
+    #[test]
+    fn llm_input_turns_are_identical_for_both_source_row_orders() {
+        // Twin consistency at the shared level: the genai store yields
+        // chronological rows (the Linux llm_findings reverses them before
+        // calling) while the trajectory source yields newest-first rows
+        // (the macOS llm_findings passes them through) — both must feed
+        // the model the same chronological list. The macOS twin is
+        // cfg-gated off Linux, so its handler cannot run there; this pins
+        // the shared contract both handlers call.
+        let texts = [
+            "plan first",
+            "write tests",
+            "keep it short",
+            "use rust",
+            "be concise",
+        ];
+        let chronological: Vec<PreferenceEventRow> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| turn_row(i as i64 + 1, t))
+            .collect();
+        let mut newest_first = chronological.clone();
+        newest_first.reverse();
+        assert_eq!(
+            llm_input_turns(chronological.iter().rev()),
+            llm_input_turns(newest_first.iter()),
+            "genai (reversed chronological) and trajectory (native DESC) \
+             inputs must answer identically"
+        );
+        assert_eq!(llm_input_turns(newest_first.iter()), texts);
     }
 }

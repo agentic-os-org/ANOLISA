@@ -634,10 +634,20 @@ impl ReuseStore {
         let mut tally: std::collections::BTreeMap<String, (usize, usize)> =
             std::collections::BTreeMap::new();
         for label in self.list_labels(&LabelFilter::default())? {
-            let bucket = match label.confirm_state {
-                ConfirmState::Overridden => 0,
-                ConfirmState::Confirmed => 1,
-                ConfirmState::Unconfirmed => continue,
+            // The bucket follows the human decision, not `confirm_state`: a
+            // `Confirm` pins `human_label = effective_label()`, which is the
+            // model's verdict when one exists. Bucketing by state alone would
+            // count a person endorsing `good` over a rule's `unknown` as a
+            // confirmation of the rule, while `tally_override` reports an
+            // override for the same row. Rows with no human decision keep the
+            // state-based semantics.
+            let bucket = match label.human_label {
+                Some(human) => usize::from(human == label.auto_label),
+                None => match label.confirm_state {
+                    ConfirmState::Unconfirmed => continue,
+                    ConfirmState::Overridden => 0,
+                    ConfirmState::Confirmed => 1,
+                },
             };
             for rule in &label.auto_rules {
                 let entry = tally.entry(rule.clone()).or_insert((0, 0));

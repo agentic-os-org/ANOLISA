@@ -9,6 +9,7 @@
 #include <stdbool.h>
 
 #include "taint.h"
+#include "process.h"
 
 #define RESET "\033[0m"
 #define GREEN "\033[32m"
@@ -109,6 +110,82 @@ static void test_arg(void)
 	check(arg_m(slots2, "push") == 0, "arg: push absent");
 }
 
+/* Backend effect decisions: block rules must stay matchable (and degrade to a
+ * notify action) on backends whose pre-operation hook is not attached, and
+ * must NOT match on tracepoints when the LSM hook denies in line (no double
+ * report). */
+static void test_effect_mode(void)
+{
+	check(te_effect_mode(TE_MODE_BLOCK, TEFFECT_NOTIFY) == TE_MODE_NOTIFY,
+	      "effect: LSM backend keeps notify");
+	check(te_effect_mode(TE_MODE_BLOCK, TEFFECT_KILL) == TE_MODE_KILL,
+	      "effect: LSM backend keeps kill");
+	check(te_effect_mode(TE_MODE_BLOCK, TEFFECT_BLOCK) == TE_MODE_BLOCK,
+	      "effect: LSM backend blocks");
+	check(te_effect_mode(TE_MODE_NOTIFY, TEFFECT_NOTIFY) == TE_MODE_NOTIFY,
+	      "effect: tracepoint backend keeps notify");
+	check(te_effect_mode(TE_MODE_NOTIFY, TEFFECT_KILL) == TE_MODE_KILL,
+	      "effect: tracepoint backend keeps kill");
+	check(te_effect_mode(TE_MODE_NOTIFY, TEFFECT_BLOCK) == TE_MODE_NOTIFY,
+	      "effect: tracepoint backend degrades block to notify");
+	check(te_effect_mode(TE_MODE_NOTIFY, 99) == TE_MODE_UNSUPPORTED,
+	      "effect: unknown effect unsupported");
+}
+
+static void test_supported_effects(void)
+{
+	unsigned int all = TE_POLICY_BLOCK_EXEC | TE_POLICY_BLOCK_FILE |
+			   TE_POLICY_BLOCK_CONNECT | TE_POLICY_RECV;
+
+	/* LSM hooks always evaluate block rules only. */
+	for (int op = TOP_EXEC; op <= TOP_RECV; op++)
+		check(te_supported_effects(TE_MODE_BLOCK, op, all, 1) ==
+		      (1U << TEFFECT_BLOCK),
+		      "effects: block backend matches only block rules");
+
+	/* Hook attached: tracepoints must not match block rules (the LSM hook
+	 * reports the denial) but keep notify and kill. */
+	unsigned int notify_kill =
+		(1U << TEFFECT_NOTIFY) | (1U << TEFFECT_KILL);
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_CONNECT,
+				   TE_POLICY_BLOCK_CONNECT, 1) == notify_kill,
+	      "effects: attached connect hook keeps block rules off tracepoints");
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_WRITE,
+				   TE_POLICY_BLOCK_FILE, 1) == notify_kill,
+	      "effects: attached file hook keeps block rules off tracepoints");
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_EXEC,
+				   TE_POLICY_BLOCK_EXEC, 1) == notify_kill,
+	      "effects: attached exec hook keeps block rules off tracepoints");
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_RECV,
+				   TE_POLICY_RECV, 1) == notify_kill,
+	      "effects: attached recv hook keeps block rules off tracepoints");
+
+	/* Hook not attached (BPF LSM inactive or feature unreserved): block
+	 * rules must stay matchable so the match degrades to a visible,
+	 * unblocked violation instead of being silently skipped. */
+	unsigned int degraded = notify_kill | (1U << TEFFECT_BLOCK);
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_CONNECT,
+				   TE_POLICY_BLOCK_CONNECT, 0) == degraded,
+	      "effects: inactive LSM degrades connect block on tracepoints");
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_CONNECT, 0, 1) == degraded,
+	      "effects: unreserved connect hook degrades block on tracepoints");
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_RECV, 0, 0) == degraded,
+	      "effects: recv block degrades without recvmsg hook");
+	check(te_supported_effects(TE_MODE_NOTIFY, TOP_EXEC, 0, 0) == degraded,
+	      "effects: exec block degrades without bprm hook");
+
+	/* Feature bits map to the hook that denies each op. */
+	check(te_block_feature_bit(TOP_EXEC) == TE_POLICY_BLOCK_EXEC,
+	      "effects: exec uses the exec block bit");
+	check(te_block_feature_bit(TOP_OPEN) == TE_POLICY_BLOCK_FILE &&
+	      te_block_feature_bit(TOP_WRITE) == TE_POLICY_BLOCK_FILE,
+	      "effects: open and write share the file block bit");
+	check(te_block_feature_bit(TOP_CONNECT) == TE_POLICY_BLOCK_CONNECT,
+	      "effects: connect uses the connect block bit");
+	check(te_block_feature_bit(TOP_RECV) == TE_POLICY_RECV,
+	      "effects: recv rides the recv flow bit");
+}
+
 int main(void)
 {
 	printf("=== ActPlane taint predicate tests ===\n");
@@ -117,6 +194,8 @@ int main(void)
 	test_match();
 	test_mask();
 	test_arg();
+	test_effect_mode();
+	test_supported_effects();
 	printf("\n%d passed, %d failed\n", passed, failed);
 	return failed == 0 ? 0 : 1;
 }

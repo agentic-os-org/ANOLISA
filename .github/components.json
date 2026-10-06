@@ -253,6 +253,24 @@
       "status": "incubating"
     },
     {
+      "id": "aw",
+      "display_name": "AW",
+      "aliases": [],
+      "issue_option": null,
+      "path_prefixes": [
+        "src/aw/"
+      ],
+      "label": "component:aw",
+      "commit_scope": "aw",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": null,
+      "issue_triagers": [
+        "kongche-jbw"
+      ],
+      "status": "incubating"
+    },
+    {
       "id": "osbase",
       "display_name": "OS Base",
       "aliases": [],

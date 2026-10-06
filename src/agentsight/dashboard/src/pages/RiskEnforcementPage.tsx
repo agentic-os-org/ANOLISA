@@ -190,8 +190,14 @@ export const RiskEnforcementPage: React.FC = () => {
     ? violations.filter((v) => v.agent_id === agentIdFilter)
     : violations;
 
-  const activeBindings = bindings.filter((binding) => binding.state === 'enforced');
-  const displayedViolations = enforcementViolationTotal(violations, health);
+  // The bindings table below shows `filteredBindings`, and `filteredBindings`
+  // is the full list when no agent filter is active, so both the summary card
+  // and the binding-limit check must derive from it to agree with the visible
+  // rows and the filter banner.
+  const activeBindings = filteredBindings.filter((binding) => binding.state === 'enforced');
+  // The table below shows `filteredViolations`; the summary card must count
+  // the same set or it disagrees with the visible rows and the filter banner.
+  const displayedViolations = enforcementViolationTotal(filteredViolations, health);
   const supportsMode = (candidate: EnforcementPolicyMode): boolean => (
     enforcementSupportsMode(health, candidate)
   );
@@ -209,6 +215,13 @@ export const RiskEnforcementPage: React.FC = () => {
   const newestViolations = [...filteredViolations]
     .sort((left, right) => right.occurred_at_ns - left.occurred_at_ns);
   const paginatedViolations = newestViolations.slice(violationOffset, violationOffset + VIOLATION_LIMIT);
+  // The list can shrink under the current offset (a refresh prunes expired
+  // bindings and their violations), leaving the slice empty; Pagination then
+  // hides itself once total <= limit, stranding the table with no control to
+  // go back. Clamp the offset to the newest list.
+  useEffect(() => {
+    setViolationOffset((current) => Math.min(current, Math.max(0, newestViolations.length - 1)));
+  }, [newestViolations.length]);
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canCreate) return;

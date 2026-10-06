@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import tempfile
@@ -15,8 +16,8 @@ from agentscope.formatter import FormatterBase
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from agentscope.model import ChatModelBase, ChatResponse
-from agentscope.tool import ToolResponse
-from anolisa_tokenless import ContentOrigin
+from agentscope.tool import Toolkit, ToolResponse
+from anolisa_tokenless import ContentOrigin, PostToolRequest, PostToolResponse
 from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 _RECOVERY_PAYLOAD = "RECOVERY_SENTINEL=世界\n" + ("内容" * 525_000) + "TRAILING_NEWLINE\n"
@@ -69,6 +70,84 @@ async def tokenless_retrieve() -> ToolResponse:
     return ToolResponse(content=[TextBlock(type="text", text="application")])
 
 
+async def assert_positional_postprocessors(
+    integration: TokenlessAgentScope,
+    toolkit: Toolkit,
+) -> None:
+    """Use the installed Toolkit's positional ABI and real execution path."""
+    original_post_tool = integration.sdk.post_tool
+    try:
+        for callback_kind in ("sync", "async", "unchanged", "none"):
+            order: list[str] = []
+
+            async def read_file() -> ToolResponse:
+                return ToolResponse(content=[TextBlock(type="text", text="original")])
+
+            def sync_postprocess(tool_call: dict, response: ToolResponse) -> ToolResponse:
+                assert tool_call["name"] == "read_file"
+                assert response.content[0]["text"] == "original"
+                order.append("application")
+                return ToolResponse(content=[TextBlock(type="text", text="application-result")])
+
+            async def async_postprocess(tool_call: dict, response: ToolResponse) -> ToolResponse:
+                await asyncio.sleep(0)
+                return sync_postprocess(tool_call, response)
+
+            def unchanged_postprocess(tool_call: dict, response: ToolResponse) -> None:
+                sync_postprocess(tool_call, response)
+
+            expected_content = (
+                "original" if callback_kind in ("none", "unchanged") else "application-result"
+            )
+
+            async def observed_post_tool(request: PostToolRequest) -> PostToolResponse:
+                assert request.tool_name == "read_file"
+                assert request.content == expected_content
+                order.append("tokenless")
+                return await original_post_tool(request)
+
+            integration.sdk.post_tool = observed_post_tool
+            previous = {
+                "sync": sync_postprocess,
+                "async": async_postprocess,
+                "unchanged": unchanged_postprocess,
+                "none": None,
+            }[callback_kind]
+            schema = {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            positional: list[Any] = []
+            for name, parameter in list(
+                inspect.signature(Toolkit.register_tool_function).parameters.items()
+            )[1:]:
+                if name == "tool_func":
+                    positional.append(read_file)
+                elif name == "json_schema":
+                    positional.append(schema)
+                elif name == "postprocess_func":
+                    positional.append(previous)
+                    break
+                else:
+                    positional.append(parameter.default)
+            toolkit.register_tool_function(*positional, namesake_strategy="override")
+            tool_call = ToolUseBlock(
+                type="tool_use",
+                id=f"call-positional-{callback_kind}",
+                name="read_file",
+                input={},
+            )
+            responses = [chunk async for chunk in await toolkit.call_tool_function(tool_call)]
+            assert len(responses) == 1
+            assert responses[0].content[0]["text"] == expected_content
+            assert order == (["tokenless"] if previous is None else ["application", "tokenless"])
+    finally:
+        integration.sdk.post_tool = original_post_tool
+
+
 async def main() -> None:
     """Run one real AgentScope 1.x postprocessor and retrieval cycle."""
     version = tuple(int(part) for part in agentscope.__version__.split(".")[:3])
@@ -116,6 +195,7 @@ async def main() -> None:
             enable_rewrite_query=False,
         )
         integration.install(agent, session_id="smoke-session")
+        await assert_positional_postprocessors(integration, toolkit)
 
         await agent._reasoning()
         serialized_tools = json.dumps(model.tools, ensure_ascii=False)

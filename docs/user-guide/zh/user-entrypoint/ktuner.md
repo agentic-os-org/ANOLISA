@@ -67,12 +67,18 @@ sudo ktuner fix vm.swappiness
 ktuner why net.core.somaxconn
 
 # 撤销 ktuner 做的所有改动
-sudo ktuner rollback
+sudo ktuner rollback          # 破坏性且终结：恢复并删除 ledger
+sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ```
 
-所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、`1` check 发现可改进项（非错误）、`2` 错误。
+所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、
+`1` check 发现可改进项或 rollback 仍有值未恢复、`2` 命令错误。
+回滚遇到写入失败或路径缺失时返回 `1`（包括部分恢复），仍在 stdout 输出 JSON 计数，
+并保留记录以便重试。空记录为成功的无操作（`0`）；记录缺失或无法读取为命令错误（`2`）。
 
 ---
+
+网络 conf 参数中的网卡身份区分大小写。`net/ipv4/conf/Br0.100/forwarding` 和 `net.ipv4.conf.Br0.100.forwarding` 指向同一网卡；`br0.100` 是不同的身份。IPv6 遵循相同规则。网卡包含字面点时，持久化记录使用首个分隔符为斜杠的 sysctl.d 键，让 systemd 保留这些点。此行为支持已有有效记录或自定义库推荐；当前内置规则不生成逐 VLAN 推荐。
 
 ## 权限边界
 
@@ -80,11 +86,12 @@ sudo ktuner rollback
 |------|------|------|
 | `check`、`why` | 否 | 只读诊断；绝不写内核 |
 | `tune --dry-run` | 否 | 预览改动，不写入 |
-| `tune`、`fix`、`rollback` | 是（`sudo`） | 写 `/proc/sys`；非 root 直接报错 |
+| `tune`、`fix`、`rollback` | 是（`sudo`） | 写 `/proc/sys`；非 root 直接报错。`rollback --list` 只读但同样需要 root（ledger 是 0700 root 目录下的 0600 文件） |
 
 安全保证：
 
 - **代码执行 deny-list**：可能导致代码执行的参数（`kernel.core_pattern`、`kernel.modprobe`、`kernel.hotplug` 等）在所有写入路径上被无条件阻止。匹配基于解析后的文件系统路径，因此拼写变体无法绕过。
+- **并发操作**：tune、fix、库导入和 rollback 通过同一把锁串行执行原值读取、写入、账本更新和持久化。过期诊断值不会被用作新的回滚原值；无法读取账本时阻止新写入。此保证不覆盖外部 sysctl 写入者或崩溃恢复。
 - **回滚安全**：已应用的改动会被记录；部分回滚失败时绝不丢弃其余参数的原始值。
 - **无自主 root**：ktuner 非 root 运行时一律报错。通过 cosh 调用时，沙箱守卫与权限提示确保任何 `sudo ktuner tune` 都经人工批准才执行。
 

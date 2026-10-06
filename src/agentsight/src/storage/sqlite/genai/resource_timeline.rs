@@ -58,7 +58,7 @@ impl GenAISqliteStore {
         let mut statement = conn.prepare(
             "SELECT start_timestamp_ns,
                     COALESCE(end_timestamp_ns, start_timestamp_ns),
-                    pid, tool_call_ids, input_messages
+                    COALESCE(pid, 0) AS pid, tool_call_ids, input_messages
              FROM genai_events
              WHERE event_type = 'llm_call' AND session_id = ?1
              ORDER BY start_timestamp_ns ASC",
@@ -69,7 +69,10 @@ impl GenAISqliteStore {
             Ok(SessionCall {
                 start_ns: row.get(0)?,
                 end_ns: row.get(1)?,
-                pid: row.get(2)?,
+                // `pid` is nullable in the schema; a NULL (only producible by
+                // a foreign writer) falls back to 0, which matches no
+                // samples, instead of failing the whole timeline query.
+                pid: row.get::<_, i64>(2)? as i32,
                 tool_call_ids: parse_string_array(tool_ids_json.as_deref()),
                 tool_response_ids: parse_tool_response_ids(input_messages_json.as_deref()),
             })
@@ -278,12 +281,22 @@ fn collect_tool_response_ids(value: &serde_json::Value, ids: &mut HashSet<String
             }
         }
         serde_json::Value::Object(object) => {
-            let is_response = object
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|kind| matches!(kind, "tool_call_response" | "tool_result"));
+            // The column holds whatever the capture wrote. Besides the parts
+            // shape, a request body stored verbatim by the crash drain carries
+            // the raw protocol forms: an OpenAI chat replay writes the tool
+            // result as a `role: "tool"` message keyed by `tool_call_id`, and
+            // Responses writes `function_call_output` keyed by `call_id`.
+            let kind = object.get("type").and_then(serde_json::Value::as_str);
+            let is_response = kind.is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "tool_call_response" | "tool_result" | "function_call_output"
+                )
+            }) || object.get("role").and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && object.contains_key("tool_call_id");
             if is_response {
-                for key in ["id", "tool_call_id", "tool_use_id"] {
+                for key in ["id", "tool_call_id", "tool_use_id", "call_id"] {
                     if let Some(id) = object.get(key).and_then(serde_json::Value::as_str) {
                         ids.insert(id.to_string());
                     }

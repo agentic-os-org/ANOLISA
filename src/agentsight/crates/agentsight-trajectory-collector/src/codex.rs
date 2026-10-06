@@ -113,6 +113,7 @@ pub fn convert_codex_events(
     let mut current_effort: Option<serde_json::Value> = None;
     // Cumulative usage from the last token_count event (authoritative totals).
     let mut last_total_usage: Option<(u64, u64, u64)> = None;
+    let mut previous_total_usage: Option<(u64, u64, u64)> = None;
 
     let flush = |turn: &mut Option<AgentTurn>, steps: &mut Vec<Step>, step_id: &mut usize| {
         if let Some(t) = turn.take() {
@@ -160,15 +161,25 @@ pub fn convert_codex_events(
                         .get("message")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    step_id += 1;
-                    steps.push(user_step(step_id, ts, text.to_string()));
+                    // Like the role=user fallback, skip message-less
+                    // events so no empty user step consumes a step id.
+                    if !text.is_empty() {
+                        step_id += 1;
+                        steps.push(user_step(step_id, ts, text.to_string()));
+                    }
                 }
                 "token_count" => {
                     if let Some(info) = payload.get("info") {
-                        if let Some(total) = usage_triple(info.get("total_token_usage")) {
+                        let total = usage_triple(info.get("total_token_usage"));
+                        let last = usage_triple(info.get("last_token_usage"));
+                        let incremental = incremental_usage(total, previous_total_usage, last);
+                        // Missing totals use last-call accounting, so a later total
+                        // must not include that already-counted gap in its delta.
+                        previous_total_usage = total;
+                        if let Some(total) = total {
                             last_total_usage = Some(total);
                         }
-                        if let Some((pt, ct, cache)) = usage_triple(info.get("last_token_usage")) {
+                        if let Some((pt, ct, cache)) = incremental {
                             let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
                             let m = t.metrics.get_or_insert_with(zero_metrics);
                             *m.prompt_tokens.get_or_insert(0) += pt;
@@ -289,6 +300,15 @@ pub fn extract_private_metadata(
     let mut user_count: u64 = 0;
     let mut assistant_count: u64 = 0;
 
+    // Same era detection as `convert_codex_events`: newer CLIs emit
+    // `event_msg/user_message` for the real user input, and role=user
+    // response_items then only carry injected context. Legacy rollouts
+    // predate the event, so their user messages are the role=user
+    // response_items the converter's fallback turns into steps.
+    let has_user_event_msg = events
+        .iter()
+        .any(|e| envelope_type(e) == "event_msg" && payload_type(e) == "user_message");
+
     for e in events {
         let payload = e.get("payload").unwrap_or(&serde_json::Value::Null);
         match envelope_type(e) {
@@ -300,10 +320,33 @@ pub fn extract_private_metadata(
                         .map(String::from);
                 }
             }
-            "event_msg" if payload_type(e) == "user_message" => user_count += 1,
+            // The counts ride on the same events as the trajectory and have to
+            // agree with the steps it contains, so an event that produces no
+            // step must not be counted either (see `convert_codex_events`).
+            "event_msg" if payload_type(e) == "user_message" => {
+                let text = payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !text.is_empty() {
+                    user_count += 1;
+                }
+            }
             "response_item" if payload_type(e) == "message" => {
-                if let Some("assistant") = payload.get("role").and_then(|v| v.as_str()) {
-                    assistant_count += 1
+                let role = payload.get("role").and_then(|v| v.as_str());
+                if role == Some("assistant") && !joined_text(payload.get("content")).is_empty() {
+                    assistant_count += 1;
+                }
+                // Legacy fallback (no event_msg/user_message in the whole
+                // rollout): the converter derives the user steps from
+                // role=user response_items, so the count must follow the same
+                // fallback; message-less items produce no step and are not
+                // counted.
+                if !has_user_event_msg
+                    && role == Some("user")
+                    && !joined_text(payload.get("content")).is_empty()
+                {
+                    user_count += 1;
                 }
             }
             _ => {}
@@ -406,6 +449,29 @@ fn usage_triple(usage: Option<&serde_json::Value>) -> Option<(u64, u64, u64)> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     Some((pt.unwrap_or(0), ct.unwrap_or(0), cache))
+}
+
+// Rate-limit updates can repeat the current usage snapshot. Only cumulative
+// advances belong to this turn; the first snapshot or a reset needs the
+// reported last-call usage so earlier history is not charged to this turn.
+fn incremental_usage(
+    total: Option<(u64, u64, u64)>,
+    previous: Option<(u64, u64, u64)>,
+    last: Option<(u64, u64, u64)>,
+) -> Option<(u64, u64, u64)> {
+    let delta = match (total, previous) {
+        (Some(t), Some(p)) => {
+            t.0.checked_sub(p.0)
+                .zip(t.1.checked_sub(p.1))
+                .zip(t.2.checked_sub(p.2))
+                .map(|((input, output), cached)| (input, output, cached))
+        }
+        _ => None,
+    };
+    // An unchanged snapshot is known zero usage, not a missing delta.
+    delta
+        .or(last)
+        .filter(|&(input, output, cached)| input != 0 || output != 0 || cached != 0)
 }
 
 fn sum_step_usage(steps: &[Step]) -> Option<(u64, u64, u64)> {
@@ -595,6 +661,26 @@ mod tests {
     }
 
     #[test]
+    fn test_message_less_user_message_emits_no_step() {
+        // Some event_msg/user_message records carry no message payload;
+        // like the role=user fallback, they must not produce an empty
+        // user step that consumes a step id.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-2\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        traj.validate_step_ids().unwrap();
+        assert_eq!(traj.steps.len(), 1, "steps: {:?}", traj.steps);
+        assert_eq!(traj.steps[0].source, StepSource::Agent);
+        assert_eq!(traj.steps[0].message, "hi");
+        // The skipped user step must not leave a gap in the id ordering.
+        assert_eq!(traj.steps[0].step_id, 1);
+    }
+
+    #[test]
     fn test_tool_call_variants() {
         // function_call carries a JSON-string `arguments`; local_shell_call
         // has an `action` object and no name (defaults to "shell");
@@ -640,5 +726,83 @@ mod tests {
         assert_eq!(extra["project"], "sysom-dev");
         assert_eq!(extra["user_message_count"], 1);
         assert_eq!(extra["assistant_message_count"], 1);
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_match_the_trajectory() {
+        // The counts ride on the same events as the trajectory, so an event
+        // that produces no step must not be counted either: a message-less
+        // event_msg/user_message (skipped by `convert_codex_events` since
+        // d4fdb97b9) and an assistant message with no text.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-3\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let extra = extract_private_metadata(&events, "codex");
+
+        let user_steps = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .count();
+        let assistant_messages: usize = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::Agent)
+            .count();
+        assert_eq!(user_steps, 1);
+        assert_eq!(assistant_messages, 1);
+        let counted_user = extra["user_message_count"].as_u64().unwrap();
+        let counted_assistant = extra["assistant_message_count"].as_u64().unwrap();
+        assert_eq!(
+            (counted_user, counted_assistant),
+            (user_steps as u64, assistant_messages as u64),
+            "the counts must describe the trajectory they ride on"
+        );
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_fallback_users() {
+        // Legacy rollouts predate event_msg/user_message (see
+        // `test_fallback_user_from_response_item_without_event_msg`): the
+        // converter derives the user steps from role=user response_items, so
+        // the count must follow the same fallback instead of reporting zero.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-4\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"first question\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer one\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"second question\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer two\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let user_steps = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .count();
+        assert_eq!(user_steps, 2);
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(
+            extra["user_message_count"].as_u64().unwrap(),
+            user_steps as u64,
+            "legacy sessions without event_msg must still count their users"
+        );
+    }
+
+    #[test]
+    fn test_extract_private_metadata_skips_injected_context_users() {
+        // In modern rollouts role=user response_items carry injected
+        // environment context while event_msg/user_message is the real
+        // input: the fallback must not wake up and double-count them.
+        let events = fixture_events();
+        let extra = extract_private_metadata(&events, "(default)");
+        assert_eq!(extra["user_message_count"], 1);
     }
 }

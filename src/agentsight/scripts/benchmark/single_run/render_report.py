@@ -188,7 +188,12 @@ def counter_delta(values: list[float]) -> int:
         return 0
     total = 0.0
     for previous, current in pairwise(values):
-        total += max(0.0, current - previous)
+        if current < previous:
+            # Counter reset: the new epoch's accumulated count already
+            # happened, so its first observed sample counts in full.
+            total += current
+        else:
+            total += current - previous
     return int(total)
 
 

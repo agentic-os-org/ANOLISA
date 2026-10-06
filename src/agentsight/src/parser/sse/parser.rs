@@ -12,11 +12,20 @@ impl SSEParser {
         let mut result = SSEEvents::new();
         let mut current_event = SSEEvent::new("");
         let mut data_lines: Vec<String> = Vec::new();
-        let lines = buffer.lines().peekable();
         let mut consumed_len = 0;
 
-        for line in lines {
-            consumed_len += line.len() + 1; // +1 for newline
+        // Split inclusive so CRLF lines are measured by their real byte
+        // length: `str::lines()` strips the `\r`, and adding only 1 for it
+        // undercounts every CRLF line, which pushed the remaining-slice start
+        // into the middle of a multi-byte character (panicking) and dropped
+        // the wrong number of unconsumed bytes. A trailing line without a
+        // newline is never consumed, so it stays in `remaining` intact.
+        for raw in buffer.split_inclusive('\n') {
+            let Some(raw_line) = raw.strip_suffix('\n') else {
+                break;
+            };
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            consumed_len += raw.len();
 
             if line.is_empty() {
                 // Empty line terminates the event
@@ -55,13 +64,10 @@ impl SSEParser {
             }
         }
 
-        // Check if we have a complete event at the end (ends with double newline)
-        result.remaining = if buffer.ends_with("\n\n") || buffer.ends_with("\r\n\r\n") {
-            String::new()
-        } else {
-            // Return unconsumed data
-            buffer[consumed_len.saturating_sub(1)..].to_string()
-        };
+        // `consumed_len` only advances past complete (newline-terminated)
+        // lines, so the split is always on a char boundary and any trailing
+        // partial line is returned verbatim.
+        result.remaining = buffer[consumed_len..].to_string();
         result.consumed_bytes = consumed_len;
 
         result
@@ -81,31 +87,64 @@ impl SseParser {
     /// Parse SslEvent and extract SSE events
     /// Returns Vec of ParsedSseEvent
     ///
+    /// Only newline-terminated lines are parsed. A trailing line without a
+    /// newline is a torn line from an SSL_read split and produces no event
+    /// (the legacy parser returns the same tail in `remaining`); bytes after
+    /// the last complete line are not returned, so a caller that needs them
+    /// has to retain the raw buffer. An event whose fields are complete but
+    /// lacks the terminating blank line is still emitted, matching the
+    /// legacy parser's end-of-buffer handling.
+    ///
     /// Note: For multi-line data fields, data is concatenated with '\n' separators.
     /// The data_offset points to the first data line, data_len covers all data content
     /// including internal newlines.
     pub fn parse(&self, event: Rc<SslEvent>) -> Vec<ParsedSseEvent> {
         let buf_len = event.buf_size() as usize;
         let buf = &event.buf[..buf_len];
-        let text = String::from_utf8_lossy(buf);
 
         let mut events = Vec::new();
         let mut current_id: Option<String> = None;
         let mut current_event: Option<String> = None;
         let mut current_retry: Option<u64> = None;
-        let mut data_parts: Vec<String> = Vec::new();
+        let mut data_parts: Vec<&[u8]> = Vec::new();
         let mut data_start: Option<usize> = None;
 
         let mut byte_offset = 0;
+        // Set when the buffer's last segment has no terminating newline: the
+        // event is still in flight and must not be flushed at end-of-buffer.
+        let mut trailing_line_torn = false;
 
-        // Use split_inclusive to properly track byte offsets with \r\n line endings
-        let lines_iter = text.split_inclusive('\n');
+        // Iterate the ORIGINAL bytes, not a lossy UTF-8 conversion: the
+        // zero-copy offsets below index into event.buf, so they must stay
+        // in raw-buffer coordinates. from_utf8_lossy expands every invalid
+        // byte (e.g. a multi-byte character split across TLS record
+        // boundaries) into a 3-byte U+FFFD, which would shift every offset
+        // after it and make data() slice the wrong bytes.
+        let lines_iter = buf.split_inclusive(|b| *b == b'\n');
 
         for line_with_end in lines_iter {
-            // Remove trailing \r\n or \n for parsing, but keep track of original length
-            let line = line_with_end.trim_end_matches('\n').trim_end_matches('\r');
             let line_with_end_len = line_with_end.len();
             let line_start = byte_offset;
+
+            // A final segment without '\n' is not a complete line: it is the
+            // torn prefix of a line split across SSL_read buffers (possibly
+            // partial JSON carrying a delta or usage). Emitting it would
+            // dispatch a bogus event whose remainder cannot be recognized in
+            // the next buffer; the legacy parser returns such a tail in
+            // `remaining` instead.
+            let Some(line_with_cr) = line_with_end.strip_suffix(b"\n") else {
+                trailing_line_torn = true;
+                break;
+            };
+
+            // Strip a trailing \r for parsing, but keep the original length
+            // for the raw-buffer offsets computed from line_start.
+            let mut end = line_with_cr.len();
+            while end > 0 && line_with_cr[end - 1] == b'\r' {
+                end -= 1;
+            }
+            let line_bytes = &line_with_cr[..end];
+            let line = String::from_utf8_lossy(line_bytes);
 
             if line.is_empty() {
                 // Empty line terminates the event
@@ -118,18 +157,10 @@ impl SseParser {
                     // Multi-line data concatenation is not supported in zero-copy mode
                     // Users needing full multi-line data should use the legacy SSEParser
                     let (data_offset, data_len) = if !data_parts.is_empty() {
-                        // Only use first data line for zero-copy access
-                        // Use the actual byte length from original buffer, not UTF-8 string length
-                        let first_line_bytes = data_parts[0].as_bytes();
-                        let first_line_byte_len = first_line_bytes.len();
-                        // Account for \r if present in original data
-                        let has_crlf = data_parts[0].ends_with('\r');
-                        let adjusted_len = if has_crlf {
-                            first_line_byte_len - 1
-                        } else {
-                            first_line_byte_len
-                        };
-                        (data_start.unwrap_or(0), adjusted_len)
+                        // Only use first data line for zero-copy access;
+                        // its raw byte length is exact because trailing \r
+                        // was already trimmed above.
+                        (data_start.unwrap_or(0), data_parts[0].len())
                     } else {
                         (0, 0)
                     };
@@ -167,6 +198,8 @@ impl SseParser {
                 // line_start: start of line in buffer
                 // field.len() + 1: skip field and colon
                 // +1 if there was a space after colon
+                // A field only matches when it is pure ASCII, so the lossy
+                // prefix has the same length as the raw prefix.
                 let value_start =
                     line_start + field.len() + 1 + if has_space_after_colon { 1 } else { 0 };
 
@@ -177,22 +210,24 @@ impl SseParser {
                         if data_start.is_none() {
                             data_start = Some(value_start);
                         }
-                        // Store the value without \r for consistency
-                        data_parts.push(value_stripped.to_string());
+                        // Keep the RAW value bytes: the recorded length must
+                        // count original buffer bytes, not the lossy
+                        // expansion of any invalid UTF-8 inside the value.
+                        data_parts.push(&line_bytes[value_start - line_start..]);
                     }
                     "retry" => current_retry = value_stripped.parse().ok(),
                     _ => {} // Unknown field, ignore per spec
                 }
             } else {
                 // Field without colon, entire line is field name with empty value
-                match line {
+                match line.as_ref() {
                     "id" => current_id = Some(String::new()),
                     "event" => current_event = Some(String::new()),
                     "data" => {
                         if data_start.is_none() {
                             data_start = Some(line_start + 5); // "data" + 0 chars
                         }
-                        data_parts.push(String::new());
+                        data_parts.push(&[]);
                     }
                     "retry" => current_retry = Some(0),
                     _ => {} // Unknown field, ignore per spec
@@ -202,11 +237,14 @@ impl SseParser {
             byte_offset += line_with_end_len;
         }
 
-        // Handle event at end without double newline
-        if current_id.is_some()
-            || current_event.is_some()
-            || current_retry.is_some()
-            || !data_parts.is_empty()
+        // Handle event at end without double newline. Suppressed when the
+        // buffer ended on a torn line: the event is incomplete, so flushing
+        // it here would publish a partial event and drop its remainder.
+        if !trailing_line_torn
+            && (current_id.is_some()
+                || current_event.is_some()
+                || current_retry.is_some()
+                || !data_parts.is_empty())
         {
             let (data_offset, data_len) = if !data_parts.is_empty() {
                 // Only use first data line for zero-copy access
@@ -295,6 +333,37 @@ mod tests {
 
         assert_eq!(events[0].data(), b"first");
         assert_eq!(events[1].data(), b"second");
+    }
+
+    #[test]
+    fn test_parse_offsets_survive_invalid_utf8_bytes() {
+        // A TLS record boundary can split a multi-byte character, so a
+        // captured buffer may contain invalid UTF-8. Offsets must stay in
+        // ORIGINAL buffer coordinates: with the lossy whole-buffer string,
+        // each invalid byte expanded into a 3-byte U+FFFD and every later
+        // event's data() returned the wrong bytes.
+        let parser = SseParser::new();
+        let data = b"data: \xff\n\ndata: hi\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data(), b"\xff");
+        assert_eq!(events[1].data(), b"hi");
+    }
+
+    #[test]
+    fn test_parse_offsets_survive_invalid_utf8_inside_data() {
+        // Invalid bytes inside the first data line must not inflate the
+        // recorded data_len either.
+        let parser = SseParser::new();
+        let data = b"event: usage\ndata: {\"a\":1}\xff\ndata: second\n\n".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.as_deref(), Some("usage"));
+        assert_eq!(events[0].data(), b"{\"a\":1}\xff");
     }
 
     #[test]
@@ -398,6 +467,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_torn_trailing_line_no_event() {
+        // One SSL_read can split the stream mid-line. A final segment without
+        // a terminating newline is a torn prefix of a line (e.g. partial
+        // JSON), not a complete event: dispatching it loses the remainder,
+        // which arrives in the next buffer as an unrecognizable fragment.
+        // The legacy SSEParser returns such a tail in `remaining` instead.
+        let parser = SseParser::new();
+        let data = b"data: {\"a\":1".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert!(
+            events.is_empty(),
+            "torn trailing line must not be emitted as an event, got {} event(s)",
+            events.len()
+        );
+    }
+
+    #[test]
+    fn test_parse_complete_event_then_torn_tail() {
+        // Only the blank-line-terminated event is complete; the torn tail
+        // must not become a second partial event.
+        let parser = SseParser::new();
+        let data = b"data: complete\n\ndata: {\"a\":1".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1, "only the complete event may be emitted");
+        assert_eq!(events[0].data(), b"complete");
+    }
+
+    #[test]
     fn test_parse_synthetic_done_marker() {
         let event = create_test_event(b"dummy".to_vec());
         let done = ParsedSseEvent::new_done_marker(event);
@@ -462,6 +563,39 @@ mod tests {
         let result = SSEParser::parse_stream("data: partial");
         // No double newline means no complete event
         assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_crlf_multibyte_tail() {
+        // CRLF lines must be counted by their full byte length. The old
+        // `line.len() + 1` accounting dropped the `\r`, so the remaining
+        // slice started one byte early per CRLF line and landed inside the
+        // final multi-byte character ("中" at bytes 19..22 -> byte 21).
+        let buffer = "data:a\r\ndata:中中中";
+        let result = SSEParser::parse_stream(buffer);
+        assert_eq!(result.len(), 0);
+        assert_eq!(result.remaining, "data:中中中");
+        assert_eq!(result.consumed_bytes, "data:a\r\n".len());
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_crlf_consumed_bytes() {
+        let buffer = "data: one\r\n\r\ndata: partial";
+        let result = SSEParser::parse_stream(buffer);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.events[0].data, "one");
+        assert_eq!(result.remaining, "data: partial");
+        assert_eq!(result.consumed_bytes, "data: one\r\n\r\n".len());
+    }
+
+    #[test]
+    fn test_legacy_parse_stream_trailing_partial_line_returned() {
+        // LF accounting is unchanged: complete lines are consumed, the
+        // unterminated tail is handed back byte-for-byte.
+        let result = SSEParser::parse_stream("data: a\ndata: b");
+        assert_eq!(result.len(), 0);
+        assert_eq!(result.remaining, "data: b");
+        assert_eq!(result.consumed_bytes, "data: a\n".len());
     }
 
     #[test]

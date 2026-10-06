@@ -344,6 +344,7 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forwarded["tool_call"].input, '{"command":"/rtk ls"}')
         self.assertEqual(call.input, '{"command": "ls"}')
         self.assertEqual(seen["post"].content_origin, core.ContentOrigin.COMMAND_OUTPUT)
+        self.assertEqual(seen["post"].command, "/rtk ls")
         self.assertEqual(seen["post"].output_optimization, core.OutputOptimization.RTK)
         self.assertEqual(seen["post"].capabilities.recovery, core.RecoveryMethod())
         self.assertEqual(seen["post"].status, core.ToolResultStatus.SUCCESS)

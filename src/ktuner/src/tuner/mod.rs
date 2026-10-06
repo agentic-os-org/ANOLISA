@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::bench::BenchResult;
@@ -13,33 +14,80 @@ use crate::rules::Recommendation;
 const ROLLBACK_PATH: &str = "/var/lib/ktuner/rollback.json";
 const SYSCTL_PERSIST_PATH: &str = "/etc/sysctl.d/99-ktuner.conf";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct RollbackEntry {
     previous: String,
     applied: String,
     path: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct RollbackData {
     version: u32,
     entries: BTreeMap<String, RollbackEntry>,
 }
 
-pub fn apply(recommendations: &[Recommendation]) -> Result<usize> {
+/// One parameter that failed to apply, with the write/verify error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyFailure {
+    pub param: String,
+    pub error: String,
+}
+
+/// One parameter the kernel accepted but with a value different from the
+/// request. The parameter IS applied — with the kernel's value — so the
+/// delta is surfaced as a note rather than a failure (#4160).
+///
+/// Boundary case, deliberate: a write the kernel silently IGNORES (accepts,
+/// value unchanged) records `applied = old` — strictly better than the old
+/// invisibility, and sysctl.d only gains a no-op line.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClampNote {
+    pub param: String,
+    pub requested: String,
+    pub effective: String,
+}
+
+/// Outcome of applying a batch: how many params were applied, which failed
+/// with why, and which the kernel accepted with an adjusted value. Mirrors
+/// `RollbackOutcome` so `tune` can report partial failure the way `rollback`
+/// already does — the previous return type (a bare count) could not represent
+/// failures at all, so quiet mode dropped them entirely. `clamped` is disjoint
+/// from `failed`: a rejected write is a failure, an accepted-but-adjusted
+/// write is applied with a note.
+pub struct ApplyOutcome {
+    pub applied: usize,
+    pub failed: Vec<ApplyFailure>,
+    pub clamped: Vec<ClampNote>,
+}
+
+pub fn apply(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
     apply_inner(recommendations, false)
 }
 
-pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<usize> {
+pub fn apply_quiet(recommendations: &[Recommendation]) -> Result<ApplyOutcome> {
     apply_inner(recommendations, true)
 }
 
-fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize> {
+fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<ApplyOutcome> {
+    let guard = lock_ledger_at(ROLLBACK_PATH)?;
+    load_rollback()?; // Refuse an unreadable ledger before any live write.
+    apply_locked(recommendations, quiet, &guard)
+}
+
+// Keep the transaction guard alive through every write and persistence step.
+fn apply_locked(
+    recommendations: &[Recommendation],
+    quiet: bool,
+    guard: &LedgerLock,
+) -> Result<ApplyOutcome> {
     let total = recommendations.len();
     let mut applied_recs: Vec<Recommendation> = Vec::new();
+    let mut failed: Vec<ApplyFailure> = Vec::new();
+    let mut clamped: Vec<ClampNote> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
-        match apply_single(rec) {
-            Ok(()) => {
+        match apply_recordable(rec) {
+            Ok((applied, outcome)) => {
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} → {}",
@@ -47,12 +95,36 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
                         i + 1,
                         total,
                         rec.param,
-                        rec.recommended_value
+                        outcome.effective
                     );
+                    if outcome.clamped {
+                        // The write landed but the kernel adjusted it; the
+                        // effective value is what gets recorded, so the
+                        // operator sees the delta here (#4160).
+                        println!(
+                            "      {} 内核实际生效 {}（期望 {}，已被内核调整并按实际值记录）",
+                            "⚠".yellow(),
+                            outcome.effective,
+                            rec.recommended_value
+                        );
+                    }
                 }
-                applied_recs.push(rec.clone());
+                if outcome.clamped {
+                    clamped.push(ClampNote {
+                        param: rec.param.clone(),
+                        requested: rec.recommended_value.clone(),
+                        effective: outcome.effective.clone(),
+                    });
+                }
+                // The ledger and sysctl.d must describe live reality: record
+                // the value the kernel actually took, not the request (#4160).
+                applied_recs.push(applied);
             }
             Err(e) => {
+                failed.push(ApplyFailure {
+                    param: rec.param.clone(),
+                    error: e.to_string(),
+                });
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} : {}",
@@ -68,8 +140,8 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
     }
 
     if !applied_recs.is_empty() {
-        save_rollback(&applied_recs)?;
-        persist_from_rollback()?;
+        save_rollback(guard, &applied_recs)?;
+        persist_from_rollback(guard)?;
         if !quiet {
             println!();
             println!(
@@ -81,28 +153,66 @@ fn apply_inner(recommendations: &[Recommendation], quiet: bool) -> Result<usize>
         println!();
         println!("  没有配置被成功应用");
     }
-    Ok(applied_recs.len())
+    Ok(ApplyOutcome {
+        applied: applied_recs.len(),
+        failed,
+        clamped,
+    })
 }
 
 /// Apply a single recommendation with rollback recording and persistence, but
 /// without apply()'s progress output — used by `ktuner fix` so a single fix is
-/// just as reversible (and survives reboot) as `tune`.
-pub fn apply_one(rec: &Recommendation) -> Result<()> {
-    apply_single(rec)?;
-    save_rollback(std::slice::from_ref(rec))?;
-    persist_from_rollback()?;
-    Ok(())
+/// just as reversible (and survives reboot) as `tune`. Returns the write
+/// outcome so `fix` can report the value the kernel actually took.
+pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
+    let guard = lock_ledger_at(ROLLBACK_PATH)?;
+    load_rollback()?;
+    let (applied, outcome) = apply_recordable(rec)?;
+    save_rollback(&guard, std::slice::from_ref(&applied))?;
+    persist_from_rollback(&guard)?;
+    Ok(outcome)
 }
 
-fn apply_single(rec: &Recommendation) -> Result<()> {
-    write_and_verify(&rec.param, &rec.recommended_value)
+// Recommendations are gathered before locking and may describe an older
+// state. Capture a writable original only after the transaction owns the lock.
+fn read_previous(param: &str) -> Result<String> {
+    let path = param_to_path(param);
+    let value = fs::read_to_string(&path)
+        .with_context(|| format!("read original value from {path} before applying"))?;
+    let trimmed = value.trim();
+    Ok(trimmed
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+        .unwrap_or(trimmed)
+        .to_string())
+}
+
+fn apply_recordable(rec: &Recommendation) -> Result<(Recommendation, WriteOutcome)> {
+    let previous = read_previous(&rec.param)?;
+    let outcome = write_and_verify(&rec.param, &rec.recommended_value)?;
+    let mut applied = rec_with_effective(rec, &outcome);
+    applied.current_value = previous;
+    Ok((applied, outcome))
+}
+
+/// The result of a verified write: the value now live in the kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteOutcome {
+    /// What the kernel actually took: the read-back value when it is
+    /// observable (whether it matches the request or was clamped), the
+    /// request itself for write-only tunables where no read-back exists.
+    pub effective: String,
+    /// True when the write was accepted but the live value differs from the
+    /// request. Callers must still record `effective` — the change is real —
+    /// and surface the divergence (#4160).
+    pub clamped: bool,
 }
 
 /// Write `value` to the kernel path for `param` and verify it took effect by
 /// reading it back. This is the single choke point for every live parameter
 /// write (tune / fix / import all route through here), so the code-execution
 /// deny-list is enforced here too as defense-in-depth — see is_forbidden_param.
-pub fn write_and_verify(param: &str, value: &str) -> Result<()> {
+pub fn write_and_verify(param: &str, value: &str) -> Result<WriteOutcome> {
     if is_forbidden_param(param) {
         anyhow::bail!("拒绝写入可执行代码的内核参数 {param}（core_pattern / modprobe 等）");
     }
@@ -122,43 +232,108 @@ pub fn write_and_verify(param: &str, value: &str) -> Result<()> {
         }
     })?;
 
-    // Verify by reading back. Some tunables are write-only (mode 0200, e.g.
-    // vm.drop_caches / vm.compact_memory): the write is accepted but the read
-    // fails — treat that as success, not a spurious verify failure, since the
-    // kernel took the write.
-    let readback = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
-
-    let readback_trimmed = readback.trim();
-    if !readback_matches(value, readback_trimmed) {
-        anyhow::bail!("验证失败: 期望 '{value}', 实际 '{readback_trimmed}'");
-    }
-
-    Ok(())
+    // Verify by reading back. A mismatch is NOT a failure (#4160): fs::write
+    // already succeeded, so the live value changed. Return what the kernel
+    // actually took so every caller records it instead of leaving an untracked
+    // live change that the rollback ledger cannot undo and sysctl.d does not
+    // persist.
+    Ok(match readback_verdict(&path, value) {
+        ReadbackVerdict::Verified { effective } => WriteOutcome {
+            effective,
+            clamped: false,
+        },
+        ReadbackVerdict::Clamped { effective } => WriteOutcome {
+            effective,
+            clamped: true,
+        },
+    })
 }
 
-/// Whether a sysfs/sysctl read-back indicates `value` took effect. sysfs "list"
-/// files (block scheduler, transparent_hugepage/enabled|defrag, ...) echo every
-/// option and mark the ACTIVE one in brackets, e.g. "always madvise [never]" —
-/// the selected value is inside `[ ]`, not necessarily first. So whenever the
-/// read-back contains a bracketed token we look for `[value]`; otherwise we
-/// compare tokens (tolerating a single written value against a multi-token
-/// read-back that leads with it). Previously only params literally named
-/// "scheduler" got the bracket-aware path, so THP writes were mis-reported as
-/// verify failures.
-fn readback_matches(value: &str, readback_trimmed: &str) -> bool {
+/// Read `path` back and classify it against the value just written. Some
+/// tunables are write-only (mode 0200, e.g. vm.drop_caches /
+/// vm.compact_memory): the write is accepted but the read fails — that is
+/// `Verified` with the request as the record, since the kernel took the write
+/// and no read-back exists to diverge from.
+fn readback_verdict(path: &str, value: &str) -> ReadbackVerdict {
+    match fs::read_to_string(path) {
+        Ok(s) => classify_readback(value, s.trim()),
+        Err(_) => ReadbackVerdict::Verified {
+            effective: value.to_string(),
+        },
+    }
+}
+
+/// Classification of a read-back against the value that was written. Pure
+/// (strings in, verdict out) so every verify decision — including the
+/// kernel's clamping behaviour — is unit-testable without a writable
+/// /proc/sys.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadbackVerdict {
+    /// The read-back confirms the write took effect as requested. `effective`
+    /// is what to record: the request for bracket-list and leading-token
+    /// files, the kernel's own rendering for an exact scalar match.
+    Verified { effective: String },
+    /// The write was ACCEPTED but the live value differs from the request:
+    /// the kernel clamped or normalized it (e.g. an out-of-range
+    /// net.core.rmem_max settles at a bound). The change did happen, so
+    /// `effective` must reach the rollback ledger and sysctl.d; only the
+    /// requested-vs-actual delta is surfaced as a note (#4160).
+    Clamped { effective: String },
+}
+
+/// Whether a sysfs/sysctl read-back confirms `value`, and if not, what the
+/// kernel actually took. sysfs "list" files (block scheduler,
+/// transparent_hugepage/enabled|defrag, ...) echo every option and mark the
+/// ACTIVE one in brackets, e.g. "always madvise [never]" — the selected value
+/// is inside `[ ]`, not necessarily first, so a token that merely appears
+/// unbracketed does NOT count. Otherwise we compare tokens (tolerating a
+/// single written value against a multi-token read-back that leads with it —
+/// a confirmed write, not a clamp).
+fn classify_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
     if readback_trimmed.contains('[') {
-        return readback_trimmed.contains(&format!("[{value}]"));
+        if readback_trimmed.contains(&format!("[{value}]")) {
+            return ReadbackVerdict::Verified {
+                effective: value.to_string(),
+            };
+        }
+        // The active option differs from the request: the write landed on the
+        // bracketed option, which is the value to record.
+        let active = readback_trimmed
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+            .unwrap_or_default()
+            .to_string();
+        return ReadbackVerdict::Clamped { effective: active };
     }
     let rec_tokens: Vec<&str> = value.split_whitespace().collect();
     let read_tokens: Vec<&str> = readback_trimmed.split_whitespace().collect();
-    if rec_tokens.len() == 1 && read_tokens.len() > 1 {
-        read_tokens.first() == rec_tokens.first()
-    } else {
-        rec_tokens == read_tokens
+    if rec_tokens == read_tokens {
+        return ReadbackVerdict::Verified {
+            effective: readback_trimmed.to_string(),
+        };
     }
+    if rec_tokens.len() == 1 && read_tokens.len() > 1 && read_tokens.first() == rec_tokens.first() {
+        // Leading-token match (e.g. write "bbr", read back "bbr cubic"):
+        // a confirmed write of the REQUEST — the kernel only echoed extra
+        // tokens it appends to its rendering. Record the request: the full
+        // multi-token read-back is not a value the kernel can take back on
+        // rollback or that sysctl.d can persist for a scalar param.
+        return ReadbackVerdict::Verified {
+            effective: value.to_string(),
+        };
+    }
+    ReadbackVerdict::Clamped {
+        effective: readback_trimmed.to_string(),
+    }
+}
+
+/// The ledger/persistence view of `rec` after a write: `recommended_value`
+/// becomes the value the kernel actually took, so the rollback ledger and
+/// sysctl.d describe reality (#4160). Every other field is preserved verbatim.
+fn rec_with_effective(rec: &Recommendation, outcome: &WriteOutcome) -> Recommendation {
+    let mut applied = rec.clone();
+    applied.recommended_value = outcome.effective.clone();
+    applied
 }
 
 /// Drop `..`, `.` and empty path components so a parameter name can never
@@ -186,6 +361,8 @@ pub fn param_to_path(param: &str) -> String {
         }
     } else if let Some(rest) = param.strip_prefix("transparent_hugepage/") {
         format!("/sys/kernel/mm/transparent_hugepage/{}", sanitize_rel(rest))
+    } else if let Some(path) = net_iface_path(param) {
+        path
     } else {
         // sysctl: dots become slashes, so any ".." is turned into "//" and
         // cannot traverse; the result is always rooted at /proc/sys.
@@ -193,18 +370,66 @@ pub fn param_to_path(param: &str) -> String {
     }
 }
 
+/// Resolve `net.<proto>.{conf,neigh}.<interface>.<property>` (dotted or
+/// slashed spelling) with the INTERFACE segment kept verbatim. Under
+/// /proc/sys/net/{ipv4,ipv6}/{conf,neigh}/ every interface is a directory
+/// whose name may itself contain dots — a VLAN subinterface is `eth0.100`, so
+/// the real file is conf/eth0.100/forwarding (a literal-dot directory). The
+/// blanket dot->slash translation instead produced conf/eth0/100/forwarding,
+/// which never exists, so `ktuner why` answered "parameter not found" for
+/// BOTH spellings even though the file was right there. Property names under
+/// these families never contain dots or slashes, so the last separator splits
+/// interface from property and everything before it stays verbatim; for
+/// dot-free interfaces (all, default, eth0) the result is byte-identical to
+/// the blanket translation. Returns None for every other sysctl.
+fn net_iface_path(param: &str) -> Option<String> {
+    for proto in ["ipv4", "ipv6"] {
+        for family in ["conf", "neigh"] {
+            for sep in ['.', '/'] {
+                let prefix = format!("net{sep}{proto}{sep}{family}{sep}");
+                if let Some(rest) = param.strip_prefix(&prefix) {
+                    return Some(match split_iface_tail(rest) {
+                        Some((iface, prop)) => {
+                            format!("/proc/sys/net/{proto}/{family}/{iface}/{prop}")
+                        }
+                        None => format!("/proc/sys/net/{proto}/{family}/{rest}"),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Split a per-interface family tail into (interface, property): the LAST
+/// separator is the boundary, because properties are plain names while
+/// interfaces may contain dots (VLAN `eth0.100`). None when the tail has no
+/// separator — an interface named without a property, a directory rather than
+/// a tunable.
+fn split_iface_tail(rest: &str) -> Option<(&str, &str)> {
+    rest.rsplit_once('/').or_else(|| rest.rsplit_once('.'))
+}
+
 /// Whether a parameter name is structurally legitimate to apply. Used to reject
 /// hostile entries from imported config files before they ever reach the
-/// filesystem. Rejects traversal, absolute paths and NUL bytes.
+/// filesystem. Rejects traversal, absolute paths, NUL bytes, and degenerate
+/// spellings with empty segments (`vm//swappiness`, `vm..swappiness`).
 pub fn is_safe_param(param: &str) -> bool {
     if param.is_empty() || param.starts_with('/') || param.contains('\0') {
         return false;
     }
-    // `..` is only a traversal between path separators. The sysctl branch turns
-    // dots into slashes (so any ".." there collapses to "//" and cannot
-    // escape), leaving the block// and transparent_hugepage/ branches — both
-    // '/'-separated — as the real risk.
-    if param.split('/').any(|seg| seg == "..") {
+    // Dots are separators for sysctl names (param_to_path turns them into
+    // slashes), so inspect the slash-resolved spelling: `..` segments are the
+    // traversal risk on the '/'-separated block/ and transparent_hugepage/
+    // branches, and empty segments are degenerate repeated or trailing
+    // separators. The kernel collapses those on write, but the rollback
+    // ledger keeps the spelling verbatim and persistence would emit a name
+    // sysctl.d rejects (e.g. `vm..swappiness = 60`).
+    if param
+        .replace('.', "/")
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "..")
+    {
         return false;
     }
     true
@@ -262,16 +487,39 @@ fn canonicalize_path(path: &str) -> String {
     format!("/{}", out.join("/"))
 }
 
-fn load_rollback() -> RollbackData {
-    if let Ok(json) = fs::read_to_string(ROLLBACK_PATH) {
-        if let Ok(data) = serde_json::from_str::<RollbackData>(&json) {
-            return data;
+fn load_rollback() -> Result<RollbackData> {
+    load_rollback_from(ROLLBACK_PATH)
+}
+
+fn load_rollback_from(path: &str) -> Result<RollbackData> {
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RollbackData {
+                version: 1,
+                entries: BTreeMap::new(),
+            });
         }
-    }
-    RollbackData {
-        version: 1,
-        entries: BTreeMap::new(),
-    }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read rollback ledger {path}; {}", ledger_remedy(path)))
+        }
+    };
+    // Only an absent ledger is empty: hiding errors would discard originals
+    // when a later merge replaces the existing rollback record.
+    serde_json::from_str(&json)
+        .with_context(|| format!("parse rollback ledger {path}; {}", ledger_remedy(path)))
+}
+
+// tune/fix reach the ledger only after parameters were written, and rollback
+// reads the same file, so the error must name a way out. Moving the ledger
+// aside is only safe while the copy is kept: a fresh ledger would record the
+// already-tuned values as the originals.
+fn ledger_remedy(path: &str) -> String {
+    format!(
+        "parameters may already be applied; inspect and repair {path} (or move it aside \
+         and keep the copy, which holds the original values), then rerun the command"
+    )
 }
 
 // Publish a fresh inode only after its contents and exact final mode are ready.
@@ -312,27 +560,50 @@ fn write_atomic_with(
     result
 }
 
-fn save_rollback(recommendations: &[Recommendation]) -> Result<()> {
-    merge_rollback(recommendations.iter().map(|r| {
-        (
-            r.param.clone(),
-            r.current_value.clone(),
-            r.recommended_value.clone(),
-        )
-    }))
+fn save_rollback(guard: &LedgerLock, recommendations: &[Recommendation]) -> Result<()> {
+    merge_rollback_locked(
+        guard,
+        ROLLBACK_PATH,
+        recommendations.iter().map(|r| {
+            (
+                r.param.clone(),
+                r.current_value.clone(),
+                r.recommended_value.clone(),
+            )
+        }),
+    )
 }
 
 /// Merge `(param, previous, applied)` entries into a cumulative rollback record.
-/// For a param already recorded, keep the ORIGINAL `previous` (the true
+/// For a kernel path already recorded, keep the ORIGINAL `previous` (the true
 /// pre-ktuner value) so rollback always restores pristine state even across
 /// multiple tune/fix/import runs; only refresh `applied`. New params are added.
 /// Pure (no I/O) so the keep-original-previous invariant is unit-testable.
+///
+/// Ledgers written before the alias dedup may already hold two spellings of
+/// one kernel path (e.g. `vm.swappiness` from tune and `vm/swappiness` from
+/// import); [`heal_alias_duplicates`] collapses such pairs before the new
+/// entries are merged, so a legacy duplicate cannot survive into the next
+/// ledger generation — where it would restore an intermediate value over the
+/// original and double-render the knob in sysctl.d.
 fn merge_entries<I>(mut data: RollbackData, entries: I) -> RollbackData
 where
     I: IntoIterator<Item = (String, String, String)>,
 {
+    heal_alias_duplicates(&mut data);
     for (param, previous, applied) in entries {
         let path = param_to_path(&param);
+        let identity = canonicalize_path(&path);
+        // Equivalent spellings must share the first rollback record, or a
+        // later alias would restore an intermediate value over the original.
+        if let Some(entry) = data
+            .entries
+            .values_mut()
+            .find(|entry| canonicalize_path(&entry.path) == identity)
+        {
+            entry.applied = applied;
+            continue;
+        }
         data.entries
             .entry(param)
             .and_modify(|e| e.applied = applied.clone())
@@ -345,20 +616,145 @@ where
     data
 }
 
-/// Merge the given entries into the on-disk rollback record and persist it.
-fn merge_rollback<I>(entries: I) -> Result<()>
+/// Collapse ledger entries that record the same kernel path under two
+/// spellings.
+///
+/// Ledgers written before the alias dedup (#3563) may already hold both
+/// `vm.swappiness` (from tune) and `vm/swappiness` (from import). Left in
+/// place, a rollback restores both in BTreeMap key order, so the later
+/// spelling overwrites the pristine original with an intermediate value, and
+/// `render_persistence` emits two lines for one knob.
+///
+/// Chain rule: when `x.applied == y.previous`, `y` was recorded while the
+/// value `x` had applied was live, so `x` is the earlier record and the pair
+/// collapses to `x.previous` (the pristine original) with `y.applied` (the
+/// newest value), under `x`'s key. Records with no chain relation — the knob
+/// was changed manually between the two ktuner runs — cannot be ordered, so
+/// the entry with the greatest key survives verbatim: that is exactly the
+/// record whose `previous` the key-order double write leaves in the kernel
+/// today, so the healed restore changes no outcome, it only removes the
+/// duplicate write. Pure (no I/O) so both rules are unit-testable.
+fn heal_alias_duplicates(data: &mut RollbackData) {
+    // Group the entry keys by the kernel path they resolve to.
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, entry) in &data.entries {
+        groups
+            .entry(canonicalize_path(&entry.path))
+            .or_default()
+            .push(key.clone());
+    }
+    for (_path, mut keys) in groups {
+        if keys.len() < 2 {
+            continue;
+        }
+        keys.sort();
+        // Collapse chain links first: x.applied == y.previous proves y was
+        // recorded after x, so x's previous is the older original.
+        loop {
+            let mut chain: Option<(String, String)> = None;
+            'pairs: for x in &keys {
+                for y in &keys {
+                    if x != y && data.entries[x].applied == data.entries[y].previous {
+                        chain = Some((x.clone(), y.clone()));
+                        break 'pairs;
+                    }
+                }
+            }
+            let Some((x, y)) = chain else { break };
+            let newest = data.entries[&y].applied.clone();
+            data.entries.get_mut(&x).unwrap().applied = newest;
+            data.entries.remove(&y);
+            keys.retain(|k| *k != y);
+        }
+        // Whatever remains has no order evidence: keep the greatest key, the
+        // record today's key-order restore writes last.
+        let survivor = keys.last().expect("group is non-empty").clone();
+        for key in keys {
+            if key != survivor {
+                data.entries.remove(&key);
+            }
+        }
+    }
+}
+
+/// Guard holding an exclusive `flock` on the ledger's lockfile. The lock is
+/// released when the descriptor closes on drop; the file itself stays on
+/// disk (flock state belongs to the open descriptor, not the file).
+struct LedgerLock {
+    _file: fs::File,
+}
+
+/// Take an exclusive inter-process lock on `<ledger-path>.lock`, in the
+/// ledger's own directory, mirroring the repo's `libc::flock` guard idiom
+/// (blaze's pid handoff). The lock serializes every ledger transition:
+/// without it two concurrent `ktuner fix`/`tune` runs (cron + config
+/// management) freely interleaved load -> merge -> rename, so both loaded
+/// the same snapshot, each renamed its own merge result, and the loser's
+/// entry — a live kernel change with its only record of the pristine
+/// `previous` — was silently dropped: rollback then restored the wrong
+/// value or none, and the regenerated sysctl.d omitted the line.
+fn lock_ledger_at(path: &str) -> Result<LedgerLock> {
+    lock_ledger_with(path, libc::LOCK_EX)
+}
+
+/// Shared-acquisition twin of `lock_ledger_at` for read-only ledger access
+/// (`rollback --list`): the preview's exists -> read pair must be atomic
+/// against every LOCK_EX holder — a rollback finalize deletes the ledger
+/// under that lock — but concurrent readers cost nothing, so LOCK_SH
+/// excludes the writers without serializing parallel listings.
+fn lock_ledger_shared_at(path: &str) -> Result<LedgerLock> {
+    lock_ledger_with(path, libc::LOCK_SH)
+}
+
+fn lock_ledger_with(path: &str, operation: i32) -> Result<LedgerLock> {
+    let dir = Path::new(path)
+        .parent()
+        .context("rollback path has no parent")?;
+    fs::create_dir_all(dir).context("创建 rollback 目录失败")?;
+    let lock_path = format!("{path}.lock");
+    // 0600 like the ledger itself; contents never matter, only the flock on
+    // the descriptor, so an existing file from an earlier run is fine.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("打开 rollback 锁文件 {lock_path} 失败"))?;
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+        return Err(anyhow::anyhow!(
+            "锁定 rollback 锁文件 {lock_path} 失败: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(LedgerLock { _file: file })
+}
+
+#[cfg(test)]
+fn merge_rollback_at<I>(path: &str, entries: I) -> Result<()>
 where
     I: IntoIterator<Item = (String, String, String)>,
 {
-    let dir = Path::new(ROLLBACK_PATH).parent().unwrap();
+    let guard = lock_ledger_at(path)?;
+    merge_rollback_locked(&guard, path, entries)
+}
+
+// Callers retain the same descriptor through live writes and persistence.
+// Opening a second descriptor here would deadlock against their own flock.
+fn merge_rollback_locked<I>(_guard: &LedgerLock, path: &str, entries: I) -> Result<()>
+where
+    I: IntoIterator<Item = (String, String, String)>,
+{
+    let data = merge_entries(load_rollback_from(path)?, entries);
+    let dir = Path::new(path)
+        .parent()
+        .context("rollback path has no parent")?;
     fs::create_dir_all(dir).context("创建 rollback 目录失败")?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("设置 {} 权限 0700 失败", dir.display()))?;
 
-    let data = merge_entries(load_rollback(), entries);
-
     let json = serde_json::to_string_pretty(&data)?;
-    write_atomic(ROLLBACK_PATH, json.as_bytes(), 0o600).context("保存 rollback 文件失败")?;
+    write_atomic(path, json.as_bytes(), 0o600).context("保存 rollback 文件失败")?;
     Ok(())
 }
 
@@ -388,17 +784,33 @@ fn validate_import_value(param: &str, value: &str) -> Result<()> {
 /// write_and_verify), then record it in the rollback ledger so `ktuner
 /// rollback` can undo it. This gives `import` the same safety net as
 /// `fix`/`tune` — previously import did a raw, unguarded, unverified fs::write
-/// with no way back. `current` is the pre-write value: rollback is only
-/// recorded when it is known, so we never record a bogus "" original to restore.
+/// with no way back. The original is read under the transaction lock;
+/// `current` is retained for compatibility but is never trusted as an original.
+/// Unreadable write-only parameters can still be applied when `current` is
+/// absent, without inventing a rollback value or persistence entry.
 pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<()> {
+    // Structural name guard before anything else: the rollback ledger records
+    // the key verbatim and persistence re-emits it, so a degenerate spelling
+    // must never be applied — rejecting here keeps it out of the ledger.
+    if !is_safe_param(param) {
+        anyhow::bail!("invalid parameter name {param}: traversal, empty segment, or absolute path");
+    }
     validate_import_value(param, value)?;
-    write_and_verify(param, value)?;
-    if let Some(prev) = current {
-        merge_rollback(std::iter::once((
-            param.to_string(),
-            prev.to_string(),
-            value.to_string(),
-        )))?;
+    let guard = lock_ledger_at(ROLLBACK_PATH)?;
+    load_rollback()?;
+    let previous = match read_previous(param) {
+        Ok(previous) => Some(previous),
+        Err(error) if current.is_some() => return Err(error),
+        Err(_) => None,
+    };
+    let outcome = write_and_verify(param, value)?;
+    if let Some(previous) = previous {
+        merge_rollback_locked(
+            &guard,
+            ROLLBACK_PATH,
+            std::iter::once((param.to_string(), previous, outcome.effective)),
+        )?;
+        persist_from_rollback(&guard)?;
     }
     Ok(())
 }
@@ -406,14 +818,12 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
 const NONSYSCTL_SCRIPT_PATH: &str = "/etc/ktuner/apply-nonsysctl.sh";
 const NONSYSCTL_SERVICE_PATH: &str = "/etc/systemd/system/ktuner-nonsysctl.service";
 
-/// Regenerate the persisted config files from the cumulative rollback record,
-/// which is the single source of truth for everything ktuner has applied. This
-/// keeps persistence cumulative across runs (previously each run overwrote the
-/// files with only its own batch, silently dropping earlier params) and never
-/// persists a param that failed to apply (those are not in the record).
-fn persist_from_rollback() -> Result<()> {
-    let data = load_rollback();
-
+/// Render the persisted file bodies from the rollback ledger, which is the
+/// single source of truth for everything ktuner has applied. Returns
+/// `(sysctl_conf, nonsysctl_script)`; `None` when a file would be empty.
+fn render_persistence(
+    entries: &std::collections::BTreeMap<String, RollbackEntry>,
+) -> (Option<String>, Option<String>) {
     let mut sysctl_content = String::from("# Generated by ktuner - do not edit manually\n");
     sysctl_content.push_str("# Run `sudo ktuner rollback` to revert\n\n");
 
@@ -424,20 +834,43 @@ fn persist_from_rollback() -> Result<()> {
     let mut has_sysctl = false;
     let mut has_nonsysctl = false;
 
-    for (param, entry) in &data.entries {
+    for (param, entry) in entries {
         if param.starts_with("block/") || param.starts_with("transparent_hugepage/") {
             nonsysctl_script.push_str(&format!(
                 "[ -f '{}' ] && echo '{}' > '{}'\n",
                 entry.path, entry.applied, entry.path
             ));
             has_nonsysctl = true;
-        } else if param.contains('.') {
-            sysctl_content.push_str(&format!("{} = {}\n", param, entry.applied));
+        } else if param.contains('.') || param.contains('/') {
+            // A slash as the first separator makes sysctl.d preserve literal
+            // dots. Derive dotted-interface keys from the recorded proc path,
+            // or systemd would interpret Br0.100 as two directories.
+            let key = entry
+                .path
+                .strip_prefix("/proc/sys/")
+                .filter(|path| net_iface_path(param).is_some() && path.contains('.'))
+                .map(str::to_string)
+                .unwrap_or_else(|| param.replace('/', "."));
+            sysctl_content.push_str(&format!("{key} = {}\n", entry.applied));
             has_sysctl = true;
         }
     }
 
-    if has_sysctl {
+    let sysctl = has_sysctl.then_some(sysctl_content);
+    let nonsysctl = has_nonsysctl.then_some(nonsysctl_script);
+    (sysctl, nonsysctl)
+}
+
+/// Regenerate the persisted config files from the cumulative rollback record,
+/// which is the single source of truth for everything ktuner has applied. This
+/// keeps persistence cumulative across runs (previously each run overwrote the
+/// files with only its own batch, silently dropping earlier params) and never
+/// persists a param that failed to apply (those are not in the record).
+fn persist_from_rollback(_guard: &LedgerLock) -> Result<()> {
+    let data = load_rollback()?;
+    let (sysctl_content, nonsysctl_script) = render_persistence(&data.entries);
+
+    if let Some(sysctl_content) = sysctl_content {
         // sysctl.d convention: world-readable, same as the systemd service
         // file below; write_atomic lands the mode before the rename so no
         // 0600 intermediate is ever visible at the final path.
@@ -445,7 +878,7 @@ fn persist_from_rollback() -> Result<()> {
             .context("持久化 sysctl 配置失败（需要 root 权限？）")?;
     }
 
-    if has_nonsysctl {
+    if let Some(nonsysctl_script) = nonsysctl_script {
         let dir = Path::new(NONSYSCTL_SCRIPT_PATH).parent().unwrap();
         fs::create_dir_all(dir).ok();
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
@@ -486,18 +919,55 @@ fn systemctl_quiet(args: &[&str]) {
 }
 
 pub fn rollback_preview() -> Result<Vec<(String, String, String)>> {
-    if !Path::new(ROLLBACK_PATH).exists() {
+    rollback_preview_at(ROLLBACK_PATH)
+}
+
+/// Read the pending rollback set for `--list` from the ledger at `path`.
+///
+/// An absent ledger short-circuits before the lock: lock acquisition creates
+/// the ledger directory and its `<path>.lock` file, and `--list` is
+/// documented as read-only ("nothing is written or deleted"), so a fresh
+/// install must not gain either from a preview.
+///
+/// Otherwise the exists -> read pair runs under the ledger's lock, matching
+/// rollback_inner's transaction shape: a concurrent rollback finalize holds
+/// LOCK_EX while it deletes the ledger, so an unlocked preview could pass
+/// exists() and then lose the file to that delete before read_to_string —
+/// "empty pending" turned into a hard 读取 rollback 文件失败 error and a
+/// `--list` exit 2. A shared lock is enough: preview never writes, and every
+/// writer/finalizer takes LOCK_EX on the same `<ledger>.lock`, so LOCK_SH
+/// keeps them out of the window without serializing parallel listings.
+fn rollback_preview_at(path: &str) -> Result<Vec<(String, String, String)>> {
+    // No ledger = nothing pending, which is not an error (a fresh install, or
+    // a completed rollback): --list reports an empty pending set without
+    // creating the ledger directory or lock file.
+    if !Path::new(path).exists() {
         return Ok(Vec::new());
     }
-
-    let json = fs::read_to_string(ROLLBACK_PATH).context("读取 rollback 文件失败")?;
-    let data: RollbackData = serde_json::from_str(&json).context("解析 rollback 文件失败")?;
-
-    let mut result = Vec::new();
-    for (param, entry) in &data.entries {
-        result.push((param.clone(), entry.applied.clone(), entry.previous.clone()));
+    let _guard = lock_ledger_shared_at(path)?;
+    // Re-check under the shared lock: a concurrent finalize holds LOCK_EX
+    // while it deletes the ledger, so the state observed here is the state
+    // the read below sees.
+    if !Path::new(path).exists() {
+        return Ok(Vec::new());
     }
-    Ok(result)
+    #[cfg(test)]
+    tests::finalize_race_probe(path);
+    let json = fs::read_to_string(path).context("读取 rollback 文件失败")?;
+    parse_rollback_entries(&json)
+}
+
+/// Parse rollback-ledger JSON into (param, applied, previous) triples in
+/// BTreeMap order. A corrupt ledger is an error, never an empty list —
+/// silently treating a corrupt ledger as empty is how the original values
+/// get lost (cf. #3578).
+fn parse_rollback_entries(json: &str) -> Result<Vec<(String, String, String)>> {
+    let data: RollbackData = serde_json::from_str(json).context("解析 rollback 文件失败")?;
+    Ok(data
+        .entries
+        .iter()
+        .map(|(param, entry)| (param.clone(), entry.applied.clone(), entry.previous.clone()))
+        .collect())
 }
 
 /// Outcome of a rollback attempt: how many params were restored vs. failed to
@@ -507,6 +977,14 @@ pub struct RollbackOutcome {
     pub restored: usize,
     pub failed: usize,
     pub skipped: usize,
+}
+
+impl RollbackOutcome {
+    /// Whether all recorded values were restored, including an empty ledger.
+    /// Failed writes and missing paths leave restoration incomplete.
+    pub fn is_complete(&self) -> bool {
+        rollback_should_finalize(self.failed, self.skipped)
+    }
 }
 
 /// How to summarise a rollback to the user. Kept as a pure classifier so the
@@ -552,14 +1030,12 @@ pub fn rollback_quiet() -> Result<RollbackOutcome> {
     rollback_inner(true)
 }
 
-fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
-    if !Path::new(ROLLBACK_PATH).exists() {
-        anyhow::bail!("没有找到 rollback 文件 ({ROLLBACK_PATH})，可能尚未执行过 tune");
-    }
-
-    let json = fs::read_to_string(ROLLBACK_PATH).context("读取 rollback 文件失败")?;
-    let data: RollbackData = serde_json::from_str(&json).context("解析 rollback 文件失败")?;
-
+fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
+    // Heal first: a legacy ledger may hold two spellings of one kernel path,
+    // and restoring both in key order would overwrite the pristine original
+    // with the intermediate value the second spelling recorded.
+    let mut data = data.clone();
+    heal_alias_duplicates(&mut data);
     let mut restored = 0;
     let mut failed = 0;
     let mut skipped = 0;
@@ -574,10 +1050,38 @@ fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
         if Path::new(&entry.path).exists() {
             match fs::write(&entry.path, &entry.previous) {
                 Ok(()) => {
-                    if !quiet {
-                        println!("  {} {} → {} (已恢复)", "✓".green(), param, entry.previous);
+                    // Confirm the write with the same read-back the tune path
+                    // uses (#5717): fs::write returning Ok only means the
+                    // kernel accepted the value, not that it took it. A
+                    // clamped read-back (the kernel kept another value) must
+                    // not count as restored, or rollback reports Full and
+                    // deletes the ledger while the system is still tuned. It
+                    // is a failure, which keeps the ledger for a retry.
+                    match readback_verdict(&entry.path, &entry.previous) {
+                        ReadbackVerdict::Verified { .. } => {
+                            if !quiet {
+                                println!(
+                                    "  {} {} → {} (已恢复)",
+                                    "✓".green(),
+                                    param,
+                                    entry.previous
+                                );
+                            }
+                            restored += 1;
+                        }
+                        ReadbackVerdict::Clamped { effective } => {
+                            if !quiet {
+                                println!(
+                                    "  {} {} : 回读为 {}（期望 {}），未恢复",
+                                    "✗".red(),
+                                    param,
+                                    effective,
+                                    entry.previous
+                                );
+                            }
+                            failed += 1;
+                        }
                     }
-                    restored += 1;
                 }
                 Err(e) => {
                     if !quiet {
@@ -593,6 +1097,28 @@ fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
             skipped += 1;
         }
     }
+
+    RollbackOutcome {
+        restored,
+        failed,
+        skipped,
+    }
+}
+
+fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
+    let _guard = lock_ledger_at(ROLLBACK_PATH)?;
+    if !Path::new(ROLLBACK_PATH).exists() {
+        anyhow::bail!("没有找到 rollback 文件 ({ROLLBACK_PATH})，可能尚未执行过 tune");
+    }
+
+    // The existence check, restore and cleanup share the apply transaction lock.
+    let json = fs::read_to_string(ROLLBACK_PATH).context("读取 rollback 文件失败")?;
+    let data: RollbackData = serde_json::from_str(&json).context("解析 rollback 文件失败")?;
+    let RollbackOutcome {
+        restored,
+        failed,
+        skipped,
+    } = restore_entries(&data, quiet);
 
     if rollback_should_finalize(failed, skipped) {
         if Path::new(SYSCTL_PERSIST_PATH).exists() {
@@ -647,6 +1173,14 @@ pub struct VerifyResult {
     pub degraded: Vec<String>,
 }
 
+/// Compare the before/after bench runs metric by metric and report which
+/// ones degraded. Pairing is by `BenchResult.name`, never by position: bench
+/// suites emit results in completion order, so a re-run may reorder the
+/// vectors, and index-pairing would compare a throughput against a latency
+/// and flag both — with `ROLLBACK_MIN_DEGRADED == 2` that spuriously rolls
+/// back a fully improved system. A before-metric with no after-partner, or a
+/// change that cannot be graded (`b.value <= 0.0`, non-finite `a.value`),
+/// counts as degraded: unverifiable is never silently clean.
 pub fn verify_and_report(before: &[BenchResult], after: &[BenchResult]) -> VerifyResult {
     println!("  {}", "性能对比 (before → after)".bold());
     println!(
@@ -657,16 +1191,39 @@ pub fn verify_and_report(before: &[BenchResult], after: &[BenchResult]) -> Verif
 
     let mut degraded = Vec::new();
 
-    for (b, a) in before.iter().zip(after.iter()) {
-        let change = if b.value > 0.0 {
-            (a.value - b.value) / b.value * 100.0
-        } else {
-            0.0
+    let after_by_name: HashMap<&str, &BenchResult> =
+        after.iter().map(|a| (a.name.as_str(), a)).collect();
+
+    for b in before {
+        let Some(a) = after_by_name.get(b.name.as_str()) else {
+            // The after-run lost this metric (bench error, partial run). zip
+            // truncation used to drop it from the comparison entirely; a
+            // metric that cannot be verified must be surfaced instead.
+            degraded.push(b.name.clone());
+            let before_val = format!("{:>8.2} {:<10}", b.value, b.unit);
+            let after_val = format!("{:>8} {:<10}", "—", "");
+            println!(
+                "  {:<24} {}  {} {}",
+                b.name,
+                before_val,
+                after_val,
+                "无法验证 ⚠".red()
+            );
+            continue;
         };
+
+        let change = (a.value - b.value) / b.value * 100.0;
+
+        // NaN (and the infinities a `b.value == 0.0` division produces)
+        // compare false against BOTH thresholds, so without this guard a
+        // NaN after-value passes as clean and renders as "↓NaN%".
+        let unverifiable = !change.is_finite() || b.value <= 0.0;
 
         let is_latency = b.unit.contains("ns") || b.unit.contains("μs");
 
-        let is_degraded = if is_latency {
+        let is_degraded = if unverifiable {
+            true
+        } else if is_latency {
             change > DEGRADATION_THRESHOLD
         } else {
             change < -DEGRADATION_THRESHOLD
@@ -676,7 +1233,7 @@ pub fn verify_and_report(before: &[BenchResult], after: &[BenchResult]) -> Verif
             degraded.push(b.name.clone());
         }
 
-        let change_display = if change.abs() < 1.0 {
+        let change_display = if unverifiable || change.abs() < 1.0 {
             "—".dimmed().to_string()
         } else if is_latency {
             if change < 0.0 {
@@ -746,7 +1303,189 @@ pub fn auto_rollback_on_degradation(result: &VerifyResult) -> Result<Option<Roll
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persistence_preserves_literal_interface_dots() {
+        for proto in ["ipv4", "ipv6"] {
+            for param in [
+                format!("net/{proto}/conf/Br0.100/forwarding"),
+                format!("net.{proto}.conf.Br0.100.forwarding"),
+            ] {
+                let path = format!("/proc/sys/net/{proto}/conf/Br0.100/forwarding");
+                let entries = BTreeMap::from([(
+                    param,
+                    RollbackEntry {
+                        previous: "0".into(),
+                        applied: "1".into(),
+                        path,
+                    },
+                )]);
+                let (config, script) = render_persistence(&entries);
+                assert!(config
+                    .unwrap()
+                    .contains(&format!("net/{proto}/conf/Br0.100/forwarding = 1")));
+                assert!(script.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn persistence_preserves_neighbour_interface_dots() {
+        // sysctl.d needs a slash-first key to keep a literal-dot interface
+        // together (systemd would split net.ipv4.neigh.Br0.100 into two path
+        // components), so the neigh key must be derived from the recorded
+        // proc path exactly as the conf one is.
+        for proto in ["ipv4", "ipv6"] {
+            for param in [
+                format!("net/{proto}/neigh/Br0.100/gc_thresh3"),
+                format!("net.{proto}.neigh.Br0.100.gc_thresh3"),
+            ] {
+                let path = format!("/proc/sys/net/{proto}/neigh/Br0.100/gc_thresh3");
+                let entries = BTreeMap::from([(
+                    param,
+                    RollbackEntry {
+                        previous: "4096".into(),
+                        applied: "8192".into(),
+                        path,
+                    },
+                )]);
+                let (config, script) = render_persistence(&entries);
+                assert!(config
+                    .unwrap()
+                    .contains(&format!("net/{proto}/neigh/Br0.100/gc_thresh3 = 8192")));
+                assert!(script.is_none());
+            }
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn render_persistence_normalizes_slashed_sysctl_names() {
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "kernel/sysrq".to_string(),
+            RollbackEntry {
+                previous: "1".to_string(),
+                applied: "176".to_string(),
+                path: "/proc/sys/kernel/sysrq".to_string(),
+            },
+        );
+        entries.insert(
+            "block/sda/scheduler".to_string(),
+            RollbackEntry {
+                previous: "none".to_string(),
+                applied: "mq-deadline".to_string(),
+                path: "/sys/block/sda/queue/scheduler".to_string(),
+            },
+        );
+        let (sysctl, nonsysctl) = render_persistence(&entries);
+        // The ledger is the single source of truth: a slashed sysctl spelling
+        // must land in the sysctl.d file in its dotted form, not be dropped.
+        let sysctl = sysctl.expect("slashed sysctl param must be persisted");
+        assert!(sysctl.contains("kernel.sysrq = 176"));
+        let nonsysctl = nonsysctl.expect("block param must be persisted");
+        assert!(nonsysctl.contains("/sys/block/sda/queue/scheduler"));
+    }
+
+    #[test]
+    fn render_persistence_empty_without_entries() {
+        let entries = std::collections::BTreeMap::new();
+        let (sysctl, nonsysctl) = render_persistence(&entries);
+        assert!(sysctl.is_none());
+        assert!(nonsysctl.is_none());
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_round_trip() {
+        let data = RollbackData {
+            version: 1,
+            entries: [
+                (
+                    "vm.swappiness".to_string(),
+                    RollbackEntry {
+                        previous: "60".to_string(),
+                        applied: "1".to_string(),
+                        path: "/proc/sys/vm/swappiness".to_string(),
+                    },
+                ),
+                (
+                    "block/sda/scheduler".to_string(),
+                    RollbackEntry {
+                        previous: "mq-deadline".to_string(),
+                        applied: "none".to_string(),
+                        path: "/sys/block/sda/queue/scheduler".to_string(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let entries = parse_rollback_entries(&json).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "block/sda/scheduler".to_string(),
+                    "none".to_string(),
+                    "mq-deadline".to_string()
+                ),
+                (
+                    "vm.swappiness".to_string(),
+                    "1".to_string(),
+                    "60".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_empty_ledger() {
+        // Fresh install / post-rollback state: empty, not an error.
+        let entries = parse_rollback_entries(r#"{"version":1,"entries":{}}"#).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_rejects_corrupt_json() {
+        // The #3578 "corrupt is not empty" contract.
+        let err = parse_rollback_entries("not json").unwrap_err();
+        assert!(err.to_string().contains("解析"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_rejects_wrong_shape() {
+        // Wrong top-level type and wrong entries type: Err, no panic, no
+        // silent default.
+        assert!(parse_rollback_entries("[1,2,3]").is_err());
+        assert!(parse_rollback_entries(r#"{"entries":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_rollback_entries_sorted_by_param() {
+        // BTreeMap serialization emits sorted keys, so the parse output is
+        // sorted by param — the ordering --list's output promises.
+        let data = RollbackData {
+            version: 1,
+            entries: ["c", "a", "b"]
+                .iter()
+                .map(|p| {
+                    (
+                        p.to_string(),
+                        RollbackEntry {
+                            previous: "0".to_string(),
+                            applied: "1".to_string(),
+                            path: format!("/proc/sys/{p}"),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let entries = parse_rollback_entries(&json).unwrap();
+        let params: Vec<&str> = entries.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(params, vec!["a", "b", "c"]);
+    }
 
     #[test]
     fn test_param_to_path_sysctl() {
@@ -767,6 +1506,45 @@ mod tests {
             param_to_path("net.core.rmem_max"),
             "/proc/sys/net/core/rmem_max"
         );
+    }
+
+    #[test]
+    fn apply_reports_missing_params_as_failures() {
+        // Nonexistent paths fail inside write_and_verify before any write, so
+        // this is safe for non-root CI: every param must come back as a
+        // recorded failure with its reason, not vanish — the old quiet-mode
+        // contract dropped the error text entirely, so `ktuner tune` printed
+        // {"applied": 0} and exited 0 even when every write failed.
+        let recs: Vec<Recommendation> = ["vm.ktuner_no_such_a", "vm.ktuner_no_such_b"]
+            .iter()
+            .map(|p| Recommendation {
+                param: p.to_string(),
+                current_value: "0".to_string(),
+                recommended_value: "1".to_string(),
+                writable: true,
+                ..Default::default()
+            })
+            .collect();
+        let dir =
+            std::env::temp_dir().join(format!("ktuner_missing_params_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        let outcome = apply_locked(&recs, true, &guard)
+            .expect("apply_quiet must not fail on per-param errors");
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.failed.len(), 2, "both failures must be reported");
+        assert_eq!(outcome.failed[0].param, "vm.ktuner_no_such_a");
+        assert!(
+            !outcome.failed[0].error.is_empty(),
+            "error text must survive quiet mode"
+        );
+        assert!(
+            !ledger.exists(),
+            "failed parameters must not publish a ledger"
+        );
+        drop(guard);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -798,6 +1576,171 @@ mod tests {
     }
 
     #[test]
+    fn test_param_to_path_conf_vlan_interface() {
+        // VLAN subinterfaces are literal-dot directories under conf/
+        // (conf/eth0.100/forwarding). The blanket dot->slash translation
+        // resolved both spellings to conf/eth0/100/forwarding, which never
+        // exists — `ktuner why` then failed with "parameter not found" even
+        // though the file was present.
+        assert_eq!(
+            param_to_path("net.ipv4.conf.eth0.100.forwarding"),
+            "/proc/sys/net/ipv4/conf/eth0.100/forwarding"
+        );
+        assert_eq!(
+            param_to_path("net/ipv4/conf/eth0.100/forwarding"),
+            "/proc/sys/net/ipv4/conf/eth0.100/forwarding"
+        );
+        assert_eq!(
+            param_to_path("net.ipv6.conf.eth0.100.accept_ra"),
+            "/proc/sys/net/ipv6/conf/eth0.100/accept_ra"
+        );
+        // Dot-free interfaces keep the blanket translation's exact result.
+        assert_eq!(
+            param_to_path("net.ipv4.conf.all.send_redirects"),
+            "/proc/sys/net/ipv4/conf/all/send_redirects"
+        );
+        assert_eq!(
+            param_to_path("net.ipv4.conf.default.rp_filter"),
+            "/proc/sys/net/ipv4/conf/default/rp_filter"
+        );
+        // Interface-only tails are directories, same as before.
+        assert_eq!(
+            param_to_path("net.ipv4.conf.eth0"),
+            "/proc/sys/net/ipv4/conf/eth0"
+        );
+        // Degenerate double dots still resolve to a nonexistent literal-dot
+        // directory: fail-closed, never a wrong write.
+        assert_eq!(
+            param_to_path("net.ipv4.conf.eth0..100.forwarding"),
+            "/proc/sys/net/ipv4/conf/eth0..100/forwarding"
+        );
+    }
+
+    #[test]
+    fn test_param_to_path_neigh_vlan_interface() {
+        // The neighbour family repeats conf's literal-dot layout
+        // (neigh/eth0.100/gc_thresh3), so the same blanket dot->slash
+        // translation resolved both spellings to neigh/eth0/100/gc_thresh3 —
+        // a path that never exists, making `ktuner why` answer
+        // "parameter not found" although the file was present.
+        assert_eq!(
+            param_to_path("net.ipv4.neigh.eth0.100.gc_thresh3"),
+            "/proc/sys/net/ipv4/neigh/eth0.100/gc_thresh3"
+        );
+        assert_eq!(
+            param_to_path("net/ipv4/neigh/eth0.100/gc_thresh3"),
+            "/proc/sys/net/ipv4/neigh/eth0.100/gc_thresh3"
+        );
+        assert_eq!(
+            param_to_path("net.ipv6.neigh.Br0.100.proxy_qlen"),
+            "/proc/sys/net/ipv6/neigh/Br0.100/proxy_qlen"
+        );
+        // Dot-free interfaces keep the blanket translation's exact result.
+        assert_eq!(
+            param_to_path("net.ipv4.neigh.default.gc_thresh1"),
+            "/proc/sys/net/ipv4/neigh/default/gc_thresh1"
+        );
+        assert_eq!(
+            param_to_path("net.ipv4.neigh.eth0.proxy_delay"),
+            "/proc/sys/net/ipv4/neigh/eth0/proxy_delay"
+        );
+    }
+
+    #[test]
+    fn test_conf_vlan_spellings_share_a_ledger_entry() {
+        // Equivalent dotted/slashed spellings must resolve to the same real
+        // file so merge_entries keeps ONE rollback entry pointing at it
+        // (the alias-dedup contract), instead of two aliases for a path
+        // that never existed.
+        let data = RollbackData {
+            version: 1,
+            entries: BTreeMap::new(),
+        };
+        let data = merge_entries(
+            data,
+            [(
+                "net.ipv4.conf.eth0.100.forwarding".to_string(),
+                "0".to_string(),
+                "1".to_string(),
+            )],
+        );
+        let data = merge_entries(
+            data,
+            [(
+                "net/ipv4/conf/eth0.100/forwarding".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            )],
+        );
+        assert_eq!(data.entries.len(), 1, "aliases must share one entry");
+        let entry = data.entries.values().next().unwrap();
+        assert_eq!(entry.path, "/proc/sys/net/ipv4/conf/eth0.100/forwarding");
+        assert_eq!(entry.previous, "0", "pristine value survives the alias");
+    }
+
+    #[test]
+    fn test_neigh_vlan_spellings_share_a_ledger_entry() {
+        // Same alias-dedup contract one namespace over: both neighbour
+        // spellings must resolve to the real literal-dot file so the ledger
+        // keeps one entry with the pristine value.
+        let data = RollbackData {
+            version: 1,
+            entries: BTreeMap::new(),
+        };
+        let data = merge_entries(
+            data,
+            [(
+                "net.ipv4.neigh.eth0.100.gc_thresh3".to_string(),
+                "1024".to_string(),
+                "4096".to_string(),
+            )],
+        );
+        let data = merge_entries(
+            data,
+            [(
+                "net/ipv4/neigh/eth0.100/gc_thresh3".to_string(),
+                "4096".to_string(),
+                "4096".to_string(),
+            )],
+        );
+        assert_eq!(data.entries.len(), 1, "aliases must share one entry");
+        let entry = data.entries.values().next().unwrap();
+        assert_eq!(entry.path, "/proc/sys/net/ipv4/neigh/eth0.100/gc_thresh3");
+        assert_eq!(entry.previous, "1024", "pristine value survives the alias");
+    }
+
+    #[test]
+    fn test_is_forbidden_param_conf_family_unaffected() {
+        // The deny-list compares resolved paths; conf-family resolution lands
+        // strictly under /proc/sys/net/, so no forbidden path becomes
+        // reachable, VLAN tunables are not denied, and the forbidden
+        // spellings keep their verdicts.
+        assert!(!is_forbidden_param("net.ipv4.conf.eth0.100.forwarding"));
+        assert!(!is_forbidden_param("net.ipv4.conf.all.send_redirects"));
+        for p in [
+            "kernel.core_pattern",
+            "kernel/core_pattern",
+            "kernel.modprobe",
+            "kernel//modprobe",
+        ] {
+            assert!(is_forbidden_param(p), "{p} must stay forbidden");
+        }
+    }
+
+    #[test]
+    fn test_is_safe_param_vlan_conf_spellings() {
+        // Both VLAN spellings remain legitimate names (the existing contract
+        // next door already pins the dotted and slashed pair), while
+        // degenerate double-dot interfaces stay rejected — the dot-preserving
+        // resolution must not loosen the structural name guard.
+        assert!(is_safe_param("net.ipv4.conf.eth0.100.forwarding"));
+        assert!(is_safe_param("net/ipv4/conf/eth0.100/forwarding"));
+        assert!(!is_safe_param("net.ipv4.conf.eth0..100.forwarding"));
+        assert!(!is_safe_param("net.ipv4.conf..forwarding"));
+        assert!(!is_safe_param("net.ipv4.conf.eth0.100."));
+    }
+
+    #[test]
     fn test_param_to_path_rejects_traversal() {
         // Traversal components must be stripped so the result can never escape
         // its root, even from a hostile imported .conf.
@@ -825,6 +1768,22 @@ mod tests {
         assert!(!is_safe_param("/etc/passwd"));
         assert!(!is_safe_param(""));
         assert!(!is_safe_param(".."));
+    }
+
+    #[test]
+    fn test_is_safe_param_rejects_degenerate_separators() {
+        // The kernel collapses repeated separators on write, so
+        // `vm//swappiness` and `vm..swappiness` (dots are sysctl separators)
+        // both reach the same file — but the ledger keeps the spelling
+        // verbatim and persistence would emit a name sysctl.d rejects.
+        assert!(!is_safe_param("vm//swappiness"));
+        assert!(!is_safe_param("vm..swappiness"));
+        assert!(!is_safe_param("vm.swappiness."));
+        assert!(!is_safe_param("block//sda/scheduler"));
+        // VLAN interfaces (`eth0.100` under procfs) keep both spellings
+        // legitimate: the dot form and the canonical slashed form.
+        assert!(is_safe_param("net.ipv4.conf.eth0/100.forwarding"));
+        assert!(is_safe_param("net.ipv4.conf.eth0.100.forwarding"));
     }
 
     #[test]
@@ -916,6 +1875,29 @@ mod tests {
     }
 
     #[test]
+    fn rollback_completeness_includes_failed_and_skipped_entries() {
+        for (restored, failed, skipped, complete) in [
+            (0, 0, 0, true),
+            (3, 0, 0, true),
+            (0, 1, 0, false),
+            (0, 0, 1, false),
+            (2, 1, 0, false),
+            (2, 0, 1, false),
+            (2, 1, 1, false),
+        ] {
+            assert_eq!(
+                RollbackOutcome {
+                    restored,
+                    failed,
+                    skipped
+                }
+                .is_complete(),
+                complete
+            );
+        }
+    }
+
+    #[test]
     fn test_rollback_finalize_only_when_all_restored() {
         // Finalize (delete ledger) only when EVERY param was restored: zero
         // failures AND zero skipped. A failed write or an absent path must keep
@@ -924,6 +1906,306 @@ mod tests {
         assert!(!rollback_should_finalize(1, 0)); // a write failed
         assert!(!rollback_should_finalize(0, 1)); // a path was absent — the missed case
         assert!(!rollback_should_finalize(2, 3));
+    }
+
+    #[test]
+    fn test_merge_aliases_keep_one_pristine_rollback_entry() {
+        for (first, second) in [
+            ("vm.swappiness", "vm/swappiness"),
+            ("vm/swappiness", "vm.swappiness"),
+            ("net.ipv4.tcp_fastopen", "net/ipv4/tcp_fastopen"),
+        ] {
+            for param in [first, second] {
+                assert!(is_safe_param(param));
+                assert!(!is_forbidden_param(param));
+            }
+            let data = RollbackData {
+                version: 1,
+                entries: BTreeMap::new(),
+            };
+            let data = merge_entries(
+                data,
+                [(first.to_string(), "10".to_string(), "20".to_string())],
+            );
+            let data = merge_entries(
+                data,
+                [(second.to_string(), "20".to_string(), "30".to_string())],
+            );
+            assert_eq!(data.entries.len(), 1, "aliases {first} / {second}");
+            let entry = &data.entries[first];
+            assert_eq!(entry.previous, "10", "pristine value for {first}");
+            assert_eq!(entry.applied, "30", "latest value for {second}");
+            assert_eq!(canonicalize_path(&entry.path), param_to_path(first));
+        }
+    }
+
+    #[test]
+    fn test_merge_alias_preserves_single_existing_ledger_entry() {
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{"vm/swappiness":{
+                "previous":"10","applied":"20","path":"/proc/sys/vm/swappiness"
+            }}}"#,
+        )
+        .unwrap();
+        let data = merge_entries(
+            data,
+            [(
+                "vm.swappiness".to_string(),
+                "20".to_string(),
+                "30".to_string(),
+            )],
+        );
+        assert_eq!(data.entries.len(), 1);
+        let entry = &data.entries["vm/swappiness"];
+        assert_eq!(entry.previous, "10");
+        assert_eq!(entry.applied, "30");
+        assert_eq!(entry.path, "/proc/sys/vm/swappiness");
+    }
+
+    #[test]
+    fn test_merge_keeps_distinct_kernel_paths_separate() {
+        let data = RollbackData {
+            version: 1,
+            entries: BTreeMap::new(),
+        };
+        let data = merge_entries(
+            data,
+            [
+                (
+                    "vm.swappiness".to_string(),
+                    "10".to_string(),
+                    "20".to_string(),
+                ),
+                (
+                    "vm.swappiness_extra".to_string(),
+                    "40".to_string(),
+                    "50".to_string(),
+                ),
+            ],
+        );
+        assert_eq!(data.entries.len(), 2);
+        assert_eq!(data.entries["vm.swappiness"].previous, "10");
+        assert_eq!(data.entries["vm.swappiness_extra"].previous, "40");
+    }
+
+    #[test]
+    fn test_merge_sysfs_aliases_share_a_rollback_entry() {
+        for (first, second) in [
+            ("block/sda/scheduler", "block/sda//scheduler"),
+            (
+                "transparent_hugepage/enabled",
+                "transparent_hugepage//enabled",
+            ),
+        ] {
+            let data = RollbackData {
+                version: 1,
+                entries: BTreeMap::new(),
+            };
+            let data = merge_entries(
+                data,
+                [(
+                    first.to_string(),
+                    "before".to_string(),
+                    "middle".to_string(),
+                )],
+            );
+            let data = merge_entries(
+                data,
+                [(
+                    second.to_string(),
+                    "middle".to_string(),
+                    "after".to_string(),
+                )],
+            );
+            assert_eq!(data.entries.len(), 1, "aliases {first} / {second}");
+            assert_eq!(data.entries[first].previous, "before");
+            assert_eq!(data.entries[first].applied, "after");
+        }
+    }
+
+    #[test]
+    fn test_rollback_aliases_restore_pristine_value_once() {
+        let dir = AtomicTestDir::new("rollback_alias");
+        let path = dir.0.join("swappiness");
+        fs::write(&path, "10").unwrap();
+        let mut data = RollbackData {
+            version: 1,
+            entries: BTreeMap::new(),
+        };
+        for (param, applied) in [("vm.swappiness", "20"), ("vm/swappiness", "30")] {
+            let previous = fs::read_to_string(&path).unwrap();
+            fs::write(&path, applied).unwrap();
+            data = merge_entries(data, [(param.to_string(), previous, applied.to_string())]);
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "30");
+        // Run the production restore loop against a temporary parameter file;
+        // no /proc/sys writes or system-wide rollback cleanup are needed.
+        for entry in data.entries.values_mut() {
+            entry.path = path.to_str().unwrap().to_string();
+        }
+        let outcome = restore_entries(&data, true);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "10");
+        assert_eq!(outcome.restored, 1);
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn rollback_heals_a_legacy_duplicate_spelling_ledger() {
+        // Ledger shape from before the alias dedup (#3563): tune recorded
+        // vm.swappiness 60->10, a later import recorded vm/swappiness 10->5
+        // under its own spelling. Restoring both in BTreeMap key order
+        // writes 60 and then 10, so the kernel ends up on the INTERMEDIATE
+        // value and the pristine 60 never comes back.
+        let dir = AtomicTestDir::new("rollback_heal_dup");
+        let path = dir.0.join("swappiness");
+        fs::write(&path, "5").unwrap(); // live value after both applies
+        let mut data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"5","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        for entry in data.entries.values_mut() {
+            entry.path = path.to_str().unwrap().to_string();
+        }
+        let outcome = restore_entries(&data, true);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "60",
+            "rollback must restore the pristine pre-ktuner value, not the intermediate"
+        );
+        assert_eq!(outcome.restored, 1, "one knob, one restore write");
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn merge_heals_a_legacy_duplicate_spelling_ledger() {
+        // Same legacy ledger, then any later tune/fix/import merge: the pair
+        // must collapse instead of surviving into the next ledger
+        // generation (where it would double-render in sysctl.d).
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"5","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(
+            data,
+            [(
+                "net.core.somaxconn".to_string(),
+                "128".to_string(),
+                "4096".to_string(),
+            )],
+        );
+        assert_eq!(data.entries.len(), 2, "one entry per knob");
+        let entry = &data.entries["vm.swappiness"];
+        assert_eq!(entry.previous, "60", "pristine value survives the heal");
+        assert_eq!(entry.applied, "5", "newest applied survives the heal");
+    }
+
+    #[test]
+    fn merge_heals_unrelated_duplicates_to_the_last_write() {
+        // No chain relation between the two records (the knob was set to 20
+        // manually between them), so the pristine value cannot be
+        // identified. The survivor is the greatest key: exactly the record
+        // whose previous the key-order double write leaves in the kernel
+        // today, so the healed restore changes no outcome, it only removes
+        // the duplicate write.
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"20","applied":"30","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(data, []);
+        assert_eq!(data.entries.len(), 1, "one entry per knob");
+        let entry = &data.entries["vm/swappiness"];
+        assert_eq!(entry.previous, "20", "last-write previous survives");
+        assert_eq!(entry.applied, "30", "last-write applied survives");
+    }
+
+    #[test]
+    fn test_restore_entries_preserves_guards_and_outcome_counts() {
+        let dir = AtomicTestDir::new("rollback_outcome");
+        let allowed = dir.0.join("allowed");
+        let forbidden = dir.0.join("forbidden");
+        fs::write(&allowed, "20").unwrap();
+        fs::write(&forbidden, "unchanged").unwrap();
+        let mut entries = BTreeMap::new();
+        for (param, path) in [
+            ("vm.swappiness", allowed.clone()),
+            ("kernel.core_pattern", forbidden.clone()),
+            ("vm.dirty_ratio", dir.0.clone()),
+            ("vm.dirty_background_ratio", dir.0.join("missing")),
+        ] {
+            entries.insert(
+                param.to_string(),
+                RollbackEntry {
+                    previous: "10".to_string(),
+                    applied: "20".to_string(),
+                    path: path.to_str().unwrap().to_string(),
+                },
+            );
+        }
+        let outcome = restore_entries(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+        );
+        assert_eq!(fs::read_to_string(allowed).unwrap(), "10");
+        assert_eq!(fs::read_to_string(forbidden).unwrap(), "unchanged");
+        assert_eq!(outcome.restored, 1);
+        assert_eq!(outcome.failed, 2);
+        assert_eq!(outcome.skipped, 1);
+    }
+
+    #[test]
+    fn test_restore_entries_counts_readback_mismatch_as_failed() {
+        // fs::write returning Ok does not prove the kernel took the value: a
+        // write can be clamped, and the vm.dirty_ratio <-> vm.dirty_bytes
+        // pair silently clears its sibling. A restore whose write is not
+        // confirmed must NOT count as restored — counting it lets rollback
+        // report Full and delete the ledger while the live value is still the
+        // tuned one, so `previous` is never re-applied. A symlink to /dev/null
+        // has the same shape: the write is accepted and the read-back does not
+        // hold `previous`.
+        let dir = AtomicTestDir::new("rollback_readback_mismatch");
+        let discarded = dir.0.join("discarded");
+        std::os::unix::fs::symlink("/dev/null", &discarded).unwrap();
+        let restored = dir.0.join("restored");
+        fs::write(&restored, "30").unwrap();
+        let mut entries = BTreeMap::new();
+        for (param, path) in [("vm.dirty_bytes", &discarded), ("vm.swappiness", &restored)] {
+            entries.insert(
+                param.to_string(),
+                RollbackEntry {
+                    previous: "10".to_string(),
+                    applied: "30".to_string(),
+                    path: path.to_str().unwrap().to_string(),
+                },
+            );
+        }
+        let outcome = restore_entries(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+        );
+        // The confirmed restore is restored; the unconfirmed one is a failure
+        // so the ledger is kept for a retry.
+        assert_eq!(fs::read_to_string(&restored).unwrap(), "10");
+        assert_eq!(outcome.restored, 1);
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.skipped, 0);
+        assert!(!rollback_should_finalize(outcome.failed, outcome.skipped));
     }
 
     #[test]
@@ -960,6 +2242,229 @@ mod tests {
         assert_eq!(e.previous, "10", "pristine previous must survive re-tuning");
         assert_eq!(e.applied, "30", "applied must refresh to the latest");
         assert_eq!(e.path, "/proc/sys/vm/swappiness");
+    }
+
+    #[test]
+    fn test_ledger_lock_excludes_a_second_descriptor() {
+        // The guard must actually hold an exclusive flock: a second open file
+        // description on the same lockfile cannot acquire (even in-process —
+        // flock contends per descriptor), and can once the guard drops.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_ledger_lock_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        // The lockfile lives beside the ledger, private like the ledger.
+        let lock_path = dir.join("rollback.json.lock");
+        assert_eq!(
+            fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let second = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        let rc = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, -1, "non-blocking acquire while held must fail");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EWOULDBLOCK)
+        );
+        drop(guard);
+        let rc = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "acquire after drop must succeed");
+        unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_UN) };
+        drop(second);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Arm switch for `finalize_race_probe`, set only by the preview race
+    /// test so every other `rollback_preview_at` caller stays unaffected.
+    pub(super) static ARM_FINALIZE_RACE_PROBE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Test-only injection point inside `rollback_preview_at`'s exists ->
+    /// read_to_string window (the TOCTOU gap). Deterministic stand-in for a
+    /// concurrent `ktuner rollback` finalize racing the preview: the real
+    /// finalize may delete the ledger only while holding the exclusive
+    /// ledger lock (#5447's discipline), so this probe grabs LOCK_EX
+    /// non-blocking and deletes only if the grab succeeds. Against an
+    /// unlocked preview the grab succeeds and the delete lands inside the
+    /// window — the historical race; against the shared-locked preview the
+    /// grab fails and the finalize defers, exactly as a real blocking LOCK_EX
+    /// waiter would behind the preview's LOCK_SH.
+    pub(super) fn finalize_race_probe(path: &str) {
+        use std::sync::atomic::Ordering;
+        if !ARM_FINALIZE_RACE_PROBE.load(Ordering::SeqCst) {
+            return;
+        }
+        let lock_path = format!("{path}.lock");
+        let file = match fs::OpenOptions::new().write(true).open(&lock_path) {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            // Exclusive holder present (the preview's shared lock): a real
+            // finalize blocks here instead of deleting mid-window.
+            return;
+        }
+        let _ = fs::remove_file(path);
+        drop(file);
+    }
+
+    #[test]
+    fn test_rollback_preview_reports_pending_set() {
+        // Control: a normal preview is unchanged by the locking — the pending
+        // triples come back in (param, applied, previous) shape, BTreeMap order.
+        let dir = AtomicTestDir::new("preview-normal");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        merge_rollback_at(
+            path,
+            [
+                ("vm.swappiness".into(), "60".into(), "10".into()),
+                ("net.core.somaxconn".into(), "128".into(), "256".into()),
+            ],
+        )
+        .unwrap();
+        let entries = rollback_preview_at(path).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "net.core.somaxconn".to_string(),
+                    "256".to_string(),
+                    "128".to_string()
+                ),
+                (
+                    "vm.swappiness".to_string(),
+                    "10".to_string(),
+                    "60".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rollback_preview_empty_when_ledger_absent() {
+        // Control: the exit-0 empty case stays empty — no ledger is not an
+        // error, `--list` still reports an empty pending set.
+        let dir = AtomicTestDir::new("preview-absent");
+        let ledger = dir.0.join("rollback.json");
+        assert!(rollback_preview_at(ledger.to_str().unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `rollback --list` is a documented read-only preview ("Read-only: no
+    /// writes" in cmd_rollback, "nothing is written or deleted" in the
+    /// README), but the shared-lock acquisition ran before the
+    /// ledger-exists check and created the ledger directory (default umask
+    /// mode, not the writer's 0700) plus `<ledger>.lock`. A preview with no
+    /// ledger must leave the filesystem untouched.
+    #[test]
+    fn test_rollback_preview_absent_ledger_creates_nothing() {
+        let dir = AtomicTestDir::new("preview-absent-no-write");
+        let ledger = dir.0.join("nested").join("rollback.json");
+        let entries = rollback_preview_at(ledger.to_str().unwrap()).unwrap();
+        assert!(entries.is_empty());
+        assert!(!ledger.exists(), "preview must not create the ledger");
+        assert!(
+            !ledger.parent().unwrap().exists(),
+            "preview must not create the ledger directory"
+        );
+        assert!(
+            !std::path::Path::new(&format!("{}.lock", ledger.display())).exists(),
+            "preview must not create the lock file"
+        );
+    }
+
+    #[test]
+    fn test_rollback_preview_survives_concurrent_finalize_delete() {
+        // A rollback finalize deletes the ledger under the exclusive lock; the
+        // preview's exists -> read pair must not straddle that delete. Unlocked
+        // (pre-fix), the probe's delete lands inside the window and the
+        // preview died with 读取 rollback 文件失败 (--list exit 2) instead of
+        // reporting the pending set.
+        use std::sync::atomic::Ordering;
+        let dir = AtomicTestDir::new("preview-race");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        merge_rollback_at(path, [("vm.swappiness".into(), "60".into(), "10".into())]).unwrap();
+        ARM_FINALIZE_RACE_PROBE.store(true, Ordering::SeqCst);
+        let entries = rollback_preview_at(path)
+            .expect("preview must survive a concurrent finalize's delete window");
+        ARM_FINALIZE_RACE_PROBE.store(false, Ordering::SeqCst);
+        assert_eq!(
+            entries,
+            vec![(
+                "vm.swappiness".to_string(),
+                "10".to_string(),
+                "60".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_concurrent_merges_retain_every_entry() {
+        // Barrier-synchronized lost-update repro at the merge level: two fix
+        // runs load the same (empty) ledger, each merges its own entry, and
+        // without the ledger lock whichever write_atomic rename lands last
+        // silently drops the other's entry — its pristine `previous` is then
+        // recorded nowhere. With the lock, every round retains both.
+        use std::sync::{Arc, Barrier};
+        let rounds = 50;
+        for round in 0..rounds {
+            let dir = std::env::temp_dir().join(format!(
+                "ktuner_ledger_race_{}_{:?}_{round}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let ledger_a = dir.join("rollback.json");
+            let ledger_b = ledger_a.clone();
+            let barrier = Arc::new(Barrier::new(2));
+            let barrier_a = barrier.clone();
+            let barrier_b = barrier;
+            let join_a = std::thread::spawn(move || {
+                barrier_a.wait();
+                merge_rollback_at(
+                    ledger_a.to_str().unwrap(),
+                    [("vm.audit_a".to_string(), "60".to_string(), "10".to_string())],
+                )
+            });
+            let join_b = std::thread::spawn(move || {
+                barrier_b.wait();
+                merge_rollback_at(
+                    ledger_b.to_str().unwrap(),
+                    [(
+                        "net.core.audit_b".to_string(),
+                        "128".to_string(),
+                        "4096".to_string(),
+                    )],
+                )
+            });
+            join_a.join().unwrap().expect("merge a");
+            join_b.join().unwrap().expect("merge b");
+            let data = load_rollback_from(dir.join("rollback.json").to_str().unwrap()).unwrap();
+            let missing: Vec<&str> = ["vm.audit_a", "net.core.audit_b"]
+                .iter()
+                .filter(|p| !data.entries.contains_key(**p))
+                .copied()
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "round {round}: lost ledger update, missing {missing:?} in {:?}",
+                data.entries.keys().collect::<Vec<_>>()
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[test]
@@ -1200,19 +2705,179 @@ mod tests {
     }
 
     #[test]
-    fn test_readback_matches() {
-        // Bracketed sysfs list files: the active option is inside [ ], not first.
-        assert!(readback_matches("never", "always madvise [never]"));
-        assert!(readback_matches("mq-deadline", "[mq-deadline] none"));
-        assert!(!readback_matches("never", "[always] madvise never"));
-        // Plain scalar sysctls.
-        assert!(readback_matches("1", "1"));
-        assert!(!readback_matches("1", "0"));
-        // Single written value leading a multi-token read-back matches on first.
-        assert!(readback_matches("bbr", "bbr cubic"));
-        // Multi-token exact match, and its negation.
-        assert!(readback_matches("250 32000 100 128", "250 32000 100 128"));
-        assert!(!readback_matches("250 32000 100 128", "250 32000 100 999"));
+    fn test_classify_readback_scalar_exact() {
+        // Plain scalar sysctls confirm with the kernel's rendering.
+        assert_eq!(
+            classify_readback("1", "1"),
+            ReadbackVerdict::Verified {
+                effective: "1".to_string()
+            }
+        );
+        // Multi-token exact match (kernel.sem-style quadruples).
+        assert_eq!(
+            classify_readback("250 32000 100 128", "250 32000 100 128"),
+            ReadbackVerdict::Verified {
+                effective: "250 32000 100 128".to_string()
+            }
+        );
+        // Whitespace differences are token-level, not byte-level.
+        assert_eq!(
+            classify_readback("10  20", "10 20"),
+            ReadbackVerdict::Verified {
+                effective: "10 20".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_scalar_clamped() {
+        // The kernel rejected the requested magnitude and settled at a bound:
+        // the write DID land, so this is applied-with-note, not an error (#4160).
+        assert_eq!(
+            classify_readback("999999999", "4194304"),
+            ReadbackVerdict::Clamped {
+                effective: "4194304".to_string()
+            }
+        );
+        // A single-value write that read back different.
+        assert_eq!(
+            classify_readback("1", "0"),
+            ReadbackVerdict::Clamped {
+                effective: "0".to_string()
+            }
+        );
+        // Multi-token mismatch records the kernel's full read-back.
+        assert_eq!(
+            classify_readback("250 32000 100 128", "250 32000 100 999"),
+            ReadbackVerdict::Clamped {
+                effective: "250 32000 100 999".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_bracket_list() {
+        // Bracketed sysfs list files: the active option is inside [ ], not
+        // necessarily first; an unbracketed token does NOT count.
+        assert_eq!(
+            classify_readback("never", "always madvise [never]"),
+            ReadbackVerdict::Verified {
+                effective: "never".to_string()
+            }
+        );
+        assert_eq!(
+            classify_readback("mq-deadline", "[mq-deadline] none"),
+            ReadbackVerdict::Verified {
+                effective: "mq-deadline".to_string()
+            }
+        );
+        // The write landed on a DIFFERENT active option: clamped to it, and
+        // the bracketed option is what must be recorded.
+        assert_eq!(
+            classify_readback("never", "[always] madvise never"),
+            ReadbackVerdict::Clamped {
+                effective: "always".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_leading_token_is_verified() {
+        // A single written value leading a multi-token read-back is a
+        // confirmed write of the REQUEST (e.g. congestion-control listings):
+        // the effective value is the request itself, because the kernel's
+        // multi-token rendering is not a value a writable scalar param can
+        // take back on rollback or that sysctl.d can persist.
+        assert_eq!(
+            classify_readback("bbr", "bbr cubic"),
+            ReadbackVerdict::Verified {
+                effective: "bbr".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_rec_with_effective_swaps_only_recommended_value() {
+        let rec = Recommendation {
+            param: "net.core.rmem_max".to_string(),
+            current_value: "212992".to_string(),
+            recommended_value: "999999999".to_string(),
+            reason: "万兆场景".to_string(),
+            confidence: crate::rules::Confidence::High,
+            category: crate::rules::Category::Performance,
+            writable: true,
+        };
+        let outcome = WriteOutcome {
+            effective: "4194304".to_string(),
+            clamped: true,
+        };
+        let applied = rec_with_effective(&rec, &outcome);
+        // The ledger view carries the kernel's value; everything else is
+        // preserved verbatim so rollback restores the true original.
+        assert_eq!(applied.recommended_value, "4194304");
+        assert_eq!(applied.param, rec.param);
+        assert_eq!(applied.current_value, "212992");
+        assert_eq!(applied.reason, rec.reason);
+        assert_eq!(applied.confidence, rec.confidence);
+        assert_eq!(applied.category, rec.category);
+        assert_eq!(applied.writable, rec.writable);
+        // When nothing was clamped the rec passes through unchanged.
+        let ok_outcome = WriteOutcome {
+            effective: "999999999".to_string(),
+            clamped: false,
+        };
+        assert_eq!(
+            rec_with_effective(&rec, &ok_outcome).recommended_value,
+            "999999999"
+        );
+    }
+
+    #[test]
+    fn test_write_and_verify_rejects_nonexistent_path() {
+        // Nonexistent-path pattern: fails at the path check before any write,
+        // so this is side-effect-free even as root in a container.
+        let err = write_and_verify("vm.ktuner_no_such_param_for_clamp_test", "1").unwrap_err();
+        assert!(err.to_string().contains("参数路径不存在"));
+    }
+
+    #[test]
+    fn test_write_and_verify_rejects_forbidden_param_first() {
+        // Defense-in-depth ordering: the deny-list fires before any path or
+        // write attempt, even for a param whose path does not exist.
+        let err = write_and_verify("kernel.core_pattern", "x").unwrap_err();
+        assert!(err.to_string().contains("拒绝写入"));
+    }
+
+    #[test]
+    fn test_apply_quiet_reports_no_clamps_when_nothing_lands() {
+        // Two nonexistent params: nothing is written, so nothing can be
+        // clamped, and the outcome must report zero applied with an empty
+        // clamped list. Only the private fixture lock may be created.
+        let recs: Vec<Recommendation> = ["vm.ktuner_no_such_a", "vm.ktuner_no_such_b"]
+            .iter()
+            .map(|p| Recommendation {
+                param: p.to_string(),
+                current_value: "0".to_string(),
+                recommended_value: "1".to_string(),
+                writable: true,
+                ..Default::default()
+            })
+            .collect();
+        let dir = std::env::temp_dir().join(format!("ktuner_no_clamps_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        let outcome =
+            apply_locked(&recs, true, &guard).expect("apply must not fail on per-param errors");
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.failed.len(), 2);
+        assert!(outcome.clamped.is_empty());
+        assert!(
+            !ledger.exists(),
+            "failed parameters must not publish a ledger"
+        );
+        drop(guard);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1296,6 +2961,21 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_import_rejects_degenerate_names() {
+        // The name guard fires before validate_import_value and before any
+        // filesystem access, so this needs no root and touches no /proc/sys
+        // entry. The value itself is valid — only the name can be the
+        // rejection reason.
+        for param in ["vm//swappiness", "vm..swappiness"] {
+            let err = apply_import(param, "10", None).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid parameter name"),
+                "degenerate name {param:?} must be rejected up front: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_apply_import_accepts_normal_values() {
         // Use a nonexistent parameter: when the tests run as root with a
         // writable /proc/sys, applying a real sysctl (e.g. vm.swappiness)
@@ -1309,5 +2989,192 @@ mod tests {
                 "normal value wrongly rejected: {e}"
             );
         }
+    }
+
+    #[test]
+    fn test_absent_rollback_ledger_can_be_created() {
+        let dir = AtomicTestDir::new("ledger-absent");
+        let ledger = dir.0.join("nested/rollback.json");
+        let path = ledger.to_str().unwrap();
+        let data = load_rollback_from(path).unwrap();
+        assert_eq!(data.version, 1);
+        assert!(data.entries.is_empty());
+        merge_rollback_at(path, [("vm.swappiness".into(), "60".into(), "10".into())]).unwrap();
+        let data = load_rollback_from(path).unwrap();
+        assert_eq!(data.entries["vm.swappiness"].previous, "60");
+        assert_eq!(data.entries["vm.swappiness"].applied, "10");
+        assert_eq!(
+            fs::metadata(&ledger).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn test_valid_rollback_ledger_keeps_originals_across_merges() {
+        let dir = AtomicTestDir::new("ledger-valid");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        merge_rollback_at(path, [("vm.swappiness".into(), "60".into(), "10".into())]).unwrap();
+        merge_rollback_at(
+            path,
+            [
+                ("vm.swappiness".into(), "10".into(), "20".into()),
+                ("net.core.somaxconn".into(), "128".into(), "256".into()),
+            ],
+        )
+        .unwrap();
+        let data = load_rollback_from(path).unwrap();
+        assert_eq!(data.entries.len(), 2);
+        assert_eq!(data.entries["vm.swappiness"].previous, "60");
+        assert_eq!(data.entries["vm.swappiness"].applied, "20");
+        assert_eq!(data.entries["net.core.somaxconn"].previous, "128");
+    }
+
+    #[test]
+    fn test_invalid_rollback_ledger_is_never_replaced() {
+        let dir = AtomicTestDir::new("ledger-invalid");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        for contents in [
+            b"".as_slice(),
+            br#"{"version":1,"entries":{"vm.swappiness":{"previous":"60""#.as_slice(),
+            br#"{"version":1,"entries":[]}"#.as_slice(),
+            b"\xff\xfe".as_slice(),
+        ] {
+            fs::write(&ledger, contents).unwrap();
+            fs::set_permissions(&ledger, fs::Permissions::from_mode(0o640)).unwrap();
+            fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o755)).unwrap();
+            let error =
+                merge_rollback_at(path, [("vm.swappiness".into(), "10".into(), "20".into())])
+                    .expect_err("invalid ledger must prevent a replacement");
+            assert!(error.to_string().contains(path), "{error:#}");
+            assert_eq!(fs::read(&ledger).unwrap(), contents);
+            assert_eq!(
+                fs::metadata(&ledger).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+            assert_eq!(
+                fs::metadata(&dir.0).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert!(!Path::new(&format!("{path}.tmp.{}", std::process::id())).exists());
+        }
+    }
+
+    #[test]
+    fn test_rollback_read_errors_do_not_become_empty_ledgers() {
+        let dir = AtomicTestDir::new("ledger-read-error");
+        let path = dir.0.to_str().unwrap();
+        let error = load_rollback_from(path)
+            .err()
+            .expect("a directory is an I/O error, not an absent ledger");
+        assert!(error.to_string().contains(path), "{error:#}");
+        assert!(dir.0.is_dir());
+    }
+
+    #[test]
+    fn test_rollback_ledger_errors_name_a_remedy() {
+        let dir = AtomicTestDir::new("ledger-remedy");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        fs::write(&ledger, b"{").unwrap();
+        for error in [
+            load_rollback_from(path)
+                .err()
+                .expect("truncated ledger must not parse"),
+            load_rollback_from(dir.0.to_str().unwrap())
+                .err()
+                .expect("directory must not read"),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("inspect and repair"), "{message}");
+            assert!(message.contains("rerun the command"), "{message}");
+        }
+    }
+
+    fn bench(name: &str, value: f64, unit: &str) -> BenchResult {
+        BenchResult {
+            name: name.to_string(),
+            value,
+            unit: unit.to_string(),
+        }
+    }
+
+    #[test]
+    fn verify_pairs_by_name_so_reordering_cannot_flip_the_verdict() {
+        // Same host, both metrics genuinely improved (latency 500→80 ns,
+        // throughput 100→600 MB/s), but the after-run finished in swapped
+        // order. Index-pairing compared seq_read against 80 "MB/s" and
+        // io_latency against 600 "ns", flagged BOTH degraded — enough to
+        // trigger auto_rollback_on_degradation on a fully improved system.
+        let before = vec![
+            bench("seq_read", 100.0, "MB/s"),
+            bench("io_latency", 500.0, "ns"),
+        ];
+        let after = vec![
+            bench("io_latency", 80.0, "ns"),
+            bench("seq_read", 600.0, "MB/s"),
+        ];
+        let result = verify_and_report(&before, &after);
+        assert!(
+            result.degraded.is_empty(),
+            "every metric improved, yet flagged degraded: {:?}",
+            result.degraded
+        );
+    }
+
+    #[test]
+    fn verify_surfaces_a_before_metric_missing_from_the_after_run() {
+        // zip truncation used to shrink the comparison to the metrics both
+        // runs share, so a bench that silently lost fsync reported a clean
+        // tune. A metric that cannot be verified must never be silently
+        // clean.
+        let before = vec![
+            bench("seq_read", 100.0, "MB/s"),
+            bench("fsync", 500.0, "ns"),
+        ];
+        let after = vec![bench("seq_read", 200.0, "MB/s")];
+        let result = verify_and_report(&before, &after);
+        assert_eq!(result.degraded, vec!["fsync".to_string()]);
+    }
+
+    #[test]
+    fn verify_marks_non_finite_changes_degraded_instead_of_clean() {
+        // NaN compares false against both thresholds, so it used to pass as
+        // clean and rendered as "↓NaN%". A degenerate before-value is the
+        // same problem from the other side (0.0 divides into ±inf).
+        let result = verify_and_report(
+            &[
+                bench("seq_read", 100.0, "MB/s"),
+                bench("io_latency", 500.0, "ns"),
+            ],
+            &[
+                bench("seq_read", f64::NAN, "MB/s"),
+                bench("io_latency", 500.0, "ns"),
+            ],
+        );
+        assert_eq!(result.degraded, vec!["seq_read".to_string()]);
+
+        let result = verify_and_report(
+            &[bench("seq_read", 0.0, "MB/s")],
+            &[bench("seq_read", 200.0, "MB/s")],
+        );
+        assert_eq!(result.degraded, vec!["seq_read".to_string()]);
+    }
+
+    #[test]
+    fn verify_same_order_pairing_keeps_today_grading() {
+        // Unchanged, aligned runs must grade exactly as before: improved
+        // throughput is clean, a >10% latency regression is degraded.
+        let before = vec![
+            bench("seq_read", 100.0, "MB/s"),
+            bench("io_latency", 500.0, "ns"),
+        ];
+        let after = vec![
+            bench("seq_read", 200.0, "MB/s"),
+            bench("io_latency", 600.0, "ns"),
+        ];
+        let result = verify_and_report(&before, &after);
+        assert_eq!(result.degraded, vec!["io_latency".to_string()]);
     }
 }

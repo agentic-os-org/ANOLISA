@@ -241,10 +241,19 @@ enable 会接管指向同一插件源的已有符号链接，包括 Tokenless �
 anolisa logs <component>
 anolisa logs <component> --limit 50
 anolisa logs <component> --severity warn
+anolisa logs <component> --since '2026-10-01T00:30:00Z'
 anolisa bug
 ```
 
 `--level` 是 `--severity` 的别名。
+
+`--since` 接受包含边界的 RFC3339 起始时间，按实际时间比较时区偏移和小数秒。
+例如，`2026-10-01T08:30:00+08:00` 和 `2026-10-01T00:30:00Z` 选择相同的时间窗口。
+`--limit` 按追加顺序保留最近的匹配记录。
+
+无效的 `--since` 值返回 `INVALID_ARGUMENT`。启用时间筛选时，`started_at` 无法
+解析为 RFC3339 的记录不匹配；省略 `--since` 可查看这些记录。格式错误的 JSON
+仍会导致查询报错。查询不会修改日志文件。
 
 使用 `--component cosh-ng` 时，`anolisa bug` 还会调用已安装的
 `cosh-shell` 二进制，将脱敏诊断包导出到全新的私有路径（`0600`，绝不

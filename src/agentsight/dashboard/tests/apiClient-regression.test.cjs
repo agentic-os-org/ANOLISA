@@ -8,6 +8,7 @@ const {
   enforcementSupportsMode,
   enforcementViolationTotal,
   fetchContainmentPlan,
+  fetchInterruptionStats,
   fetchLatencyMetrics,
   fetchSecurityCase,
   fetchSecurityStatus,
@@ -36,6 +37,10 @@ const {
   fixLocusDiverges,
   fixLocusLabel,
 } = require(process.env.AGENTSIGHT_ACCURACY_ATTRIBUTION_BUILD);
+const {
+  fillModelBuckets,
+  fillTokenBuckets,
+} = require(process.env.AGENTSIGHT_TIMESERIES_BUCKETS_BUILD);
 
 function enforcementHealth(alternatePidRetarget) {
   return {
@@ -210,6 +215,34 @@ test('fetchStorageStatus preserves schema 2 maintenance and partial inventory fi
   assert.equal(response.stores[2].coverage, 'partial');
   assert.deepEqual(response.stores[0].maintenance, maintenance);
   assert.equal(response.stores[1].maintenance.next_run_unix_ms, null);
+});
+
+test('fetchInterruptionStats forwards the agent filter alongside the range', async () => {
+  const requested = [];
+  global.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response(JSON.stringify([]), { status: 200 });
+  };
+
+  await fetchInterruptionStats(1000, 2000, 'claude-code');
+  await fetchInterruptionStats(1000, 2000);
+
+  const withAgent = new URL(requested[0]);
+  assert.equal(withAgent.pathname, '/api/interruptions/stats');
+  assert.equal(withAgent.searchParams.get('start_ns'), '1000');
+  assert.equal(withAgent.searchParams.get('end_ns'), '2000');
+  assert.equal(
+    withAgent.searchParams.get('agent_name'),
+    'claude-code',
+    'the tooltip breakdown must use the same agent scope as the badge',
+  );
+
+  const withoutAgent = new URL(requested[1]);
+  assert.equal(
+    withoutAgent.searchParams.get('agent_name'),
+    null,
+    'an omitted agent must not send agent_name',
+  );
 });
 
 test('fetchLatencyMetrics forwards ranges and preserves nullable percentile data', async () => {
@@ -511,4 +544,184 @@ test('fixLocusLabel translates only the sentinel value', () => {
   assert.equal(fixLocusLabel('无', t), 'None');
   assert.equal(fixLocusLabel('Skill', t), 'Skill');
   assert.equal(fixLocusLabel('Context-policy', t), 'Context-policy');
+});
+
+// ─── Timeseries bucket gap-filling ─────────────────────────────────────────────
+
+/**
+ * Rebuilds the server's exact i64 bucket grid for a query window.
+ *
+ * The Rust side (get_token_timeseries) derives `bucket_start_ns` as
+ * start_ns + idx * floor((end_ns - start_ns) / buckets) in exact 64-bit
+ * integers. The dashboard, however, works in JS doubles where epoch-ns
+ * values are rounded to a multiple of 256 ns, so the fill helpers must
+ * tolerate that wobble when mapping a bucket back onto its index.
+ */
+function serverBucketGrid(startMs, endMs, bucketCount) {
+  const startNs = startMs * 1_000_000; // exactly what the page sends
+  const endNs = endMs * 1_000_000;
+  const bucketNs = (BigInt(endNs) - BigInt(startNs)) / BigInt(bucketCount);
+  const grid = [];
+  for (let idx = 0; idx < bucketCount; idx += 1) {
+    grid.push(Number(BigInt(startNs) + BigInt(idx) * bucketNs));
+  }
+  return { startNs, endNs, grid };
+}
+
+// A minute-aligned start (DateTimePicker) with an arbitrary-millisecond end
+// (Date.now()) is the shape that misassigns under floor(): measured on the
+// pre-fix code, roughly 283 of 300 such windows shifted buckets onto their
+// left neighbour. This exact pair shifts 15 of 30 buckets.
+test('fillTokenBuckets keeps every bucket on its own slot under ns rounding', () => {
+  const { startNs, endNs, grid } = serverBucketGrid(1760063940000, 1760113451189, 30);
+  // Marker idx + 1 so slot 0 asserts real data rather than a zero-fill.
+  const data = grid.map((bucketStartNs, idx) => ({
+    bucket_start_ns: bucketStartNs,
+    input_tokens: idx + 1,
+    output_tokens: 0,
+    total_tokens: idx + 1,
+  }));
+
+  const filled = fillTokenBuckets(data, startNs, endNs, 30);
+
+  assert.equal(filled.length, 30);
+  for (let i = 0; i < 30; i += 1) {
+    // The marker of bucket i must still be at slot i — not merged into i-1.
+    assert.equal(filled[i].input_tokens, i + 1, `bucket ${i} misplaced`);
+  }
+});
+
+test('fillModelBuckets keeps every bucket on its own slot under ns rounding', () => {
+  const { startNs, endNs, grid } = serverBucketGrid(1760054640000, 1760165106879, 30);
+  const data = grid.map((bucketStartNs, idx) => ({
+    bucket_start_ns: bucketStartNs,
+    model: idx % 2 === 0 ? 'a' : 'b',
+    total_tokens: idx + 1,
+  }));
+
+  const filled = fillModelBuckets(data, startNs, endNs, 30, ['a', 'b']);
+
+  assert.equal(filled.length, 60); // 30 slots x 2 models
+  for (let i = 0; i < 30; i += 1) {
+    // Slot i holds models 'a' and 'b' at 2i / 2i+1; whichever model bucket i
+    // carried must keep its marker inside slot i.
+    const marker = Math.max(filled[2 * i].total_tokens, filled[2 * i + 1].total_tokens);
+    assert.equal(marker, i + 1, `bucket ${i} misplaced`);
+  }
+});
+
+test('fillTokenBuckets zero-fills missing buckets on the server grid', () => {
+  // Exact small numbers: no ns rounding involved, pure gap-filling.
+  const data = [
+    { bucket_start_ns: 0, input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+    { bucket_start_ns: 200, input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+  ];
+
+  const filled = fillTokenBuckets(data, 0, 300, 30);
+
+  assert.equal(filled.length, 30);
+  assert.deepEqual(filled[0], data[0]);
+  assert.deepEqual(filled[20], data[1]);
+  assert.deepEqual(filled[1], {
+    bucket_start_ns: 10,
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+  });
+});
+
+test('fillTokenBuckets passes data through for a degenerate window', () => {
+  const data = [
+    { bucket_start_ns: 5, input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+  ];
+  // Zero-width range: bucketNs floors to 0 and the data is returned as-is.
+  assert.equal(fillTokenBuckets(data, 5, 5, 30), data);
+});
+
+test('formatDurationSecs never renders 60 seconds inside a minute field', () => {
+  const { formatDurationSecs } = require(process.env.AGENTSIGHT_FORMAT_DURATION_BUILD);
+
+  assert.equal(formatDurationSecs(12.34), '12.3s');
+  assert.equal(formatDurationSecs(59.4), '59.4s');
+  // Rounding happened after the minute split before, yielding "60.0s",
+  // "1m 60s" and "59m 60s".
+  assert.equal(formatDurationSecs(59.96), '1m 0s');
+  assert.equal(formatDurationSecs(119.6), '2m 0s');
+  assert.equal(formatDurationSecs(3599.7), '60m 0s');
+  assert.equal(formatDurationSecs(125), '2m 5s');
+});
+
+// ─── richText: finding texts render only their two documented tags ──────────
+
+// The built component emits `require('react/jsx-runtime')` (compiled with
+// --jsx react-jsx, same as LoginPage), which does not resolve from the temp
+// outDir — stub it like the login regression does and run the built file in a
+// sandbox.
+function loadRichTextBuild() {
+  const { readFileSync } = require('node:fs');
+  const vm = require('node:vm');
+  const code = readFileSync(process.env.AGENTSIGHT_RICH_TEXT_BUILD, 'utf8');
+  const module = { exports: {} };
+  vm.runInNewContext(code, {
+    module,
+    exports: module.exports,
+    require: (name) => {
+      if (name === 'react/jsx-runtime') {
+        return {
+          jsx: (type, props) => ({ type, props }),
+          jsxs: (type, props) => ({ type, props }),
+        };
+      }
+      throw new Error(`unexpected require from richText.js: ${name}`);
+    },
+  });
+  return module.exports;
+}
+
+test('escapeRichText neutralizes markup injected through finding texts', () => {
+  const { escapeRichText } = loadRichTextBuild();
+
+  // Payload the server can really produce: confirm_before_act interpolates
+  // the raw tool command into the accuracy `detail` string.
+  const toolCmdPayload = 'tool `bash` ran `rm -rf <img src=x onerror=alert(1)>`';
+  const escaped = escapeRichText(toolCmdPayload);
+  assert.ok(!escaped.includes('<img'), 'an injected tag must not survive as markup');
+  assert.ok(escaped.includes('&lt;img src=x onerror=alert(1)&gt;'),
+    'the injected tag must render as literal text');
+
+  assert.ok(!escapeRichText('<script>alert(1)</script>').includes('<script'));
+  assert.ok(!escapeRichText('<svg onload=alert(1)>').includes('<svg'));
+  // Quotes and ampersands must not smuggle attributes into the allowed tags.
+  assert.equal(escapeRichText('a & b "c"'), 'a &amp; b &quot;c&quot;');
+});
+
+test('escapeRichText keeps only the exact documented tags', () => {
+  const { escapeRichText } = loadRichTextBuild();
+
+  assert.equal(escapeRichText('a <code>cmd</code> b'), 'a <code>cmd</code> b');
+  assert.equal(escapeRichText('<b>bold</b> stays'), '<b>bold</b> stays');
+  // A tag that merely starts like an allowed one must stay escaped, and no
+  // attributes may ride along on the allowed tags.
+  assert.equal(escapeRichText('<codeX>'), '&lt;codeX&gt;');
+  assert.ok(!escapeRichText('<code onclick=alert(1)>x</code>').includes('<code '));
+  assert.equal(escapeRichText('<i>no</i>'), '&lt;i&gt;no&lt;/i&gt;');
+});
+
+test('RichText sanitizes what it injects into the DOM', () => {
+  const { RichText } = loadRichTextBuild();
+
+  const element = RichText({ children: 'x <img src=x onerror=alert(1)> <code>ok</code>' });
+  const html = element.props.dangerouslySetInnerHTML.__html;
+  assert.ok(!html.includes('<img'), 'the component must not inject raw tags');
+  assert.ok(html.includes('<code>ok</code>'), 'the documented tag survives');
+});
+
+test('optimization findings render through the sanitizer, not raw strings', () => {
+  const { readFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const source = readFileSync(join(process.cwd(), 'src/pages/OptimizationPage.tsx'), 'utf8');
+  assert.match(source, /import \{ RichText \} from '\.\.\/utils\/richText';/,
+    'the page must render finding texts through utils/richText');
+  assert.doesNotMatch(source, /dangerouslySetInnerHTML=\{\{ __html: s \}\}/,
+    'the page must not inject the raw finding string into the DOM');
 });

@@ -90,10 +90,31 @@ impl TimePeriod {
         let start_ns = start.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
         let end_ns = end.and_utc().timestamp_nanos_opt().unwrap_or(0) as u64;
 
+        // Every fixed calendar end above is second-granularity (23:59:59),
+        // including today's: they all cover a whole day or week, whose last
+        // sub-second would otherwise be invisible to the inclusive <= query
+        // bound. Extend the end to the final nanosecond of that second — one
+        // nanosecond short of the next day, which belongs to the next period.
+        // Today is a calendar day like yesterday, so leaving it out made a
+        // record at 23:59:59.5 vanish from today's total while the same record
+        // counts towards yesterday a day later.
+        let end_ns = match self {
+            TimePeriod::Today
+            | TimePeriod::Yesterday
+            | TimePeriod::LastWeek
+            | TimePeriod::LastMonth => end_ns.saturating_add(999_999_999),
+            _ => end_ns,
+        };
+
         (start_ns, end_ns)
     }
 
-    /// Get previous period for comparison
+    /// The paired period used for view switching: Today <-> Yesterday,
+    /// Week <-> LastWeek, Month <-> LastMonth.
+    ///
+    /// For the three "last" periods the pair is the *current, unfinished*
+    /// period, which is later in time — not an earlier window. Comparisons must
+    /// therefore not treat it as a baseline (see `by_period_with_compare`).
     pub fn previous_period(&self) -> TimePeriod {
         match self {
             TimePeriod::Today => TimePeriod::Yesterday,
@@ -229,6 +250,48 @@ pub struct TokenStore {
     table_available: bool,
 }
 
+/// Columns projected by every token reader. A `token_records` table that does
+/// not provide all of them is a foreign or partially created table.
+const REQUIRED_TOKEN_COLUMNS: [&str; 13] = [
+    "id",
+    "timestamp_ns",
+    "pid",
+    "comm",
+    "agent",
+    "model",
+    "provider",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "request_id",
+    "endpoint",
+];
+
+/// Returns whether `table_name` exists with the schema the readers project.
+///
+/// A same-named table with different columns (another tool's database, or a
+/// partially created table) reports as unavailable so readers return empty
+/// results instead of failing to prepare their fixed column list.
+fn token_table_available(conn: &Connection, table_name: &str) -> Result<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+        [table_name],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+
+    let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    let columns: std::collections::HashSet<String> = statement
+        .query_map([table_name], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(REQUIRED_TOKEN_COLUMNS
+        .iter()
+        .all(|column| columns.contains(*column)))
+}
+
 impl TokenStore {
     /// Create a new token store with default table name.
     ///
@@ -302,13 +365,7 @@ impl TokenStore {
                 ..ConnectionOptions::default()
             },
         )?;
-        let table_available = conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
-            )",
-            [table_name],
-            |row| row.get(0),
-        )?;
+        let table_available = token_table_available(&conn, table_name)?;
         Ok(Self {
             conn,
             table_name: table_name.to_string(),
@@ -404,12 +461,14 @@ impl TokenStore {
              FROM {} ORDER BY timestamp_ns DESC",
             self.table_name
         );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .expect("Failed to prepare statement");
+        // The probe above proves the schema only for a stable file; a database
+        // that changes under a read-only handle (or a corrupt schema) still
+        // yields an empty result instead of aborting the process.
+        let Ok(mut stmt) = self.conn.prepare(&sql) else {
+            return Vec::new();
+        };
 
-        stmt.query_map([], |row| {
+        let Ok(rows) = stmt.query_map([], |row| {
             Ok(TokenRecord {
                 id: row.get(0)?,
                 timestamp_ns: row.get::<_, i64>(1)? as u64,
@@ -427,10 +486,10 @@ impl TokenStore {
                 tool_calls: Vec::new(),
                 reasoning_content: None,
             })
-        })
-        .expect("Failed to query")
-        .filter_map(|r| r.ok())
-        .collect()
+        }) else {
+            return Vec::new();
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     /// Get records in time range
@@ -452,12 +511,12 @@ impl TokenStore {
              ORDER BY timestamp_ns DESC",
             self.table_name
         );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .expect("Failed to prepare statement");
+        // See `all`: an unrepairable read returns empty rather than aborting.
+        let Ok(mut stmt) = self.conn.prepare(&sql) else {
+            return Vec::new();
+        };
 
-        stmt.query_map(params![start_ns as i64, end_ns as i64], |row| {
+        let Ok(rows) = stmt.query_map(params![start_ns as i64, end_ns as i64], |row| {
             Ok(TokenRecord {
                 id: row.get(0)?,
                 timestamp_ns: row.get::<_, i64>(1)? as u64,
@@ -475,10 +534,10 @@ impl TokenStore {
                 tool_calls: Vec::new(),
                 reasoning_content: None,
             })
-        })
-        .expect("Failed to query")
-        .filter_map(|r| r.ok())
-        .collect()
+        }) else {
+            return Vec::new();
+        };
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     /// Get records for last N hours
@@ -488,7 +547,10 @@ impl TokenStore {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
 
-        let hours_ns = hours * 3600 * 1_000_000_000;
+        // Saturate so an absurd --hours degrades to "everything" (a zero
+        // start) instead of overflowing: the nanosecond product leaves u64
+        // above ~5.12 million hours, and a debug build aborts on the multiply.
+        let hours_ns = hours.saturating_mul(3_600_000_000_000);
         let start_ns = now.saturating_sub(hours_ns);
 
         self.by_time_range_owned(start_ns, now)
@@ -580,8 +642,16 @@ impl<'a> TokenQuery<'a> {
     pub fn by_period_with_compare(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period(period);
 
-        // Get previous period data
+        // Only compare against a window that starts before this one.
+        // `previous_period()` is the view-switching pair-mate, so for
+        // yesterday / last_week / last_month it hands back the current,
+        // unfinished period; reporting that as "the previous period" compares a
+        // complete period against a partial one.
         let prev_period = period.previous_period();
+        if prev_period.time_range().0 >= period.time_range().0 {
+            return result;
+        }
+
         let prev_result = self.by_period(prev_period);
 
         let change = result.total_tokens as i64 - prev_result.total_tokens as i64;
@@ -625,23 +695,28 @@ impl<'a> TokenQuery<'a> {
 
     /// Query hours with comparison
     pub fn by_hours_with_compare(&self, hours: u64) -> TokenQueryResult {
-        let mut result = self.by_hours(hours);
+        // Read the clock once and cut both windows from the same instant:
+        // separate `SystemTime::now()` readings for the current and previous
+        // windows could let a record written between them count in both.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let hours_ns = hours.saturating_mul(3_600_000_000_000);
+        let start_ns = now.saturating_sub(hours_ns.saturating_mul(2));
+        let mid_ns = now.saturating_sub(hours_ns);
 
-        // Get previous period data
-        let prev_records = self.store.by_last_hours(hours * 2);
-        let prev_records: Vec<_> = prev_records
+        let mut result = self.build_result(
+            self.store.by_time_range(mid_ns, now),
+            format!("最近 {hours} 小时"),
+        );
+
+        // Previous window: the earlier half, [start_ns, mid_ns)
+        let prev_records: Vec<_> = self
+            .store
+            .by_time_range(start_ns, mid_ns)
             .into_iter()
-            .filter(|r| {
-                // Get records from the earlier half
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                let hours_ns = hours * 3600 * 1_000_000_000;
-                let start_ns = now.saturating_sub(hours_ns * 2);
-                let mid_ns = now.saturating_sub(hours_ns);
-                r.timestamp_ns >= start_ns && r.timestamp_ns < mid_ns
-            })
+            .filter(|r| r.timestamp_ns < mid_ns)
             .collect();
 
         let prev_total: u64 = prev_records.iter().map(|r| r.total_tokens()).sum();
@@ -731,8 +806,14 @@ impl<'a> TokenQuery<'a> {
             })
             .collect();
 
-        // Sort by total tokens descending
-        breakdown.sort_by_key(|entry| std::cmp::Reverse(entry.total_tokens));
+        // Sort by total tokens descending. The rows come from a HashMap, whose
+        // iteration order is randomized per process, so ties are broken by
+        // name instead of following the map order.
+        breakdown.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         breakdown
     }
 }
@@ -773,6 +854,25 @@ mod tests {
         let records = store.all();
         assert!(!records.is_empty());
 
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn read_only_store_treats_a_mismatched_token_table_as_empty() {
+        // A foreign database (or a partially created table) can contain a
+        // `token_records` table with different columns; the read-only CLI path
+        // must report empty results instead of aborting on a failed prepare.
+        let path = unique_db_path("mismatched_table");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("CREATE TABLE token_records (x INTEGER)", [])
+                .unwrap();
+        }
+
+        let store = TokenStore::open_read_only_existing(&path, "token_records").unwrap();
+
+        assert!(store.by_time_range(0, 1_000_000).is_empty());
+        assert!(store.all().is_empty());
         cleanup_db(&path);
     }
 
@@ -984,6 +1084,35 @@ mod tests {
     }
 
     #[test]
+    fn test_by_last_hours_saturates_for_absurd_hours() {
+        let path = unique_db_path("absurd_hours");
+        let store = TokenStore::new(&path).unwrap();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        store
+            .insert(&make_record(
+                now_ns.saturating_sub(1_000),
+                Some("recent"),
+                1,
+                2,
+            ))
+            .unwrap();
+
+        // 5_124_096 hours is the first value whose nanosecond product leaves
+        // u64; a window wider than the recorded history must saturate to
+        // "everything" and keep the recent row instead of overflowing.
+        let rows = store.by_last_hours(5_124_096);
+        assert_eq!(rows.len(), 1, "an absurd --hours must not lose recent rows");
+        assert_eq!(rows[0].agent.as_deref(), Some("recent"));
+
+        let rows = store.by_last_hours(u64::MAX);
+        assert_eq!(rows.len(), 1, "u64::MAX hours must not overflow");
+        cleanup_db(&path);
+    }
+
+    #[test]
     fn test_purge_before_deletes_old_records() {
         let path = unique_db_path("purge_before");
         let store = TokenStore::new(&path).unwrap();
@@ -1111,6 +1240,146 @@ mod tests {
         let result = query.by_period_with_breakdown(TimePeriod::Today);
         assert_eq!(result.breakdown.len(), 1);
         assert_eq!(result.breakdown[0].name, "python");
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_period_end_covers_the_final_second() {
+        // The fixed ends were second-granularity (23:59:59) while records are
+        // stamped in nanoseconds, so 23:59:59.5 fell outside the inclusive
+        // query bound and silently vanished from the period totals.
+        let ns: u64 = 1_000_000_000;
+        let (start, end) = TimePeriod::Today.time_range();
+        assert_eq!(end - start, 86_400 * ns - 1);
+
+        let (start, end) = TimePeriod::Yesterday.time_range();
+        assert_eq!(end - start, 86_400 * ns - 1);
+
+        let (start, end) = TimePeriod::LastWeek.time_range();
+        assert_eq!(end - start, 7 * 86_400 * ns - 1);
+
+        let (start, end) = TimePeriod::LastMonth.time_range();
+        let now = Utc::now().naive_utc();
+        let first_this_month = now.date().with_day(1).unwrap();
+        let last_last_month = first_this_month - chrono::Duration::days(1);
+        let first_last_month = last_last_month.with_day(1).unwrap();
+        let days = (last_last_month - first_last_month).num_days() + 1;
+        assert_eq!(end - start, days as u64 * 86_400 * ns - 1);
+    }
+
+    #[test]
+    fn test_yesterday_includes_record_in_final_second() {
+        let path = unique_db_path("yesterday_final_second");
+        let store = TokenStore::new(&path).unwrap();
+        let (yesterday_start, _) = TimePeriod::Yesterday.time_range();
+        // 23:59:59.5 yesterday — inside the calendar day, sub-second.
+        let late = yesterday_start + 86_399 * 1_000_000_000 + 500_000_000;
+        store
+            .insert(&make_record(late, Some("Agent-Late"), 40, 20))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period(TimePeriod::Yesterday);
+        assert_eq!(result.total_tokens, 60);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_today_includes_record_in_final_second() {
+        // Today ends at the same fixed 23:59:59 as yesterday, so it needs the
+        // same nanosecond extension; without it 23:59:59.5 falls outside the
+        // inclusive bound and vanishes from today's total, while the same
+        // record is counted by yesterday one day later.
+        let path = unique_db_path("today_final_second");
+        let store = TokenStore::new(&path).unwrap();
+        let (today_start, _) = TimePeriod::Today.time_range();
+        let late = today_start + 86_399 * 1_000_000_000 + 500_000_000;
+        store
+            .insert(&make_record(late, Some("Agent-Late"), 40, 20))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period(TimePeriod::Today);
+        assert_eq!(result.total_tokens, 60);
+        cleanup_db(&path);
+    }
+
+    /// `previous_period()` is the pair-mate used for view switching, so for
+    /// last_week it hands back the *current*, unfinished week. Comparing a
+    /// complete week against a partial one is not "the previous period", and
+    /// the CLI prints that fabricated baseline as `比上一时段（N）`. Without an
+    /// earlier window to compare against, the query must not report one.
+    #[test]
+    fn last_week_does_not_compare_against_the_unfinished_week() {
+        let path = unique_db_path("compare_last_week");
+        let store = TokenStore::new(&path).unwrap();
+
+        let (last_week_start, _) = TimePeriod::LastWeek.time_range();
+        store
+            .insert(&make_record(last_week_start, Some("A"), 60, 40))
+            .unwrap();
+        let (week_start, _) = TimePeriod::Week.time_range();
+        store
+            .insert(&make_record(week_start, Some("A"), 6, 4))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::LastWeek);
+        assert_eq!(result.total_tokens, 100, "last week's own total");
+        assert!(
+            result.comparison.is_none(),
+            "last week has no earlier period to compare against, got {:?}",
+            result.comparison
+        );
+        cleanup_db(&path);
+    }
+
+    /// Guard for the direction that is genuinely earlier: today still compares
+    /// against the complete yesterday.
+    #[test]
+    fn today_compares_against_yesterday() {
+        let path = unique_db_path("compare_today");
+        let store = TokenStore::new(&path).unwrap();
+
+        let (yesterday_start, _) = TimePeriod::Yesterday.time_range();
+        store
+            .insert(&make_record(yesterday_start, Some("A"), 60, 40))
+            .unwrap();
+        let (today_start, _) = TimePeriod::Today.time_range();
+        store
+            .insert(&make_record(today_start, Some("A"), 6, 4))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::Today);
+        assert_eq!(result.total_tokens, 10, "today's own total");
+        let comparison = result.comparison.expect("today compares against yesterday");
+        assert_eq!(comparison.previous_total, 100);
+        assert_eq!(comparison.trend, Trend::Down);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_breakdown_ties_are_ordered_by_name() {
+        let path = unique_db_path("breakdown_ties");
+        let store = TokenStore::new(&path).unwrap();
+        let (today_start, _) = TimePeriod::Today.time_range();
+
+        // Five agents with identical totals: the breakdown order used to
+        // follow the HashMap iteration order (randomized per process).
+        for agent in ["zeta", "alpha", "delta", "echo", "bravo"] {
+            store
+                .insert(&make_record(today_start, Some(agent), 100, 50))
+                .unwrap();
+        }
+
+        let result = TokenQuery::new(&store).by_period_with_breakdown(TimePeriod::Today);
+        let names: Vec<&str> = result
+            .breakdown
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["alpha", "bravo", "delta", "echo", "zeta"],
+            "count ties must be broken by name, not by map order"
+        );
         cleanup_db(&path);
     }
 }

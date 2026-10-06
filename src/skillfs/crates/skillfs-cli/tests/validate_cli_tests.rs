@@ -238,3 +238,95 @@ fn all_ok_prints_success_message() {
         "should print success message, stdout={stdout}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. skills[].status values in JSON output
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn json_skill_status_fields_are_clean_names() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+    create_skill_dir(source.path(), "degraded-skill", DEGRADED_SKILL);
+    create_skill_dir(source.path(), "bad-yaml", ERROR_SKILL);
+
+    let out = Command::new(bin_path())
+        .args([
+            "validate",
+            source.path().to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("invoke skillfs validate --format json");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+
+    let skills = json["skills"].as_array().expect("skills array");
+    assert!(skills.len() >= 3, "expected 3 skills, got {skills:?}");
+
+    let statuses: std::collections::BTreeMap<String, String> = skills
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().expect("skill name").to_string(),
+                s["status"].as_str().expect("status string").to_string(),
+            )
+        })
+        .collect();
+
+    // The status field must carry the bare status name — "ok", "degraded",
+    // or "error" — so JSON consumers can match on it. Debug-repr leakage
+    // like `degraded("missing description")` embeds the message (already
+    // reported separately) into the status string.
+    for (name, status) in &statuses {
+        assert!(
+            matches!(status.as_str(), "ok" | "degraded" | "error"),
+            "skill {name} has non-canonical status {status:?}"
+        );
+    }
+    assert_eq!(statuses["good-skill"], "ok", "good-skill status");
+    assert_eq!(statuses["degraded-skill"], "degraded", "degraded status");
+    assert_eq!(statuses["bad-yaml"], "error", "bad-yaml status");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. non-UTF-8 source path
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn non_utf8_source_path_is_validated() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // Linux paths are arbitrary bytes; `source` is a `PathBuf`, so a source
+    // directory whose name is not valid UTF-8 must be accepted like any other.
+    let parent = tempfile::tempdir().expect("parent tempdir");
+    let source = parent.path().join(OsStr::from_bytes(b"skills-\xff"));
+    std::fs::create_dir(&source).expect("create non-UTF-8 source dir");
+    create_skill_dir(&source, "good-skill", VALID_SKILL);
+
+    let out = Command::new(bin_path())
+        .arg("validate")
+        .arg(&source)
+        .output()
+        .expect("invoke skillfs validate");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "skillfs must not panic on a non-UTF-8 argument, stderr={stderr}"
+    );
+    assert!(
+        out.status.success(),
+        "expected success, status={:?} stdout={stdout} stderr={stderr}",
+        out.status
+    );
+    assert!(
+        stdout.contains("All skills loaded successfully"),
+        "stdout={stdout}"
+    );
+}

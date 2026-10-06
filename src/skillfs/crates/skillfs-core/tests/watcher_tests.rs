@@ -7,7 +7,28 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 
-use skillfs_core::watcher::{SkillEvent, watch_source};
+use skillfs_core::watcher::{SkillEvent, watch_source, watch_source_with_handle};
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
+async fn test_watcher_detects_directory_deletion() {
+    let source_dir = tempdir().expect("source directory");
+    let source = source_dir.path().to_path_buf();
+    let skill_dir = source.join("to-delete");
+    std::fs::create_dir(&skill_dir).expect("skill directory");
+
+    let (mut rx, handle) = watch_source_with_handle(source, 50)
+        .await
+        .expect("watcher must be attached before deleting the directory");
+    std::fs::remove_dir(&skill_dir).expect("remove skill directory");
+
+    let event = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+    handle.shutdown().await;
+    assert!(
+        matches!(event, Ok(Some(SkillEvent::DirDeleted(path))) if path == skill_dir),
+        "directory deletion must emit a directory-level event"
+    );
+}
 
 #[tokio::test]
 #[ignore = "flaky in CI - filesystem events may not fire reliably"]
@@ -182,6 +203,156 @@ async fn test_watcher_detects_directory_creation() {
 
 #[tokio::test]
 #[ignore = "flaky in CI - filesystem events may not fire reliably"]
+async fn test_watcher_detects_directory_rename_within_source() {
+    let source_dir = tempdir().expect("source directory");
+    let source = source_dir.path().to_path_buf();
+    let old_dir = source.join("alpha");
+    let new_dir = source.join("beta");
+    std::fs::create_dir(&old_dir).expect("skill directory");
+    std::fs::write(old_dir.join("SKILL.md"), "---\nname: alpha\n---\n").expect("manifest");
+
+    let (mut rx, handle) = watch_source_with_handle(source, 50)
+        .await
+        .expect("watcher must be attached before renaming the directory");
+    std::fs::rename(&old_dir, &new_dir).expect("rename skill directory");
+
+    // A rename reports both sides: DirDeleted for the old name and
+    // DirCreated for the new one. Child events (SKILL.md) may also arrive;
+    // collect until both directory-level events are seen or time runs out.
+    let mut saw_deleted = false;
+    let mut saw_created = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline && !(saw_deleted && saw_created) {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(SkillEvent::DirDeleted(path))) => saw_deleted |= path == old_dir,
+            Ok(Some(SkillEvent::DirCreated(path))) => saw_created |= path == new_dir,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    handle.shutdown().await;
+    assert!(
+        saw_deleted,
+        "renaming a skill directory must emit DirDeleted for the old name"
+    );
+    assert!(
+        saw_created,
+        "renaming a skill directory must emit DirCreated for the new name"
+    );
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
+async fn test_watcher_detects_directory_moved_in() {
+    let parent = tempdir().expect("parent directory");
+    let source = parent.path().join("source");
+    std::fs::create_dir(&source).expect("source directory");
+    // A skill directory created OUTSIDE the watched tree, then moved in.
+    let staging = parent.path().join("staging");
+    std::fs::create_dir(&staging).expect("staging directory");
+    let moved_in = staging.join("arriving-skill");
+    std::fs::create_dir(&moved_in).expect("staged skill directory");
+    std::fs::write(moved_in.join("SKILL.md"), "---\nname: arriving\n---\n").expect("manifest");
+
+    let (mut rx, handle) = watch_source_with_handle(source.clone(), 50)
+        .await
+        .expect("watcher must be attached before moving the directory in");
+    std::fs::rename(&moved_in, source.join("arriving-skill"))
+        .expect("move skill directory into the source");
+
+    let expected = source.join("arriving-skill");
+    let mut saw_created = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline && !saw_created {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(SkillEvent::DirCreated(path))) => saw_created |= path == expected,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    handle.shutdown().await;
+    assert!(
+        saw_created,
+        "a directory moved into the source must emit DirCreated"
+    );
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
+async fn test_watcher_detects_directory_moved_out() {
+    let parent = tempdir().expect("parent directory");
+    let source = parent.path().join("source");
+    std::fs::create_dir(&source).expect("source directory");
+    let leaving = source.join("leaving-skill");
+    std::fs::create_dir(&leaving).expect("skill directory");
+    std::fs::write(leaving.join("SKILL.md"), "---\nname: leaving\n---\n").expect("manifest");
+
+    let (mut rx, handle) = watch_source_with_handle(source.clone(), 50)
+        .await
+        .expect("watcher must be attached before moving the directory out");
+    std::fs::rename(&leaving, parent.path().join("gone-skill"))
+        .expect("move skill directory out of the source");
+
+    let mut saw_deleted = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline && !saw_deleted {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(SkillEvent::DirDeleted(path))) => saw_deleted |= path == leaving,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    handle.shutdown().await;
+    assert!(
+        saw_deleted,
+        "a directory moved out of the source must emit DirDeleted"
+    );
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
+#[cfg(unix)]
+async fn test_watcher_symlink_rename_is_not_a_dir_deletion() {
+    // Review regression, real inotify: renaming a symlink that points at
+    // a real directory must not emit DirDeleted — the drift conversion
+    // maps DirDeleted straight into a skill-scoped deletion, and no skill
+    // directory ever moved. Pins the no-follow type contract of the
+    // paired-rename correlation (`paths[1].is_dir()` used to follow the
+    // symlink target and record both sides as directories).
+    let parent = tempdir().expect("parent directory");
+    let source = parent.path().join("source");
+    std::fs::create_dir(&source).expect("source directory");
+    let real_target = parent.path().join("real-target");
+    std::fs::create_dir(&real_target).expect("real directory target");
+    let link = source.join("link-a");
+    std::os::unix::fs::symlink("../real-target", &link).expect("symlink to a directory");
+
+    let (mut rx, handle) = watch_source_with_handle(source.clone(), 50)
+        .await
+        .expect("watcher must be attached before renaming the symlink");
+    std::fs::rename(&link, source.join("link-b")).expect("rename the symlink");
+
+    let mut saw_dir_deleted = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(SkillEvent::DirDeleted(path))) => {
+                saw_dir_deleted = true;
+                eprintln!("unexpected DirDeleted: {}", path.display());
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    handle.shutdown().await;
+    assert!(
+        !saw_dir_deleted,
+        "renaming a symlink must never be reported as a skill-directory deletion"
+    );
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
 async fn test_watcher_debouncing() {
     let source_dir = tempdir().unwrap();
     let source = source_dir.path().to_path_buf();
@@ -216,4 +387,49 @@ async fn test_watcher_debouncing() {
 
     // Should have received at least one event, but debouncing may reduce the count
     assert!(event_count >= 1, "should receive at least one event");
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
+async fn test_watcher_ignores_skill_meta_snapshot_manifests() {
+    // Reviewer live probe shape: a metadata change on
+    // `<skill>/.skill-meta/versions/<v>.snapshot/SKILL.md` is
+    // store-internal snapshot state, not a user-edited manifest, and
+    // must not surface as a skill event.
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_dir = tempdir().unwrap();
+    let source = source_dir.path().to_path_buf();
+    let snapshot = source
+        .join("alpha")
+        .join(".skill-meta")
+        .join("versions")
+        .join("v1.snapshot")
+        .join("SKILL.md");
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot, "---\nname: alpha\n---\n").unwrap();
+
+    let (mut rx, handle) = watch_source_with_handle(source, 50)
+        .await
+        .expect("watcher must be attached before touching the snapshot");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let mut perms = std::fs::metadata(&snapshot).unwrap().permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&snapshot, perms).unwrap();
+
+    let result = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+    handle.shutdown().await;
+    if let Ok(Some(event)) = result {
+        let path_str = match &event {
+            SkillEvent::Created(p) | SkillEvent::Modified(p) | SkillEvent::Deleted(p) => {
+                p.to_string_lossy()
+            }
+            SkillEvent::DirCreated(p) | SkillEvent::DirDeleted(p) => p.to_string_lossy(),
+        };
+        assert!(
+            !path_str.contains(".skill-meta"),
+            ".skill-meta snapshot writes must not emit skill events, got {event:?}"
+        );
+    }
 }

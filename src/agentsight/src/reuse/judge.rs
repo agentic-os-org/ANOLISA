@@ -58,8 +58,9 @@ pub struct JudgeVerdict {
     pub label: TrajectoryLabel,
     pub reason: String,
     pub cited_steps: Vec<usize>,
-    /// Set when a `bad` arrived with no cited step and was reduced to `unknown`.
-    /// Reported rather than applied quietly, so the rate stays visible.
+    /// Set when a `bad` arrived with no cited step, or only with steps the
+    /// judged round does not contain, and was reduced to `unknown`. Reported
+    /// rather than applied quietly, so the rate stays visible.
     pub downgraded: bool,
 }
 
@@ -235,6 +236,42 @@ pub fn interpret(response: &JudgeResponse) -> Result<JudgeVerdict, JudgeError> {
     }
 }
 
+/// Applies the citation rule against the steps actually present in the round.
+///
+/// [`interpret`] can only tell whether the model cited anything, not whether
+/// the id exists: a `bad` citing a step outside the judged round (a previous
+/// round's step, `0`, or an invented number) is as unsupported as one citing
+/// nothing. Letting it through would display a fabricated citation as the
+/// evidence behind an accusation. Kept separate from [`judge_last_round`] so
+/// the check is exercisable without a model call.
+fn interpret_in_round(
+    response: &JudgeResponse,
+    doc: &AtifTrajectory,
+    round: std::ops::Range<usize>,
+) -> Result<JudgeVerdict, JudgeError> {
+    let verdict = interpret(response)?;
+    if verdict.label != TrajectoryLabel::Bad {
+        return Ok(verdict);
+    }
+    let present: Vec<usize> = doc.steps[round].iter().map(|step| step.step_id).collect();
+    if verdict
+        .cited_steps
+        .iter()
+        .all(|cited| present.contains(cited))
+    {
+        return Ok(verdict);
+    }
+    Ok(JudgeVerdict {
+        label: TrajectoryLabel::Unknown,
+        reason: format!(
+            "模型判为 bad 但引用的步骤不在本轮记录中，按证据不足处理：{}",
+            response.reason
+        ),
+        cited_steps: Vec::new(),
+        downgraded: true,
+    })
+}
+
 /// Judges the final round of a trajectory.
 ///
 /// The final round carries the outcome; judging every round would multiply the
@@ -250,10 +287,10 @@ pub async fn judge_last_round(
 ) -> Result<JudgeVerdict, JudgeError> {
     let round = last_round(doc).ok_or(JudgeError::NothingToJudge)?;
     let response: JudgeResponse = client
-        .chat_json_parsed(build_messages(doc, round))
+        .chat_json_parsed(build_messages(doc, round.clone()))
         .await
         .map_err(|error| JudgeError::Call(error.to_string()))?;
-    interpret(&response)
+    interpret_in_round(&response, doc, round)
 }
 
 /// Range of the final round.

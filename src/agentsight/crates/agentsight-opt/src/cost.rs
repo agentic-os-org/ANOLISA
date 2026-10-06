@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::atif::{observation_looks_like_error, AtifStep, AtifTrajectory};
+use crate::atif::{observation_result_is_error, AtifStep, AtifTrajectory};
 use crate::types::{
     CostFinding, CostHeadroom, CostRatioMetrics, CostSegment, CostStats, LlmCall,
     RedundantCallGroup, TurnLedgerRow, WasteCandidate, WasteCandidateSet,
@@ -200,7 +200,16 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             }
         })
         .collect();
-    redundant_calls.sort_by_key(|group| std::cmp::Reverse(group.count));
+    // `tool_sig_counts` is a HashMap, whose iteration order is randomized per
+    // map instance, so groups tying on count kept the map's random order and
+    // the waste table reordered between runs of the same trajectory. Break
+    // ties by signature, the way 947a9bde2 broke aggregate ties by name.
+    redundant_calls.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.cmd_sig.cmp(&b.cmd_sig))
+    });
 
     // Generate findings. Reserved for data-quality warnings only (degraded
     // capture, below) — heuristic insights (tool dominance, redundant calls,
@@ -227,9 +236,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
             CostFinding {
                 severity: "high".to_string(),
                 html: format!(
-                    "<b>{}/{}</b> 个 agent 步无消息、无工具调用且无 usage（疑似采集不完整）。\
-                     体积与 token 数字仅反映用户/系统侧内容，<b>不可作为优化依据</b>。",
-                    empty_agent_steps, agent_steps
+                    "<b>{empty_agent_steps}/{agent_steps}</b> 个 agent 步无消息、无工具调用且无 usage（疑似采集不完整）。\
+                     体积与 token 数字仅反映用户/系统侧内容，<b>不可作为优化依据</b>。"
                 ),
             },
         );
@@ -313,7 +321,7 @@ pub(crate) struct UsageBlock {
 }
 
 fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
-    let m = step.metrics?;
+    let m = step.metrics.as_ref()?;
     let prompt = m.prompt_tokens.map(u64::from);
     let completion = m.completion_tokens.map(u64::from);
     let cached = m.cached_tokens.map(u64::from);
@@ -506,10 +514,7 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                 let has_tool = !step.calls().is_empty();
                 let all_calls_errored = has_tool
                     && !step.results().is_empty()
-                    && step
-                        .results()
-                        .iter()
-                        .all(|r| observation_looks_like_error(r.content.as_deref().unwrap_or("")));
+                    && step.results().iter().all(observation_result_is_error);
 
                 let turn_ts = step.end_ts().unwrap_or(origin);
                 b.finalize(
@@ -797,10 +802,13 @@ fn trunc(s: &str, n: usize) -> String {
 }
 
 /// Whether a tool call command looks like a backtrack / dead-end reversal.
+/// Branch creation (`git checkout -b`/`-B`; `-B` folds to `-b` in the
+/// lowercase) discards nothing — it is forward progress, so it stays out
+/// even though it contains "git checkout".
 fn is_backtrack_cmd(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
+    let checkout = c.contains("git checkout") && !c.contains("git checkout -b");
     [
-        "git checkout",
         "git reset",
         "git revert",
         "git stash",
@@ -810,6 +818,7 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
     ]
     .iter()
     .any(|k| c.contains(k))
+        || checkout
 }
 
 // ---------------------------------------------------------------------------
@@ -964,7 +973,7 @@ pub(crate) fn build_turn_ledger(
                 let err = step
                     .results()
                     .iter()
-                    .find(|r| observation_looks_like_error(r.content.as_deref().unwrap_or("")));
+                    .find(|r| observation_result_is_error(r));
                 let files: Vec<String> = step.calls().iter().filter_map(write_target).collect();
                 let backtrack = step
                     .calls()
@@ -1124,7 +1133,8 @@ pub(crate) fn extract_waste_candidates_from(
     // inputs. The agent-step ordinal is the replay step index. (Backtrack
     // signals live in the turn ledger, keyed by the same ordinal.)
     let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
-    let mut user_inputs: Vec<(usize, usize, String)> = Vec::new(); // step, tokens, snippet
+                                                                            // (first replay turn, replays, tokens, snippet)
+    let mut user_inputs: Vec<(usize, usize, usize, String)> = Vec::new();
 
     let mut turn_idx: i64 = -1;
     for step in &trajectory.steps {
@@ -1132,7 +1142,7 @@ pub(crate) fn extract_waste_candidates_from(
             "agent" => {
                 turn_idx += 1;
                 let step_no = turn_idx.max(0) as usize;
-                for result in step.results() {
+                for (k, result) in step.results().iter().enumerate() {
                     let text = result.content.as_deref().unwrap_or("");
                     let toks = estimate_tokens(text);
                     if toks >= TOOL_TRIM_MIN {
@@ -1145,7 +1155,20 @@ pub(crate) fn extract_waste_candidates_from(
                                     .find(|c| c.tool_call_id == id)
                                     .map(|c| c.function_name.clone())
                             })
-                            .or_else(|| step.calls().first().map(|c| c.function_name.clone()))
+                            .or_else(|| {
+                                // Positional pairing is only for documents whose
+                                // results carry no ids at all (the same rule
+                                // `collect_tool_calls_with` applies). Falling
+                                // back whenever the id misses would blame the
+                                // first tool of the step for a sibling's output
+                                // and feed that name into the candidate's facts.
+                                step.results()
+                                    .iter()
+                                    .all(|r| r.source_call_id.is_none())
+                                    .then(|| step.calls().get(k))
+                                    .flatten()
+                                    .map(|c| c.function_name.clone())
+                            })
                             .unwrap_or_else(|| "unknown".to_string());
                         tool_outputs.push((step_no, name, toks, trunc(text, SNIPPET_CHARS)));
                     }
@@ -1155,8 +1178,19 @@ pub(crate) fn extract_waste_candidates_from(
                 let text = step.message.as_deref().unwrap_or("");
                 let toks = estimate_tokens(text);
                 if toks >= USER_LARGE_MIN {
-                    let step_no = turn_idx.max(0) as usize;
-                    user_inputs.push((step_no, toks, trunc(text, SNIPPET_CHARS)));
+                    // The message arrives after turn_idx + 1 agent turns have
+                    // finished, so it enters the context of the turns that
+                    // follow - never the turn that completed before it was
+                    // sent. turn_idx is -1 before the first agent step, hence
+                    // the +1: a leading message is replayed by every turn.
+                    let first_replay_turn = (turn_idx + 1) as usize;
+                    let replays = total_steps.saturating_sub(first_replay_turn);
+                    user_inputs.push((
+                        first_replay_turn,
+                        replays,
+                        toks,
+                        trunc(text, SNIPPET_CHARS),
+                    ));
                 }
             }
             _ => {}
@@ -1181,10 +1215,20 @@ pub(crate) fn extract_waste_candidates_from(
 
     // ── 上下文臃肿 ──
 
-    // 前缀缓存 (playbook #1): savings are a price discount — prefix replay ×
-    // (1 − cached price). 判据直接给命中率序列（对齐 perf 的 prefix_cache）：
-    // 持续为零/偏低即未在享受缓存；无 usage 本身就是"可能未开启 caching"的信号。
-    let cache_save = (cache_tok as f64 * (1.0 - CACHED_PRICE_RATIO)).round() as usize;
+    // 前缀缓存 (playbook #1): savings are a price discount — the share of the
+    // replayed prefix NOT already served from cache × (1 − cached price), the
+    // same correction compute_headroom applies; counting the raw cacheable
+    // sum advertised near-full savings on trajectories already hitting ~90%
+    // cache. 判据直接给命中率序列（对齐 perf 的 prefix_cache）：持续为零/偏低
+    // 即未在享受缓存；无 usage 本身就是"可能未开启 caching"的信号。
+    let incremental_cache_tok: usize = calls
+        .iter()
+        .map(|c| {
+            c.cacheable
+                .saturating_sub(c.real_cached_tokens.unwrap_or(0) as usize)
+        })
+        .sum();
+    let cache_save = (incremental_cache_tok as f64 * (1.0 - CACHED_PRICE_RATIO)).round() as usize;
     if cache_tok > 0 {
         let hit_seq: Vec<String> = calls
             .iter()
@@ -1309,15 +1353,14 @@ pub(crate) fn extract_waste_candidates_from(
     if !user_inputs.is_empty() {
         let up_potential: usize = user_inputs
             .iter()
-            .map(|(s, t, _)| {
-                ((*t as f64) * PROMPT_COMPRESS_FRAC * total_steps.saturating_sub(*s) as f64).round()
-                    as usize
+            .map(|(_, replays, t, _)| {
+                ((*t as f64) * PROMPT_COMPRESS_FRAC * *replays as f64).round() as usize
             })
             .sum();
         let steps: Vec<usize> = user_inputs.iter().map(|u| u.0).collect();
         let top_m13 = user_inputs
             .iter()
-            .map(|(s, t, _)| bill_share(t * total_steps.saturating_sub(*s)))
+            .map(|(_, replays, t, _)| bill_share(t * *replays))
             .fold(0.0, f64::max);
         candidates.push(WasteCandidate {
             id: "user_prompt".into(),
@@ -1332,10 +1375,10 @@ pub(crate) fn extract_waste_candidates_from(
             facts: format!(
                 "{} 段超长用户输入（最大 {} tok），最大单条 M13 重放占比 {:.0}%",
                 user_inputs.len(),
-                fmt_k(user_inputs.iter().map(|u| u.1).max().unwrap_or(0)),
+                fmt_k(user_inputs.iter().map(|u| u.2).max().unwrap_or(0)),
                 top_m13 * 100.0
             ),
-            snippet: user_inputs.first().map(|u| u.2.clone()).unwrap_or_default(),
+            snippet: user_inputs.first().map(|u| u.3.clone()).unwrap_or_default(),
         });
     }
 
@@ -1481,6 +1524,50 @@ mod tests {
     }
 
     #[test]
+    fn redundant_calls_break_count_ties_by_signature() {
+        // Two tools called the same number of times: the counts map is a
+        // HashMap, whose iteration order is randomized per map instance, so a
+        // count-only sort could list the waste table in either order.
+        let mut steps = String::new();
+        for (id, name, cmd) in [
+            ("c1", "Bash", "ls -la /tmp"),
+            ("c2", "Bash", "ls -la /tmp"),
+            ("c3", "Bash", "ls -la /tmp"),
+            ("c4", "Grep", "pattern TODO"),
+            ("c5", "Grep", "pattern TODO"),
+            ("c6", "Grep", "pattern TODO"),
+        ] {
+            steps.push_str(&format!(
+                r#",{{"step_id":0,"source":"agent","tool_calls":[{{"tool_call_id":"{id}","function_name":"{name}","arguments":{{"command":"{cmd}"}}}}]}}"#
+            ));
+        }
+        let t = traj(&format!(
+            r#"[{{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"}}{steps}]"#
+        ));
+
+        let first: Vec<String> = compute_cost(&t)
+            .unwrap()
+            .redundant_calls
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
+        assert_eq!(first.len(), 2, "both groups reach the waste table");
+        for _ in 0..16 {
+            let names: Vec<String> = compute_cost(&t)
+                .unwrap()
+                .redundant_calls
+                .iter()
+                .map(|g| g.name.clone())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["Bash".to_string(), "Grep".to_string()],
+                "a count tie must not follow the map's iteration order"
+            );
+        }
+    }
+
+    #[test]
     fn test_waste_candidates_tool_output() {
         // A big tool return replayed across several steps → tool_output candidate.
         let big = "x ".repeat(6000); // ~3k tokens (latin/4), over the 2k trim threshold
@@ -1505,6 +1592,71 @@ mod tests {
         assert_eq!(tool.optimization, "工具输出截断");
         assert!(tool.facts.contains("Read"));
         assert!(set.total_input_tokens > 0);
+    }
+
+    /// A big observation whose id matches no call (its result never arrived, or
+    /// the producer dropped the id) must not borrow the first tool's name: the
+    /// name lands in the candidate's facts and in the LLM's evidence.
+    #[test]
+    fn unmatched_observation_id_does_not_borrow_the_first_tools_name() {
+        let big = "x ".repeat(6000);
+        let t = traj(&format!(
+            r#"[
+            {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"}},
+            {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[
+                {{"tool_call_id":"c1","function_name":"Read","arguments":{{"file_path":"/a"}}}},
+                {{"tool_call_id":"c2","function_name":"Bash","arguments":{{"command":"ls"}}}}],
+             "observation":{{"results":[{{"source_call_id":"c9","content":"{big}"}}]}}}},
+            {{"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"ok"}}
+        ]"#
+        ));
+        let set = extract_waste_candidates(&t).unwrap();
+        let tool = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "tool_output")
+            .expect("tool_output candidate");
+        assert!(
+            !tool.facts.contains("Read"),
+            "a result whose id matches no call must not inherit the first tool's name: {}",
+            tool.facts
+        );
+        assert!(tool.facts.contains("unknown"), "facts: {}", tool.facts);
+    }
+
+    /// Two id-less results pair positionally with the calls, not all with the
+    /// first one.
+    #[test]
+    fn id_less_observations_pair_positionally_not_all_to_the_first_call() {
+        let big = "x ".repeat(6000);
+        let t = traj(&format!(
+            r#"[
+            {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"}},
+            {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[
+                {{"tool_call_id":"c1","function_name":"Read","arguments":{{"file_path":"/a"}}}},
+                {{"tool_call_id":"c2","function_name":"Bash","arguments":{{"command":"ls"}}}}],
+             "observation":{{"results":[{{"content":"{big}"}},{{"content":"{big}"}}]}}}},
+            {{"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"ok"}}
+        ]"#
+        ));
+        let set = extract_waste_candidates(&t).unwrap();
+        let tool = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "tool_output")
+            .expect("tool_output candidate");
+        assert!(
+            tool.facts.contains("Read"),
+            "first result pairs with the first call: {}",
+            tool.facts
+        );
+        assert!(
+            tool.facts.contains("Bash"),
+            "second result pairs with the second call: {}",
+            tool.facts
+        );
     }
 
     #[test]
@@ -1689,6 +1841,75 @@ mod tests {
         assert!(text.contains("| FILES: src/p.rs"));
         assert!(text.contains("| BACKTRACK"));
         assert!(text.contains("| USER→: 命名要用 snake_case"));
+    }
+
+    /// The structured provider flag must reach the turn ledger the same way it
+    /// reaches `PerfStats`: a clean-text failure the producer flagged is still a
+    /// failure, and a success that merely mentions an error is not.
+    #[test]
+    fn ledger_honors_structured_observation_is_error() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"make test"}}],
+             "observation":{"results":[{"source_call_id":"c1",
+               "content":"make: *** Tool execution aborted, exit status 1",
+               "extra":{"is_error":true}}]}},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"true"}}],
+             "observation":{"results":[{"source_call_id":"c2",
+               "content":"Error: connection reset (recovered, retry succeeded)",
+               "extra":{"is_error":false}}]}}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        let ledger = build_turn_ledger(&cost, &t);
+
+        assert!(
+            ledger[0].is_error,
+            "producer set extra.is_error=true on a clean-text failure, \
+             but the ledger dropped it: {ledger:?}"
+        );
+        assert!(
+            !ledger[1].is_error,
+            "extra.is_error=false must beat the error-mentioning text"
+        );
+    }
+
+    /// Flag-less documents keep the text-heuristic fallback.
+    #[test]
+    fn ledger_keeps_text_heuristic_for_flagless_observations() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"cargo test"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"error: cannot find value"}]}}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        let ledger = build_turn_ledger(&cost, &t);
+        assert!(ledger[0].is_error);
+    }
+
+    /// `all_calls_errored` feeds `removable_turn`: a failed turn the producer
+    /// flagged must not look error-free just because its output text is clean.
+    #[test]
+    fn removable_turn_honors_structured_observation_is_error() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"make test"}}],
+             "observation":{"results":[{"source_call_id":"c1",
+               "content":"make: *** Tool execution aborted, exit status 1",
+               "extra":{"is_error":true}}]}},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"done"}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        assert!(
+            cost.calls[0].removable_turn,
+            "a turn whose every tool call failed must be removable, flag or not"
+        );
     }
 
     /// Model-supplied turn numbers are untrusted input: unknown turns are
@@ -1883,5 +2104,121 @@ mod tests {
         assert_eq!(cost.usage_steps, 0);
         assert_eq!(cost.total_real_input_tok, 0);
         assert!(cost.calls[0].real_prompt_tokens.is_none());
+    }
+
+    /// Prefix caching saves only on the share not already served from cache.
+    /// compute_headroom applies exactly that correction (see its test
+    /// headroom_discounts_tokens_already_served_from_cache); the candidate
+    /// must not advertise the raw cacheable sum on the same cache-warm
+    /// trajectory, or the waste table contradicts the headroom card.
+    #[test]
+    fn fixed_overhead_candidate_discounts_already_cached_tokens() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z",
+             "metrics":{"prompt_tokens":10100,"completion_tokens":200,"cached_tokens":9500},
+             "message":"a"},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:04.000Z",
+             "metrics":{"prompt_tokens":10100,"completion_tokens":210,"cached_tokens":9500},
+             "message":"b"}
+        ]"#,
+        );
+        let set = extract_waste_candidates(&t).unwrap();
+        let c = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "fixed_overhead")
+            .expect("fixed_overhead candidate fires on a >2k static region");
+        // 9500 of each step's 10100 prompt tokens already come from cache, so
+        // only the ~500-600-token uncached remainder per turn is still to
+        // gain: the discounted savings stay far below the ~15k the raw
+        // prefix-replay sum would report.
+        assert!(
+            c.potential_save_tokens < 1_500,
+            "cache-warm trajectory must not advertise the full prefix replay, got {}",
+            c.potential_save_tokens
+        );
+        assert!(c.potential_save_tokens > 0);
+    }
+
+    /// A user message that arrives mid-conversation is replayed only by the
+    /// agent turns that FOLLOW it: the turn that completed before the message
+    /// was sent never saw it, so it contributes no replay cost. The
+    /// prompt-compression candidate must count replays that way.
+    #[test]
+    fn user_prompt_candidate_counts_only_following_turn_replays() {
+        let big = "x ".repeat(4000); // ~2k tokens, over the 1.5k USER_LARGE_MIN
+        let t = traj(&format!(
+            r#"[
+            {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"{big}"}},
+            {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z","message":"a1"}},
+            {{"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z","message":"a2"}},
+            {{"step_id":4,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"a3"}},
+            {{"step_id":5,"source":"user","timestamp":"2026-07-02T06:30:04.000Z","message":"{big}"}},
+            {{"step_id":6,"source":"agent","timestamp":"2026-07-02T06:30:05.000Z","message":"a4"}},
+            {{"step_id":7,"source":"agent","timestamp":"2026-07-02T06:30:06.000Z","message":"a5"}},
+            {{"step_id":8,"source":"agent","timestamp":"2026-07-02T06:30:07.000Z","message":"a6"}}
+        ]"#
+        ));
+        let set = extract_waste_candidates(&t).unwrap();
+        let up = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "user_prompt")
+            .expect("user_prompt candidate fires on 2k-token inputs");
+        // Leading input: replayed by all 6 turns. Mid-conversation input
+        // (after 3 finished turns): replayed by turns 3..5, i.e. 3 turns.
+        // 2k tok x 0.6 x (6 + 3) = 10800; counting the finished turn too
+        // would report 12000.
+        assert_eq!(up.potential_save_tokens, 10_800);
+    }
+
+    /// `git checkout -b/-B` creates a branch: nothing is discarded, so it is
+    /// forward progress, not a reversal. Flagging it BACKTRACK feeds a false
+    /// 回退 count into the detour prompt and pads the prevention ceiling
+    /// with that turn's tokens.
+    #[test]
+    fn branch_creation_is_not_a_backtrack() {
+        assert!(!is_backtrack_cmd("git checkout -b feature/opt"));
+        assert!(!is_backtrack_cmd("git checkout -B feature/opt"));
+        assert!(!is_backtrack_cmd("cd /repo && git checkout -b fix/parse"));
+        // Discarding and reset forms stay backtracks.
+        assert!(is_backtrack_cmd("git checkout -- src/lib.rs"));
+        assert!(is_backtrack_cmd("git checkout ."));
+        assert!(is_backtrack_cmd("git reset --hard HEAD~1"));
+
+        // End to end: the ledger and the detour facts must not count a
+        // branch creation as a backtrack.
+        let mut steps = String::from(
+            r#"{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"start"}"#,
+        );
+        steps.push_str(
+            r#",{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+                "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"git checkout -b feature/opt"}}],
+                "observation":{"results":[{"source_call_id":"c1","content":"Switched to a new branch"}]}}"#,
+        );
+        for id in 3..=6 {
+            steps.push_str(&format!(
+                r#",{{"step_id":{id},"source":"agent","timestamp":"2026-07-02T06:30:0{id}.000Z","message":"working"}}"#
+            ));
+        }
+        let t = traj(&format!("[{steps}]"));
+        let set = extract_waste_candidates(&t).unwrap();
+        let detour = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "detour")
+            .expect("detour fires on a 5-turn trajectory");
+        assert!(
+            detour.facts.contains("0 处回退"),
+            "branch creation must not count as a backtrack: {}",
+            detour.facts
+        );
+        assert!(
+            set.ledger.iter().all(|r| !r.backtrack),
+            "no ledger row may carry the BACKTRACK flag: {:?}",
+            set.ledger
+        );
     }
 }

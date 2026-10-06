@@ -42,6 +42,9 @@ anolisa update all
 `status` 和 `doctor` 允许修改 raw 安装中 `type = "config"` 文件的内容，
 同时继续检查文件是否存在、权限和路径安全。
 
+`logs --since <RFC3339>` 按包含边界的时间戳筛选，正确比较时区偏移和小数秒。
+只有设置 `--since` 时，无法解析时间戳的记录才会被排除。
+
 ### 二级命令 — 管理
 
 | 命令 | 说明 |
@@ -119,7 +122,7 @@ raw backend 每次解析都会重新拉取 distribution index，仓库不可达�
 - Linux（x86_64 / aarch64）或 macOS 11+（arm64 / x86_64，功能受限）
 
 Intel macOS 的预构建包和 npm 支持需要使用包含 `darwin-x64` 平台包的新版本。
-该版本发布且安装入口单独开放之前，官网安装脚本仍仅支持 ARM Mac。
+官网安装脚本已同时支持 ARM Mac 与 macOS 11 及更高版本的 Intel Mac。
 - 从源码构建需要 Rust ≥ 1.93
 
 ## 许可证

@@ -290,73 +290,108 @@ def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
     bodies: dict[int, bytearray] = {}
     paths: dict[int, str] = {}
     run_ids: dict[int, str | None] = {}
+
+    def send_stream_data(stream_id: int, frame: bytes, *, end_stream: bool = False) -> None:
+        """Send one payload honoring h2 flow control and the frame-size limit.
+
+        python-h2 raises FlowControlError when a send exceeds the remaining
+        window and never reads the socket itself, so a response larger than
+        the peer's initial window (~64 KiB) can only be delivered by slicing
+        to the window, and by reading (and applying) the client's pending
+        WINDOW_UPDATE frames whenever the window is exhausted.
+        """
+        view = memoryview(frame)
+        while view:
+            window = connection.local_flow_control_window(stream_id)
+            if window <= 0:
+                data = sock.recv(65535)
+                if not data:
+                    raise ConnectionError("client closed while flow-control blocked")
+                handle_events(connection.receive_data(data))
+                continue
+            take = min(len(view), window, connection.max_outbound_frame_size)
+            connection.send_data(
+                stream_id,
+                bytes(view[:take]),
+                end_stream=end_stream and take == len(view),
+            )
+            sock.sendall(connection.data_to_send())
+            view = view[take:]
+
+    def handle_events(events: list[Any]) -> None:
+        for event in events:
+            if isinstance(event, RequestReceived):
+                headers = dict(event.headers)
+                paths[event.stream_id] = headers.get(":path", "")
+                run_ids[event.stream_id] = header_value(
+                    headers, "X-Benchmark-Run-ID"
+                )
+                bodies[event.stream_id] = bytearray()
+            elif isinstance(event, DataReceived):
+                bodies.setdefault(event.stream_id, bytearray()).extend(event.data)
+                connection.acknowledge_received_data(
+                    event.flow_controlled_length, event.stream_id
+                )
+            elif isinstance(event, StreamEnded):
+                path = paths.pop(event.stream_id, "")
+                run_id = run_ids.pop(event.stream_id, None)
+                body = bytes(bodies.pop(event.stream_id, b""))
+                if path == "/healthz":
+                    send_h2_body(connection, event.stream_id, b"OK", "text/plain")
+                elif path in ENDPOINTS:
+                    rid = request_id_from(body, {})
+                    record_request(settings, run_id, rid, HTTPStatus.OK)
+                    response = response_events(
+                        path, rid, settings.chunks, settings.chunk_bytes
+                    )
+                    if settings.sse:
+                        connection.send_headers(
+                            event.stream_id,
+                            [
+                                (":status", "200"),
+                                ("content-type", "text/event-stream"),
+                            ],
+                        )
+                        # python-h2 buffers frames until data_to_send() is
+                        # called; flush after headers and after every chunk
+                        # so --chunk-delay-ms paces delivery instead of
+                        # delaying one final burst (the HTTP/1.1 path
+                        # already flushes per chunk via chunked_write).
+                        sock.sendall(connection.data_to_send())
+                        for item in response:
+                            frame = f"data: {json.dumps(item, separators=(',', ':'))}\n\n".encode()
+                            send_stream_data(event.stream_id, frame)
+                            if settings.chunk_delay:
+                                time.sleep(settings.chunk_delay)
+                        send_stream_data(
+                            event.stream_id, b"data: [DONE]\n\n", end_stream=True
+                        )
+                    else:
+                        payload = json.dumps(
+                            {
+                                "request_id": rid,
+                                "usage": {
+                                    "input_tokens": INPUT_TOKENS,
+                                    "output_tokens": OUTPUT_TOKENS,
+                                    "total_tokens": TOTAL_TOKENS,
+                                },
+                            },
+                            separators=(",", ":"),
+                        ).encode()
+                        send_h2_body(
+                            connection, event.stream_id, payload, "application/json"
+                        )
+                else:
+                    connection.send_headers(
+                        event.stream_id, [(":status", "404")], end_stream=True
+                    )
+
     try:
         while True:
             data = sock.recv(65535)
             if not data:
                 return
-            for event in connection.receive_data(data):
-                if isinstance(event, RequestReceived):
-                    headers = dict(event.headers)
-                    paths[event.stream_id] = headers.get(":path", "")
-                    run_ids[event.stream_id] = header_value(
-                        headers, "X-Benchmark-Run-ID"
-                    )
-                    bodies[event.stream_id] = bytearray()
-                elif isinstance(event, DataReceived):
-                    bodies.setdefault(event.stream_id, bytearray()).extend(event.data)
-                    connection.acknowledge_received_data(
-                        event.flow_controlled_length, event.stream_id
-                    )
-                elif isinstance(event, StreamEnded):
-                    path = paths.pop(event.stream_id, "")
-                    run_id = run_ids.pop(event.stream_id, None)
-                    body = bytes(bodies.pop(event.stream_id, b""))
-                    if path == "/healthz":
-                        send_h2_body(connection, event.stream_id, b"OK", "text/plain")
-                    elif path in ENDPOINTS:
-                        rid = request_id_from(body, {})
-                        record_request(settings, run_id, rid, HTTPStatus.OK)
-                        events = response_events(
-                            path, rid, settings.chunks, settings.chunk_bytes
-                        )
-                        if settings.sse:
-                            connection.send_headers(
-                                event.stream_id,
-                                [
-                                    (":status", "200"),
-                                    ("content-type", "text/event-stream"),
-                                ],
-                            )
-                            for item in events:
-                                frame = f"data: {json.dumps(item, separators=(',', ':'))}\n\n".encode()
-                                connection.send_data(
-                                    event.stream_id, frame, end_stream=False
-                                )
-                                if settings.chunk_delay:
-                                    time.sleep(settings.chunk_delay)
-                            connection.send_data(
-                                event.stream_id, b"data: [DONE]\n\n", end_stream=True
-                            )
-                        else:
-                            payload = json.dumps(
-                                {
-                                    "request_id": rid,
-                                    "usage": {
-                                        "input_tokens": INPUT_TOKENS,
-                                        "output_tokens": OUTPUT_TOKENS,
-                                        "total_tokens": TOTAL_TOKENS,
-                                    },
-                                },
-                                separators=(",", ":"),
-                            ).encode()
-                            send_h2_body(
-                                connection, event.stream_id, payload, "application/json"
-                            )
-                    else:
-                        connection.send_headers(
-                            event.stream_id, [(":status", "404")], end_stream=True
-                        )
+            handle_events(connection.receive_data(data))
             pending = connection.data_to_send()
             if pending:
                 sock.sendall(pending)

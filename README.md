@@ -78,6 +78,11 @@ capability can be enabled independently.
       <td></td>
       <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/blaze/">Blaze</a></strong><br><sub>Sandbox lifecycle</sub></td>
     </tr>
+    <tr>
+      <td></td>
+      <td></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/aw/">AW</a></strong><br><sub>Unified Agent policy configuration</sub></td>
+    </tr>
   </tbody>
 </table>
 

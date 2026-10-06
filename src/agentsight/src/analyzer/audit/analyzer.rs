@@ -39,24 +39,32 @@ impl AuditAnalyzer {
 
     /// Extract audit record from HttpRecord
     ///
-    /// Only creates llm_call for SSE responses, which are LLM streaming API calls.
-    /// Non-SSE requests (like npm package queries) are filtered out.
-    /// This method works for both HTTP/1.1 and HTTP/2 uniformly.
+    /// Creates llm_call for LLM API paths (streaming or not), and for streams
+    /// on unrecognized paths that carry parsed provider/usage evidence.
+    /// Everything else (npm package queries, MCP HTTP+SSE transport, metrics
+    /// streams) is filtered out. Works for both HTTP/1.1 and HTTP/2 uniformly.
     pub fn analyze_http(
         &self,
         http_record: &HttpRecord,
         token_record: Option<&TokenRecord>,
     ) -> Option<AuditRecord> {
-        // Create llm_call audit records for SSE responses AND non-streaming
-        // LLM API calls (identified by path). Without this, non-streaming
-        // completions (stream:false) are invisible in audit --type llm.
-        let is_llm_path = http_record.path.contains("/chat/completions")
-            || http_record.path.contains("/v1/messages")
-            || http_record.path.contains("/v1/completions")
-            || http_record
-                .path
-                .contains("/api/v1/copilot/generate_copilot");
-        if !http_record.is_sse && !is_llm_path {
+        // Create llm_call audit records for LLM API calls identified by path,
+        // and for streaming calls whose parsed events yielded provider/usage
+        // evidence. `is_sse` alone must not decide: MCP's legacy HTTP+SSE
+        // transport and metrics event streams are SSE but never LLM calls, so
+        // admitting every SSE response creates empty llm_call rows.
+        //
+        // Use the shared parser-layer path set that decides whether the
+        // GenAI pipeline creates a row at all: a private copy here
+        // drifted from it, and /v1/responses (plus the DashScope native
+        // endpoints) were parsed into trajectories yet never audited.
+        let is_llm_path = crate::parser::llm::is_llm_api_path(&http_record.path);
+        let has_usage_evidence = token_record.is_some_and(|record| {
+            record.input_tokens > 0
+                || record.output_tokens > 0
+                || (!record.provider.is_empty() && record.provider != "unknown")
+        });
+        if !is_llm_path && !has_usage_evidence {
             return None;
         }
 
@@ -295,6 +303,57 @@ mod tests {
             result.is_none(),
             "non-LLM path must NOT produce audit record"
         );
+    }
+
+    #[test]
+    fn test_sse_nonllm_path_no_audit_without_usage_evidence() {
+        // MCP's legacy HTTP+SSE transport and metrics event streams are SSE
+        // too, so `is_sse` alone does not prove an LLM call. Without parsed
+        // usage evidence the stream must not create an llm_call audit row.
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/mcp/sse", true, Some("event: message\ndata: {}\n\n"));
+        let result = analyzer.analyze_http(&record, None);
+        assert!(
+            result.is_none(),
+            "non-LLM SSE path must NOT produce an audit record without usage evidence"
+        );
+    }
+
+    #[test]
+    fn test_sse_nonllm_path_with_usage_evidence_still_audited() {
+        // A real streaming call served from a gateway path outside the shared
+        // LLM path set still carries provider/usage evidence and must stay in
+        // the audit; the path gate is not allowed to drop it.
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/custom/gateway/stream", true, None);
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 100, 20);
+        let result = analyzer.analyze_http(&record, Some(&token));
+        assert!(
+            result.is_some(),
+            "SSE with parsed usage evidence must still produce an audit record"
+        );
+    }
+
+    #[test]
+    fn test_nonsse_responses_and_dashscope_paths_produce_audit() {
+        // Both endpoints are parsed into trajectories by the GenAI pipeline
+        // (is_llm_api_path), so a non-streaming call must not vanish from
+        // audit --type llm.
+        let analyzer = AuditAnalyzer::new();
+        for path in &[
+            "/v1/responses",
+            "/api/v1/services/aigc/text-generation/generation",
+            "/api/v1/services/aigc/multimodal-generation/generation",
+            "/proxy/chat/completions",
+        ] {
+            let record = make_http_record(path, false, None);
+            let result = analyzer.analyze_http(&record, None);
+            assert!(result.is_some(), "{path} must produce an audit record");
+        }
+
+        // Token counting is not an inference call and stays out of the audit.
+        let record = make_http_record("/v1/messages/count_tokens", false, None);
+        assert!(analyzer.analyze_http(&record, None).is_none());
     }
 
     #[test]

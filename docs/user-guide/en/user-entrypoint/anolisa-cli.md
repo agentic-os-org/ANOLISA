@@ -267,10 +267,20 @@ Inspect component logs or generate a diagnostic bundle:
 anolisa logs <component>
 anolisa logs <component> --limit 50
 anolisa logs <component> --severity warn
+anolisa logs <component> --since '2026-10-01T00:30:00Z'
 anolisa bug
 ```
 
 `--level` is an alias for `--severity`.
+
+`--since` accepts an inclusive RFC3339 lower bound. Time-zone offsets and
+fractional seconds are compared as instants: `2026-10-01T08:30:00+08:00` and
+`2026-10-01T00:30:00Z` select the same time window. `--limit` keeps the most recent
+matching entries in append order.
+
+An invalid `--since` value returns `INVALID_ARGUMENT`. Records whose `started_at`
+cannot be parsed as RFC3339 do not match a time filter; omit `--since` to inspect
+them. Malformed JSON remains a query error. These queries do not modify the log.
 
 With `--component cosh-ng`, `anolisa bug` also asks the installed
 `cosh-shell` binary to export its sanitized diagnostic bundle to a fresh

@@ -35,8 +35,10 @@ interface CallContext {
   toolCallId: string;
 }
 
-interface OptimizationState {
-  optimization: "rtk";
+interface CallState {
+  optimization: "none" | "rtk";
+  /** Shell command line behind the result, for Core's file_read classification. */
+  command?: string;
   createdAt: number;
 }
 
@@ -317,7 +319,7 @@ export default {
     const available = checkTokenless();
 
     const sessionMap = new Map<string, string>();
-    const optimizationStates = new Map<string, OptimizationState>();
+    const callStates = new Map<string, CallState>();
     const categories = loadToolCategories();
     const fileTools = new Set(categories.layer_1_skip.tools.map((tool) => tool.toLowerCase()));
     const shellTools = new Set(categories.layer_2_shell.tools.map((tool) => tool.toLowerCase()));
@@ -333,26 +335,27 @@ export default {
       `${context.sessionId}\0${context.toolCallId}`;
     const pruneStates = (): void => {
       const cutoff = Date.now() - OPTIMIZATION_STATE_TTL_MS;
-      for (const [key, state] of optimizationStates) {
-        if (state.createdAt <= cutoff) optimizationStates.delete(key);
+      for (const [key, state] of callStates) {
+        if (state.createdAt <= cutoff) callStates.delete(key);
       }
-      while (optimizationStates.size >= OPTIMIZATION_STATE_MAX_ENTRIES) {
-        const oldest = optimizationStates.keys().next().value as string;
-        optimizationStates.delete(oldest);
+      while (callStates.size >= OPTIMIZATION_STATE_MAX_ENTRIES) {
+        const oldest = callStates.keys().next().value as string;
+        callStates.delete(oldest);
       }
     };
-    const markOptimized = (context: CallContext): void => {
+    const rememberState = (context: CallContext, patch: Partial<CallState>): void => {
       pruneStates();
       const key = stateKey(context);
-      optimizationStates.delete(key);
-      optimizationStates.set(key, { optimization: "rtk", createdAt: Date.now() });
+      const previous = callStates.get(key);
+      callStates.delete(key);
+      callStates.set(key, { optimization: "none", ...previous, ...patch, createdAt: Date.now() });
     };
-    const consumeOptimization = (context: CallContext): "none" | "rtk" => {
-      if (!context.toolCallId) return "none";
+    const consumeState = (context: CallContext): CallState | undefined => {
+      if (!context.toolCallId) return undefined;
       const key = stateKey(context);
-      const state = optimizationStates.get(key);
-      optimizationStates.delete(key);
-      return state?.optimization ?? "none";
+      const state = callStates.get(key);
+      callStates.delete(key);
+      return state;
     };
 
     api.on(
@@ -371,8 +374,8 @@ export default {
           || event.sessionKey
           || "";
         if (event.sessionKey) sessionMap.delete(event.sessionKey);
-        for (const key of optimizationStates.keys()) {
-          if (key.startsWith(`${sessionId}\0`)) optimizationStates.delete(key);
+        for (const key of callStates.keys()) {
+          if (key.startsWith(`${sessionId}\0`)) callStates.delete(key);
         }
       },
     );
@@ -401,19 +404,18 @@ export default {
           },
           ctx: HookContext,
         ) => {
-          const sessionId = sessionIdFor(ctx);
-          if (
-            !rtkEnabled
-            || event.toolName !== "exec"
-            || typeof event.params?.command !== "string"
-          ) {
-            return;
-          }
           const context: CallContext = {
-            sessionId,
+            sessionId: sessionIdFor(ctx),
             toolCallId: event.toolCallId || ctx.toolCallId || "",
           };
-          if (!context.toolCallId) return;
+          const command = event.params?.command;
+          if (!context.toolCallId || typeof command !== "string") return;
+          // Core reports a plain file print (`cat page.html`) as file_read from
+          // the command line, so the page stays verbatim while data still compresses.
+          if (postToolEnabled && shellTools.has(event.toolName.toLowerCase())) {
+            rememberState(context, { command });
+          }
+          if (!rtkEnabled || event.toolName !== "exec") return;
 
           const result = runOperation(
             "pre_tool",
@@ -445,7 +447,12 @@ export default {
             return;
           }
 
-          if (postToolEnabled) markOptimized(context);
+          if (postToolEnabled) {
+            rememberState(context, {
+              optimization: "rtk",
+              command: argumentsResult.command,
+            });
+          }
           if (verbose) console.log(`[tokenless:rtk] rewrote ${event.toolName}`);
           return { params: argumentsResult };
         },
@@ -461,7 +468,7 @@ export default {
             sessionId: sessionIdFor(ctx),
             toolCallId: ctx.toolCallId || event.toolCallId || "",
           };
-          const outputOptimization = consumeOptimization(context);
+          const state = consumeState(context);
           if (event.isSynthetic) return;
 
           const slot = contentSlot(event.message);
@@ -475,24 +482,24 @@ export default {
               : "api_response";
           const isError = slot.kind === "tool_text" && slot.message.isError === true;
 
-          const result = runOperation(
-            "post_tool",
-            {
-              result_kind: "tool",
-              tool_name: toolName,
-              content: slot.content,
-              status: isError ? "error" : "success",
-              content_origin: contentOrigin,
-              output_optimization: outputOptimization,
-              capabilities: {
-                replace_output: true,
-                // The trusted operator CLI does not enforce Agent Marker visibility.
-                recovery: { kind: 'none' },
-                replace_with_text: slot.replaceWithText,
-              },
+          const input: Record<string, unknown> = {
+            result_kind: "tool",
+            tool_name: toolName,
+            content: slot.content,
+            status: isError ? "error" : "success",
+            content_origin: contentOrigin,
+            output_optimization: state?.optimization ?? "none",
+            capabilities: {
+              replace_output: true,
+              // The trusted operator CLI does not enforce Agent Marker visibility.
+              recovery: { kind: 'none' },
+              replace_with_text: slot.replaceWithText,
             },
-            context,
-          );
+          };
+          if (contentOrigin === "command_output" && state?.command !== undefined) {
+            input.command = state.command;
+          }
+          const result = runOperation("post_tool", input, context);
           if (result === null) return;
 
           if (result.disposition === "tool_error") {

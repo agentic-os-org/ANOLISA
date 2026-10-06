@@ -133,8 +133,8 @@ pub enum InterruptionAction {
         #[structopt(long, conflicts_with = "unresolved")]
         resolved: bool,
 
-        /// Maximum number of results (default: 100)
-        #[structopt(long, default_value = "100")]
+        /// Maximum number of results (default: 100, max: 1000)
+        #[structopt(long, default_value = "100", parse(try_from_str = parse_list_limit))]
         limit: i64,
 
         /// Output as JSON (one JSON array)
@@ -346,7 +346,7 @@ impl InterruptionCommand {
                 let (start_ns, end_ns) = time_range_ns(*last);
                 // `None`: the CLI reports what happened in the window,
                 // resolved or not, unlike the dashboard's unresolved-only card.
-                match store.stats(start_ns, end_ns, None) {
+                match store.stats(start_ns, end_ns, None, None) {
                     Ok(stats) => {
                         if *json {
                             print_json(&stats);
@@ -486,6 +486,24 @@ impl InterruptionCommand {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Upper bound for `--limit`, mirroring `AuditStore::list_events`' documented
+/// `1..=1000` range. The store itself accepts any positive LIMIT (the `count`
+/// subcommand deliberately passes `i64::MAX`), so the bound lives on the flag.
+const MAX_LIST_LIMIT: i64 = 1000;
+
+/// Parse `--limit`: reject values below 1 with a clear error — SQLite reads a
+/// negative LIMIT as "no limit", which would dump every matching event — and
+/// cap oversized values at [`MAX_LIST_LIMIT`].
+fn parse_list_limit(raw: &str) -> Result<i64, String> {
+    let value: i64 = raw
+        .parse()
+        .map_err(|_| format!("--limit must be an integer, got {raw:?}"))?;
+    if value < 1 {
+        return Err(format!("--limit must be at least 1, got {value}"));
+    }
+    Ok(value.min(MAX_LIST_LIMIT))
+}
+
 /// Default database path for interruption events.
 fn default_db_path() -> std::path::PathBuf {
     GenAISqliteStore::default_path()
@@ -501,7 +519,13 @@ fn time_range_ns(hours: u64) -> (i64, i64) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as i64;
-    let start_ns = now_ns - (hours as i64) * 3600 * 1_000_000_000;
+    let start_ns = now_ns.saturating_sub(
+        // Saturate so an absurd --last (up to u64::MAX) degrades to
+        // "everything" (start far in the past) instead of overflowing into an
+        // inverted or future-start window. Guard the u64->i64 cast first so a
+        // value >= 2^63 cannot flip sign.
+        (hours.min(i64::MAX as u64) as i64).saturating_mul(3_600_000_000_000),
+    );
     (start_ns, now_ns)
 }
 
@@ -548,9 +572,12 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 }
 
 /// Truncate a string ID for table display, appending "..." if needed.
+/// Counts and cuts by character, not byte: stored ids are free text and a
+/// byte-index cut can land inside a multi-byte character and panic.
 fn truncate_id(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+    if s.chars().count() > max_len {
+        let kept: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{kept}...")
     } else {
         s.to_string()
     }
@@ -641,5 +668,70 @@ fn print_json<T: serde::Serialize>(value: &T) {
             eprintln!("JSON serialization error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_id_cuts_on_char_boundaries() {
+        // 16 chars / 48 bytes: a byte-index cut at 11 lands inside a character
+        // and panics. The limit is a character budget.
+        let id = "会话会话会话会话会话会话会话会话";
+        let out = truncate_id(id, 14);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.chars().count(), 14);
+
+        // Short multi-byte ids pass through untouched.
+        assert_eq!(truncate_id("会话", 14), "会话");
+
+        // ASCII behaviour is unchanged.
+        assert_eq!(truncate_id("abcdefghij", 14), "abcdefghij");
+        assert_eq!(truncate_id("abcdefghijklmnop", 14), "abcdefghijk...");
+    }
+
+    #[test]
+    fn list_limit_rejects_negative_and_caps_oversized() {
+        // SQLite reads a negative LIMIT as "no limit", so `--limit=-1` used
+        // to dump every matching event; the flag must not reach the store
+        // as-is (the sibling AuditStore::list_events clamps to 1..=1000).
+        let negative = InterruptionCommand::from_iter_safe(["interruption", "list", "--limit=-1"]);
+        let err = negative.expect_err("a negative limit must be rejected");
+        assert!(
+            err.to_string().contains("--limit"),
+            "the error must name the flag: {err}"
+        );
+
+        let oversized =
+            InterruptionCommand::from_iter_safe(["interruption", "list", "--limit", "100000"])
+                .expect("an oversized limit still parses");
+        match oversized.action {
+            InterruptionAction::List { limit, .. } => {
+                assert_eq!(limit, 1000, "an oversized limit must be capped")
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn time_range_never_inverts_for_absurd_last() {
+        // A requested window far wider than the recorded history must degrade
+        // to "everything", not overflow into an inverted or future-start
+        // window. Without the saturating guard `u64::MAX as i64 == -1` pushes
+        // start one hour into the future.
+        let (start, end) = time_range_ns(u64::MAX);
+        assert!(start <= end, "start {start} must not exceed end {end}");
+
+        // 3_000_000 hours (~342 years) overflows i64 nanoseconds; the window
+        // must still be ordered (debug builds abort on the multiply).
+        let (start, end) = time_range_ns(3_000_000);
+        assert!(start <= end, "start {start} must not exceed end {end}");
+
+        // A normal window is unaffected.
+        let (s2, e2) = time_range_ns(24);
+        assert!(s2 < e2);
+        assert_eq!(e2 - s2, 24 * 3600 * 1_000_000_000);
     }
 }

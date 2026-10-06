@@ -131,14 +131,28 @@ impl SandboxManifest {
         paths.push(PathBuf::from("/etc/anolisa/sandbox.toml"));
 
         // 2. XDG user config
-        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            paths.push(Path::new(&xdg).join("anolisa/sandbox.toml"));
-        } else if let Ok(home) = std::env::var("HOME") {
-            paths.push(Path::new(&home).join(".config/anolisa/sandbox.toml"));
+        if let Some(config_home) = user_config_home(
+            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        ) {
+            paths.push(config_home.join("anolisa/sandbox.toml"));
         }
 
         paths
     }
+}
+
+/// Resolve the user config home per the XDG Base Directory spec: a non-empty
+/// absolute `$XDG_CONFIG_HOME` wins; unset, empty, or relative values fall
+/// back to an absolute `$HOME/.config`. A relative `$HOME` is rejected by the
+/// same rule — any relative config root would make manifest lookup depend on
+/// the CWD. Returns `None` when neither variable yields a usable root.
+fn user_config_home(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    if let Some(xdg) = xdg.filter(|v| !v.is_empty() && Path::new(v).is_absolute()) {
+        return Some(PathBuf::from(xdg));
+    }
+    home.filter(|v| !v.is_empty() && Path::new(v).is_absolute())
+        .map(|h| Path::new(h).join(".config"))
 }
 
 impl ScenarioConfig {
@@ -211,6 +225,40 @@ mod tests {
         assert!(m.find_scenario("firecracker").is_some());
         assert!(m.find_scenario("landlock").is_some());
         assert!(m.find_scenario("nonexistent").is_none());
+    }
+
+    #[test]
+    fn user_config_home_follows_xdg_spec() {
+        // A non-empty absolute XDG_CONFIG_HOME wins.
+        assert_eq!(
+            user_config_home(Some("/xdg"), Some("/home/u")),
+            Some(PathBuf::from("/xdg"))
+        );
+        // Empty or relative values are ignored per the spec and fall back to
+        // $HOME/.config — never to a CWD-relative root.
+        assert_eq!(
+            user_config_home(Some(""), Some("/home/u")),
+            Some(PathBuf::from("/home/u/.config"))
+        );
+        assert_eq!(
+            user_config_home(Some("rel/dir"), Some("/home/u")),
+            Some(PathBuf::from("/home/u/.config"))
+        );
+        // No usable root at all — unset, empty, or relative. A relative HOME
+        // is rejected by the same rule as a relative XDG_CONFIG_HOME;
+        // accepting it would reintroduce the CWD-relative root this filter
+        // exists to prevent.
+        assert_eq!(user_config_home(None, None), None);
+        assert_eq!(user_config_home(Some(""), Some("")), None);
+        assert_eq!(user_config_home(Some("rel/dir"), Some("rel/home")), None);
+        assert_eq!(user_config_home(None, Some("rel/home")), None);
+    }
+
+    #[test]
+    fn default_search_paths_are_absolute() {
+        for p in SandboxManifest::default_search_paths() {
+            assert!(p.is_absolute(), "search path must be absolute: {p:?}");
+        }
     }
 
     #[test]

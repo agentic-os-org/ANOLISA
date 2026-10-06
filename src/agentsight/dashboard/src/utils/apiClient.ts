@@ -998,14 +998,22 @@ export interface InterruptionTypeStat {
 
 /**
  * Fetch per-type interruption stats within a time range.
+ *
+ * `agentName` must be forwarded by callers that also filter the severity
+ * badge by agent, otherwise the tooltip breakdown counts every agent while
+ * the badge shows one.
  */
 export async function fetchInterruptionStats(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<InterruptionTypeStat[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) {
+    params.set('agent_name', agentName);
+  }
   return apiFetch<InterruptionTypeStat[]>(
     `${API_BASE}/api/interruptions/stats?${params.toString()}`
   );
@@ -2040,7 +2048,9 @@ export async function login(token: string): Promise<boolean> {
     credentials: 'same-origin',
     body: JSON.stringify({ token }),
   });
-  return res.ok;
+  if (res.status === 401) return false;
+  if (!res.ok) throw new Error(`POST /api/auth/login -> ${res.status}`);
+  return true;
 }
 
 // ─── Storage status API ─────────────────────────────────────────────────────

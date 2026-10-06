@@ -128,11 +128,19 @@ pub(super) fn classify_call_kind_from_raw(
     system_instructions: &Option<String>,
     first_user_text: &str,
 ) -> &'static str {
+    // The system prompt reaches this classifier in two shapes: an array of
+    // message objects (the structured path stores it that way) and a bare JSON
+    // string (the pending/crash path serialises Anthropic's top-level `system`
+    // or the Responses API's `instructions` directly). Both must extract the
+    // same text, or a recap call that is interrupted before `complete_pending`
+    // runs is persisted as `main` and never corrected.
     let sys_text = system_instructions
         .as_deref()
-        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
-        .map(|arr| {
-            arr.iter()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| match v {
+            serde_json::Value::String(text) => text,
+            serde_json::Value::Array(arr) => arr
+                .iter()
                 .filter_map(|m| {
                     let c = m.get("content")?;
                     if let Some(s) = c.as_str() {
@@ -157,7 +165,8 @@ pub(super) fn classify_call_kind_from_raw(
                     None
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            _ => String::new(),
         })
         .unwrap_or_default();
 
@@ -205,38 +214,19 @@ impl PidAgentNameCache for lru::LruCache<u32, String> {
     }
 }
 
+/// OpenClaw prepends the user turn with a bracketed wall-clock header in one
+/// of two shapes: "[Day YYYY-MM-DD HH:MM TZ]" (e.g. "[Tue 2026-03-31 17:19
+/// GMT+8]") or "[Day, DD Mon YYYY HH:MM:SS TZ]" (e.g. "[Tuesday, 31 Mar 2026
+/// 17:19:05 +0800]"). Shape-anchored so a user's own bracketed text (e.g.
+/// "[0:10]" or "[status: 1]") can never satisfy it.
+static OPENCLAW_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"\[(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{2,4}[\s-]\d{1,2}[\s-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[^\]\[]{0,32}\]|\[(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s+[^\]\[]{0,32}\]",
+    )
+    .expect("OPENCLAW_TS_RE is a valid pattern")
+});
+
 impl GenAIBuilder {
-    /// Path suffixes of the DashScope/Bailian **native** protocol.
-    ///
-    /// Full form: `POST https://{WorkspaceId}.{region}.maas.aliyuncs.com
-    /// /api/v1/services/aigc/{text,multimodal}-generation/generation`.
-    /// Distinct from the OpenAI-compatible mode
-    /// (`/compatible-mode/v1/chat/completions`), which already matches the
-    /// `/v1/chat/completions` pattern.
-    pub(super) const DASHSCOPE_NATIVE_PATHS: [&'static str; 2] = [
-        "/aigc/text-generation/generation",
-        "/aigc/multimodal-generation/generation",
-    ];
-
-    /// Whether the path belongs to the DashScope/Bailian native protocol.
-    pub(super) fn is_dashscope_native_path(path: &str) -> bool {
-        Self::DASHSCOPE_NATIVE_PATHS
-            .iter()
-            .any(|p| path.contains(p))
-    }
-
-    /// Check if the path indicates an LLM API call
-    pub(super) fn is_llm_api_path(&self, path: &str) -> bool {
-        path.contains("/v1/chat/completions")
-            || path.contains("/v1/completions")
-            || path.contains("/v1/messages")
-            || path.contains("/v1/responses")
-            || path.contains("/chat/completions")
-            || path.contains("/completions")
-            || path.contains("/api/v1/copilot/generate_copilot")
-            || Self::is_dashscope_native_path(path)
-    }
-
     /// Check if request body contains SysOM POP API markers
     /// SysOM uses path "/" with action in body (llmParamString field)
     pub(super) fn is_sysom_pop_request(request_body: &Option<String>) -> bool {
@@ -244,73 +234,6 @@ impl GenAIBuilder {
             .as_ref()
             .map(|b| b.contains("llmParamString"))
             .unwrap_or(false)
-    }
-
-    /// Normalize the messages array from a parsed request body.
-    ///
-    /// Supports:
-    /// - OpenAI chat completions: top-level `"messages"` array.
-    /// - OpenAI Responses API (codex 0.137+ via dashscope `/v1/responses`):
-    ///   top-level `"input"` array with sibling `"instructions"` string.
-    /// - DashScope/Bailian native protocol: top-level `"input"` **object**
-    ///   wrapping a `"messages"` array.
-    ///
-    /// Returns `(messages_vec, instructions_text)` where `instructions_text`
-    /// is the system-prompt fallback used when the messages array has no
-    /// `role == "system"` entry. It is set for:
-    /// - OpenAI Responses API: the top-level `"instructions"` string.
-    /// - Anthropic Messages API: the top-level `"system"` field (string or
-    ///   array of `{"type":"text","text":"..."}` blocks), since Anthropic
-    ///   carries the system prompt outside the messages array.
-    ///
-    /// The native protocol needs no fallback: its system prompt lives inside
-    /// `input.messages`.
-    pub(super) fn extract_messages_view(
-        body: &serde_json::Value,
-    ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
-        if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
-            let system_text = body.get("system").and_then(Self::extract_system_text);
-            return Some((arr.clone(), system_text));
-        }
-        if let Some(input) = body.get("input") {
-            if let Some(arr) = input.as_array() {
-                let instructions = body
-                    .get("instructions")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                return Some((arr.clone(), instructions));
-            }
-            if let Some(arr) = input.get("messages").and_then(|m| m.as_array()) {
-                return Some((arr.clone(), None));
-            }
-        }
-        None
-    }
-
-    /// Extract text from Anthropic's top-level `system` field.
-    ///
-    /// The field is either a plain string or an array of content blocks
-    /// (`{"type":"text","text":"..."}`). Returns `None` when empty so the
-    /// caller's "no system role in messages" fallback stays inactive.
-    fn extract_system_text(system: &serde_json::Value) -> Option<String> {
-        match system {
-            serde_json::Value::String(s) => {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            }
-            serde_json::Value::Array(blocks) => {
-                let text: String = blocks
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if text.is_empty() { None } else { Some(text) }
-            }
-            _ => None,
-        }
     }
 
     /// Extract human-readable text from a message's `content` field.
@@ -357,7 +280,7 @@ impl GenAIBuilder {
             Some("openai".to_string())
         } else if path.contains("/api/v1/copilot/generate_copilot") {
             Some("sysom".to_string())
-        } else if Self::is_dashscope_native_path(path) {
+        } else if crate::parser::llm::is_dashscope_native_path(path) {
             Some("dashscope".to_string())
         } else {
             None
@@ -567,21 +490,19 @@ impl GenAIBuilder {
             }
         }
 
-        // OpenClaw: 查找最后一个 [timestamp] 模式，取其后的内容
-        // 格式: [Day YYYY-MM-DD HH:MM TZ] 或 [Day, DD Mon YYYY HH:MM:SS TZ]
-        if let Some(pos) = text.rfind(']') {
-            // 确认 ] 前面有对应的 [
-            if let Some(bracket_start) = text[..pos].rfind('[') {
-                let bracket_content = &text[bracket_start + 1..pos];
-                // 简单验证：方括号内包含数字（日期）和冒号（时间）
-                if bracket_content.contains(':')
-                    && bracket_content.chars().any(|c| c.is_ascii_digit())
-                {
-                    let after = text[pos + 1..].trim_start();
-                    if !after.is_empty() {
-                        return after.to_string();
-                    }
-                }
+        // OpenClaw prepends the user turn with a bracketed wall-clock header,
+        // e.g. "[Tue 2026-03-31 17:19 GMT+8]" or
+        // "[Tuesday, 31 Mar 2026 17:19:05 +0800]". The match is anchored to
+        // the FIRST header-shaped bracket in the text — not the last bare
+        // bracket pair — so a user's own bracketed text can never be mistaken
+        // for the header. The previous rfind(']')+digit/colon heuristic
+        // truncated ordinary queries like "please slice indexes [0:10] and
+        // print them" to "and print them", and a genuine OpenClaw query that
+        // *ends* with a user bracket kept its untrusted-metadata preamble.
+        if let Some(m) = OPENCLAW_TS_RE.find(text) {
+            let after = text[m.end()..].trim_start();
+            if !after.is_empty() {
+                return after.to_string();
             }
         }
 
@@ -601,8 +522,11 @@ impl GenAIBuilder {
         let mut result = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(start) = rest.find("<system-reminder>") {
-            result.push_str(&rest[..start]);
+            // Only a complete block is stripped. Without a closing tag the
+            // text merely mentions the tag (no block to remove), so the
+            // remainder is kept verbatim and appended once after the loop.
             if let Some(end_offset) = rest[start..].find("</system-reminder>") {
+                result.push_str(&rest[..start]);
                 rest = &rest[start + end_offset + "</system-reminder>".len()..];
             } else {
                 break;
@@ -829,30 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_llm_api_path() {
-        let builder = GenAIBuilder::new();
-        assert!(builder.is_llm_api_path("/v1/chat/completions"));
-        assert!(builder.is_llm_api_path("/v1/completions"));
-        assert!(builder.is_llm_api_path("/v1/messages"));
-        assert!(builder.is_llm_api_path("/api/v1/copilot/generate_copilot"));
-        assert!(builder.is_llm_api_path("/proxy/v1/chat/completions"));
-        assert!(!builder.is_llm_api_path("/api/health"));
-        assert!(!builder.is_llm_api_path("/v1/models"));
-    }
-
-    /// DashScope/Bailian native protocol endpoints end in `/generation`, which
-    /// matched none of the compatible-mode patterns. Without them the whole
-    /// non-streaming call was dropped at the `build_llm_call` gate.
-    #[test]
-    fn test_is_llm_api_path_dashscope_native() {
-        let builder = GenAIBuilder::new();
-        assert!(builder.is_llm_api_path("/api/v1/services/aigc/text-generation/generation"));
-        assert!(builder.is_llm_api_path("/api/v1/services/aigc/multimodal-generation/generation"));
-        // Other aigc services (image synthesis, embeddings) stay out.
-        assert!(!builder.is_llm_api_path("/api/v1/services/aigc/text2image/image-synthesis"));
-    }
-
-    #[test]
     fn test_is_sysom_pop_request() {
         assert!(GenAIBuilder::is_sysom_pop_request(&Some(
             r#"{"llmParamString":"{}"}"#.to_string()
@@ -957,6 +857,59 @@ mod tests {
     }
 
     #[test]
+    fn test_bracket_with_colon_and_digit_in_query_is_kept_verbatim() {
+        // A plain query whose own text contains a [x:y] token must never be
+        // truncated: the old rfind(']') heuristic stored only "and print them".
+        let text = "please slice indexes [0:10] and print them";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "please slice indexes [0:10] and print them"
+        );
+    }
+
+    #[test]
+    fn test_openclaw_timestamp_with_trailing_user_bracket() {
+        // A genuine OpenClaw query that ends with a user bracket: the header
+        // must still be stripped (the old heuristic returned the whole text
+        // including the untrusted-metadata preamble).
+        let text = "[Tue 2026-03-31 17:19 GMT+8] please slice [0:10]";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "please slice [0:10]"
+        );
+    }
+
+    #[test]
+    fn test_openclaw_second_timestamp_format() {
+        let text = "[Tuesday, 31 Mar 2026 17:19:05 +0800] real question";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "real question");
+    }
+
+    #[test]
+    fn test_openclaw_header_with_empty_remainder_falls_through() {
+        // Header only, nothing after it: keep the original text (existing
+        // fall-through preserved).
+        let text = "Sender (untrusted metadata):\n[Tue 2026-03-31 17:19 GMT+8]";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), text);
+    }
+
+    #[test]
+    fn test_non_openclaw_bracket_pair_at_start_is_not_treated_as_header() {
+        // digit+colon bracket that is NOT a timestamp shape: kept verbatim
+        // (the old heuristic truncated to "check the build").
+        let text = "[status: 1] check the build";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), text);
+    }
+
+    #[test]
+    fn test_openclaw_header_after_preamble_is_still_stripped() {
+        // The full real-world OpenClaw shape: untrusted metadata preamble,
+        // then the timestamp header, then the question.
+        let text = "Sender (untrusted metadata):\n```json\n{}\n```\n\n[Tue 2026-03-31 17:19 GMT+8] hello world";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "hello world");
+    }
+
+    #[test]
     fn test_strip_user_query_prefix_with_timestamp() {
         let text = "Sender (untrusted metadata):\n```json\n{}\n```\n\n[Tue 2026-03-31 17:19 GMT+8] hello world";
         assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "hello world");
@@ -1035,6 +988,29 @@ mod tests {
         assert_eq!(
             GenAIBuilder::strip_user_query_prefix(text),
             "<system-reminder>some context without end tag and user input"
+        );
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_text_before_unclosed_tag_not_duplicated() {
+        // A prefix before an unterminated tag used to be emitted twice: the
+        // prefix was accumulated, then the whole remainder (prefix included)
+        // was appended again.
+        let text = "how do I use <system-reminder> tags in prompts?";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "how do I use <system-reminder> tags in prompts?"
+        );
+    }
+
+    #[test]
+    fn test_strip_system_reminder_tags_keeps_unterminated_tail_once() {
+        // Complete blocks are stripped; the tail after the last unterminated
+        // open tag is kept exactly once.
+        let text = "A <system-reminder>drop</system-reminder> B <system-reminder>mention C";
+        assert_eq!(
+            GenAIBuilder::strip_system_reminder_tags(text),
+            "A  B <system-reminder>mention C"
         );
     }
 
@@ -1444,150 +1420,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_messages_view_chat_completions() {
-        let body = serde_json::json!({
-            "model": "gpt-4",
-            "messages": [
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "hi"}
-            ]
-        });
-        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 2);
-        assert!(instructions.is_none());
-    }
-
-    #[test]
-    fn test_extract_messages_view_responses_api() {
-        let body = serde_json::json!({
-            "model": "gpt-4",
-            "input": [{"role": "user", "content": "hi"}],
-            "instructions": "sys prompt"
-        });
-        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(instructions.as_deref(), Some("sys prompt"));
-    }
-
-    #[test]
-    fn test_extract_messages_view_none() {
-        let body = serde_json::json!({"model": "gpt-4"});
-        assert!(GenAIBuilder::extract_messages_view(&body).is_none());
-    }
-
-    #[test]
-    fn test_extract_messages_view_responses_api_without_instructions() {
-        let body = serde_json::json!({
-            "model": "gpt-4",
-            "input": [{"role": "user", "content": "hi"}]
-        });
-        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert!(instructions.is_none());
-    }
-
-    #[test]
-    fn test_extract_system_text_string() {
-        let system = serde_json::json!("You are helpful");
-        assert_eq!(
-            GenAIBuilder::extract_system_text(&system),
-            Some("You are helpful".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_system_text_empty_string() {
-        let system = serde_json::json!("");
-        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
-    }
-
-    #[test]
-    fn test_extract_system_text_array() {
-        let system = serde_json::json!([
-            {"type": "text", "text": "Part 1"},
-            {"type": "text", "text": "Part 2"}
-        ]);
-        assert_eq!(
-            GenAIBuilder::extract_system_text(&system),
-            Some("Part 1\nPart 2".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_system_text_empty_array() {
-        let system = serde_json::json!([]);
-        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
-    }
-
-    #[test]
-    fn test_extract_system_text_non_text() {
-        assert_eq!(
-            GenAIBuilder::extract_system_text(&serde_json::json!(123)),
-            None
-        );
-        assert_eq!(
-            GenAIBuilder::extract_system_text(&serde_json::Value::Null),
-            None
-        );
-    }
-
-    /// DashScope/Bailian native protocol wraps the messages array inside an
-    /// `input` **object**, unlike the Responses API where `input` is an array.
-    #[test]
-    fn test_extract_messages_view_dashscope_native_input_object() {
-        let body = serde_json::json!({
-            "model": "qwen-plus",
-            "input": {
-                "messages": [
-                    {"role": "system", "content": "sys"},
-                    {"role": "user", "content": "hi"}
-                ]
-            },
-            "parameters": {"result_format": "message"}
-        });
-        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("system"));
-        // Native protocol carries the system prompt inside the messages array,
-        // so no top-level instructions fallback is needed.
-        assert!(instructions.is_none());
-    }
-
-    /// An `input` object without a `messages` array carries no conversation.
-    #[test]
-    fn test_extract_messages_view_dashscope_native_input_object_without_messages() {
-        let body = serde_json::json!({
-            "model": "qwen-plus",
-            "input": {"prompt": "hi"}
-        });
-        assert!(GenAIBuilder::extract_messages_view(&body).is_none());
-    }
-
-    #[test]
-    fn test_extract_messages_view_anthropic_system() {
-        let body = serde_json::json!({
-            "model": "claude-3",
-            "system": "You are helpful",
-            "messages": [{"role": "user", "content": "Hi"}]
-        });
-        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(instructions.as_deref(), Some("You are helpful"));
-    }
-
-    #[test]
-    fn test_extract_messages_view_anthropic_system_array() {
-        let body = serde_json::json!({
-            "model": "claude-3",
-            "system": [{"type": "text", "text": "sys prompt"}],
-            "messages": [{"role": "user", "content": "Hi"}]
-        });
-        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(instructions.as_deref(), Some("sys prompt"));
-    }
-
-    #[test]
     fn test_extract_message_text_string() {
         let msg = serde_json::json!({"role": "user", "content": "hello"});
         assert_eq!(
@@ -1646,5 +1478,37 @@ mod tests {
         assert_eq!(cache.get_agent_name(&1), Some(&"Agent1".to_string()));
         assert_eq!(cache.get_agent_name(&2), Some(&"Agent2".to_string()));
         assert_eq!(cache.get_agent_name(&3), None);
+    }
+
+    /// The pending/crash path serialises a top-level system prompt (Anthropic's
+    /// `system` field, the Responses API's `instructions`) as a bare JSON
+    /// string, while the structured path carries the same prompt as an array of
+    /// message objects. Both shapes must yield the same call kind: otherwise a
+    /// recap call that is interrupted before `complete_pending` runs is
+    /// persisted as `main` and never corrected.
+    #[test]
+    fn test_raw_system_prompt_as_json_string_is_recap() {
+        let system_instructions =
+            Some(serde_json::to_string("You are a specialized context summarizer.").unwrap());
+        assert_eq!(
+            classify_call_kind_from_raw(&system_instructions, "hi"),
+            "recap"
+        );
+    }
+
+    /// Guard: the array shape keeps working exactly as before.
+    #[test]
+    fn test_raw_system_prompt_as_array_is_recap() {
+        let system_instructions = Some(
+            serde_json::to_string(&vec![serde_json::json!({
+                "role": "system",
+                "content": "managed memory extraction subagent"
+            })])
+            .unwrap(),
+        );
+        assert_eq!(
+            classify_call_kind_from_raw(&system_instructions, "hi"),
+            "recap"
+        );
     }
 }

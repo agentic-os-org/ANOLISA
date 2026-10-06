@@ -106,22 +106,38 @@ pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
 ///
 /// Preferred: `end − start` per agent step (`extra.start_timestamp`).
 /// Fallback when start is unrecorded: interval from the previous step's
-/// timestamp to this step's end (mirrors the trigger → response measurement).
+/// timestamp to this step's end (mirrors the trigger → response measurement)
+/// — except when the previous agent step issued tool calls and no user step
+/// intervenes: that interval is the tool window `tool_window_secs` books for
+/// those calls (it falls back to this step's end under the same
+/// missing-start condition), so claiming it as model time too double-books
+/// the same wall-clock second and the model/tool/idle split leaves its
+/// 0..wall domain (observed: tool+model = 2× wall on start-less traces).
 /// Returns (total_secs, per_step_vec).
 fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
     let mut turns: Vec<f64> = Vec::new();
     let mut prev_ts = None;
+    let mut prev_agent_had_calls = false;
+    let mut user_intervened = false;
 
     for step in &traj.steps {
         let step_end = step.end_ts();
         if step.is_agent() {
-            let start = step.start_ts().or(prev_ts);
+            let start = step.start_ts().or_else(|| {
+                (!prev_agent_had_calls || user_intervened)
+                    .then_some(prev_ts)
+                    .flatten()
+            });
             if let (Some(s), Some(e)) = (start, step_end) {
                 let dur = (e - s).as_seconds_f64();
                 if dur > 0.0 {
                     turns.push(dur);
                 }
             }
+            prev_agent_had_calls = !step.calls().is_empty();
+            user_intervened = false;
+        } else if step.is_user() {
+            user_intervened = true;
         }
         if let Some(e) = step_end {
             prev_ts = Some(e);
@@ -250,10 +266,15 @@ fn compute_tool_agg(tool_calls: &[ToolCallRecord]) -> Vec<ToolAggStats> {
             max_secs: max,
         })
         .collect();
+    // The aggregation map is a HashMap, whose iteration order is randomized
+    // per map instance, so tools tying on total_secs kept the map's random
+    // order and the per-tool table reordered between runs of the same trace.
+    // Break ties by name.
     agg.sort_by(|a, b| {
         b.total_secs
             .partial_cmp(&a.total_secs)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
     });
     agg
 }
@@ -266,7 +287,9 @@ fn compute_tool_agg(tool_calls: &[ToolCallRecord]) -> Vec<ToolAggStats> {
 fn extract_cache_turns(traj: &AtifTrajectory) -> Vec<CacheTurn> {
     let mut turns = Vec::new();
     for step in traj.steps.iter().filter(|s| s.is_agent()) {
-        let Some(m) = step.metrics else { continue };
+        let Some(m) = step.metrics.as_ref() else {
+            continue;
+        };
         let Some(prompt) = m.prompt_tokens else {
             continue;
         };
@@ -306,6 +329,40 @@ mod tests {
                 "agent":{{"name":"a","version":"1","model_name":"m1"}},"steps":{steps_json}}}"#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn tool_agg_breaks_total_secs_ties_by_name() {
+        // The aggregation map is a HashMap, whose iteration order is
+        // randomized per map instance, so a duration-only sort could list
+        // equally slow tools in either order.
+        fn call(name: &str, dur: f64, i: usize) -> crate::types::ToolCallRecord {
+            crate::types::ToolCallRecord {
+                name: name.into(),
+                call_id: format!("{name}-{i}"),
+                start: 0.0,
+                dur,
+                cmd: String::new(),
+                err: false,
+                target: None,
+                result_tokens: None,
+            }
+        }
+        let calls = vec![
+            call("zeta", 1.0, 1),
+            call("alpha", 1.0, 2),
+            call("mid", 2.0, 3),
+        ];
+
+        for _ in 0..16 {
+            let agg = compute_tool_agg(&calls);
+            let names: Vec<&str> = agg.iter().map(|a| a.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["mid", "alpha", "zeta"],
+                "a total_secs tie must not follow the map's iteration order"
+            );
+        }
     }
 
     #[test]
@@ -477,5 +534,59 @@ mod tests {
     fn test_extract_perf_candidates_empty() {
         let set = extract_perf_candidates(&traj("[]")).expect("extract");
         assert!(set.top_tools.is_empty());
+    }
+
+    /// The wall-clock split must stay within the wall: when
+    /// `extra.start_timestamp` is unrecorded, the model-time fallback
+    /// (previous step's end -> this step's end) claims the very interval
+    /// `tool_window_secs` already books as the preceding tool step's
+    /// execution window (it falls back to this step's end under the same
+    /// condition), so tool + model exceeds wall_secs.
+    #[test]
+    fn wall_clock_split_does_not_double_book_missing_start_gaps() {
+        // No start_timestamp anywhere: the 30s gap between the two steps is
+        // the Bash call's execution window.
+        let stats = compute_stats(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:00.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"sleep 30"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:30.000Z","message":"done"}
+        ]"#,
+        ))
+        .unwrap();
+
+        assert!(
+            (stats.tool_secs - 30.0).abs() < 0.01,
+            "the inter-step gap is the tool window"
+        );
+        assert!(
+            stats.tool_secs + stats.model_secs <= stats.wall_secs + 0.01,
+            "tool {:.1}s + model {:.1}s must stay within wall {:.1}s",
+            stats.tool_secs,
+            stats.model_secs,
+            stats.wall_secs
+        );
+    }
+
+    /// The fallback must keep measuring model time across gaps that no tool
+    /// window claims (the previous agent step produced text only): dropping
+    /// the fallback entirely would hide genuine thinking time.
+    #[test]
+    fn missing_start_gap_after_a_text_step_still_counts_as_model_time() {
+        let stats = compute_stats(&traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:05.000Z","message":"hmm"},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:30.000Z","message":"done"}
+        ]"#,
+        ))
+        .unwrap();
+
+        assert!(
+            (stats.model_secs - 30.0).abs() < 0.01,
+            "5s + 25s of post-trigger thinking is the fallback's model time, got {:.1}",
+            stats.model_secs
+        );
     }
 }

@@ -97,26 +97,32 @@ static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLo
 /// * 空字符串    → 清空动态路径，已激活的 `LogtailExporter`（`dynamic=true`）
 ///   下次 `export()` 时检测到 `logtail_path() == None` 直接跳过，实现可逆暂停。
 pub fn set_dynamic_logtail_path(path: &str) {
-    if let Ok(mut guard) = DYNAMIC_LOGTAIL_PATH.write() {
-        if path.is_empty() {
-            if guard.is_some() {
-                log::info!("Dynamic logtail path cleared (SLS uploads paused)");
-            }
-            *guard = None;
-        } else {
-            *guard = Some(path.to_string());
-            log::info!("Dynamic logtail path set: {path}");
+    // Recover a poisoned lock instead of silently skipping the update: the
+    // stored path is still valid, and a skipped update leaves the exporter
+    // writing to the previous path while the config handler reports the new one.
+    let mut guard = DYNAMIC_LOGTAIL_PATH
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if path.is_empty() {
+        if guard.is_some() {
+            log::info!("Dynamic logtail path cleared (SLS uploads paused)");
         }
+        *guard = None;
+    } else {
+        *guard = Some(path.to_string());
+        log::info!("Dynamic logtail path set: {path}");
     }
 }
 
 /// 检查 Logtail 导出是否启用（环境变量 SLS_LOGTAIL_FILE 是否设置，或动态路径已配置）
 pub fn logtail_enabled() -> bool {
     std::env::var(LOGTAIL_ENV_VAR).is_ok() || {
+        // Recover a poisoned lock: reporting "disabled" here would stop
+        // dynamic SLS uploads without any error.
         DYNAMIC_LOGTAIL_PATH
             .read()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 }
 
@@ -128,8 +134,12 @@ pub fn logtail_path() -> Option<String> {
     if let Ok(p) = std::env::var(LOGTAIL_ENV_VAR) {
         return Some(p);
     }
-    // 回退到动态配置路径
-    DYNAMIC_LOGTAIL_PATH.read().ok().and_then(|g| g.clone())
+    // 回退到动态配置路径。Recover a poisoned lock: reporting `None` here
+    // would silently stop dynamic SLS uploads.
+    DYNAMIC_LOGTAIL_PATH
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// 返回当前应写入 SLS Logtail 的所有活动路径。
@@ -1086,6 +1096,47 @@ pub mod tests {
         // so no other test thread can observe a race.
         unsafe { std::env::remove_var(LOGTAIL_ENV_VAR) };
         set_dynamic_logtail_path("");
+    }
+
+    /// A panic while the dynamic-path lock was held (the write guard is held
+    /// across the log calls) poisons it for the rest of the process. Setting,
+    /// clearing and reading the path must keep working: a silently skipped
+    /// update leaves the exporter writing to the old path while the config
+    /// handler reports the new one, and a silently failed read reports "no
+    /// path", which stops dynamic SLS uploads without any error.
+    #[test]
+    fn test_dynamic_path_recovers_from_poisoned_lock() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_logtail_state();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = DYNAMIC_LOGTAIL_PATH.write().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(poisoned.is_err(), "dynamic path lock should be poisoned");
+        assert!(
+            DYNAMIC_LOGTAIL_PATH.write().is_err(),
+            "precondition: lock reports poisoning"
+        );
+
+        // A poisoned lock must not swallow the update...
+        set_dynamic_logtail_path("/poisoned-dynamic.log");
+        assert_eq!(
+            logtail_path(),
+            Some("/poisoned-dynamic.log".to_string()),
+            "a set path must be readable after the lock was poisoned"
+        );
+        assert!(
+            logtail_enabled(),
+            "a configured path must still report enabled"
+        );
+
+        // ...and clearing it must still take effect.
+        set_dynamic_logtail_path("");
+        assert_eq!(logtail_path(), None, "clearing must still take effect");
+        assert!(!logtail_enabled(), "a cleared path must report disabled");
+
+        reset_logtail_state();
     }
 
     #[test]

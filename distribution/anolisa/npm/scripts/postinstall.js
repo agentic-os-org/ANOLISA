@@ -79,9 +79,13 @@ function main() {
 
   const linkPath = join(binDir, 'anolisa');
 
-  // Remove existing symlink or file
-  if (existsSync(linkPath)) {
+  // Do not follow the launcher symlink: its previous target may be absent.
+  try {
     unlinkSync(linkPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
   }
 
   // Create symlink to the platform-specific binary

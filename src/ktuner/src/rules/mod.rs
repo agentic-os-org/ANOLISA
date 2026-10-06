@@ -1,4 +1,4 @@
-use crate::detect::{read_sysctl_u64, DiskType, SystemInfo};
+use crate::detect::{read_sysctl_i64, read_sysctl_u64, DiskInfo, DiskType, SystemInfo};
 use crate::profile::WorkloadType;
 use anyhow::Result;
 
@@ -41,20 +41,50 @@ pub struct EvalResult {
     pub total_checked: usize,
 }
 
+impl Confidence {
+    /// Score penalty of one recommendation: hardware-deterministic advice
+    /// (`High`) costs more than workload-dependent advice (`Medium`), and the
+    /// same weight drives `EvalResult::score` and the score predicted after
+    /// tuning.
+    pub fn weight(&self) -> usize {
+        match self {
+            Confidence::High => 3,
+            Confidence::Medium => 2,
+        }
+    }
+}
+
 impl EvalResult {
+    /// Total penalty the recommendations cost, in `Confidence::weight` units.
+    pub fn penalty(&self) -> usize {
+        self.recommendations
+            .iter()
+            .map(|r| r.confidence.weight())
+            .sum()
+    }
+
+    /// Health score for this result: 100 minus the penalty of every finding,
+    /// floored at 30 so a heavily untuned host stays on a readable scale.
     pub fn score(&self) -> usize {
         if self.recommendations.is_empty() {
             return 100;
         }
-        let penalty: usize = self
+        100usize.saturating_sub(self.penalty()).max(30)
+    }
+
+    /// Score the system would report once every recommendation in `applied` has
+    /// been applied: the penalty of what is *not* applied, floored exactly like
+    /// `score`. `score() + applied weight` is not the same number — `score` is
+    /// already floored at 30, so that sum counts the floor as a gain and
+    /// overstates the result whenever the penalty exceeds 70.
+    pub fn score_after_applying(&self, applied: &[Recommendation]) -> usize {
+        let remaining: usize = self
             .recommendations
             .iter()
-            .map(|r| match r.confidence {
-                Confidence::High => 3,
-                Confidence::Medium => 2,
-            })
+            .filter(|rec| !applied.iter().any(|a| a.param == rec.param))
+            .map(|rec| rec.confidence.weight())
             .sum();
-        100usize.saturating_sub(penalty).max(30)
+        100usize.saturating_sub(remaining).max(30)
     }
 }
 
@@ -341,17 +371,25 @@ fn dedupe_recommendations(recs: Vec<Recommendation>) -> Vec<Recommendation> {
 
 // ─── Performance Rules ────────────────────────────────────────────────────────
 
+/// Scheduler an NVMe disk runs after tuning: the pass-through scheduler
+/// [`eval_io_scheduler`] recommends, or `None` when neither is offered.
+fn nvme_scheduler_target(disk: &DiskInfo) -> Option<&'static str> {
+    if disk.available_schedulers.iter().any(|s| s == "none") {
+        Some("none")
+    } else if disk.available_schedulers.iter().any(|s| s == "noop") {
+        Some("noop")
+    } else {
+        None
+    }
+}
+
 fn eval_io_scheduler(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let mut count = 0;
     for disk in &info.disks {
         match disk.disk_type {
             DiskType::NVMe => {
                 count += 1;
-                let target = if disk.available_schedulers.contains(&"none".to_string()) {
-                    "none"
-                } else if disk.available_schedulers.contains(&"noop".to_string()) {
-                    "noop"
-                } else {
+                let Some(target) = nvme_scheduler_target(disk) else {
                     continue;
                 };
 
@@ -702,11 +740,24 @@ fn eval_accept_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 }
 
 fn eval_sysrq(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sysrq";
+    eval_sysrq_at(info, recs, "/proc/sys/kernel/sysrq")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the signed read is
+/// unit-testable against a temp file. `drivers/tty/sysrq.c` registers
+/// kernel.sysrq through `sysrq_sysctl_handler`, which copies the table
+/// with no min/max and reads back through `sysrq_mask()` — and -1 is the
+/// mask with every function enabled, a legal, maximally-open setting. The
+/// unsigned reader parses "-1" to Err and falls back to 0, which here is
+/// the *disabled* value, so the `current != 0 && current != 176` gate
+/// skipped the hardening rule on exactly the most exposed hosts.
+fn eval_sysrq_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // sysrq is a mask; -1 enables every function, so it must be read signed
+    // or the unsigned fallback maps it to 0 (disabled) and skips the rule.
+    let current = read_sysctl_i64(path);
     // sysrq=1 means all functions enabled; high values also enable all
     if current != 0 && current != 176 {
         // 176 = safe subset (sync + remount-ro + reboot)
@@ -836,10 +887,21 @@ fn eval_tcp_rmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if max_val < 16777216 {
+        // Raise-only per field: keep a default the administrator raised
+        // above the fixed tuple's middle value instead of lowering it.
+        let vals: Vec<u64> = content
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let recommended = if vals.len() == 3 {
+            per_field_max(&vals, &[4096, 131072, 16777216])
+        } else {
+            "4096 131072 16777216".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_rmem".to_string(),
             current_value: content,
-            recommended_value: "4096 131072 16777216".to_string(),
+            recommended_value: recommended,
             reason: "万兆网卡场景下增大 TCP 接收缓冲区上限，充分利用带宽-延迟积".to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -864,10 +926,21 @@ fn eval_tcp_wmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if max_val < 16777216 {
+        // Raise-only per field: keep a default the administrator raised
+        // above the fixed tuple's middle value instead of lowering it.
+        let vals: Vec<u64> = content
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let recommended = if vals.len() == 3 {
+            per_field_max(&vals, &[4096, 65536, 16777216])
+        } else {
+            "4096 65536 16777216".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_wmem".to_string(),
             current_value: content,
-            recommended_value: "4096 65536 16777216".to_string(),
+            recommended_value: recommended,
             reason: "万兆网卡场景下增大 TCP 发送缓冲区上限，避免大流量传输时发送端瓶颈".to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -913,18 +986,41 @@ fn eval_ip_local_port_range(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if parts.len() == 2 && parts[1] - parts[0] < 30000 {
-        recs.push(Recommendation {
-            param: "net.ipv4.ip_local_port_range".to_string(),
-            current_value: content,
-            recommended_value: "1024 65535".to_string(),
-            reason: "可用临时端口范围过小，高并发短连接场景下可能耗尽端口导致连接失败".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if parts.len() == 2 {
+        port_range_recommendation(parts[0], parts[1], recs);
     }
     1
+}
+
+/// Value-driven core of the port-range rule, separated so tests can force
+/// every branch on any host (the sysctl is read from the live /proc).
+///
+/// Raise-only range semantics: the low endpoint an administrator chose is
+/// never lowered (the old fixed "1024 65535" rewrite collapsed a range
+/// deliberately narrowed for hardening, e.g. "50000 60000", back to the
+/// full span). The fix widens upward from the current low endpoint; when
+/// even the maximum high endpoint (65535) cannot reach the 30000-port
+/// threshold, the hardening choice wins and nothing is recommended — an
+/// unsatisfiable recommendation that fires on every check would be worse.
+fn port_range_recommendation(lo: u64, hi: u64, recs: &mut Vec<Recommendation>) {
+    if hi.saturating_sub(lo) >= 30_000 {
+        return;
+    }
+    // Widen upward to the maximum port; if even that cannot reach the
+    // threshold from the current low endpoint, the administrator's
+    // hardening choice wins (see the doc comment above).
+    if 65_535_u64.saturating_sub(lo) < 30_000 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "net.ipv4.ip_local_port_range".to_string(),
+        current_value: format!("{lo} {hi}"),
+        recommended_value: format!("{lo} 65535"),
+        reason: "可用临时端口范围过小，高并发短连接场景下可能耗尽端口导致连接失败；在不降低起始端口（可能是安全加固）的前提下向上扩展".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
 }
 
 fn eval_default_qdisc(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -1088,7 +1184,7 @@ fn eval_tcp_congestion_control(info: &SystemInfo, recs: &mut Vec<Recommendation>
         let avail_path = "/proc/sys/net/ipv4/tcp_available_congestion_control";
         if info.param_exists(avail_path) {
             let available = read_sysctl_string(avail_path);
-            if available.contains("bbr") {
+            if congestion_algo_available(&available, "bbr") {
                 recs.push(Recommendation {
                     param: "net.ipv4.tcp_congestion_control".to_string(),
                     current_value: current,
@@ -1455,7 +1551,11 @@ fn eval_read_ahead_kb(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 
 fn eval_nr_requests(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     for disk in &info.disks {
-        if disk.disk_type == DiskType::NVMe && disk.nr_requests < 256 {
+        // Without an elevator the kernel caps nr_requests at the hardware tag
+        // depth (larger writes fail with EINVAL), and switching to `none`
+        // resets it to that depth, so under `none` the value cannot be raised.
+        let scheduler = nvme_scheduler_target(disk).unwrap_or(&disk.scheduler);
+        if disk.disk_type == DiskType::NVMe && disk.nr_requests < 256 && scheduler != "none" {
             recs.push(Recommendation {
                 param: format!("block/{}/nr_requests", disk.name),
                 current_value: disk.nr_requests.to_string(),
@@ -1575,14 +1675,30 @@ fn eval_pid_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_sched_migration_cost(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_migration_cost_ns";
+    eval_sched_migration_cost_at(info, recs, "/proc/sys/kernel/sched_migration_cost_ns")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the signed read is
+/// unit-testable against a temp file. `kernel/sched/fair.c` declares
+/// `sysctl_sched_migration_cost` unsigned but registers it through
+/// `proc_dointvec` with no min/max, so "-1" round-trips verbatim — and
+/// `task_hot()` special-cases it: -1 keeps every task cache-hot (migration
+/// effectively disabled) while 0 makes no task cache-hot (always migrate).
+fn eval_sched_migration_cost_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // -1 is the kernel's "never migrate" sentinel, so it must be read signed
+    // or the unsigned fallback maps it to 0, the opposite "always migrate"
+    // policy, and the report misdiagnoses a pinned host.
+    let current = read_sysctl_i64(path);
     if current < 5000000 {
         recs.push(Recommendation {
             param: "kernel.sched_migration_cost_ns".to_string(),
@@ -1646,11 +1762,27 @@ fn eval_send_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_perf_event_paranoid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/perf_event_paranoid";
+    eval_perf_event_paranoid_at(info, recs, "/proc/sys/kernel/perf_event_paranoid")
+}
+
+/// Path-injectable form so the signed parse is unit-testable against a temp
+/// file. The upstream perf_event_paranoid sysctl has no upper bound of 2;
+/// -1 permits unprivileged perf events. An unsigned parse turns -1 into the
+/// fallback 0, misreporting the current value and losing the original on
+/// rollback. Read signed, mirroring eval_sched_rt_runtime.
+fn eval_perf_event_paranoid_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0);
     if current < 2 {
         recs.push(Recommendation {
             param: "kernel.perf_event_paranoid".to_string(),
@@ -1686,11 +1818,26 @@ fn eval_rp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/panic";
+    eval_panic_at(info, recs, "/proc/sys/kernel/panic")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the signed read is
+/// unit-testable against a temp file. `kernel/reboot.c` registers
+/// kernel.panic through plain `proc_dointvec`, which copies the table with
+/// no min/max, and -1 is the documented "reboot immediately, without
+/// syncing" setting (`panic=-1` in kernel-parameters.txt). The unsigned
+/// reader parses "-1" to Err and falls back to 0, which here is the
+/// *never-reboot* value, so the rule fired on exactly the most
+/// crash-resilient hosts — and the current_value it recorded, "0", is what
+/// a rollback would restore, silently discarding the immediate-reboot
+/// policy.
+fn eval_panic_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // panic is a plain int; -1 reboots immediately, so it must be read signed
+    // or the unsigned fallback maps it to 0 (never reboot) and fires the rule.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "kernel.panic".to_string(),
@@ -1832,16 +1979,54 @@ fn host_needs_ip_forward(info: &SystemInfo) -> bool {
     false
 }
 
+/// Whether a `/proc/net/bonding`-style directory actually contains a bond.
+///
+/// The bonding module creates this directory from its pernet init
+/// (`bond_create_proc_dir`) as soon as it is loaded — even with
+/// `max_bonds=0` and no bond interface — so the directory's mere existence
+/// is not evidence of bonding. The kernel puts one file per bond into it,
+/// so a non-empty directory is the signal.
+fn proc_bonding_has_bonds(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 /// Whether the host uses link bonding. The ARP-tuning rules key off "2+ NICs",
 /// but bond members are multiple NICs forming ONE logical link where settings
 /// like arp_filter/arp_ignore can break the bond, so they must skip bonded hosts.
 fn has_bond() -> bool {
-    if std::path::Path::new("/proc/net/bonding").is_dir() {
+    if proc_bonding_has_bonds(std::path::Path::new("/proc/net/bonding")) {
         return true;
     }
-    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+    dir_has_bond(std::path::Path::new("/sys/class/net"))
+}
+
+/// Skip guard shared by the whole ARP-tuning family — the four `conf/all`
+/// rules and the two `conf/default` rules. Hosts qualify only with 2+
+/// interfaces and no bond: a bonded host lists the bond master AND its
+/// slaves, so `network.len() >= 2` holds trivially, yet per `has_bond` the
+/// ARP tweaks must not be recommended there. `bond_present` is `has_bond()`
+/// in production and injected in tests (via `dir_has_bond` on a synthetic
+/// `/sys/class/net`).
+fn arp_tuning_skipped(net_ifaces: usize, bond_present: bool) -> bool {
+    net_ifaces < 2 || bond_present
+}
+
+/// Whether a `/sys/class/net`-style directory lists an actual bond interface.
+///
+/// The kernel's `bonding_masters` control file appears in this directory
+/// whenever the bonding module is loaded — even with zero bonds configured —
+/// so the exact name is not a bond. `detect::read_network_info` skips it for
+/// the same reason.
+fn dir_has_bond(dir: &std::path::Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.filter_map(|e| e.ok()) {
-            if e.file_name().to_string_lossy().starts_with("bond") {
+            let name = e.file_name();
+            if name == *"bonding_masters" {
+                continue;
+            }
+            if name.to_string_lossy().starts_with("bond") {
                 return true;
             }
         }
@@ -1873,19 +2058,30 @@ fn eval_unprivileged_bpf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
-        recs.push(Recommendation {
-            param: "kernel.unprivileged_bpf_disabled".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: "非特权用户可加载 BPF 程序存在提权风险，应禁止".to_string(),
-            confidence: Confidence::High,
-            category: Category::Security,
-            writable: true,
-        });
-    }
+    recommend_unprivileged_bpf(read_sysctl_u64(path), recs);
     1
+}
+
+/// Push the recommendation for a given `kernel.unprivileged_bpf_disabled` value.
+///
+/// Split from the probe so the rule is assertable on every host: 0 is the only
+/// value worth changing, and the target has to be 2 rather than 1.
+fn recommend_unprivileged_bpf(current: u64, recs: &mut Vec<Recommendation>) {
+    if current != 0 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "kernel.unprivileged_bpf_disabled".to_string(),
+        current_value: "0".to_string(),
+        // 1 and 2 both deny unprivileged bpf(), but the kernel refuses to
+        // clear a 1 for the rest of the boot, so only 2 lets
+        // `ktuner rollback` restore the previous state.
+        recommended_value: "2".to_string(),
+        reason: "非特权用户可加载 BPF 程序存在提权风险，应禁止".to_string(),
+        confidence: Confidence::High,
+        category: Category::Security,
+        writable: true,
+    });
 }
 
 fn eval_core_uses_pid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -2009,6 +2205,17 @@ fn eval_threads_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
     1
 }
 
+/// Huge pages covering a quarter of memory. `vm.nr_hugepages` counts pages of
+/// the default huge page size, which is 2 MiB only on common x86 setups (512
+/// MiB on 64K-page aarch64, 1 GiB with `default_hugepagesz=1G`). 0 when the
+/// size is unknown, so no count is guessed.
+fn quarter_memory_hugepages(memory_gb: u64, hugepage_kb: u64) -> u64 {
+    if hugepage_kb == 0 {
+        return 0;
+    }
+    memory_gb * 1024 * 1024 / 4 / hugepage_kb
+}
+
 fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/nr_hugepages";
     if !info.param_exists(path) {
@@ -2019,8 +2226,11 @@ fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
         return 1;
     }
     let current = read_sysctl_u64(path);
-    if current == 0 && info.memory_total_gb >= 16 {
-        let recommended = info.memory_total_gb * 1024 / 4 / 2;
+    let recommended = quarter_memory_hugepages(
+        info.memory_total_gb,
+        crate::detect::read_default_hugepage_kb(),
+    );
+    if current == 0 && info.memory_total_gb >= 16 && recommended > 0 {
         recs.push(Recommendation {
             param: "vm.nr_hugepages".to_string(),
             current_value: "0".to_string(),
@@ -2760,7 +2970,7 @@ fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
-        let recommended = 256 * 1024 * 1024; // 256MB
+        let recommended = DIRTY_BYTES_TARGET;
         recs.push(Recommendation {
             param: "vm.dirty_bytes".to_string(),
             current_value: "0".to_string(),
@@ -3214,7 +3424,7 @@ fn eval_arp_announce(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
     if !info.param_exists(path) {
         return 1;
     }
-    if info.network.len() < 2 || has_bond() {
+    if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3238,7 +3448,7 @@ fn eval_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    if info.network.len() < 2 || has_bond() {
+    if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3310,19 +3520,30 @@ fn eval_tcp_adv_win_scale(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
         .trim()
         .parse::<i64>()
         .unwrap_or(1);
-    if current < 2 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_adv_win_scale".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "2".to_string(),
-            reason: "TCP 接收缓冲区开销因子偏低，增大可让更多缓冲区用于应用数据提升吞吐"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_adv_win_scale_recommendation(current, &info.kernel_version) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_adv_win_scale` recommendation for an already-read
+/// value; split from the file probe so the version gate is testable anywhere.
+fn tcp_adv_win_scale_recommendation(current: i64, kernel_version: &str) -> Option<Recommendation> {
+    // Linux 6.6 replaced the sysctl with a per-socket scaling_ratio measured
+    // from real skb overhead; the knob is documented as obsolete and the
+    // receive window ignores it, so raising it there changes nothing.
+    if kernel_at_least(kernel_version, 6, 6) || current >= 2 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_adv_win_scale".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "2".to_string(),
+        reason: "TCP 接收缓冲区开销因子偏低，增大可让更多缓冲区用于应用数据提升吞吐".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_sched_tunable_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3470,19 +3691,49 @@ fn eval_panic_on_warn(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current != 0 {
-        recs.push(Recommendation {
-            param: "kernel.panic_on_warn".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "0".to_string(),
-            reason: "内核 WARN 即 panic 过于激进，正常运行中的 WARN 不应导致系统重启".to_string(),
-            confidence: Confidence::High,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    recommend_panic_on_warn(read_sysctl_u64(path), recs);
     1
+}
+
+/// Emit the `kernel.panic_on_warn` recommendation for an already-read value.
+///
+/// Split out from the file probe so the recommendation's shape — its category in
+/// particular — is testable on a host that does not boot with `panic_on_warn=1`.
+fn recommend_panic_on_warn(current: u64, recs: &mut Vec<Recommendation>) {
+    if current == 0 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "kernel.panic_on_warn".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "0".to_string(),
+        reason: "内核 WARN 即 panic 过于激进，正常运行中的 WARN 不应导致系统重启".to_string(),
+        confidence: Confidence::High,
+        // Availability policy about taking the host down, like panic,
+        // panic_on_oops, panic_on_oom and hardlockup_panic: a security
+        // recommendation is what `--category security` selects.
+        category: Category::Security,
+        writable: true,
+    });
+}
+
+/// `vm.dirty_bytes` recommended for >=64GB hosts that still use the ratio form.
+const DIRTY_BYTES_TARGET: u64 = 256 * 1024 * 1024;
+/// Preferred `vm.dirty_background_bytes` when the dirty limit leaves room.
+const DIRTY_BACKGROUND_BYTES_TARGET: u64 = 256 * 1024 * 1024;
+
+/// Background threshold that stays below the dirty limit in effect after
+/// tuning: the current `vm.dirty_bytes`, or [`DIRTY_BYTES_TARGET`] when it is
+/// 0 because [`eval_dirty_bytes`] then recommends that value. The kernel
+/// replaces a background threshold at or above the dirty threshold with half
+/// of it (`domain_dirty_limits`), so a larger value would not mean what it says.
+fn dirty_background_bytes_target(dirty_bytes: u64) -> u64 {
+    let limit = if dirty_bytes == 0 {
+        DIRTY_BYTES_TARGET
+    } else {
+        dirty_bytes
+    };
+    DIRTY_BACKGROUND_BYTES_TARGET.min(limit / 2)
 }
 
 fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3500,20 +3751,43 @@ fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
     } else {
         0
     };
+    let dirty_bytes = read_sysctl_u64("/proc/sys/vm/dirty_bytes");
+    dirty_background_bytes_recommendation(info.memory_total_gb, bytes, ratio, dirty_bytes, recs);
+    1
+}
+
+/// Value-driven core of the dirty-background-bytes rule, separated so
+/// tests can force the `bytes == 0 && ratio > 5` branch on any host (the
+/// sysctls are read from the live /proc, which a test cannot control).
+fn dirty_background_bytes_recommendation(
+    memory_total_gb: u64,
+    bytes: u64,
+    ratio: u64,
+    dirty_bytes: u64,
+    recs: &mut Vec<Recommendation>,
+) {
     if bytes == 0 && ratio > 5 {
-        let recommended_mb = 256;
         recs.push(Recommendation {
             param: "vm.dirty_background_bytes".to_string(),
-            current_value: format!("0 (ratio={ratio}%)"),
-            recommended_value: format!("{}", recommended_mb * 1024 * 1024),
+            // current_value feeds the rollback ledger's `previous` field,
+            // which is written back verbatim on `ktuner rollback`. A
+            // human-readable annotation here would be rejected by the
+            // kernel as EINVAL, making the param permanently unrestorable.
+            // The ratio detail already appears in the reason.
+            current_value: "0".to_string(),
+            // Keep the background threshold strictly below the dirty
+            // limit in effect after tuning (400d0105f): the kernel
+            // silently halves a background threshold that reaches the
+            // dirty threshold, so a larger value would not mean what it
+            // says.
+            recommended_value: dirty_background_bytes_target(dirty_bytes).to_string(),
             reason: format!("{}GB 内存 dirty_background_ratio {}% = {}GB 脏页才开始后台刷盘，用 bytes 可精确控制",
-                info.memory_total_gb, ratio, info.memory_total_gb * ratio / 100),
+                memory_total_gb, ratio, memory_total_gb * ratio / 100),
             confidence: Confidence::Medium,
             category: Category::Performance,
             writable: true,
         });
     }
-    1
 }
 
 fn eval_hardlockup_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3602,7 +3876,7 @@ fn eval_arp_notify(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    if info.network.len() < 2 || has_bond() {
+    if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3626,7 +3900,7 @@ fn eval_default_arp_announce(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    if info.network.len() < 2 {
+    if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3650,7 +3924,7 @@ fn eval_default_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    if info.network.len() < 2 {
+    if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3733,7 +4007,7 @@ fn eval_arp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    if info.network.len() <= 1 || has_bond() {
+    if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3810,24 +4084,32 @@ fn eval_tcp_orphan_retries(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    orphan_retries_recommendation(read_sysctl_u64(path), recs);
+    1
+}
+
+/// Value-driven core of the orphan-retries rule, separated so tests can
+/// force the `current == 0 || current > 3` branch on any host.
+fn orphan_retries_recommendation(current: u64, recs: &mut Vec<Recommendation>) {
     if current == 0 || current > 3 {
+        // Plain numeric current_value: rollback writes it back verbatim,
+        // and the kernel-default-of-8 note for `0` belongs in the reason.
+        let reason = if current == 0 {
+            "孤儿连接重试次数为 0（内核实际按默认 8 次处理），显式收紧到 2 可加速资源回收"
+                .to_string()
+        } else {
+            "孤儿连接（对端无响应）重试次数过多，占用资源时间过长，减少可加速资源回收".to_string()
+        };
         recs.push(Recommendation {
             param: "net.ipv4.tcp_orphan_retries".to_string(),
-            current_value: if current == 0 {
-                "0 (默认8)".to_string()
-            } else {
-                current.to_string()
-            },
+            current_value: current.to_string(),
             recommended_value: "2".to_string(),
-            reason: "孤儿连接（对端无响应）重试次数过多，占用资源时间过长，减少可加速资源回收"
-                .to_string(),
+            reason,
             confidence: Confidence::Medium,
             category: Category::Performance,
             writable: true,
         });
     }
-    1
 }
 
 fn eval_tcp_early_retrans(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -4038,7 +4320,11 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if vals.len() >= 4 && (vals[0] < 1024 || vals[1] < 65536 || vals[3] < 4096) {
+    // Raise-only per field: the old fixed quadruple "1024 65536 256 4096"
+    // lowered semmns/semopm/semmni an administrator deliberately raised
+    // whenever any single checked field was low, and semopm was rewritten
+    // without ever being checked.
+    if let Some(recommended) = sem_recommendation(&vals) {
         let current_str = vals
             .iter()
             .map(|v| v.to_string())
@@ -4047,7 +4333,7 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         recs.push(Recommendation {
             param: "kernel.sem".to_string(),
             current_value: current_str,
-            recommended_value: "1024 65536 256 4096".to_string(),
+            recommended_value: recommended,
             reason: "数据库场景下信号量参数过低，可能导致连接数受限或 semget() 失败".to_string(),
             confidence: Confidence::Medium,
             category: Category::Performance,
@@ -4132,19 +4418,36 @@ fn eval_tcp_fack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_fack".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "1".to_string(),
-            reason: "TCP Forward Acknowledgement 可改善丢包恢复效率，减少不必要的重传".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_fack_recommendation(read_sysctl_u64(path), &info.kernel_version) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_fack` recommendation for an already-read value.
+///
+/// Split out from the file probe so the version gate is testable on any host.
+fn tcp_fack_recommendation(current: u64, kernel_version: &str) -> Option<Recommendation> {
+    // FACK was removed from the TCP stack in Linux 4.15 (commit 95f5acbf3e12,
+    // "net: tcp: remove FACK from the code"), replaced by RACK loss detection.
+    // The sysctl file still exists on modern kernels but nothing reads it, so
+    // recommending "1" there is dead advice: it claims fewer spurious
+    // retransmits while changing no behavior at all.
+    if kernel_at_least(kernel_version, 4, 15) {
+        return None;
+    }
+    if current != 0 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_fack".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "1".to_string(),
+        reason: "TCP Forward Acknowledgement 可改善丢包恢复效率，减少不必要的重传".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_tcp_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5183,7 +5486,7 @@ fn eval_tcp_available_congestion(_info: &SystemInfo, _recs: &mut Vec<Recommendat
         return 1;
     }
     let content = read_sysctl_string(path);
-    if !content.contains("bbr") {
+    if !congestion_algo_available(&content, "bbr") {
         return 1;
     }
     let current_algo = read_sysctl_string("/proc/sys/net/ipv4/tcp_congestion_control");
@@ -5295,11 +5598,20 @@ fn eval_conntrack_tcp_timeout_established(
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    conntrack_timeout_recommendation(read_sysctl_u64(path), recs);
+    1
+}
+
+/// Value-driven core of the conntrack-timeout rule, separated so tests can
+/// force the `current > 86400` branch on any host (the sysctl is read from
+/// the live /proc, which a test cannot control).
+fn conntrack_timeout_recommendation(current: u64, recs: &mut Vec<Recommendation>) {
     if current > 86400 {
         recs.push(Recommendation {
             param: "net.netfilter.nf_conntrack_tcp_timeout_established".to_string(),
-            current_value: format!("{} ({}天)", current, current / 86400),
+            // Plain numeric: rollback writes this back verbatim; the
+            // days annotation belongs in the reason, not the value.
+            current_value: current.to_string(),
             recommended_value: "86400".to_string(),
             reason: "conntrack 已建立连接的超时默认 5 天太长，高并发下大量条目占满表导致丢包，缩短到 1 天".to_string(),
             confidence: Confidence::Medium,
@@ -5307,7 +5619,6 @@ fn eval_conntrack_tcp_timeout_established(
             writable: true,
         });
     }
-    1
 }
 
 fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -5380,24 +5691,33 @@ fn eval_perf_cpu_time_max_percent(info: &SystemInfo, recs: &mut Vec<Recommendati
     1
 }
 
+/// `kernel/hung_task.c` registers hung_task_warnings with a range of
+/// [-1, INT_MAX], where -1 means "unlimited warnings" and 0 disables them.
+/// The unsigned reader turned the legal "-1" into 0, so a host with warnings
+/// unlimited was reported as disabled and `tune` rewrote it to 10, silently
+/// capping the log. Pure so tests can force every branch.
+fn hung_task_warnings_recommendation(current: i64, recs: &mut Vec<Recommendation>) {
+    if current != 0 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "kernel.hung_task_warnings".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: "10".to_string(),
+        reason: "hung task 警告被禁用，无法发现进程卡死问题，建议至少保留一定数量的告警"
+            .to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
+}
+
 fn eval_hung_task_warnings(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/hung_task_warnings";
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 0 {
-        recs.push(Recommendation {
-            param: "kernel.hung_task_warnings".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: "10".to_string(),
-            reason: "hung task 警告被禁用，无法发现进程卡死问题，建议至少保留一定数量的告警"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    hung_task_warnings_recommendation(read_sysctl_i64(path), recs);
     1
 }
 
@@ -5412,25 +5732,75 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
         return 1;
     }
     let ratio = read_sysctl_u64(ratio_path);
-    let db_present = info.processes.iter().any(|p| {
-        p.name.contains("postgres") || p.name.contains("mysql") || p.name.contains("oracle")
-    });
-    if db_present && ratio < 80 {
-        recs.push(Recommendation {
-            param: "vm.overcommit_ratio".to_string(),
-            current_value: ratio.to_string(),
-            recommended_value: "80".to_string(),
-            reason: "overcommit_memory=2 模式下 ratio 过低会限制可用内存，数据库建议设为 80-90"
-                .to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    overcommit_ratio_recommendation(oc_mode, ratio, is_database_present(info), recs);
     1
 }
 
+/// Whether the sampled process list contains a database server, matched at name
+/// boundaries exactly like every other DB-gated rule (`has_process`).
+///
+/// The old inline predicate substring-matched the whole comm
+/// (`p.name.contains("mysql")`), so MySQL client tools — an open `mysql` shell,
+/// `mysqldump`, `mysqlrouter` — counted as the database itself and a host that
+/// only runs them was tuned as if the DB lived there: the same false-positive
+/// class #4100 removed from `has_process` (etcdctl satisfied "etcd"), left
+/// behind at this direct-iteration site.
+fn is_database_present(info: &SystemInfo) -> bool {
+    info.has_process("postgres") || info.has_process("mysqld") || info.has_process("oracle")
+}
+
+/// Pure core of the `vm.overcommit_ratio` rule: a strict-mode
+/// (`overcommit_memory == 2`) database host whose ratio sits below 80 gets
+/// exactly one raise-to-80 recommendation. Split from the /proc probe so the
+/// branch is assertable on any host instead of only on one already running
+/// `overcommit_memory=2`.
+fn overcommit_ratio_recommendation(
+    oc_mode: u64,
+    ratio: u64,
+    db_present: bool,
+    recs: &mut Vec<Recommendation>,
+) {
+    if !db_present || oc_mode != 2 || ratio >= 80 {
+        return;
+    }
+    recs.push(Recommendation {
+        param: "vm.overcommit_ratio".to_string(),
+        current_value: ratio.to_string(),
+        recommended_value: "80".to_string(),
+        reason: "overcommit_memory=2 模式下 ratio 过低会限制可用内存，数据库建议设为 80-90"
+            .to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Formats `vals` with each field raised to at least its floor, preserving
+/// any value an administrator deliberately set above the floor. Rewriting a
+/// multi-field sysctl with fixed numbers would lower those fields instead
+/// (e.g. kernel.sem "512 1024000000 500 32000" → "1024 65536 256 4096"
+/// collapses semmns by four orders of magnitude).
+fn per_field_max(vals: &[u64], floors: &[u64]) -> String {
+    vals.iter()
+        .zip(floors.iter().chain(std::iter::repeat(&0)))
+        .map(|(v, floor)| v.max(floor).to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Per-field floors for `kernel.sem` (semmsl, semmns, semopm, semmni) on a
+/// database host. The recommendation raises each field to at least its floor
+/// and otherwise keeps the current value. Returns `None` when every field
+/// already meets its floor.
+fn sem_recommendation(vals: &[u64]) -> Option<String> {
+    const FLOORS: [u64; 4] = [1024, 65536, 256, 4096];
+    if vals.len() < 4 || vals.iter().zip(FLOORS).all(|(v, floor)| *v >= floor) {
+        return None;
+    }
+    Some(per_field_max(vals, &FLOORS))
+}
 
 fn read_sysctl_string(path: &str) -> String {
     std::fs::read_to_string(path)
@@ -5438,10 +5808,200 @@ fn read_sysctl_string(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a `uname -r`-style release string is at least `major.minor`.
+///
+/// Only the leading numeric `major.minor` is compared, so distro suffixes
+/// ("6.8.0-40-generic", "5.15.0-microsoft-standard-WSL2") parse fine. Returns
+/// false when the string does not start with two dot-separated numbers, in
+/// which case the caller keeps its legacy (pre-gate) behavior.
+fn kernel_at_least(version: &str, want_major: u64, want_minor: u64) -> bool {
+    let mut parts = version
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty());
+    let (Some(major), Some(minor)) = (
+        parts.next().and_then(|s| s.parse().ok()),
+        parts.next().and_then(|s| s.parse().ok()),
+    ) else {
+        return false;
+    };
+    (major, minor) >= (want_major, want_minor)
+}
+
+/// Whether the exact algorithm name `algo` appears in a whitespace-separated
+/// `tcp_available_congestion_control` listing. Names must be compared as
+/// whole tokens: a substring match accepts "bbr2"/"bbr_plus" when plain
+/// "bbr" is not registered, and the kernel rejects writing an unregistered
+/// name with ENOENT — a recommendation that can never be applied.
+fn congestion_algo_available(available: &str, algo: &str) -> bool {
+    available.split_whitespace().any(|name| name == algo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bbr_availability_requires_an_exact_algorithm_token() {
+        // Plain bbr present, in any position.
+        assert!(congestion_algo_available("reno cubic bbr", "bbr"));
+        assert!(congestion_algo_available("bbr reno cubic", "bbr"));
+        // Variants whose names merely contain "bbr" must NOT count: the
+        // kernel rejects writing an unregistered algorithm name with ENOENT,
+        // so a substring match produces a recommendation that can never be
+        // applied.
+        assert!(!congestion_algo_available("reno cubic bbr2", "bbr"));
+        assert!(!congestion_algo_available("reno cubic bbr_plus", "bbr"));
+        assert!(!congestion_algo_available("bbr2", "bbr"));
+        // Absent entirely.
+        assert!(!congestion_algo_available("reno cubic", "bbr"));
+    }
     use crate::detect::*;
+
+    #[test]
+    fn sem_recommendation_only_raises_fields() {
+        // Everything at or above the floors: no recommendation.
+        assert_eq!(sem_recommendation(&[32000, 1024000000, 500, 32000]), None);
+        // One low field: raise it, keep every other field (the old fixed
+        // quadruple collapsed semmns from 1024000000 to 65536 here).
+        assert_eq!(
+            sem_recommendation(&[512, 1024000000, 500, 32000]).as_deref(),
+            Some("1024 1024000000 500 32000")
+        );
+        // semopm low alone is now detected (it was rewritten before without
+        // ever being part of the trigger).
+        assert_eq!(
+            sem_recommendation(&[32000, 1024000000, 100, 32000]).as_deref(),
+            Some("32000 1024000000 256 32000")
+        );
+        // All four low: the full floor tuple.
+        assert_eq!(
+            sem_recommendation(&[250, 32000, 32, 128]).as_deref(),
+            Some("1024 65536 256 4096")
+        );
+        // Malformed input: no recommendation rather than a partial write.
+        assert_eq!(sem_recommendation(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn overcommit_db_detection_matches_at_name_boundaries() {
+        // The #4100 false-positive class, at the one site the boundary fix did
+        // not reach: the old predicate substring-matched the whole comm, so
+        // MySQL client tools counted as the database itself.
+        fn info_with(names: &[&str]) -> SystemInfo {
+            let mut info = make_test_info();
+            info.processes = names
+                .iter()
+                .map(|n| ProcessInfo {
+                    name: n.to_string(),
+                })
+                .collect();
+            info
+        }
+        // Real database servers, including role-prefixed worker comms.
+        for name in ["postgres", "postgres: writer", "mysqld", "oracle"] {
+            assert!(
+                is_database_present(&info_with(&[name])),
+                "{name} is a database"
+            );
+        }
+        // Client tools and proxies merely embed the server's name.
+        for name in [
+            "mysql",
+            "mysqldump",
+            "mysqlrouter",
+            "mysqlbinlog",
+            "pg_dump",
+        ] {
+            assert!(
+                !is_database_present(&info_with(&[name])),
+                "{name} is not the database"
+            );
+        }
+        assert!(!is_database_present(&info_with(&[])));
+    }
+
+    #[test]
+    fn overcommit_ratio_recommendation_requires_a_real_database() {
+        // A strict-mode host running only client tooling must not be tuned:
+        // under the old substring predicate mysqldump/mysqlrouter passed here.
+        let mut recs = Vec::new();
+        overcommit_ratio_recommendation(2, 50, false, &mut recs);
+        assert!(recs.is_empty(), "client tools are not a database workload");
+
+        // The genuine case still fires with the documented value.
+        let mut recs = Vec::new();
+        overcommit_ratio_recommendation(2, 50, true, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].param, "vm.overcommit_ratio");
+        assert_eq!(recs[0].current_value, "50");
+        assert_eq!(recs[0].recommended_value, "80");
+        assert_eq!(recs[0].confidence, Confidence::Medium);
+
+        // Non-strict overcommit modes stay silent even for a real database.
+        for oc_mode in [0, 1] {
+            let mut recs = Vec::new();
+            overcommit_ratio_recommendation(oc_mode, 50, true, &mut recs);
+            assert!(recs.is_empty(), "mode {oc_mode} is not strict overcommit");
+        }
+        // A ratio already at or above the floor needs no change.
+        let mut recs = Vec::new();
+        overcommit_ratio_recommendation(2, 80, true, &mut recs);
+        assert!(recs.is_empty(), "80 already meets the floor");
+    }
+
+    #[test]
+    fn tcp_buffer_recommendations_keep_raised_defaults() {
+        // A raised default (262144 / 131072) survives; only the max field
+        // is lifted to the 10-GbE floor.
+        assert_eq!(
+            per_field_max(&[4096, 262144, 8388608], &[4096, 131072, 16777216]),
+            "4096 262144 16777216"
+        );
+        assert_eq!(
+            per_field_max(&[4096, 131072, 8388608], &[4096, 65536, 16777216]),
+            "4096 131072 16777216"
+        );
+        // Untouched defaults below the floors are raised to them.
+        assert_eq!(
+            per_field_max(&[4096, 87380, 6291456], &[4096, 131072, 16777216]),
+            "4096 131072 16777216"
+        );
+    }
+
+    #[test]
+    fn port_range_recommendation_never_lowers_the_low_endpoint() {
+        // The reviewer's hardening case: "50000 60000" must NOT be
+        // rewritten to "1024 65535" (the old fixed tuple lowered field 0).
+        // Widening upward cannot reach the 30000-port threshold from
+        // 50000, so the hardening choice wins: no recommendation at all,
+        // rather than an unsatisfiable one that fires on every check.
+        let mut recs = Vec::new();
+        port_range_recommendation(50_000, 60_000, &mut recs);
+        assert!(
+            recs.is_empty(),
+            "hardened range must not be lowered or nagged"
+        );
+
+        // A low-but-recoverable range widens upward only: the low endpoint
+        // survives verbatim, the high endpoint extends to 65535.
+        let mut recs = Vec::new();
+        port_range_recommendation(32_768, 60_999, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].current_value, "32768 60999");
+        assert_eq!(recs[0].recommended_value, "32768 65535");
+
+        // The default narrow range gets the full-span widening.
+        let mut recs = Vec::new();
+        port_range_recommendation(1024, 20_000, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_value, "1024 65535");
+
+        // An already-adequate range stays silent.
+        let mut recs = Vec::new();
+        port_range_recommendation(1024, 65_535, &mut recs);
+        assert!(recs.is_empty());
+    }
 
     fn rec(param: &str, conf: Confidence) -> Recommendation {
         Recommendation {
@@ -5453,6 +6013,95 @@ mod tests {
             category: Category::Performance,
             writable: false,
         }
+    }
+
+    /// Synthetic `/sys/class/net`-style dir for `dir_has_bond` (std-only, no
+    /// tempfile dependency).
+    /// Drop guard over a synthetic `/sys/class/net`-style dir; removal
+    /// survives a failing assert (cf. `SchedDir`).
+    struct NetDir(std::path::PathBuf);
+
+    impl NetDir {
+        fn new(entries: &[&str]) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "ktuner-has-bond-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for name in entries {
+                if name.ends_with('/') {
+                    std::fs::create_dir(dir.join(name.trim_end_matches('/'))).unwrap();
+                } else {
+                    std::fs::write(dir.join(name), b"").unwrap();
+                }
+            }
+            Self(dir)
+        }
+    }
+
+    impl Drop for NetDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn dir_has_bond_ignores_bonding_masters_control_file() {
+        // bonding module loaded, zero bonds: the kernel lists the regular
+        // file `bonding_masters` alongside real interfaces.
+        let dir = NetDir::new(&["bonding_masters", "eth0/", "eth1/", "lo/"]);
+        assert!(!dir_has_bond(&dir.0));
+    }
+
+    #[test]
+    fn dir_has_bond_detects_real_bond_interfaces() {
+        let dir = NetDir::new(&["bonding_masters", "bond0/", "eth0/"]);
+        assert!(dir_has_bond(&dir.0));
+
+        let dir = NetDir::new(&["eth0/", "lo/"]);
+        assert!(!dir_has_bond(&dir.0));
+    }
+
+    #[test]
+    fn proc_bonding_dir_without_bonds_is_not_a_bond() {
+        // `modprobe bonding` creates /proc/net/bonding even with no bond
+        // (max_bonds=0). The directory alone must not skip ARP tuning; one
+        // file per bond is the real signal.
+        let dir = NetDir::new(&[]);
+        assert!(!proc_bonding_has_bonds(&dir.0));
+
+        let dir = NetDir::new(&["bond0"]);
+        assert!(proc_bonding_has_bonds(&dir.0));
+    }
+
+    #[test]
+    fn arp_tuning_guard_skips_bonded_hosts() {
+        // A bonded host lists the bond master AND its slaves, so
+        // network.len() >= 2 holds trivially — the guard must still skip.
+        assert!(arp_tuning_skipped(2, true));
+        assert!(arp_tuning_skipped(3, true));
+        // Eligible only with 2+ interfaces and no bond.
+        assert!(!arp_tuning_skipped(2, false));
+        assert!(!arp_tuning_skipped(4, false));
+        // Below 2 interfaces never qualifies, bond or not.
+        assert!(arp_tuning_skipped(1, false));
+        assert!(arp_tuning_skipped(0, true));
+    }
+
+    #[test]
+    fn arp_tuning_guard_follows_synthetic_sysfs_bond() {
+        // End-to-end through has_bond()'s injectable leg: a synthetic
+        // /sys/class/net listing a real bond interface must flip the guard.
+        let bonded = NetDir::new(&["bonding_masters", "bond0/", "eth0/", "eth1/"]);
+        assert!(arp_tuning_skipped(3, dir_has_bond(&bonded.0)));
+
+        // Same directory without the bond stays eligible at 2+ interfaces.
+        let plain = NetDir::new(&["bonding_masters", "eth0/", "eth1/"]);
+        assert!(!arp_tuning_skipped(2, dir_has_bond(&plain.0)));
     }
 
     #[test]
@@ -5826,6 +6475,8 @@ mod tests {
     fn test_nvme_nr_requests() {
         let mut info = make_test_info();
         info.disks[0].nr_requests = 128;
+        // Only an elevator that stays in place can take a deeper queue.
+        info.disks[0].available_schedulers = vec!["mq-deadline".to_string()];
         let recs = evaluate(&info).unwrap().recommendations;
         let rec = recs.iter().find(|r| r.param.contains("nr_requests"));
         assert!(
@@ -5834,6 +6485,23 @@ mod tests {
         );
         assert_eq!(rec.unwrap().recommended_value, "1024");
         assert_eq!(rec.unwrap().confidence, Confidence::High);
+    }
+
+    #[test]
+    fn test_nvme_nr_requests_skipped_under_none() {
+        // Current `none`, or `none` recommended by the scheduler rule: either
+        // way the queue ends at the hardware depth, so 1024 would hit EINVAL
+        // or be reset by the elevator switch.
+        for scheduler in ["none", "mq-deadline"] {
+            let mut info = make_test_info();
+            info.disks[0].scheduler = scheduler.to_string();
+            info.disks[0].nr_requests = 127;
+            let recs = evaluate(&info).unwrap().recommendations;
+            assert!(
+                !recs.iter().any(|r| r.param.contains("nr_requests")),
+                "nr_requests cannot exceed the hardware depth under none (current {scheduler})"
+            );
+        }
     }
 
     #[test]
@@ -6036,6 +6704,21 @@ mod tests {
     }
 
     #[test]
+    fn test_dirty_background_bytes_stays_below_dirty_limit() {
+        const MIB: u64 = 1024 * 1024;
+        // dirty_bytes unset: ktuner recommends DIRTY_BYTES_TARGET (256 MiB), so
+        // an equal background value would be halved by the kernel anyway.
+        assert_eq!(dirty_background_bytes_target(0), 128 * MIB);
+        assert!(dirty_background_bytes_target(0) < DIRTY_BYTES_TARGET);
+        // An administrator's dirty_bytes is kept and bounds the background value.
+        assert_eq!(dirty_background_bytes_target(128 * MIB), 64 * MIB);
+        assert_eq!(dirty_background_bytes_target(4096 * MIB), 256 * MIB);
+        for dirty in [2 * 4096, MIB, 300 * MIB, 512 * MIB, u64::MAX] {
+            assert!(dirty_background_bytes_target(dirty) < dirty);
+        }
+    }
+
+    #[test]
     fn test_dirty_ratio_bytes_mutually_exclusive_large_ram() {
         // dirty_ratio ⊥ dirty_bytes in the kernel. A >=64GB host must never be
         // told to set both for the same dimension, and must use the bytes form.
@@ -6065,6 +6748,79 @@ mod tests {
             !has_ratio,
             "large-RAM host should use dirty_bytes, not dirty_ratio"
         );
+    }
+
+    #[test]
+    fn test_current_values_stay_kernel_writable() {
+        // Unconditional regression for the rollback ledger: current_value
+        // is written back to the kernel verbatim by `ktuner rollback`, so
+        // every annotated form ("0 (ratio=..%)" / "432000 (5天)" /
+        // "0 (默认8)") made its param permanently unrestorable with EINVAL.
+        // The value-driven rule cores are invoked directly so the branches
+        // fire on any host, independent of the live /proc contents.
+
+        // vm.dirty_background_bytes: bytes == 0 && ratio > 5 fires. The
+        // dirty limit input exercises #4454's target computation: with
+        // vm.dirty_bytes at 0 (the common ratio-form host), the target is
+        // clamped to half of the 256MiB dirty limit.
+        let mut recs = Vec::new();
+        dirty_background_bytes_recommendation(128, 0, 10, 0, &mut recs);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "vm.dirty_background_bytes")
+            .expect("forced branch must produce the recommendation");
+        assert_eq!(
+            rec.current_value.parse::<u64>().ok(),
+            Some(0),
+            "current_value must be the bare kernel-writable number"
+        );
+        assert_eq!(
+            rec.recommended_value,
+            dirty_background_bytes_target(0).to_string(),
+            "the extracted core must keep #4454's below-the-limit target"
+        );
+
+        // conntrack timeout: current > 86400 fires.
+        let mut recs = Vec::new();
+        conntrack_timeout_recommendation(432_000, &mut recs);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "net.netfilter.nf_conntrack_tcp_timeout_established")
+            .expect("forced branch must produce the recommendation");
+        assert_eq!(
+            rec.current_value.parse::<u64>().ok(),
+            Some(432_000),
+            "current_value must be the bare kernel-writable number"
+        );
+
+        // tcp_orphan_retries: both the 0 (kernel default) and > 3 arms.
+        for current in [0_u64, 8] {
+            let mut recs = Vec::new();
+            orphan_retries_recommendation(current, &mut recs);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_orphan_retries")
+                .unwrap_or_else(|| panic!("current={current} must produce the recommendation"));
+            assert_eq!(
+                rec.current_value.parse::<u64>().ok(),
+                Some(current),
+                "current={current} must stay a bare number (the old code annotated 0 as \"0 (默认8)\")"
+            );
+        }
+    }
+
+    #[test]
+    fn test_value_cores_do_not_recommend_when_optimal() {
+        // Boundary: at or below the thresholds nothing is recommended.
+        let mut recs = Vec::new();
+        dirty_background_bytes_recommendation(128, 268_435_456, 10, 0, &mut recs);
+        assert!(recs.is_empty(), "bytes already set: no rec");
+
+        conntrack_timeout_recommendation(86_400, &mut recs);
+        assert!(recs.is_empty(), "timeout already 1 day: no rec");
+
+        orphan_retries_recommendation(2, &mut recs);
+        assert!(recs.is_empty(), "retries already 2: no rec");
     }
 
     #[test]
@@ -6131,6 +6887,35 @@ mod tests {
     }
 
     #[test]
+    fn score_after_applying_keeps_the_floor() {
+        // 20 high-confidence + 20 medium findings = 100 points of penalty, so
+        // `score` sits on its 30-point floor.
+        let recs: Vec<Recommendation> = (0..20)
+            .map(|i| rec(&format!("test.high{i}"), Confidence::High))
+            .chain((0..20).map(|i| rec(&format!("test.medium{i}"), Confidence::Medium)))
+            .collect();
+        let eval = EvalResult {
+            recommendations: recs.clone(),
+            total_checked: 40,
+        };
+        assert_eq!(eval.score(), 30);
+
+        // Applying five findings leaves 85 points of penalty, still inside the
+        // floor, so the score after tuning is 30 — not `score() + 15 = 45`,
+        // which counts the floor as a gain.
+        assert_eq!(eval.score_after_applying(&recs[..5]), 30);
+
+        // On a host that is not floored the prediction moves by the applied
+        // weight as usual: 10 findings cost 30 points, five of them 15.
+        let light = EvalResult {
+            recommendations: recs[..10].to_vec(),
+            total_checked: 10,
+        };
+        assert_eq!(light.score(), 70);
+        assert_eq!(light.score_after_applying(&recs[..5]), 85);
+    }
+
+    #[test]
     fn test_workload_mixed_no_aggressive_swappiness() {
         let mut info = make_test_info();
         info.sysctl.swappiness = 10;
@@ -6173,6 +6958,93 @@ mod tests {
     }
 
     #[test]
+    fn test_sched_migration_cost_minus_one_reads_signed() {
+        // -1 is task_hot()'s "every task stays cache-hot" sentinel: migration
+        // is effectively disabled (kernel/sched/fair.c special-cases it next
+        // to 0, the "always migrate" value). The unsigned reader parsed
+        // "-1" to Err and fell back to 0 — the *opposite* migration policy —
+        // so the report diagnosed a deliberately pinned host as aggressively
+        // migrating, and current_value lied about the live kernel setting.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_sched_mig_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        let mut recs = Vec::new();
+        let checked = eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(checked, 1);
+        assert_eq!(
+            recs.len(),
+            1,
+            "-1 is far below 5000000, so it must be reported"
+        );
+        assert_eq!(recs[0].param, "kernel.sched_migration_cost_ns");
+        assert_eq!(
+            recs[0].current_value, "-1",
+            "current must be faithful: 0 is the opposite migration policy"
+        );
+        assert_eq!(recs[0].recommended_value, "5000000");
+    }
+
+    #[test]
+    fn test_sched_migration_cost_boundaries() {
+        // 5000000 (the recommendation itself) and anything above is already
+        // tuned; every lower value — including the -1 "never migrate"
+        // sentinel, 0 ("always migrate") and the 500000 default — must be
+        // reported with a faithful signed echo.
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        for (value, expects_rec) in [
+            (-1, true),
+            (0, true),
+            (500000, true),
+            (4999999, true),
+            (5000000, false),
+            (6000000, false),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_sched_mig_bound_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_sched_migration_cost_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only >= 5000000 is already tuned"
+            );
+            if expects_rec {
+                assert_eq!(
+                    recs[0].current_value,
+                    value.to_string(),
+                    "current_value must echo the signed value verbatim"
+                );
+                assert_eq!(recs[0].recommended_value, "5000000");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sched_migration_cost_absent_counts_as_checked() {
+        // A path that never exists exercises the absent branch: 1 checked,
+        // 0 recommendations, no filesystem dependency in CI.
+        let mut info = make_test_info();
+        info.cpu_cores = 32;
+        let mut recs = Vec::new();
+        let checked =
+            eval_sched_migration_cost_at(&info, &mut recs, "/proc/sys/kernel/ktuner_absent_sched");
+        assert_eq!(checked, 1);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
     fn test_tcp_mtu_probing() {
         let info = make_test_info();
         let recs = evaluate(&info).unwrap().recommendations;
@@ -6211,6 +7083,42 @@ mod tests {
         eval_nf_conntrack_max(&info, &mut recs);
         // Just verify it doesn't panic, result depends on system state
         let _ = recs;
+    }
+
+    #[test]
+    fn test_panic_on_warn_is_a_security_recommendation() {
+        // Every sibling panic knob (panic, panic_on_oops, panic_on_oom,
+        // hardlockup_panic) is Category::Security, and `--category security`
+        // selects on that field, so a Performance label hid the "kernel WARN
+        // should not reboot the host" advice from the only filter that looks for
+        // availability policy. Feed the value directly: a host that boots with
+        // panic_on_warn=0 would otherwise make this assertion vacuous.
+        let mut recs = Vec::new();
+        recommend_panic_on_warn(1, &mut recs);
+        let rec = recs
+            .first()
+            .expect("a non-zero panic_on_warn must be recommended");
+        assert_eq!(rec.param, "kernel.panic_on_warn");
+        assert_eq!(rec.recommended_value, "0");
+        assert_eq!(
+            rec.category,
+            Category::Security,
+            "kernel.panic_on_warn must be a security recommendation like its siblings"
+        );
+
+        // The same filter the CLI applies: the label decides visibility, so a
+        // Performance-labelled recommendation would be dropped here.
+        assert_eq!(
+            crate::category::filter_by_category(recs.clone(), "security").len(),
+            1,
+            "the recommendation must survive --category security"
+        );
+        let mut wrong = recs;
+        wrong[0].category = Category::Performance;
+        assert!(
+            crate::category::filter_by_category(wrong, "security").is_empty(),
+            "a Performance-labelled panic_on_warn is invisible to --category security"
+        );
     }
 
     #[test]
@@ -6316,6 +7224,22 @@ mod tests {
             recs.is_empty(),
             "THP should not trigger without latency-sensitive processes"
         );
+    }
+
+    #[test]
+    fn test_nr_hugepages_scale_with_default_page_size() {
+        // A quarter of 742 GB: unchanged for 2 MiB pages.
+        assert_eq!(quarter_memory_hugepages(742, 2048), 94976);
+        // 512 MiB (64K-page aarch64) and 1 GiB pages reserve the same quarter
+        // instead of 256x / 512x that much memory.
+        assert_eq!(quarter_memory_hugepages(742, 512 * 1024), 371);
+        assert_eq!(quarter_memory_hugepages(64, 1024 * 1024), 16);
+        for kb in [2048, 512 * 1024, 1024 * 1024] {
+            let reserved_kb = quarter_memory_hugepages(256, kb) * kb;
+            assert!(reserved_kb <= 256 * 1024 * 1024 / 4);
+        }
+        // Unknown size: no recommendation rather than a 2 MiB guess.
+        assert_eq!(quarter_memory_hugepages(742, 0), 0);
     }
 
     #[test]
@@ -7324,13 +8248,81 @@ mod tests {
 
     #[test]
     fn test_tcp_fack() {
+        // Shape of the recommendation on a pre-4.15 kernel, where the knob
+        // is still consumed by the TCP stack.
+        let rec = tcp_fack_recommendation(0, "3.10.0-1160.el7")
+            .expect("pre-4.15 kernel still consumes the tcp_fack knob");
+        assert_eq!(rec.recommended_value, "1");
+        assert_eq!(rec.category, Category::Performance);
+    }
+
+    #[test]
+    fn kernel_at_least_parses_release_suffixes() {
+        assert!(kernel_at_least("6.8.0-40-generic", 4, 15));
+        assert!(kernel_at_least("5.15.0-microsoft-standard-WSL2", 5, 0));
+        // The boundary itself counts: FACK was removed in 4.15.
+        assert!(kernel_at_least("4.15.0", 4, 15));
+        assert!(!kernel_at_least("4.14.209", 4, 15));
+        assert!(!kernel_at_least("3.10.0-1160.el7", 4, 15));
+        assert!(!kernel_at_least("5.4", 6, 0));
+        // Unparseable strings keep the caller's legacy behavior.
+        assert!(!kernel_at_least("", 4, 15));
+        assert!(!kernel_at_least("custom-kernel", 4, 15));
+    }
+
+    #[test]
+    fn tcp_fack_recommendation_gates_on_kernel_version() {
+        // Pre-4.15 kernels still consume the knob.
+        assert!(tcp_fack_recommendation(0, "3.10.0-1160.el7").is_some());
+        assert!(tcp_fack_recommendation(0, "4.14.209").is_some());
+        // 4.15+ removed FACK from the TCP stack (commit 95f5acbf3e12); the
+        // sysctl file still exists on modern kernels but nothing reads it, so
+        // the advice would promise loss-recovery gains that cannot happen.
+        assert!(tcp_fack_recommendation(0, "4.15.0").is_none());
+        assert!(tcp_fack_recommendation(0, "6.8.0-40-generic").is_none());
+        assert!(tcp_fack_recommendation(0, "5.4.0").is_none());
+        // Already enabled: no recommendation on any version.
+        assert!(tcp_fack_recommendation(1, "3.10.0-1160.el7").is_none());
+    }
+
+    #[test]
+    fn test_tcp_fack_not_recommended_on_modern_kernel() {
+        // Red on main: make_test_info() reports kernel 5.4 with tcp_fack=0 on
+        // the host, and the rule happily recommends a knob that no 4.15+
+        // kernel reads anymore.
+        let path = "/proc/sys/net/ipv4/tcp_fack";
+        if !std::path::Path::new(path).exists() || read_sysctl_u64(path) != 0 {
+            return; // host cannot exhibit the bug
+        }
         let info = make_test_info();
+        if !kernel_at_least(&info.kernel_version, 4, 15) {
+            return; // pre-4.15 kernels still consume the knob, advice is correct
+        }
+        if !info.has_listen_sockets() {
+            return; // the rule requires listening sockets to fire
+        }
         let mut recs = Vec::new();
         eval_tcp_fack(&info, &mut recs);
-        if let Some(rec) = recs.iter().find(|r| r.param == "net.ipv4.tcp_fack") {
-            assert_eq!(rec.recommended_value, "1");
-            assert_eq!(rec.category, Category::Performance);
-        }
+        assert!(
+            recs.iter().all(|r| r.param != "net.ipv4.tcp_fack"),
+            "tcp_fack advice must not be issued for kernel {}: FACK was removed in Linux 4.15",
+            info.kernel_version
+        );
+    }
+
+    #[test]
+    fn tcp_adv_win_scale_recommendation_gates_on_kernel_version() {
+        // Before 6.6 the receive window is derived from the sysctl.
+        let rec = tcp_adv_win_scale_recommendation(1, "5.10.134-16.an8.x86_64")
+            .expect("pre-6.6 kernels still consume tcp_adv_win_scale");
+        assert_eq!(rec.recommended_value, "2");
+        assert_eq!(rec.current_value, "1");
+        assert!(tcp_adv_win_scale_recommendation(-2, "6.5.0").is_some());
+        // 6.6+ uses the per-socket scaling_ratio; the knob is obsolete.
+        assert!(tcp_adv_win_scale_recommendation(1, "6.6.0").is_none());
+        assert!(tcp_adv_win_scale_recommendation(1, "7.0.0-29-generic").is_none());
+        // Already at or above the target on any version.
+        assert!(tcp_adv_win_scale_recommendation(2, "5.10.0").is_none());
     }
 
     #[test]
@@ -7803,6 +8795,39 @@ mod tests {
     }
 
     #[test]
+    fn test_unprivileged_bpf_recommends_the_reversible_value() {
+        // 1 and 2 both deny unprivileged bpf(), but the kernel will not clear a
+        // 1 for the rest of the boot ("Once set to 1, this can't be cleared"),
+        // so a 1 recommendation can never be rolled back. The rule is fed the
+        // value directly so the assertion holds on a host that already reports
+        // 1 or 2; the literal is asserted on purpose, so the rule cannot
+        // silently regress to 1.
+        let mut recs = Vec::new();
+        recommend_unprivileged_bpf(0, &mut recs);
+        assert_eq!(recs.len(), 1, "0 must be recommended against");
+        assert_eq!(
+            recs[0].recommended_value, "2",
+            "kernel.unprivileged_bpf_disabled must be recommended as 2: the kernel \
+             cannot clear a 1, which would make the recommendation irreversible"
+        );
+        assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[0].category, Category::Security);
+        assert_eq!(recs[0].confidence, Confidence::High);
+        assert!(recs[0].writable);
+
+        // Already denied: nothing to recommend, whichever way it was set.
+        for current in [1u64, 2] {
+            let mut recs = Vec::new();
+            recommend_unprivileged_bpf(current, &mut recs);
+            assert!(
+                recs.is_empty(),
+                "unprivileged bpf is already denied by {current}, so there is \
+                 nothing to change"
+            );
+        }
+    }
+
+    #[test]
     fn test_bpf_jit_harden() {
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -7867,6 +8892,10 @@ mod tests {
 
     #[test]
     fn test_conntrack_tcp_timeout_established() {
+        // Host-dependent path check only; the kernel-writability of
+        // current_value is pinned unconditionally by
+        // test_current_values_stay_kernel_writable through the extracted
+        // value-driven core.
         let info = make_test_info();
         let mut recs = Vec::new();
         let checked = eval_conntrack_tcp_timeout_established(&info, &mut recs);
@@ -7923,6 +8952,201 @@ mod tests {
     }
 
     #[test]
+    fn test_perf_event_paranoid_minus_one_reads_signed() {
+        // -1 is the kernel's "all users may use perf events" value, common on
+        // profiling fleets. The unsigned reader parsed "-1" to 0, so the
+        // recommendation reported current 0 and the rollback ledger later
+        // restored 0 instead of -1 — a silent wrong "Full" restore.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_perf_event_paranoid_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked = eval_perf_event_paranoid_at(&info, &mut recs, path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(checked, 1);
+        assert_eq!(recs.len(), 1, "-1 is looser than 2, so it must be flagged");
+        assert_eq!(recs[0].param, "kernel.perf_event_paranoid");
+        assert_eq!(recs[0].current_value, "-1", "current must be faithful");
+        assert_eq!(recs[0].recommended_value, "2");
+    }
+
+    #[test]
+    fn test_perf_event_paranoid_boundaries() {
+        let info = make_test_info();
+        for (value, expects_rec) in [
+            (-2, true),
+            (-1, true),
+            (0, true),
+            (1, true),
+            (2, false),
+            (3, false),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_perf_event_paranoid_bound_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_perf_event_paranoid_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: below 2 must be flagged, 2 and above are already hardened"
+            );
+            if expects_rec {
+                assert_eq!(
+                    recs[0].current_value,
+                    value.to_string(),
+                    "current_value must echo the signed value verbatim"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_perf_event_paranoid_absent_counts_as_checked() {
+        // A path that never exists exercises the absent branch: 1 checked,
+        // 0 recommendations, no filesystem dependency in CI.
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked =
+            eval_perf_event_paranoid_at(&info, &mut recs, "/proc/sys/kernel/ktuner_absent_pep");
+        assert_eq!(checked, 1);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn test_sysrq_minus_one_reads_signed() {
+        // -1 is the kernel's "every sysrq function enabled" mask (sysrq_mask()
+        // with all bits set). The unsigned reader parsed "-1" to Err, fell
+        // back to 0 — the *disabled* value — so the gate skipped the
+        // hardening recommendation on exactly the maximally-open host, and
+        // current_value lied about what a rollback would restore.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_sysrq_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked = eval_sysrq_at(&info, &mut recs, path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(checked, 1);
+        assert_eq!(recs.len(), 1, "-1 is fully open, so it must be flagged");
+        assert_eq!(recs[0].param, "kernel.sysrq");
+        assert_eq!(recs[0].current_value, "-1", "current must be faithful");
+        assert_eq!(recs[0].recommended_value, "176");
+    }
+
+    #[test]
+    fn test_sysrq_boundaries() {
+        // 0 (sysrq fully disabled) and 176 (the safe subset itself:
+        // sync + remount-ro + reboot) are already hardened and must NOT be
+        // flagged; every other value — including the signed -1 mask and the
+        // common 1/16/438 masks — must recommend 176.
+        let info = make_test_info();
+        for (value, expects_rec) in [
+            (-1, true),
+            (0, false),
+            (1, true),
+            (16, true),
+            (176, false),
+            (438, true),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_sysrq_bound_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_sysrq_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 (disabled) and 176 (safe subset) are hardened"
+            );
+            if expects_rec {
+                assert_eq!(
+                    recs[0].current_value,
+                    value.to_string(),
+                    "current_value must echo the signed value verbatim"
+                );
+                assert_eq!(recs[0].recommended_value, "176");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sysrq_absent_counts_as_checked() {
+        // A path that never exists exercises the absent branch: 1 checked,
+        // 0 recommendations, no filesystem dependency in CI.
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked = eval_sysrq_at(&info, &mut recs, "/proc/sys/kernel/ktuner_absent_sysrq");
+        assert_eq!(checked, 1);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn test_panic_minus_one_reads_signed() {
+        // `panic=-1` is the kernel's documented "reboot immediately, without
+        // syncing" setting (kernel-parameters.txt; the sysctl is a plain
+        // proc_dointvec int with no bounds). The unsigned reader parsed "-1"
+        // to Err, fell back to 0 — the *never-reboot* value — so the rule
+        // fired on exactly the most crash-resilient hosts and the
+        // current_value it recorded, "0", is what a rollback would restore.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_panic_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"-1\n").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked = eval_panic_at(&info, &mut recs, path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(checked, 1);
+        assert!(
+            recs.is_empty(),
+            "-1 reboots immediately, so the host needs no recommendation: {recs:?}"
+        );
+    }
+
+    #[test]
+    fn test_panic_boundaries() {
+        // 0 (loop forever after a panic) is the only unhardened value; a
+        // positive timeout and the immediate-reboot -1 are already reboot
+        // policies and must not be flagged.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (10, false), (60, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_panic_bound_{}_{:?}_{}",
+                std::process::id(),
+                std::thread::current().id(),
+                value
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_panic_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 (never reboot) is unhardened"
+            );
+        }
+    }
+
+    #[test]
     fn test_hung_task_warnings() {
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -7945,6 +9169,25 @@ mod tests {
         if oc != 2 {
             assert!(recs.is_empty());
         }
+    }
+
+    #[test]
+    fn hung_task_warnings_unlimited_is_not_disabled() {
+        // kernel/hung_task.c registers the sysctl with a range of
+        // [-1, INT_MAX]; -1 means unlimited warnings, 0 disables them. The
+        // unsigned reader collapsed -1 to 0 and recommended "fixing" it to 10.
+        let mut recs = Vec::new();
+        hung_task_warnings_recommendation(-1, &mut recs);
+        assert!(recs.is_empty(), "-1 means unlimited, not disabled");
+
+        hung_task_warnings_recommendation(10, &mut recs);
+        assert!(recs.is_empty(), "a positive budget needs no change");
+
+        hung_task_warnings_recommendation(0, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].param, "kernel.hung_task_warnings");
+        assert_eq!(recs[0].recommended_value, "10");
+        assert_eq!(recs[0].current_value, "0");
     }
 
     #[test]

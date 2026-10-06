@@ -97,13 +97,11 @@ pub struct AgentSight {
     /// ResponseId → SessionId mapper for FileWrite events
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
-    pending_genai: Vec<PendingGenAI>,
+    pending_genai: PendingGenAiQueue,
     /// Calls exported with a fallback session_id after the deferral window
     /// timed out, keyed by pid, awaiting a late FileWrite mapping for
     /// retroactive session fix-up (issue #2059).
     retro_session_fixup: lru::LruCache<u32, Vec<RetroFixupEntry>>,
-    /// Total estimated bytes of all pending_genai entries (for memory budget enforcement).
-    pending_genai_bytes: usize,
     /// Runtime limits for bounded buffers and eviction policies.
     runtime_limits: crate::config::RuntimeLimits,
     /// Optional FFI event sender (set when running in FFI/C-API mode)
@@ -151,6 +149,169 @@ impl PendingGenAI {
     /// Rough byte estimate for memory budget enforcement.
     fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.response_id.len() + self.events.len() * 512 // conservative per-event estimate
+    }
+}
+
+/// The deferred-GenAI queue with its byte-accounting counter. The counter is
+/// an invariant (always the sum of the queued entries' estimates) maintained
+/// inside the queue rather than by the callers: every drain path resyncs it,
+/// so the memory gauge and the eviction gate can never disagree with the
+/// queue. (Pre-fix, the counter only ever grew because its sole decrement
+/// lived in the forced-eviction loop.)
+#[derive(Default)]
+struct PendingGenAiQueue {
+    entries: Vec<PendingGenAI>,
+    /// Total estimated bytes of `entries` (memory budget enforcement).
+    bytes: usize,
+}
+
+/// One drained batch plus the pid whose retroactive session fix-up the
+/// caller should register (timeout exports only).
+struct DrainedGenAi {
+    events: Vec<GenAISemanticEvent>,
+    fixup_pid: Option<u32>,
+}
+
+impl PendingGenAiQueue {
+    fn push(&mut self, pending: PendingGenAI) {
+        self.bytes += pending.estimated_bytes();
+        self.entries.push(pending);
+    }
+
+    /// Re-derive the counter from the queue contents.
+    fn resync(&mut self) {
+        self.bytes = self.entries.iter().map(|p| p.estimated_bytes()).sum();
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Drain entries whose session_id can now be resolved, or that timed out
+    /// and must fall back; the rest stay queued.
+    fn resolve(&mut self, mapper: &ResponseSessionMapper) -> Vec<DrainedGenAi> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let mut drained = Vec::new();
+        for mut pending in pending_items {
+            if let Some(session_id) = mapper
+                .get_session_by_response_id(&pending.response_id)
+                .or_else(|| mapper.get_session_by_pid(pending.pid))
+                .map(|s| s.to_string())
+            {
+                log::debug!(
+                    "Deferred session_id resolved: response_id={} → session_id={}",
+                    pending.response_id,
+                    session_id
+                );
+                for event in &mut pending.events {
+                    if let GenAISemanticEvent::LLMCall(call) = event {
+                        call.metadata
+                            .insert("session_id".to_string(), session_id.clone());
+                    }
+                }
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: None,
+                });
+            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id timed out for response_id={}, using fallback",
+                    pending.response_id
+                );
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: Some(pending.pid),
+                });
+            } else {
+                self.entries.push(pending);
+            }
+        }
+        self.resync();
+        drained
+    }
+
+    /// Drain entries whose deferral window has expired.
+    fn flush_expired(&mut self) -> Vec<DrainedGenAi> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let mut drained = Vec::new();
+        for pending in pending_items {
+            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
+                log::debug!(
+                    "Deferred session_id expired for response_id={}, using fallback",
+                    pending.response_id
+                );
+                drained.push(DrainedGenAi {
+                    events: pending.events,
+                    fixup_pid: Some(pending.pid),
+                });
+            } else {
+                self.entries.push(pending);
+            }
+        }
+        self.resync();
+        drained
+    }
+
+    /// Drain everything (shutdown): no fix-ups — the process is exiting, so
+    /// no further FileWrite can arrive to repair a fallback session_id.
+    fn flush_all(&mut self) -> Vec<Vec<GenAISemanticEvent>> {
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        self.bytes = 0;
+        pending_items
+            .into_iter()
+            .map(|pending| {
+                log::debug!(
+                    "Flushing pending GenAI event on shutdown: response_id={}",
+                    pending.response_id
+                );
+                pending.events
+            })
+            .collect()
+    }
+
+    /// Drain only the given (exited) pid's entries; other pids keep waiting.
+    fn flush_for_pid(&mut self, pid: u32) -> Vec<Vec<GenAISemanticEvent>> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let pending_items: Vec<_> = std::mem::take(&mut self.entries);
+        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
+        self.entries = still_pending;
+        self.resync();
+        to_export
+    }
+
+    /// Evict oldest entries while count or bytes exceed the limits; returns
+    /// the evicted batches for export.
+    fn enforce_limits(
+        &mut self,
+        limits: &crate::config::RuntimeLimits,
+    ) -> Vec<Vec<GenAISemanticEvent>> {
+        let max_count = limits.pending_genai_max_count.max(1);
+        let max_bytes = limits.pending_genai_max_bytes.max(1);
+        let mut evicted = Vec::new();
+        while !self.entries.is_empty()
+            && (self.entries.len() >= max_count || self.bytes >= max_bytes)
+        {
+            let oldest = self.entries.remove(0);
+            self.bytes = self.bytes.saturating_sub(oldest.estimated_bytes());
+            log::warn!(
+                "pending_genai limit exceeded (count={}/{}, bytes={}/{}),                  flushing oldest response_id={}",
+                self.entries.len() + 1,
+                max_count,
+                self.bytes + oldest.estimated_bytes(),
+                max_bytes,
+                oldest.response_id
+            );
+            evicted.push(oldest.events);
+        }
+        evicted
     }
 }
 
@@ -423,8 +584,7 @@ impl AgentSight {
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
-                "SLS sysom mode detected (path={}), skipping SQLite and default SLS exporter",
-                path
+                "SLS sysom mode detected (path={path}), skipping SQLite and default SLS exporter"
             );
             if logtail_currently_enabled {
                 let exporter = LogtailExporter::new_with_fixed_path(
@@ -759,13 +919,12 @@ impl AgentSight {
             } else {
                 ResponseSessionMapper::disabled()
             },
-            pending_genai: Vec::new(),
+            pending_genai: PendingGenAiQueue::default(),
             // RETRO_FIXUP_CAPACITY is a non-zero constant, so the unwrap is
             // guaranteed unreachable.
             retro_session_fixup: lru::LruCache::new(
                 std::num::NonZeroUsize::new(RETRO_FIXUP_CAPACITY).unwrap(),
             ),
-            pending_genai_bytes: 0,
             runtime_limits: config.runtime_limits,
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
@@ -956,10 +1115,17 @@ impl AgentSight {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            let status = match fs::read_to_string(proc_root.join(format!("{pid}/status"))) {
-                Ok(s) => s,
+            let status = match fs::read(proc_root.join(format!("{pid}/status"))) {
+                Ok(bytes) => bytes,
                 Err(_) => continue,
             };
+            // `/proc/<pid>/status` embeds the process name, and the kernel
+            // allows non-UTF-8 bytes in a name (`prctl(PR_SET_NAME)`, or an
+            // executable whose name is not valid UTF-8). `read_to_string`
+            // rejected the whole file, so that pid and its whole subtree
+            // dropped out of the descendant set. The `PPid:` line is ASCII, so
+            // a lossy decode still finds it.
+            let status = String::from_utf8_lossy(&status);
             let ppid = status
                 .lines()
                 .find_map(|line| line.strip_prefix("PPid:\t"))
@@ -1173,8 +1339,7 @@ impl AgentSight {
                         }
                     } else {
                         log::warn!(
-                            "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            response_id
+                            "Deferred GenAI call queued without pending_info (response_id={response_id}), crash detection blind spot remains"
                         );
                     }
                     self.pending_genai.push(PendingGenAI {
@@ -1183,8 +1348,6 @@ impl AgentSight {
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
-                    self.pending_genai_bytes +=
-                        self.pending_genai.last().map_or(0, |p| p.estimated_bytes());
                     self.enforce_pending_genai_limits();
                     log::debug!("GenAI events queued for deferred session_id resolution");
                 } else {
@@ -1398,14 +1561,12 @@ impl AgentSight {
     /// Check and drain the pending_logtail mailbox.
     /// If the config watcher deposited a new LogtailExporter, register it.
     fn check_pending_logtail(&mut self) {
-        if let Ok(mut guard) = self.pending_logtail.try_lock() {
-            if let Some(exporter) = guard.take() {
-                log::info!(
-                    "Registering dynamically-activated LogtailExporter: '{}'",
-                    exporter.name()
-                );
-                self.genai_exporters.push(exporter);
-            }
+        if let Some(exporter) = crate::background::take_pending_logtail(&self.pending_logtail) {
+            log::info!(
+                "Registering dynamically-activated LogtailExporter: '{}'",
+                exporter.name()
+            );
+            self.genai_exporters.push(exporter);
         }
     }
 
@@ -1863,6 +2024,10 @@ impl AgentSight {
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
                             &response_headers,
                         );
+                    // A dead connection retains no completing read, so the
+                    // header event is the only provenance left for the
+                    // synthetic events; these feed pending-row usage
+                    // extraction only, not duration accounting.
                     crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
                         &buf,
                         content_encoding.as_deref(),
@@ -1938,65 +2103,10 @@ impl AgentSight {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
                                         if let Some(body) = request.json_body() {
-                                            if let Some(messages) =
-                                                body.get("messages").and_then(|m| m.as_array())
+                                            if let Some(count) =
+                                                drain_request_input_tokens(&body, &tokenizer)
                                             {
-                                                let mut msgs = messages.clone();
-                                                // Parse tool_calls.arguments from string to object
-                                                for msg in msgs.iter_mut() {
-                                                    if let Some(tcs) = msg
-                                                        .get_mut("tool_calls")
-                                                        .and_then(|tc| tc.as_array_mut())
-                                                    {
-                                                        for tc in tcs.iter_mut() {
-                                                            if let Some(f) = tc.get_mut("function")
-                                                            {
-                                                                if let Some(a) = f
-                                                                    .get("arguments")
-                                                                    .and_then(|a| a.as_str())
-                                                                {
-                                                                    if let Ok(p) =
-                                                                        serde_json::from_str::<
-                                                                            serde_json::Value,
-                                                                        >(
-                                                                            a
-                                                                        )
-                                                                    {
-                                                                        f["arguments"] = p;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                let tools_json: Option<Vec<serde_json::Value>> =
-                                                    body.get("tools")
-                                                        .and_then(|t| t.as_array())
-                                                        .map(|a| a.to_vec());
-                                                let count = match tokenizer
-                                                    .apply_chat_template_with_tools(
-                                                        &msgs,
-                                                        tools_json.as_deref(),
-                                                        true,
-                                                    ) {
-                                                    Ok(formatted) => {
-                                                        tokenizer.count(&formatted).unwrap_or(0)
-                                                    }
-                                                    Err(_) => {
-                                                        // Fallback: raw message count
-                                                        msgs.iter()
-                                                            .filter_map(|m| {
-                                                                serde_json::to_string(m).ok()
-                                                            })
-                                                            .map(|s| {
-                                                                tokenizer.count(&s).unwrap_or(0)
-                                                            })
-                                                            .sum()
-                                                    }
-                                                };
-                                                if count > 0 {
-                                                    enrichment.input_tokens = Some(count as i64);
-                                                }
+                                                enrichment.input_tokens = Some(count);
                                             }
                                         }
                                     }
@@ -2084,16 +2194,21 @@ impl AgentSight {
                     .unwrap_or(0);
 
                 let mut checked_pids: HashSet<u32> = HashSet::new();
-                for (pid, _call_id, session_id, agent_name, conversation_id) in &persisted_pending {
+                for (pid, ..) in &persisted_pending {
                     if !checked_pids.insert(*pid) {
                         continue; // already checked this PID
                     }
-                    if was_pid_oom_killed(*pid as i32) {
-                        let call_ids: Vec<&str> = persisted_pending
-                            .iter()
-                            .filter(|(p, _, _, _, _)| *p == *pid)
-                            .map(|(_, c, _, _, _)| c.as_str())
-                            .collect();
+                    if !was_pid_oom_killed(*pid as i32) {
+                        continue;
+                    }
+                    // One event per conversation: writing only the first
+                    // tuple's session/conversation while marking every call
+                    // interrupted left the other conversations without a
+                    // parent agent_crash event (OpenClaw = one pid, many
+                    // sessions).
+                    for (agent_name, session_id, conversation_id, call_ids) in
+                        oom_crash_groups_for_pid(*pid, &persisted_pending)
+                    {
                         log::info!(
                             "[DrainCheck] PID {} was OOM-killed (confirmed via dmesg), agent={}, calls={:?}",
                             pid,
@@ -2102,16 +2217,16 @@ impl AgentSight {
                         );
                         let detail = serde_json::json!({
                             "pid": pid,
-                            "agent_name": agent_name,
+                            "agent_name": agent_name.clone(),
                             "call_ids": call_ids,
                             "oom": true,
                             "source": "drain+dmesg",
                         });
                         let event = InterruptionEvent::new(
                             InterruptionType::AgentCrash,
-                            session_id.clone(),
+                            session_id,
                             None,
-                            conversation_id.clone(),
+                            conversation_id,
                             None,
                             Some(*pid as i32),
                             agent_name.clone(),
@@ -2125,15 +2240,15 @@ impl AgentSight {
                         } else {
                             log::info!("[DrainCheck] Recorded OOM agent_crash for pid={pid}");
                         }
-                        // Mark all pending calls for this PID as interrupted
-                        if let Some(ref store) = self.genai_sqlite_store {
-                            if let Err(e) =
-                                store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
-                            {
-                                log::warn!(
-                                    "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
-                                );
-                            }
+                    }
+                    // Mark all pending calls for this PID as interrupted
+                    if let Some(ref store) = self.genai_sqlite_store {
+                        if let Err(e) =
+                            store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
+                        {
+                            log::warn!(
+                                "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
+                            );
                         }
                     }
                 }
@@ -2178,85 +2293,30 @@ impl AgentSight {
     /// Try to resolve pending GenAI events whose session_id can now be looked up.
     /// Called after FileWrite events update the ResponseSessionMapper.
     fn resolve_pending_genai(&mut self) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let mut still_pending = Vec::new();
-        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
-
-        for mut pending in pending_items {
-            if let Some(session_id) = self
-                .response_mapper
-                .get_session_by_response_id(&pending.response_id)
-                .or_else(|| self.response_mapper.get_session_by_pid(pending.pid))
-                .map(|s| s.to_string())
-            {
-                // Resolved — update session_id in all event metadata
-                log::debug!(
-                    "Deferred session_id resolved: response_id={} → session_id={}",
-                    pending.response_id,
-                    session_id
-                );
-                for event in &mut pending.events {
-                    if let GenAISemanticEvent::LLMCall(call) = event {
-                        call.metadata
-                            .insert("session_id".to_string(), session_id.clone());
-                    }
-                }
-                to_export.push(pending.events);
-            } else if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
-                // Timed out — export with fallback session_id
-                log::debug!(
-                    "Deferred session_id timed out for response_id={}, using fallback",
-                    pending.response_id
-                );
-                self.register_retro_session_fixup(pending.pid, &pending.events);
-                to_export.push(pending.events);
-            } else {
-                // Still waiting
-                still_pending.push(pending);
+        let drained = self.pending_genai.resolve(&self.response_mapper);
+        for batch in &drained {
+            if let Some(pid) = batch.fixup_pid {
+                self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-
-        self.pending_genai = still_pending;
-
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for batch in &drained {
+            self.complete_and_export_deferred_genai(&batch.events);
+            self.detect_and_store_interruptions(&batch.events);
         }
     }
 
     /// Flush any pending GenAI events that have exceeded the timeout.
     /// Called during idle periods of the event loop.
     pub fn flush_expired_pending_genai(&mut self) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let mut still_pending = Vec::new();
-        let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
-
-        for pending in pending_items {
-            if pending.created_at.elapsed() >= PENDING_SESSION_TIMEOUT {
-                log::debug!(
-                    "Deferred session_id expired for response_id={}, using fallback",
-                    pending.response_id
-                );
-                self.register_retro_session_fixup(pending.pid, &pending.events);
-                to_export.push(pending.events);
-            } else {
-                still_pending.push(pending);
+        let drained = self.pending_genai.flush_expired();
+        for batch in &drained {
+            if let Some(pid) = batch.fixup_pid {
+                self.register_retro_session_fixup(pid, &batch.events);
             }
         }
-
-        self.pending_genai = still_pending;
-
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for batch in &drained {
+            self.complete_and_export_deferred_genai(&batch.events);
+            self.detect_and_store_interruptions(&batch.events);
         }
     }
 
@@ -2268,16 +2328,9 @@ impl AgentSight {
     /// `apply_retro_session_fixup`; the remaining pendings are persisted with
     /// whatever session_id they carry now (real UUID or fallback).
     fn flush_all_pending_genai(&mut self) {
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        for pending in &pending_items {
-            log::debug!(
-                "Flushing pending GenAI event on shutdown: response_id={}",
-                pending.response_id
-            );
-        }
-        for pending in pending_items {
-            self.complete_and_export_deferred_genai(&pending.events);
-            self.detect_and_store_interruptions(&pending.events);
+        for events in self.pending_genai.flush_all() {
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
         }
     }
 
@@ -2293,19 +2346,11 @@ impl AgentSight {
     /// Falling back to the response_id-based session_id therefore loses
     /// nothing. Deferred events of other (still-live) pids keep waiting.
     fn flush_deferred_genai_for_pid(&mut self, pid: u32) {
-        if self.pending_genai.is_empty() {
-            return;
-        }
-
-        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
-        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
-        self.pending_genai = still_pending;
-
         // No retro fix-up registration here: the pid is dead, so the FileWrite
         // that would reveal its session mapping can never arrive anymore.
-        for events in &to_export {
-            self.complete_and_export_deferred_genai(events);
-            self.detect_and_store_interruptions(events);
+        for events in self.pending_genai.flush_for_pid(pid) {
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
         }
     }
 
@@ -2383,26 +2428,7 @@ impl AgentSight {
     /// If pending GenAI queue exceeds count or byte limits, flush the oldest
     /// entries with the fallback session_id to prevent unbounded memory growth.
     fn enforce_pending_genai_limits(&mut self) {
-        let max_count = self.runtime_limits.pending_genai_max_count.max(1);
-        let max_bytes = self.runtime_limits.pending_genai_max_bytes.max(1);
-
-        while !self.pending_genai.is_empty()
-            && (self.pending_genai.len() >= max_count || self.pending_genai_bytes >= max_bytes)
-        {
-            let oldest = self.pending_genai.remove(0);
-            self.pending_genai_bytes = self
-                .pending_genai_bytes
-                .saturating_sub(oldest.estimated_bytes());
-            log::warn!(
-                "pending_genai limit exceeded (count={}/{}, bytes={}/{}), \
-                 flushing oldest response_id={}",
-                self.pending_genai.len() + 1,
-                max_count,
-                self.pending_genai_bytes + oldest.estimated_bytes(),
-                max_bytes,
-                oldest.response_id
-            );
-            let events = oldest.events;
+        for events in self.pending_genai.enforce_limits(&self.runtime_limits) {
             self.complete_and_export_deferred_genai(&events);
             self.detect_and_store_interruptions(&events);
         }
@@ -2455,7 +2481,7 @@ impl AgentSight {
             ring_buffer_dropped: self.probes.ring_buffer_dropped()?,
             connection_cache_bytes: connections.connection_cache_bytes as u64,
             pending_genai_count: self.pending_genai.len() as u64,
-            pending_genai_bytes: self.pending_genai_bytes as u64,
+            pending_genai_bytes: self.pending_genai.bytes as u64,
             pending_connection_count: connections.pending_connection_count as u64,
             pending_connection_bytes: connections.pending_connection_bytes as u64,
             eviction_count: connections.eviction_count,
@@ -2723,6 +2749,64 @@ fn apply_retro_session_fixup(
     }
 }
 
+/// Group LLM calls by `(session_id, conversation_id)`.
+///
+/// Returns groups in first-seen order, each carrying only the call ids that
+/// belong to its conversation. A single agent process can serve several
+/// conversations (OpenClaw is one gateway pid with many sessions); attributing
+/// a crash to only the first tuple leaves every other conversation's
+/// interrupted calls without a parent `agent_crash` event.
+fn group_calls_by_conversation<'a>(
+    calls: impl Iterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
+) -> Vec<(Option<String>, Option<String>, Vec<String>)> {
+    let mut groups: Vec<((Option<String>, Option<String>), Vec<String>)> = Vec::new();
+    for (call_id, session_id, conversation_id) in calls {
+        let key = (
+            session_id.map(str::to_owned),
+            conversation_id.map(str::to_owned),
+        );
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, call_ids)) => call_ids.push(call_id.to_owned()),
+            None => groups.push((key, vec![call_id.to_owned()])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((session_id, conversation_id), call_ids)| (session_id, conversation_id, call_ids))
+        .collect()
+}
+
+/// Per-conversation OOM crash groups for one dead pid.
+///
+/// `persisted_pending` rows are `(pid, call_id, session_id, agent_name,
+/// conversation_id)`; agent name is a property of the pid, so the first row
+/// of that pid is representative. Returned tuples are `(agent_name,
+/// session_id, conversation_id, call_ids)` — one per conversation, so the
+/// drain path can write one event each instead of only the first tuple's.
+fn oom_crash_groups_for_pid(
+    pid: u32,
+    persisted_pending: &[(u32, String, Option<String>, Option<String>, Option<String>)],
+) -> Vec<(Option<String>, Option<String>, Option<String>, Vec<String>)> {
+    let agent_name = persisted_pending
+        .iter()
+        .find(|(p, ..)| *p == pid)
+        .and_then(|(_, _, _, name, _)| name.clone());
+    group_calls_by_conversation(persisted_pending.iter().filter(|(p, ..)| *p == pid).map(
+        |(_, call_id, session_id, _, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ))
+    .into_iter()
+    .map(|(session_id, conversation_id, call_ids)| {
+        (agent_name.clone(), session_id, conversation_id, call_ids)
+    })
+    .collect()
+}
+
 /// Record `agent_crash` interruption events for the pending calls of an
 /// exited agent process, and mark those calls as interrupted.
 ///
@@ -2772,20 +2856,21 @@ fn record_agent_crash_interruptions(
     let is_oom = was_pid_oom_killed(pid as i32);
 
     // Group by (session_id, conversation_id) to produce one event per conversation
-    let mut by_conv: std::collections::HashMap<(Option<String>, Option<String>), Vec<String>> =
-        std::collections::HashMap::new();
-    for (call_id, session_id, _trace_id, conversation_id) in pending_calls {
-        by_conv
-            .entry((session_id.clone(), conversation_id.clone()))
-            .or_default()
-            .push(call_id.clone());
-    }
+    let groups = group_calls_by_conversation(pending_calls.iter().map(
+        |(call_id, session_id, _trace_id, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ));
 
-    for ((session_id, conversation_id), call_ids) in &by_conv {
+    for (session_id, conversation_id, call_ids) in groups {
         let mut detail = serde_json::json!({
             "pid": pid,
             "agent_name": agent_name,
-            "call_ids": call_ids,
+            "call_ids": call_ids.clone(),
             "source": "trace_procmon_exit",
             "exit_code": exit_status.code,
             "signal": exit_status.signal,
@@ -2830,6 +2915,57 @@ fn record_agent_crash_interruptions(
             log::warn!("[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}");
         }
     }
+}
+
+/// Count the input tokens of a drained request from its captured body.
+///
+/// The drain fallback runs for streams that ended before the terminal usage
+/// event, and it has to count the same request shapes the analyzer and the
+/// token breakdown count. It reads the parser-layer message view instead of a
+/// private top-level `messages` array, which recognized only OpenAI chat
+/// bodies: a drained Responses (`input` with `instructions`) or DashScope
+/// native (`input.messages`) call kept `input_tokens` NULL while its output
+/// side was still counted from the same events.
+///
+/// Extracted as a free function, like `record_agent_crash_interruptions`, so
+/// the fallback is unit-testable without constructing a full `AgentSight`
+/// instance.
+fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer) -> Option<i64> {
+    let (mut messages, instructions) = crate::parser::llm::extract_messages_view(body)?;
+    if let Some(system) = instructions.filter(|text| !text.is_empty()) {
+        messages.insert(0, serde_json::json!({"role": "system", "content": system}));
+    }
+    // Parse tool_calls.arguments from string to object
+    for msg in messages.iter_mut() {
+        if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+            for tc in tcs.iter_mut() {
+                if let Some(f) = tc.get_mut("function") {
+                    if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
+                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
+                            f["arguments"] = p;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let tools_json: Option<Vec<serde_json::Value>> = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|a| a.to_vec());
+    let count =
+        match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
+            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+            Err(_) => {
+                // Fallback: raw message count
+                messages
+                    .iter()
+                    .filter_map(|m| serde_json::to_string(m).ok())
+                    .map(|s| tokenizer.count(&s).unwrap_or(0))
+                    .sum()
+            }
+        };
+    if count > 0 { Some(count as i64) } else { None }
 }
 
 /// Render the buffer watermark report, and whether it needs operator attention.
@@ -3206,6 +3342,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The drain path checks each dead pid once but must still attribute its
+    /// OOM crash to every conversation it served: two pending tuples with the
+    /// same pid and different conversations must yield two groups, each with
+    /// its own call ids, not one event for the first tuple only.
+    #[test]
+    fn oom_crash_groups_cover_every_conversation_of_a_dead_pid() {
+        let pending: Vec<(u32, String, Option<String>, Option<String>, Option<String>)> = vec![
+            (
+                42,
+                "call-a".to_string(),
+                Some("sess-a".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-a".to_string()),
+            ),
+            (
+                42,
+                "call-b".to_string(),
+                Some("sess-b".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-b".to_string()),
+            ),
+        ];
+
+        let groups = oom_crash_groups_for_pid(42, &pending);
+
+        assert_eq!(groups.len(), 2, "one group per conversation");
+        let by_conv: std::collections::HashMap<Option<String>, Vec<String>> = groups
+            .iter()
+            .map(|(_, _, conversation_id, call_ids)| (conversation_id.clone(), call_ids.clone()))
+            .collect();
+        assert_eq!(by_conv[&Some("conv-a".to_string())], vec!["call-a"]);
+        assert_eq!(by_conv[&Some("conv-b".to_string())], vec!["call-b"]);
+        assert!(
+            groups
+                .iter()
+                .all(|(agent, ..)| agent.as_deref() == Some("OpenClaw")),
+            "every group must keep the pid's agent attribution"
+        );
+    }
+
     // ── Tests for conn_scan_agent_name (agent identity, never a domain) ──
 
     #[test]
@@ -3502,6 +3678,93 @@ mod tests {
         let bytes = pending.estimated_bytes();
         // 1 event × 512 bytes estimate
         assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
+
+    #[test]
+    fn pending_genai_byte_counter_resyncs_on_every_flush_path() {
+        // The counter is a queue invariant: after every drain path it must
+        // equal the sum of the surviving entries' estimates. Pre-fix it only
+        // ever grew (the sole decrement lived in the eviction loop), so the
+        // gauge reported stale values and the eviction gate stayed tripped.
+        let expired_at =
+            std::time::Instant::now() - PENDING_SESSION_TIMEOUT - std::time::Duration::from_secs(1);
+        let pending = |id: &str, pid: u32, at: std::time::Instant| PendingGenAI {
+            events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(id))],
+            response_id: id.to_string(),
+            pid,
+            created_at: at,
+        };
+        let sum_bytes = |queue: &PendingGenAiQueue| -> usize {
+            queue.entries.iter().map(|p| p.estimated_bytes()).sum()
+        };
+
+        // 1) resolve: the expired entry drains, the fresh one stays.
+        let mut queue = PendingGenAiQueue::default();
+        queue.push(pending("resolve-expired", 11, expired_at));
+        queue.push(pending("resolve-fresh", 11, std::time::Instant::now()));
+        let mapper = ResponseSessionMapper::disabled();
+        let drained = queue.resolve(&mapper);
+        assert_eq!(drained.len(), 1, "the expired entry must drain");
+        assert_eq!(queue.len(), 1, "the fresh entry must survive");
+        assert_eq!(queue.bytes, sum_bytes(&queue));
+        assert!(queue.bytes > 0);
+
+        // 2) flush_expired: age the survivor, flush it, counter reaches 0.
+        queue.entries[0].created_at = expired_at;
+        let drained = queue.flush_expired();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes, 0, "counter must reach 0 with the queue");
+
+        // 3) flush_for_pid: the dead pid drains, the other stays.
+        queue.push(pending("dead-pid", 42, std::time::Instant::now()));
+        queue.push(pending("live-pid", 43, std::time::Instant::now()));
+        let exported = queue.flush_for_pid(42);
+        assert_eq!(exported.len(), 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.bytes, sum_bytes(&queue));
+
+        // 4) flush_all: everything drains, counter goes to 0.
+        let exported = queue.flush_all();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.bytes, 0);
+    }
+
+    #[test]
+    fn pending_genai_eviction_keeps_counter_in_sync() {
+        // The count limit evicts oldest-first until the queue is below the
+        // limit, and the counter must match whatever survives.
+        let mut queue = PendingGenAiQueue::default();
+        for i in 0..4 {
+            queue.push(PendingGenAI {
+                events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(&format!(
+                    "evict-{i}"
+                )))],
+                response_id: format!("r{i}"),
+                pid: 1,
+                created_at: std::time::Instant::now(),
+            });
+        }
+        let limits = crate::config::RuntimeLimits {
+            pending_genai_max_count: 2,
+            ..Default::default()
+        };
+        let evicted = queue.enforce_limits(&limits);
+        assert_eq!(
+            evicted.len(),
+            3,
+            "4 entries at count-limit 2 evict down to 1"
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.bytes,
+            queue
+                .entries
+                .iter()
+                .map(|p| p.estimated_bytes())
+                .sum::<usize>()
+        );
     }
 
     // ── Test for exit-time deferred flush (issue #2032) ──
@@ -4021,6 +4284,28 @@ mod tests {
         let got = AgentSight::collect_descendant_pids_impl(1, &dir);
         let mut want = HashSet::new();
         want.extend([1, 2]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_reads_a_status_with_a_non_utf8_name() {
+        // `/proc/<pid>/status` embeds the process name, and the kernel allows
+        // non-UTF-8 bytes in a name. `read_to_string` rejected the whole file,
+        // so that pid and everything below it dropped out of the descendant
+        // set and never entered the traced_processes map.
+        let dir = unique_tmp_dir("non-utf8-name");
+        write_fake_status(&dir, 1, 0);
+        let child_dir = dir.join("2");
+        std::fs::create_dir_all(&child_dir).expect("create fake proc dir");
+        std::fs::write(child_dir.join("status"), b"Name:\tnode\xa0-22\nPPid:\t1\n")
+            .expect("write non-UTF-8 status");
+        write_fake_status(&dir, 3, 2);
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 2, 3]);
         assert_eq!(got, want);
 
         let _ = std::fs::remove_dir_all(&dir);

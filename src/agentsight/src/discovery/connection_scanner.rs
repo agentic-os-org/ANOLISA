@@ -151,28 +151,37 @@ fn resolve_domains(domain_patterns: &[String]) -> IpDomainCache {
 /// the useful view is the netns we share (the host's, under `hostNetwork`). With
 /// no shared netns this finds nothing and the scan simply yields no candidates.
 fn scan_tcp_connections(ip_cache: &IpDomainCache) -> Vec<(u64, IpAddr, u16, String)> {
-    use procfs::net::{TcpState, tcp};
+    use procfs::net::{TcpState, tcp, tcp6};
 
     let mut results = Vec::new();
-    match tcp() {
-        Ok(entries) => {
-            for entry in entries {
-                if entry.state != TcpState::Established {
-                    continue;
-                }
-                let remote_ip = entry.remote_address.ip();
-                if let Some(domain) = ip_cache.get(&remote_ip) {
-                    results.push((
-                        entry.inode,
-                        remote_ip,
-                        entry.remote_address.port(),
-                        domain.clone(),
-                    ));
+    // Both address families. The cache is keyed by `IpAddr`, so an IPv6 rule - a
+    // literal like `::1` or an AAAA-record domain - inserts an IPv6 key that the
+    // IPv4 table alone can never match; the already-running agent would then
+    // never be attached and its LLM traffic would not be captured.
+    // `health::port_detector` already reads both tables for the same reason.
+    let tables: [(&str, procfs::ProcResult<Vec<procfs::net::TcpNetEntry>>); 2] =
+        [("/proc/net/tcp", tcp()), ("/proc/net/tcp6", tcp6())];
+    for (path, table) in tables {
+        match table {
+            Ok(entries) => {
+                for entry in entries {
+                    if entry.state != TcpState::Established {
+                        continue;
+                    }
+                    let remote_ip = entry.remote_address.ip();
+                    if let Some(domain) = ip_cache.get(&remote_ip) {
+                        results.push((
+                            entry.inode,
+                            remote_ip,
+                            entry.remote_address.port(),
+                            domain.clone(),
+                        ));
+                    }
                 }
             }
-        }
-        Err(e) => {
-            log::warn!("Connection scan: failed to read /proc/net/tcp: {e}");
+            Err(e) => {
+                log::warn!("Connection scan: failed to read {path}: {e}");
+            }
         }
     }
     results
@@ -325,6 +334,45 @@ mod tests {
             results.iter().any(|r| r.pid == std::process::id()),
             "expected our pid in scan results, got {:?}",
             results.iter().map(|r| r.pid).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn scan_finds_own_ipv6_localhost_connection() {
+        // The IPv6 twin of the test above. The domain cache is keyed by
+        // `IpAddr`, so a `::1` rule inserts an IPv6 key; reading only
+        // `/proc/net/tcp` leaves that key unreachable and the agent is never
+        // attached even though the connection is established.
+        let https_rules = vec![crate::config::HttpsRule {
+            pattern: "::1".to_string(),
+        }];
+        let agent_scanner = AgentScanner::from_rules(&[], &https_rules);
+        let scanner = ConnectionScanner::new(&agent_scanner);
+
+        let listener = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(listener) => listener,
+            // No IPv6 loopback in this environment: nothing to observe.
+            Err(e) => {
+                eprintln!("skipping: cannot bind [::1]:0 ({e})");
+                return;
+            }
+        };
+        let addr = listener.local_addr().expect("listener addr");
+        let _stream = std::net::TcpStream::connect(addr).expect("connect");
+        let _accepted = listener.accept().expect("accept");
+
+        let results = scanner.scan(&HashSet::new());
+        assert!(
+            results.iter().any(|r| r.pid == std::process::id()),
+            "expected our pid from the IPv6 table, got {:?}",
+            results
+                .iter()
+                .map(|r| (r.pid, r.remote_ip))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            results.iter().any(|r| r.remote_ip.is_ipv6()),
+            "the matched entry must come from the IPv6 table"
         );
     }
 }

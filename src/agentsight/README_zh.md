@@ -235,6 +235,18 @@ agentsight serve --db /path/to/genai_events.db
 
 打开 `http://127.0.0.1:7396` 即可浏览已记录的对话和 Trace。
 
+### Dashboard 开发
+
+如需在不重新构建 Rust 二进制的情况下迭代前端：
+
+```bash
+cd src/agentsight/dashboard
+npm install
+npm run dev          # 在 http://localhost:3004 启动 webpack-dev-server
+```
+
+完成后，运行 `make build-frontend && cargo build --release` 将更新后的 UI 嵌入二进制。
+
 
 ## 快速开始
 

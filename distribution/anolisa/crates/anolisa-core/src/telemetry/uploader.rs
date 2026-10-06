@@ -381,11 +381,16 @@ impl Uploader {
         stored: Option<&FileOffset>,
     ) -> io::Result<Option<(Vec<String>, FileOffset)>> {
         let path = self.jsonl_path(component);
-        let meta = match fs::metadata(&path) {
-            Ok(m) => m,
+        // Bind the stat and the fresh-file read to one open handle, mirroring
+        // the drain below: a rotation can swap the path between a stat and a
+        // (re-)open, which would make the chosen offset/inode describe the
+        // old file while the read returns the new one.
+        let mut handle = match File::open(&path) {
+            Ok(h) => h,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        let meta = handle.metadata()?;
         let cur_inode = inode_of(&meta);
         let cur_len = meta.len();
 
@@ -398,8 +403,20 @@ impl Uploader {
                 if cur_len < o.offset {
                     // Truncated in place → restart from the beginning.
                     0
-                } else {
+                } else if offset_starts_after_newline(&mut handle, o.offset) {
                     o.offset
+                } else {
+                    // Same inode, but the pinned offset lands mid-line. The
+                    // uploader never persists an offset that is not just
+                    // past a newline, so this file is a different
+                    // generation reusing a deleted file's inode: a rotation
+                    // deletes the tailed file right before creating the
+                    // fresh one, and a sequentially-allocating filesystem
+                    // (ext4) hands the freed inode to that fresh file
+                    // (reproduced on a v100 ext4 host). Restart from the
+                    // beginning so the fresh file's head ships instead of
+                    // being silently sliced away.
+                    0
                 }
             }
             Some(o) => {
@@ -410,23 +427,48 @@ impl Uploader {
                 // single oversized POST that would exceed the SLS 10 MB body
                 // limit and retry forever. When the cap is hit the offset stays
                 // on the rotated file so the remainder drains next round.
+                //
+                // The stored offset only applies while the rotated file is
+                // still the one we were tailing. After a double rotation the
+                // offset belongs to a file that is gone; applying it would
+                // slice the wrong rotated file mid-line (and a non-UTF-8
+                // boundary would fail the read every round), so verify the
+                // inode first and drain from the start on mismatch. The
+                // verification and the read share one open handle: statting
+                // the path and reopening would let a rotation swap the file
+                // in between, making the offset/inode describe the old file
+                // while the read returns the new one. Inode equality alone
+                // is still not identity: the deleted file's inode can be
+                // recycled for the new `.jsonl.1`, so the offset must also
+                // land just past a newline in that handle (see
+                // [`offset_starts_after_newline`]).
                 let rotated = self.rotated_path(component);
-                if rotated.exists()
-                    && let Ok((mut residue, res_consumed)) =
-                        read_from(&rotated, o.offset, MAX_LINES_PER_ROUND)
-                {
-                    lines.append(&mut residue);
-                    if lines.len() >= MAX_LINES_PER_ROUND {
-                        // Cap hit: keep the offset on the rotated file so
-                        // the remainder is drained next round instead of
-                        // being skipped.
-                        return Ok(Some((
-                            lines,
-                            FileOffset {
-                                inode: o.inode,
-                                offset: o.offset + res_consumed,
-                            },
-                        )));
+                if let Ok(rotated) = File::open(&rotated) {
+                    let mut rotated = rotated;
+                    let rotated_inode = inode_of(&rotated.metadata()?);
+                    let drain_from = if rotated_inode == o.inode
+                        && offset_starts_after_newline(&mut rotated, o.offset)
+                    {
+                        o.offset
+                    } else {
+                        0
+                    };
+                    if let Ok((mut residue, res_consumed)) =
+                        read_from_handle(rotated, drain_from, MAX_LINES_PER_ROUND)
+                    {
+                        lines.append(&mut residue);
+                        if lines.len() >= MAX_LINES_PER_ROUND {
+                            // Cap hit: keep the offset on the rotated file so
+                            // the remainder is drained next round instead of
+                            // being skipped.
+                            return Ok(Some((
+                                lines,
+                                FileOffset {
+                                    inode: rotated_inode,
+                                    offset: drain_from + res_consumed,
+                                },
+                            )));
+                        }
                     }
                 }
                 0
@@ -437,7 +479,7 @@ impl Uploader {
         // Fresh file: cap the remaining budget so residue + fresh together
         // never exceed MAX_LINES_PER_ROUND in a single POST.
         let remaining_cap = MAX_LINES_PER_ROUND.saturating_sub(lines.len());
-        let (mut fresh, consumed) = read_from(&path, start_offset, remaining_cap)?;
+        let (mut fresh, consumed) = read_from_handle(handle, start_offset, remaining_cap)?;
         lines.append(&mut fresh);
 
         if lines.is_empty() {
@@ -500,6 +542,18 @@ impl Uploader {
             .as_deref()
             .and_then(|_| Identity::read(&self.config.identity_cache_path));
 
+        // A metadata transfer failure in an earlier round must not pin this
+        // round to the fallback region. The latch lives on this client: the
+        // product-type probes (desktop-id, instance/instance-type) run
+        // against it directly, and `resolve_region` clones it — flag
+        // included — for the region probe, so a latched client silences
+        // every later round's probe. The probe is documented as per-round,
+        // so clear the latch first. A non-ECS host pays one bounded curl
+        // attempt per round (the latch still collapses the product-type
+        // key series within a round); an ECS host recovers from a transient
+        // failure on the next round instead of uploading to the wrong
+        // region's project for the daemon's lifetime.
+        self.client.clear_unreachable();
         // Probe the region once per round: detected → internal host; not
         // detected → cn-hangzhou + public host (see `RegionProbe`).
         let (region, use_internal) = self.resolve_region();
@@ -542,12 +596,17 @@ impl Uploader {
                     // forever, and continue with the remaining components.
                     eprintln!("[anolisa] telemetry: logstore `{component}` not found, skipping");
                 }
-                Err(UploaderError::Http { code, .. }) if (400..500).contains(&code) => {
+                Err(UploaderError::Http { code, .. })
+                    if (400..500).contains(&code) && code != 408 && code != 429 =>
+                {
                     // Client error: the request itself is invalid (e.g., malformed
                     // body or unsupported content). Retrying the same payload will
                     // never succeed, so advance the offset to avoid blocking the
                     // pipeline indefinitely. The error is still logged above for
-                    // visibility.
+                    // visibility. 408 Request Timeout and 429 Too Many Requests
+                    // are excluded: per RFC 9110 they are retryable (the server
+                    // invites a repeat, possibly later), so they fall through to
+                    // the retryable arm below and the batch is resent next round.
                     eprintln!(
                         "[anolisa] telemetry: logstore `{component}` rejected request with HTTP {code}, skipping"
                     );
@@ -649,16 +708,27 @@ fn unix_now() -> u64 {
 /// consumed (up to and including the last newline). A trailing partial line
 /// is left for the next round.
 ///
-/// `max_lines` bounds the number of returned lines (`0` means unlimited).
-/// Use this to cap a single PutWebtracking request when a file grows fast.
-///
-/// Reads line-by-line via a `BufReader` so a large file does not have to be
-/// fully loaded into memory before `max_lines` takes effect.
+/// Path-based convenience kept for the direct unit tests below: production
+/// code opens each file exactly once and reads through that handle (see
+/// `collect_component`), so the stat, the offset choice, and the read all
+/// describe the same inode.
+#[cfg(test)]
 fn read_from(path: &Path, offset: u64, max_lines: usize) -> io::Result<(Vec<String>, u64)> {
+    let f = File::open(path)?;
+    read_from_handle(f, offset, max_lines)
+}
+
+/// Handle-based counterpart of [`read_from`]: the caller opens the file and
+/// supplies the metadata used to pick `offset`, so both refer to the same
+/// inode even if the path is swapped underneath (e.g. by logrotate).
+fn read_from_handle(
+    mut file: File,
+    offset: u64,
+    max_lines: usize,
+) -> io::Result<(Vec<String>, u64)> {
     use std::io::{BufRead, BufReader};
-    let mut f = File::open(path)?;
-    f.seek(SeekFrom::Start(offset))?;
-    let mut reader = BufReader::new(f);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
 
     let mut lines = Vec::new();
     let mut consumed: u64 = 0;
@@ -686,6 +756,37 @@ fn read_from(path: &Path, offset: u64, max_lines: usize) -> io::Result<(Vec<Stri
     Ok((lines, consumed))
 }
 
+/// Whether `offset` in `file` points just past a newline byte.
+///
+/// The uploader only persists offsets at complete-line boundaries — an
+/// offset advances only after a `'\n'`-terminated line was consumed — so a
+/// stored offset that lands mid-line cannot have been recorded for this
+/// file. Inode equality alone cannot prove file identity: a rotation
+/// deletes the tailed file immediately before the fresh file is created,
+/// and a sequentially-allocating filesystem (ext4) can hand the freed
+/// inode to that fresh file, routing a stale offset through the
+/// same-inode branch (reproduced on a v100 ext4 host, where only the
+/// mid-line tail of the fresh file ever shipped). A mid-line landing is
+/// the fingerprint of such a recycled inode; returning `false` tells the
+/// caller to restart from the beginning of the file.
+///
+/// The check cannot fire on a legitimately-tailed file (every persisted
+/// offset sits just past a `'\n'` of that same inode), so it never
+/// discards a valid position; its only blind spot is a recycled file that
+/// coincidentally holds a newline exactly at the stale byte, where the
+/// stale offset is applied as before — the same outcome as without this
+/// guard, and far cheaper than widening the offsets cache with content
+/// fingerprints.
+fn offset_starts_after_newline(file: &mut File, offset: u64) -> bool {
+    use std::io::Read;
+    if offset == 0 {
+        return true;
+    }
+    let mut one = [0u8; 1];
+    file.seek(SeekFrom::Start(offset - 1)).is_ok()
+        && matches!(file.read(&mut one), Ok(1) if one[0] == b'\n')
+}
+
 #[cfg(unix)]
 fn inode_of(meta: &fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
@@ -695,6 +796,24 @@ fn inode_of(meta: &fs::Metadata) -> u64 {
 #[cfg(not(unix))]
 fn inode_of(_meta: &fs::Metadata) -> u64 {
     0
+}
+
+#[cfg(test)]
+/// An inode value guaranteed different from every live inode in `avoid`.
+///
+/// Test-only derivation for offsets that must describe a file that no
+/// longer exists: filesystems allocate inodes sequentially, so a fixed or
+/// single-inode-derived constant can collide with a file the test (or the
+/// code under test) keeps alive, silently routing the test through the
+/// wrong branch. Starting past the maximum of all real inodes and bumping
+/// over any collision makes the mismatch deterministic regardless of how
+/// the runner's filesystem allocates.
+fn inode_distinct_from(avoid: &[u64]) -> u64 {
+    let mut candidate = avoid.iter().copied().max().unwrap_or(0).wrapping_add(1);
+    while avoid.contains(&candidate) {
+        candidate = candidate.wrapping_add(1);
+    }
+    candidate
 }
 
 // ── Signal handling (unix) ───────────────────────────────────────────
@@ -907,6 +1026,10 @@ mod tests {
     }
 
     fn test_uploader(dir: &TempDir) -> Uploader {
+        test_uploader_with_metadata(dir, "http://127.0.0.1:19999/no-such-endpoint")
+    }
+
+    fn test_uploader_with_metadata(dir: &TempDir, metadata_url: &str) -> Uploader {
         let ops = dir.path().join("ops");
         fs::create_dir_all(&ops).unwrap();
         Uploader::new(UploaderConfig {
@@ -917,7 +1040,7 @@ mod tests {
             release_path: dir.path().join("anolisa-release"),
             disable_marker_path: dir.path().join(".telemetry_disabled"),
             identity_cache_path: dir.path().join("identity.json"),
-            metadata_url: "http://127.0.0.1:19999/no-such-endpoint".to_string(),
+            metadata_url: metadata_url.to_string(),
             endpoint: test_endpoint("anon"),
             sleep_secs: 1,
             topic: "topic".to_string(),
@@ -1078,6 +1201,73 @@ mod tests {
     }
 
     #[test]
+    fn test_run_once_reprobes_region_after_a_failed_round() {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            crate::telemetry::metadata::with_metadata_script(
+                // Round 1: exactly ONE connection is dropped — the region
+                // probe, which runs on a clone of the uploader's client.
+                // The transfer failure latches the shared flag, so the
+                // product-type desktop-id / instance-type probes (on the
+                // uploader's own client) short-circuit without connecting;
+                // the strict scripted server below fails if any second
+                // connection arrives before the next round clears the
+                // latch. Round 2 re-probes all keys: the scripted
+                // responses are consumed in order.
+                &["region-id"],
+                &[
+                    ("region-id", 200, "cn-beijing\n"),
+                    ("desktop-id", 404, "missing\n"),
+                    ("instance/instance-type", 404, "missing\n"),
+                ],
+                |base| {
+                    let dir = TempDir::new().unwrap();
+                    let up = test_uploader_with_metadata(&dir, &format!("{base}/region-id"));
+                    write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+
+                    let mut urls: Vec<String> = Vec::new();
+                    up.run_once_with_post(|url, _| {
+                        urls.push(url.to_string());
+                        Ok(())
+                    })
+                    .unwrap();
+
+                    write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n{\"b\":2}\n");
+                    up.run_once_with_post(|url, body| {
+                        urls.push(url.to_string());
+                        assert!(
+                            body.contains("\"region\":\"cn-beijing\""),
+                            "round 2 must carry the detected region: {body}"
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+
+                    assert_eq!(urls.len(), 2);
+                    // Round 1 hit metadata transfer failures: the fallback
+                    // public host in cn-hangzhou is correct for that round.
+                    assert!(
+                        urls[0].starts_with(
+                            "https://anon-proj-cn-hangzhou.cn-hangzhou.log.aliyuncs.com"
+                        ),
+                        "round 1 (transfer failure) uses the fallback public host: {}",
+                        urls[0]
+                    );
+                    // Round 2 re-probes and recovers: without the per-round
+                    // latch reset, the latched client kept every later round
+                    // on the cn-hangzhou public host for the daemon's life.
+                    assert!(
+                        urls[1].starts_with(
+                            "https://anon-proj-cn-beijing.cn-beijing-internal.log.aliyuncs.com"
+                        ),
+                        "round 2 must use the detected internal host: {}",
+                        urls[1]
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
     fn test_run_once_checkpoints_before_next_upload() {
         for code in [200, 404, 400] {
             let dir = TempDir::new().unwrap();
@@ -1181,6 +1371,42 @@ mod tests {
     }
 
     #[test]
+    fn test_run_once_retries_http_408_429_instead_of_dropping() {
+        // 408 Request Timeout and 429 Too Many Requests are retryable per
+        // RFC 9110: the offset must stay put so the buffered batch is resent
+        // next round instead of being silently dropped.
+        for code in [408, 429] {
+            let dir = TempDir::new().unwrap();
+            let up = test_uploader(&dir);
+            write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+
+            let result = up.run_once_with_post(|_, _| {
+                Err(UploaderError::Http {
+                    code,
+                    url: "https://example.invalid/track".to_string(),
+                })
+            });
+            assert!(matches!(result,
+                Err(UploaderError::Http { code: c, .. }) if c == code));
+            // Retryable: no offset was recorded, so nothing was consumed.
+            assert!(up.load_offsets().is_empty());
+        }
+
+        // Positive control: a genuinely permanent 400 still advances.
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+        up.run_once_with_post(|_, _| {
+            Err(UploaderError::Http {
+                code: 400,
+                url: "https://example.invalid/track".to_string(),
+            })
+        })
+        .unwrap();
+        assert_eq!(up.load_offsets().len(), 1);
+    }
+
+    #[test]
     fn test_run_once_stops_on_checkpoint_failure() {
         let dir = TempDir::new().unwrap();
         let mut up = test_uploader(&dir);
@@ -1253,6 +1479,273 @@ mod tests {
         // New offset tracks the fresh file's inode + consumed bytes.
         assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
         assert_eq!(off.offset, 8);
+    }
+
+    #[test]
+    fn test_collect_component_residue_inode_mismatch_drains_from_start() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+
+        // The stored offset refers to a rotated file that has since been
+        // rotated away again (double rotation): the `.jsonl.1` present now
+        // has a different inode, so the stale byte offset must not be
+        // applied to it.
+        write_lines(&up.rotated_path("cosh"), "{\"a\":1}\n{\"b\":2}\n");
+        write_lines(&path, "{\"c\":3}\n");
+        // A third file kept alive for the whole test: it stands in for any
+        // extra temp file the surrounding code may create alongside the
+        // pair (e.g. offsets.json or its atomic-rename temp), and its real
+        // inode is excluded below.
+        let third = dir.path().join("third-witness.tmp");
+        write_lines(&third, "");
+        // The fabricated inode must differ from BOTH real inodes: it must
+        // not match the rotated file (else the stale offset is applied) nor
+        // the fresh active file (filesystems allocate sequentially, so
+        // rotated + 1 can be exactly the fresh inode and take the
+        // current-file branch instead). Deriving it from all live inodes
+        // keeps the mismatch branch taken regardless of allocation.
+        let stored = FileOffset {
+            inode: inode_distinct_from(&[
+                inode_of(&fs::metadata(up.rotated_path("cosh")).unwrap()),
+                inode_of(&fs::metadata(&path).unwrap()),
+                inode_of(&fs::metadata(&third).unwrap()),
+            ]),
+            offset: 5,
+        };
+
+        let (lines, off) = up
+            .collect_component("cosh", Some(&stored))
+            .unwrap()
+            .unwrap();
+        // Applying the stale offset would slice the rotated file mid-line
+        // (first line "1}"); the mismatch must drain from the start instead.
+        assert_eq!(
+            lines,
+            vec![
+                "{\"a\":1}".to_string(),
+                "{\"b\":2}".to_string(),
+                "{\"c\":3}".to_string()
+            ]
+        );
+        assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(off.offset, 8);
+    }
+
+    #[test]
+    fn test_rotated_drain_binds_stat_and_read_to_one_handle() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let rotated = up.rotated_path("cosh");
+        write_lines(&rotated, "{\"old\":1}\n");
+
+        // The exact production sequence from collect_component: open once,
+        // stat the handle, then read through the same handle. Swapping the
+        // path underneath (the logrotate window between a path stat and a
+        // path re-open) must not change what the metadata described or what
+        // the read returns.
+        let handle = File::open(&rotated).unwrap();
+        let stat_inode = inode_of(&handle.metadata().unwrap());
+
+        fs::rename(&rotated, dir.path().join("swapped-out")).unwrap();
+        write_lines(&rotated, "{\"new\":1}\n");
+
+        let (lines, consumed) = read_from_handle(handle, 0, 0).unwrap();
+        // The read still serves the file the stat described...
+        assert_eq!(lines, vec!["{\"old\":1}".to_string()]);
+        assert_eq!(consumed, "{\"old\":1}\n".len() as u64);
+        // ...and the new tenant of the path is a different file, so a
+        // persisted {stat_inode, offset} can never be mistaken for it.
+        assert_ne!(stat_inode, inode_of(&fs::metadata(&rotated).unwrap()));
+    }
+
+    #[test]
+    fn test_collect_component_residue_cap_survives_rotated_swap() {
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let rotated = up.rotated_path("cosh");
+
+        // More residue than one round drains: the continuation offset must
+        // describe the file that was actually drained, never the path's next
+        // tenant.
+        let mut residue = String::new();
+        for i in 0..MAX_LINES_PER_ROUND {
+            residue.push_str(&format!("{{\"old\":{i}}}\n"));
+        }
+        residue.push_str("{\"tail\":1}\n");
+        write_lines(&rotated, &residue);
+        write_lines(&path, "{\"fresh\":1}\n");
+        let stored = FileOffset {
+            inode: inode_of(&fs::metadata(&rotated).unwrap()),
+            offset: 0,
+        };
+
+        let (lines, cont) = up
+            .collect_component("cosh", Some(&stored))
+            .unwrap()
+            .unwrap();
+        assert_eq!(lines.len(), MAX_LINES_PER_ROUND);
+        assert_eq!(lines[0], "{\"old\":0}".to_string());
+        assert_eq!(cont.inode, stored.inode);
+        assert_eq!(
+            cont.offset,
+            residue.len() as u64 - "{\"tail\":1}\n".len() as u64
+        );
+
+        // logrotate swaps the rotated path before the next round: the
+        // continuation offset must not be applied to the new file.
+        fs::rename(&rotated, dir.path().join("gone.1")).unwrap();
+        write_lines(&rotated, "{\"new\":1}\n{\"new\":2}\n");
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"fresh\":2}\n").unwrap();
+
+        let (lines2, off2) = up.collect_component("cosh", Some(&cont)).unwrap().unwrap();
+        // New rotated file drains from the start; the fresh file restarts
+        // from 0 because round 1 hit the cap before draining it.
+        assert_eq!(
+            lines2,
+            vec![
+                "{\"new\":1}".to_string(),
+                "{\"new\":2}".to_string(),
+                "{\"fresh\":1}".to_string(),
+                "{\"fresh\":2}".to_string(),
+            ]
+        );
+        assert_eq!(off2.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(off2.offset, 24);
+    }
+
+    #[test]
+    fn retry_pinned_offset_slices_wrong_rotated_file() {
+        // A double rotation while a retryable failure pins the offset
+        // leaves the pinned offset describing a deleted file. On a
+        // sequentially-allocating filesystem (ext4, per the v100
+        // reproduction) the deleted file's inode is recycled for the new
+        // `.jsonl.1`, so the drain's inode check alone cannot tell the
+        // files apart and the pinned byte offset slices the new rotated
+        // file mid-line: its first line never ships intact. Inode reuse is
+        // not deterministically reproducible on every filesystem, so the
+        // post-recycling offsets.json is modeled directly (the pinned byte
+        // offset is kept, its inode re-pointed at the file that received
+        // the recycled inode).
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let rotated = up.rotated_path("cosh");
+
+        // Round 1 ships file A's only line; the offset pins at its length.
+        write_lines(&path, "{\"a\":1}\n");
+        up.run_once_with_post(|_, _| Ok(())).unwrap();
+        let pinned = up.load_offsets()["cosh"].clone();
+        assert_eq!(pinned.offset, 8);
+
+        // A retryable server failure (503 — 408/429 are not yet carved out
+        // as retryable on this branch's base) keeps the offset pinned
+        // while more data lands in A and the two rotations happen
+        // underneath it.
+        let mut a = OpenOptions::new().append(true).open(&path).unwrap();
+        a.write_all(b"{\"a\":2}\n").unwrap();
+        up.run_once_with_post(|_, _| {
+            Err(UploaderError::Http {
+                code: 503,
+                url: "https://example.invalid/track".to_string(),
+            })
+        })
+        .unwrap_err();
+        assert_eq!(up.load_offsets()["cosh"], pinned);
+
+        // Double rotation: A → .jsonl.1 → deleted, B → .jsonl.1, C active.
+        fs::rename(&path, &rotated).unwrap();
+        write_lines(&path, "{\"v\":\"b1\"}\n{\"v\":\"b2\"}\n");
+        let graveyard = dir.path().join("cosh.jsonl.2");
+        fs::rename(&rotated, &graveyard).unwrap();
+        fs::rename(&path, &rotated).unwrap();
+        fs::remove_file(&graveyard).unwrap();
+        write_lines(&path, "{\"v\":\"c1\"}\n");
+
+        // A's inode was recycled for the new .jsonl.1 (B): the pinned
+        // offset now claims B's inode at A's byte position.
+        let mut offsets = up.load_offsets();
+        offsets.insert(
+            "cosh".to_string(),
+            FileOffset {
+                inode: inode_of(&fs::metadata(&rotated).unwrap()),
+                offset: pinned.offset,
+            },
+        );
+        up.save_offsets(&offsets).unwrap();
+
+        // The next round must ship B whole — b1 included — plus C, with no
+        // mid-line fragment. Applying the pinned offset would ship
+        // [{raw:"\"}"},{v:"b2"},{v:"c1"}] and never ship b1.
+        let mut bodies = Vec::new();
+        up.run_once_with_post(|_, body| {
+            bodies.push(body.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let logs = parsed["__logs__"].as_array().unwrap();
+        let shipped: Vec<String> = logs
+            .iter()
+            .map(|log| match log.get("v").and_then(Value::as_str) {
+                Some(v) => v.to_string(),
+                None => format!("raw:{}", log["raw"].as_str().unwrap_or("?")),
+            })
+            .collect();
+        assert_eq!(shipped, vec!["b1", "b2", "c1"]);
+    }
+
+    #[test]
+    fn retry_pinned_offset_slices_recycled_active_file() {
+        // The same-file flavor observed on v100: the deleted A's inode was
+        // recycled for the NEW ACTIVE file, so the pinned offset routes
+        // through the same-inode branch and only the mid-line tail of the
+        // fresh file would ship (the head before the pinned byte is never
+        // read). The recycled state is modeled directly, as above.
+        let dir = TempDir::new().unwrap();
+        let up = test_uploader(&dir);
+        let path = up.jsonl_path("cosh");
+        let rotated = up.rotated_path("cosh");
+
+        // Round 1 ships A and pins the offset at 8.
+        write_lines(&path, "{\"a\":1}\n");
+        up.run_once_with_post(|_, _| Ok(())).unwrap();
+        let pinned = up.load_offsets()["cosh"].clone();
+        assert_eq!(pinned.offset, 8);
+
+        // Double rotation underneath the pinned offset: A → deleted, the
+        // quiet middle generation B → .jsonl.1, fresh active C long enough
+        // to reach past the pinned byte.
+        fs::rename(&path, &rotated).unwrap();
+        write_lines(&path, "");
+        let graveyard = dir.path().join("cosh.jsonl.2");
+        fs::rename(&rotated, &graveyard).unwrap();
+        fs::rename(&path, &rotated).unwrap();
+        fs::remove_file(&graveyard).unwrap();
+        write_lines(&path, "{\"v\":\"c1\"}\n{\"v\":\"c2\"}\n");
+
+        // A's inode was recycled for the new active file C.
+        let stored = FileOffset {
+            inode: inode_of(&fs::metadata(&path).unwrap()),
+            offset: pinned.offset,
+        };
+
+        // The pinned offset must not be applied to C: C must ship whole
+        // from its beginning. Applying it would slice C at byte 8 and
+        // upload only [{raw:"\"}"},{v:"c2"}].
+        let (lines, off) = up
+            .collect_component("cosh", Some(&stored))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lines,
+            vec!["{\"v\":\"c1\"}".to_string(), "{\"v\":\"c2\"}".to_string()]
+        );
+        assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
+        assert_eq!(off.offset, 22);
     }
 
     #[test]

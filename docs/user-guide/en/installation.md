@@ -114,6 +114,7 @@ anolisa install <component>
 | `agent-memory` | MCP-based persistent memory | user, system |
 | `agentsight` | eBPF tracing and dashboard | **system** |
 | `sec-core` | Local security runtime, scanners, and adapters | **system** |
+| `ktuner` | Deterministic kernel-tuning engine for agents | **system** (RPM, Linux x86_64) |
 
 > **Note**: System-only components require `sudo` and an explicit system scope:
 > ```bash

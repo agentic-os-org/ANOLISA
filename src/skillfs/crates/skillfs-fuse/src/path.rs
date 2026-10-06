@@ -93,8 +93,10 @@ pub enum PathType {
         skill_name: String,
         relative_path: PathBuf,
     },
-    /// Hermes management top-level entry (`.hub`, `.bundled_manifest`,
-    /// `.no-bundled-skills`). Physical passthrough, not a skill.
+    /// Top-level non-skill passthrough in Hermes layout: a management entry
+    /// (`.hub`, `.bundled_manifest`, `.no-bundled-skills`) or, in an in-place
+    /// mount, any other top-level entry that is not a directory (e.g.
+    /// `README.md`, `.gitignore`). Physical passthrough, not a skill.
     HermesMeta { name: String },
     /// Child path under a Hermes management entry
     /// (e.g. `.hub/some/file`).
