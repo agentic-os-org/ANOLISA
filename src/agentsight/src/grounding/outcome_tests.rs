@@ -240,6 +240,53 @@ fn bracket_probe_is_expected() {
 }
 
 #[test]
+fn redirected_probe_is_still_expected() {
+    // `2>&1`, `>&2` and `&>` are redirections, not chains. Splitting on the raw
+    // `&` left a stray segment ("1") whose head is not a probe command, so a
+    // probe whose non-zero exit is the answer was graded as a real failure.
+    for command in [
+        "ls /nope 2>&1",
+        "ls /nope >/dev/null 2>&1",
+        "pgrep -f agent &>/dev/null",
+        "ls /nope 1>&2",
+    ] {
+        let v = classify(
+            &bash_call(command),
+            "ls: cannot access '/nope': No such file or directory\nExit code 2",
+        );
+        assert_eq!(
+            v.status,
+            CallStatus::OkProbe,
+            "{command} graded as {} ({:?})",
+            v.matched_rule,
+            v.status
+        );
+        assert_eq!(v.matched_rule, "B3", "{command}");
+    }
+}
+
+#[test]
+fn backgrounded_probe_chain_with_a_real_command_is_not_a_probe() {
+    // A bare `&` still separates: the second command is real work, so a
+    // non-zero exit may be its failure.
+    let v = classify(
+        &bash_call("ls /nope & cat /etc/missing"),
+        "cat: /etc/missing: No such file or directory\nExit code 1",
+    );
+    assert_eq!(v.status, CallStatus::Failed);
+}
+
+#[test]
+fn redirection_before_a_real_command_still_splits() {
+    // Tolerating the redirection must not swallow the separator that follows it.
+    let v = classify(
+        &bash_call("ls /nope 2>&1 && rm -rf /tmp/cache"),
+        "rm: cannot remove '/tmp/cache': No such file or directory\nExit code 1",
+    );
+    assert_eq!(v.status, CallStatus::Failed);
+}
+
+#[test]
 fn multiline_command_with_a_real_segment_is_not_a_probe() {
     // Newlines chain commands exactly like `;` and `&&` do. Splitting only on
     // the ASCII separators judged the whole script by its first line's head,

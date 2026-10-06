@@ -419,15 +419,7 @@ fn is_probe(call: &ToolCall) -> bool {
     let Some(command) = command_of(call) else {
         return false;
     };
-    // `&&`, `||`, `;` and `|` are all built from these three characters, and a
-    // newline chains commands the same way they do, so splitting per character
-    // and dropping empty pieces covers every separator without needing a
-    // multi-string pattern.
-    let segments: Vec<&str> = command
-        .split([';', '|', '&', '\n'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments = command_segments(command);
     !segments.is_empty()
         && segments.iter().all(|segment| {
             segment
@@ -439,6 +431,47 @@ fn is_probe(call: &ToolCall) -> bool {
                 })
                 .unwrap_or(false)
         })
+}
+
+/// Shell command separators, unrolled into the segments they delimit.
+///
+/// `;`, `|`, `&&`, `||` and a newline chain commands, and so does a bare `&`.
+/// The character `&` on its own is *not* enough to split on, though: inside
+/// `2>&1`, `1>&2`, `&>` and `>&` it belongs to a redirection, which describes
+/// where a stream goes rather than where the next command starts. Splitting per
+/// character turned `ls /nope 2>&1` into `["ls /nope 2>", "1"]`, and the stray
+/// `1` — whose head is not a probe command — made a probe whose non-zero exit
+/// *is* the answer get graded as a real failure.
+fn command_segments(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let separator_len = match bytes[i] {
+            b'\n' | b';' | b'|' => 1,
+            b'&' => match bytes.get(i + 1) {
+                // `&>` / `&>>` redirect stdout and stderr.
+                Some(b'>') => 0,
+                Some(b'&') => 2,
+                // `<&`/`>&` duplication, written `>&2` or `2>&1`: the `&`
+                // follows the `>` that opened the redirection.
+                _ if i > 0 && bytes[i - 1] == b'>' => 0,
+                _ => 1,
+            },
+            _ => 0,
+        };
+        if separator_len == 0 {
+            i += 1;
+            continue;
+        }
+        segments.push(command[start..i].trim());
+        i += separator_len;
+        start = i;
+    }
+    segments.push(command[start..].trim());
+    segments.retain(|segment| !segment.is_empty());
+    segments
 }
 
 /// Shell command carried by a call, when it has one.
