@@ -1444,7 +1444,11 @@ pub fn run_client(
     // observes the freshly published generation and refuses, or it runs
     // entirely before this mount (review of this PR). The lock is released
     // before the readiness wait, and the failure-path teardown below takes
-    // it again itself.
+    // it again itself. A failed identity publication surfaces as
+    // `publish_error` after the section: its teardown takes the instance
+    // lock for its final re-verify, so it must not run inside the section
+    // that still holds that lock (review of this PR).
+    let mut publish_error: Option<Box<dyn Error>> = None;
     {
         let _instance_lock = acquire_instance_lock(&paths.state)?;
         if check_incumbent(&paths, &normalized)? {
@@ -1513,6 +1517,13 @@ pub fn run_client(
         // unreaped, so its pid cannot have been reused and the captured
         // identity is exact; the supervisor skips its own rewrite when the
         // record already is its identity (see `run_supervisor`).
+        //
+        // Publication outcome. `Some(error)` means the mount must fail: the
+        // failure teardown is recorded here and only acted on AFTER this
+        // critical section — it needs the instance lock again, and a second
+        // blocking `flock` from inside the section that still holds it would
+        // wait on itself forever (review of this PR).
+        let mut supervisor_handshake = Some(supervisor_handshake);
         match ProcessIdentity::capture(supervisor_child.id() as i32) {
             Some(identity) => {
                 if let Err(error) = write_pid_identity(&paths.supervisor_pid, &identity) {
@@ -1522,19 +1533,12 @@ pub fn run_client(
                     // the mount — releasing the lock here over a running,
                     // unrecorded supervisor is exactly the spawn/publish race
                     // the handshake closes.
-                    drop(supervisor_handshake);
+                    drop(supervisor_handshake.take());
                     wait_child_exit(
                         &mut supervisor_child,
                         Duration::from_millis(HANDSHAKE_EXIT_BUDGET_MS),
                     );
-                    if let Err(e) = teardown_instance(&paths, &normalized) {
-                        warn!(error = %e, "failed to clean up after the supervisor identity publication failure");
-                    }
-                    return Err(format!(
-                        "failed to publish supervisor identity: {error}; the startup \
-                         supervisor was stopped before it could serve"
-                    )
-                    .into());
+                    publish_error = Some(error);
                 }
             }
             None => {
@@ -1547,15 +1551,38 @@ pub fn run_client(
             }
         }
 
-        // The identity is durably on disk: the child may serve now (review
-        // of this PR).
-        supervisor_handshake.release();
+        // The identity is durably on disk (or its bare-pid fallback, which
+        // holds the slot against concurrent mounts while the pid lives): the
+        // child may serve now (review of this PR).
+        if let Some(handshake) = supervisor_handshake.as_ref() {
+            handshake.release();
+        }
 
         // Test-only: park before the critical section ends so a test can
         // observe the published supervisor identity while the instance lock
         // is still held (and serialize a second real client behind it).
         #[cfg(test)]
         hold_at_publish();
+    }
+
+    // The identity publication failed. The handshake EOF above already ended
+    // the parked supervisor; tear the half-started instance down here — after
+    // the critical section released the instance lock, because this teardown
+    // takes that lock for its final re-verify and cleanup, and calling it
+    // inside the still-holding section deadlocked the client on its own
+    // flock (review of this PR).
+    if let Some(error) = publish_error {
+        if let Err(e) = teardown_instance(&paths, &normalized) {
+            warn!(
+                error = %e,
+                "failed to clean up after the supervisor identity publication failure"
+            );
+        }
+        return Err(format!(
+            "failed to publish supervisor identity: {error}; the startup \
+             supervisor was stopped before it could serve"
+        )
+        .into());
     }
 
     // Wait for readiness.
@@ -1707,6 +1734,45 @@ impl Drop for SupervisorHandshake {
     }
 }
 
+/// Hand the startup pipe to the exec'ing supervisor child (review of this
+/// PR): when this returns, the child must hold the pipe's read end exactly
+/// once, on [`SUPERVISOR_HANDSHAKE_FD`], and no handle at all on the write
+/// end — otherwise the child's first read could never observe the client's
+/// death as EOF. Runs between `fork` and `exec`; only async-signal-safe
+/// calls belong here.
+///
+/// The `read_fd == SUPERVISOR_HANDSHAKE_FD` case is the rule, not the
+/// exception: `pipe(2)` allocates the lowest free descriptors and a lean
+/// mount client keeps fd 3 free, so the read end regularly lands on fd 3
+/// itself — where `dup2(3, 3)` is a documented no-op. The unconditional
+/// `close(read_fd)` this hand-off used to perform after the dup2 then
+/// destroyed the child's only handle on the pipe: the supervisor exec'd
+/// with no fd 3, `await_publish_handshake` found EBADF and served
+/// unguarded, and the spawn/publish barrier was silently disarmed in
+/// exactly the production fd layout the in-process tests — with their
+/// busier fd tables, where `pipe()` never returns 3 — never exercise
+/// (review of this PR).
+fn hand_handshake_pipe_to_child(
+    read_fd: libc::c_int,
+    write_fd: libc::c_int,
+) -> Result<(), std::io::Error> {
+    // SAFETY: runs between fork and exec in the supervisor child; every call
+    // below is async-signal-safe, and fd numbers are validated above.
+    unsafe {
+        // The write end must never survive into the supervisor, or a later
+        // close/drop on the client side would not produce the EOF that means
+        // "client lost".
+        let _ = libc::close(write_fd);
+        if read_fd != SUPERVISOR_HANDSHAKE_FD {
+            if libc::dup2(read_fd, SUPERVISOR_HANDSHAKE_FD) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let _ = libc::close(read_fd);
+        }
+    }
+    Ok(())
+}
+
 /// Spawn the supervisor detached in its own session so a restart of the
 /// caller's process group does not tear it down.
 ///
@@ -1724,6 +1790,21 @@ fn spawn_supervisor(
 ) -> Result<(std::process::Child, SupervisorHandshake), Box<dyn Error>> {
     use std::os::unix::process::CommandExt;
 
+    // Open the supervisor log before the pipe is created: an open failure
+    // must not leak the two pipe fds this function would otherwise already
+    // hold.
+    let sup_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.supervisor_log)
+        .map_err(|e| {
+            format!(
+                "failed to open supervisor log '{}': {e}",
+                paths.supervisor_log.display()
+            )
+        })?;
+    let sup_log_err = sup_log.try_clone()?;
+
     // The startup handshake pipe (review of this PR): the child parks on its
     // first read of fd 3 until the parent published its identity — or sees
     // EOF when the parent died or failed to publish, and exits then without
@@ -1738,18 +1819,6 @@ fn spawn_supervisor(
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
 
-    let sup_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&paths.supervisor_log)
-        .map_err(|e| {
-            format!(
-                "failed to open supervisor log '{}': {e}",
-                paths.supervisor_log.display()
-            )
-        })?;
-    let sup_log_err = sup_log.try_clone()?;
-
     let mut cmd = std::process::Command::new(supervisor_child_program(program));
     cmd.arg("supervise")
         .arg("--instance")
@@ -1759,18 +1828,12 @@ fn spawn_supervisor(
         .stderr(std::process::Stdio::from(sup_log_err));
 
     // Detach: new session + new process group, no controlling terminal. The
-    // handshake read end is dup'ed onto the reserved fd first and both
-    // original pipe fds are closed in the child, so the child exec's with
-    // exactly one handle on the pipe: fd 3.
+    // handshake hand-off runs first, so the child exec's with exactly one
+    // handle on the pipe: its read end, on fd 3 — even when the read end
+    // already started out on fd 3 (see
+    // [`hand_handshake_pipe_to_child`]).
     unsafe {
-        cmd.pre_exec(move || {
-            if libc::dup2(read_fd, SUPERVISOR_HANDSHAKE_FD) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let _ = libc::close(read_fd);
-            let _ = libc::close(write_fd);
-            Ok(())
-        });
+        cmd.pre_exec(move || hand_handshake_pipe_to_child(read_fd, write_fd));
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
@@ -3788,6 +3851,264 @@ mod tests {
         assert_ne!(
             published.pid, orphan,
             "the published record must name the second client's supervisor"
+        );
+    }
+
+    #[test]
+    fn hand_off_keeps_the_fifo_when_the_pipe_read_end_is_already_fd3() {
+        // The handshake only protects the spawn/publish window if the
+        // supervisor execs with the FIFO on SUPERVISOR_HANDSHAKE_FD and no
+        // second handle on the pipe. `pipe(2)` hands out the lowest free
+        // descriptors, and a lean mount client keeps fd 3 free, so the read
+        // end regularly lands on fd 3 itself — where `dup2(3, 3)` is a
+        // no-op, and a hand-off that closes `read_fd` afterwards destroys
+        // the child's only handle on the pipe: the supervisor execs with no
+        // fd 3, `await_publish_handshake` reads EBADF and serves unguarded,
+        // and the barrier is silently disarmed in exactly the production fd
+        // layout no in-process test can see (this harness keeps fd 3 busy,
+        // so `pipe()` never returns 3 here). This probe forks, rebuilds the
+        // lean client's child-side fd table (0,1,2 = /dev/null, the
+        // handshake pipe at [3,4], nothing else), runs the real child-side
+        // hand-off, and reports what fd 3 became.
+        const STATUS_READ: libc::c_int = 9;
+        const STATUS_WRITE: libc::c_int = 10;
+
+        let mut status_pipe: [libc::c_int; 2] = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe(status_pipe.as_mut_ptr()) },
+            0,
+            "the probe status pipe must be created"
+        );
+        let (status_read, status_write) = (status_pipe[0], status_pipe[1]);
+        let mut handshake_pipe: [libc::c_int; 2] = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe(handshake_pipe.as_mut_ptr()) },
+            0,
+            "the probe handshake pipe must be created"
+        );
+        let (handshake_read, handshake_write) = (handshake_pipe[0], handshake_pipe[1]);
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            unsafe {
+                // Child: rebuild the lean client's fd table, run the real
+                // production hand-off, report the outcome. From fork to
+                // _exit only async-signal-safe calls.
+                libc::dup2(status_read, STATUS_READ);
+                libc::dup2(status_write, STATUS_WRITE);
+                // The handshake ends move to [3,4] whatever they started on.
+                libc::dup2(handshake_read, SUPERVISOR_HANDSHAKE_FD);
+                libc::dup2(handshake_write, 4);
+                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                libc::dup2(devnull, 0);
+                libc::dup2(devnull, 1);
+                libc::dup2(devnull, 2);
+                for fd in 0..STATUS_READ {
+                    if fd != SUPERVISOR_HANDSHAKE_FD
+                        && fd != 4
+                        && fd != 0
+                        && fd != 1
+                        && fd != 2
+                        && fd != STATUS_READ
+                        && fd != STATUS_WRITE
+                    {
+                        libc::close(fd);
+                    }
+                }
+
+                // The production child-side hand-off under test: with the
+                // read end already on fd 3, it must keep the FIFO there and
+                // only close the write end.
+                let handed = hand_handshake_pipe_to_child(SUPERVISOR_HANDSHAKE_FD, 4).is_ok();
+                let mut stat: libc::stat = std::mem::zeroed();
+                let fifo = libc::fstat(SUPERVISOR_HANDSHAKE_FD, &mut stat) == 0
+                    && stat.st_mode & libc::S_IFMT == libc::S_IFIFO;
+                // The parent has closed the write end by now: a lone, live
+                // FIFO on fd 3 reads EOF; a destroyed fd 3 reads EBADF.
+                let mut byte = [0u8; 1];
+                let eof = libc::read(
+                    SUPERVISOR_HANDSHAKE_FD,
+                    byte.as_mut_ptr().cast::<libc::c_void>(),
+                    1,
+                ) == 0;
+                let verdict: u8 = if handed && fifo && eof { b'1' } else { b'0' };
+                libc::write(
+                    STATUS_WRITE,
+                    &verdict as *const u8 as *const libc::c_void,
+                    1,
+                );
+                libc::_exit(0);
+            }
+        }
+
+        // Parent: release every handle that could keep the child's read from
+        // seeing EOF, then collect the verdict with a bounded wait.
+        unsafe {
+            libc::close(handshake_read);
+            libc::close(handshake_write);
+            libc::close(status_write);
+            libc::fcntl(
+                status_read,
+                libc::F_SETFL,
+                libc::fcntl(status_read, libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut verdict = [0u8; 1];
+        let reported = loop {
+            let read =
+                unsafe { libc::read(status_read, verdict.as_mut_ptr().cast::<libc::c_void>(), 1) };
+            if read == 1 {
+                break true;
+            }
+            if read == 0 {
+                break false;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EAGAIN)
+                && error.raw_os_error() != Some(libc::EINTR)
+            {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut wait_status: libc::c_int = 0;
+        unsafe {
+            libc::waitpid(pid, &mut wait_status, 0);
+            libc::close(status_read);
+        }
+
+        assert!(
+            reported,
+            "the probe child never reported a verdict within the wait budget"
+        );
+        assert_eq!(
+            verdict[0], b'1',
+            "when the handshake pipe's read end already is fd 3, the child-side \
+             hand-off must leave the FIFO live on fd 3 with the write end closed \
+             — a dup2(fd, fd) no-op followed by close(read_fd) execs the \
+             supervisor into EBADF-and-serve and silently disarms the \
+             spawn/publish barrier"
+        );
+    }
+
+    #[test]
+    fn failed_identity_publication_ends_the_supervisor_and_fails_the_mount_without_self_deadlock() {
+        // Round-7 review: when the supervisor identity cannot be published,
+        // the mount must fail and the handshake-parked supervisor must exit —
+        // and the failure path must COMPLETE. Its teardown takes the
+        // instance lock for its final re-verify; run inside the critical
+        // section that still holds that lock, the second blocking `flock`
+        // waits on itself forever and the client never returns. The teardown
+        // therefore runs after the section released the lock.
+        let base = tempfile::tempdir().unwrap();
+        let source = base.path().join("source");
+        let mountpoint = base.path().join("mnt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&mountpoint).unwrap();
+        let instance_id = instance_id_for(&normalize_mountpoint(&mountpoint));
+        let paths = ManagedPaths::new(&instance_id);
+        let supervisor_exe = built_skillfs_binary();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        {
+            let source = source.clone();
+            let mountpoint = mountpoint.clone();
+            let supervisor_exe = supervisor_exe.clone();
+            let hold_prefix = paths.state.clone();
+            std::thread::spawn(move || {
+                SUPERVISOR_CHILD_PROGRAM_OVERRIDE.with(|o| *o.borrow_mut() = Some(supervisor_exe));
+                let result = with_hold_at_spawn(&hold_prefix, || {
+                    run_client(&[], &source, &mountpoint)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                });
+                SUPERVISOR_CHILD_PROGRAM_OVERRIDE.with(|o| *o.borrow_mut() = None);
+                let _ = done_tx.send(result);
+            });
+        }
+
+        // The client parks after the spawn, before the publication: the
+        // supervisor exists, parked on the handshake, nothing on disk.
+        let parked = wait_for_file(
+            &instance_mark_path(&paths.state, ".spawned"),
+            Duration::from_secs(10),
+        );
+        assert!(
+            parked,
+            "the client never reached the post-spawn, pre-publication park"
+        );
+        let orphan = wait_for_one_supervise(&instance_id, Duration::from_secs(5))
+            .expect("the just-spawned supervisor must be parked on the handshake");
+        assert!(
+            read_pid_identity(&paths.supervisor_pid).is_none(),
+            "the park sits before the publication: no supervisor record may exist yet"
+        );
+
+        // Make the publication fail deterministically: the supervisor pid
+        // path is occupied by a directory, so the identity write cannot
+        // land (EISDIR) once the client leaves its park. The park's release
+        // markers share the run directory, so a permission-based injection
+        // would freeze the park itself; the directory occupancy lands in
+        // the same publication error the review's read-only-directory repro
+        // produces. The occupancy is removed on every exit path, including
+        // a failing assertion.
+        struct RemoveOccupancy<'a>(&'a Path);
+        impl Drop for RemoveOccupancy<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(self.0);
+            }
+        }
+        std::fs::create_dir(&paths.supervisor_pid).unwrap();
+        let _occupancy = RemoveOccupancy(&paths.supervisor_pid);
+
+        // Release the park: the publication runs against the unwritable
+        // supervisor pid path and must fail.
+        std::fs::write(instance_mark_path(&paths.state, ".spawn-release"), b"").unwrap();
+
+        // A generous bound: the fixed path fails fast; a self-deadlocking
+        // path never returns at all.
+        let outcome = done_rx.recv_timeout(Duration::from_secs(20));
+
+        let error = match outcome {
+            Ok(Err(error)) => error,
+            Ok(Ok(())) => {
+                panic!("the mount must fail when the supervisor identity cannot be published")
+            }
+            Err(_) => panic!(
+                "the publish-failure path never returned: its teardown took the \
+                 instance lock inside the critical section that still holds it \
+                 (self-deadlock on flock)"
+            ),
+        };
+        assert!(
+            error.contains("failed to publish supervisor identity"),
+            "the mount failure must name the publication: {error}"
+        );
+
+        // The handshake-terminated supervisor is gone, and the failed
+        // publication left no record behind.
+        assert!(
+            wait_process_gone(orphan, Duration::from_secs(5)),
+            "the parked supervisor must exit when the publication fails"
+        );
+        assert!(
+            read_pid_identity(&paths.supervisor_pid).is_none(),
+            "a failed publication must leave no supervisor record"
+        );
+
+        // Remove the injected occupancy, then clean up what the failed
+        // mount left behind (its teardown ran while the pid path was
+        // occupied).
+        std::fs::remove_dir(&paths.supervisor_pid).unwrap();
+        let _ = teardown_instance_with_timeout(
+            &paths,
+            &normalize_mountpoint(&mountpoint),
+            Duration::from_secs(2),
         );
     }
 
