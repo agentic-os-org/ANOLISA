@@ -3,6 +3,10 @@ use crate::detect::SystemInfo;
 const KNOWN_SERVICES: &[(&str, &str)] = &[
     ("postgres", "PostgreSQL"),
     ("mysqld", "MySQL"),
+    // MariaDB names its daemon `mariadbd` (10.4+; distro packages also keep
+    // a mysqld alias/symlink, but the running comm is mariadbd). Without
+    // this entry a MariaDB host reported no database service at all.
+    ("mariadbd", "MariaDB"),
     ("mongod", "MongoDB"),
     ("clickhouse", "ClickHouse"),
     ("redis-server", "Redis"),
@@ -133,6 +137,20 @@ mod tests {
         let svcs = detect_services(&info);
         assert!(svcs.contains(&"Nginx"), "{svcs:?}");
         assert!(svcs.contains(&"PostgreSQL"), "{svcs:?}");
+    }
+
+    #[test]
+    fn test_detect_services_mariadb_under_its_own_daemon_name() {
+        // MariaDB 10.4+ runs as `mariadbd`; a MariaDB host must report a
+        // database service (and its role-suffixed worker comms count too).
+        let info = info_with(&["mariadbd"]);
+        let svcs = detect_services(&info);
+        assert!(svcs.contains(&"MariaDB"), "{svcs:?}");
+        let info = info_with(&["mariadbd: writer"]);
+        assert!(detect_services(&info).contains(&"MariaDB"));
+        // The client tool is not the server.
+        let info = info_with(&["mariadb-dump"]);
+        assert!(!detect_services(&info).contains(&"MariaDB"));
     }
 
     #[test]

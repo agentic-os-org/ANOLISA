@@ -37,6 +37,8 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
     // Process-based heuristics
     let has_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd; the same OLTP workload as MySQL.
+        || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     let has_cache = info.has_process("redis-server")
@@ -171,6 +173,21 @@ mod tests {
         // apache2 wins over nothing: a db still classifies first.
         assert_eq!(
             classify(&make_info(vec!["apache2", "postgres"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_mariadb() {
+        // MariaDB's daemon comm is `mariadbd`; a MariaDB-only host is an
+        // OLTP database workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["mariadbd"])),
+            WorkloadType::IoLatency
+        );
+        // Role-suffixed worker comms classify the same.
+        assert_eq!(
+            classify(&make_info(vec!["mariadbd: writer"])),
             WorkloadType::IoLatency
         );
     }
