@@ -43,6 +43,10 @@ def _wanx(prompt, model, size, key):
             rs = st["output"].get("results",[])
             if rs and rs[0].get("url"): return rs[0]["url"]
             if rs and rs[0].get("b64_image"): return "b64:"+rs[0]["b64_image"]
+            # A succeeded task with no usable result will never produce one;
+            # error out instead of polling a finished task for 4 more minutes
+            # and reporting a misleading timeout.
+            print(f"ERROR: SUCCEEDED task carried no image: {json.dumps(st.get('output',{}))}",file=sys.stderr); sys.exit(1)
         elif s == "FAILED":
             print(f"ERROR: {st['output'].get('message','')}",file=sys.stderr); sys.exit(1)
     print("ERROR: Timeout",file=sys.stderr); sys.exit(1)
@@ -56,7 +60,15 @@ def _compat(prompt, model, size, key, base):
     except urllib.error.HTTPError:
         return _wanx(prompt, model, size, key)
     d = res.get("data",[])
-    if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
+    if d:
+        url = d[0].get("url")
+        if url: return url
+        b64 = d[0].get("b64_json")
+        if b64: return "b64:"+b64
+        # An entry with neither url nor b64_json must fail loudly: returning
+        # "b64:" made _save decode an empty payload and report a 0-byte
+        # output file as success.
+        print(f"ERROR: No image in response entry: {json.dumps(d[0])}",file=sys.stderr); sys.exit(1)
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
 
 def _save(src, path):
