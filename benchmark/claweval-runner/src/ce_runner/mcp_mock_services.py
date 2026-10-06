@@ -290,11 +290,17 @@ class AuditHTTPServer:
                     parts = self.path.strip("/").split("/")
                     if len(parts) == 2 and parts[1] == "reset":
                         svc_name = parts[0]
-                        # Reset specific service
+                        # Reset specific service. The endpoint comes from
+                        # task.yaml with the BASE port, so it must be shifted
+                        # by the worker's port offset exactly like /reset
+                        # (reset_all) does — otherwise a batch worker reset
+                        # another worker's service.
                         for svc in manager.services:
                             if svc["name"] == svc_name and svc.get("reset_endpoint"):
                                 try:
-                                    httpx.post(svc["reset_endpoint"], timeout=5)
+                                    httpx.post(_shift_url(svc["reset_endpoint"],
+                                                          manager.port_offset),
+                                               timeout=5)
                                 except Exception:
                                     pass
                         manager._audit_log.clear()
