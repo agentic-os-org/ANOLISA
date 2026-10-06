@@ -214,7 +214,15 @@ class MockServiceManager:
         if not ep:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
-        url = ep["endpoint_url"]
+        # A tool is registered from task.yaml `tools` even when no matching
+        # tool_endpoints entry exists; such an entry carries no URL. Answer
+        # with a JSON error the agent can read instead of raising KeyError
+        # inside the MCP bridge.
+        url = ep.get("endpoint_url")
+        if not url:
+            return json.dumps({
+                "error": f"Tool '{tool_name}' has no endpoint configured"
+            })
         method = ep.get("endpoint_method", "POST")
 
         # MCP wraps all parameters in a single 'kwargs' field.
