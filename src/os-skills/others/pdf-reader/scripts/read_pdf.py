@@ -47,7 +47,10 @@ def main():
     fitz = _install()
     if not os.path.exists(a.file):
         print(f"ERROR: {a.file} not found",file=sys.stderr); sys.exit(1)
-    doc = fitz.open(a.file)
+    try:
+        doc = fitz.open(a.file)
+    except Exception as e:
+        print(f"ERROR: cannot open {a.file}: {e}",file=sys.stderr); sys.exit(1)
     n = len(doc)
     idx = _pages(a.pages, n) if a.pages else list(range(n))
 
