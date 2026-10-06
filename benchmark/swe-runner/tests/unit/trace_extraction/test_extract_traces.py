@@ -23,6 +23,7 @@ from swe_runner.trace_extraction import (
     write_trace_analysis_csvs,
 )
 from swe_runner.trace_extraction.helpers import (
+    _safe_int,
     extract_issue_id,
     extract_user_text,
     ns_to_iso,
@@ -87,6 +88,27 @@ class TestSanitizePathComponent:
     def test_returns_unknown_for_empty(self):
         assert sanitize_path_component("") == "__unknown__"
         assert sanitize_path_component(None) == "__unknown__"
+
+
+class TestSafeInt:
+    """_safe_int must never raise: trace fields come from several
+    converter generations and foreign writers, and one malformed value
+    used to crash the whole analysis batch with a ValueError."""
+
+    def test_plain_values(self):
+        assert _safe_int(7) == 7
+        assert _safe_int(2.9) == 2
+        assert _safe_int(None) == 0
+        assert _safe_int("") == 0
+        assert _safe_int("42") == 42
+
+    def test_float_like_strings_do_not_raise(self):
+        assert _safe_int("12.5") == 12
+        assert _safe_int(" 3.0 ") == 3
+
+    def test_garbage_strings_default_to_zero(self):
+        assert _safe_int("n/a") == 0
+        assert _safe_int("1e999") == 0
 
 
 class TestRecordOpenClawJsonlTracesInWindow:

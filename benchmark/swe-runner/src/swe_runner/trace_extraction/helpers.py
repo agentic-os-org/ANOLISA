@@ -120,15 +120,32 @@ def sanitize_path_component(value: str | None) -> str:
 
 
 def _safe_int(value: object) -> int:
-    """Convert optional numeric values to int, defaulting to 0."""
+    """Convert optional numeric values to int, defaulting to 0.
+
+    Never raises: trace JSON is written by several converter generations
+    and foreign tools, so a field can hold a float-like string ("12.5")
+    or plain garbage — the analysis must skip the value, not crash the
+    whole batch.
+    """
     if value is None:
         return 0
+    if isinstance(value, bool):
+        return int(value)
     if isinstance(value, int):
         return value
     if isinstance(value, float):
         return int(value)
-    if isinstance(value, str) and value.strip():
-        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except ValueError:
+            try:
+                return int(float(text))
+            except (ValueError, OverflowError):
+                return 0
     return 0
 
 
