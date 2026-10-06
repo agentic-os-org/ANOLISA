@@ -1153,7 +1153,7 @@ pub(crate) fn extract_waste_candidates_from(
                             .and_then(|id| {
                                 step.calls()
                                     .iter()
-                                    .find(|c| c.tool_call_id == id)
+                                    .find(|c| agentsight_atif::same_call_id(&c.tool_call_id, id))
                                     .map(|c| c.function_name.clone())
                             })
                             .or_else(|| {

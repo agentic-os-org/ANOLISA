@@ -5,6 +5,7 @@
 
 use crate::atif::{observation_result_is_error, AtifTrajectory};
 use crate::types::ToolCallRecord;
+use agentsight_atif::same_call_id;
 
 // ── Public types ──
 
@@ -176,12 +177,19 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
         // the id lookup misses would hand a sibling's observation to a call
         // whose result never arrived (interrupted execution), reporting that
         // call as failed and feeding the misattribution into the accuracy
-        // detectors and cost ledger.
+        // detectors and cost ledger. Ids are compared with the shared schema's
+        // tolerant rule: our own converters pair results to calls that way and
+        // then store the provider's echo, so a strict `==` misses exactly the
+        // documents they wrote.
         for (k, call) in step.calls().iter().enumerate() {
             let result = step
                 .results()
                 .iter()
-                .find(|r| r.source_call_id.as_deref() == Some(call.tool_call_id.as_str()))
+                .find(|r| {
+                    r.source_call_id
+                        .as_deref()
+                        .is_some_and(|id| same_call_id(id, &call.tool_call_id))
+                })
                 .or_else(|| {
                     step.results()
                         .iter()
