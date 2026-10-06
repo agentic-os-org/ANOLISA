@@ -145,7 +145,15 @@ def discover_tasks(tasks_dir: str, tag: str = None, range_str: str = None,
         filtered = []
         for d in task_dirs:
             td = load_task_yaml(os.path.join(d, "task.yaml"))
-            if tag in td.get("tags", []):
+            # YAML allows a scalar `tags: general`; `tag in "general"` would
+            # be a SUBSTRING test, so normalize to a list first and keep the
+            # match exact either way.
+            tags = td.get("tags", [])
+            if isinstance(tags, str):
+                tags = [tags]
+            if not isinstance(tags, list):
+                tags = []
+            if tag in tags:
                 filtered.append(d)
         task_dirs = filtered
 

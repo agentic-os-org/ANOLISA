@@ -243,9 +243,33 @@ class TestDiscoverTasksRange:
     def test_range_invalid_format(self, tmp_path):
         """Invalid range format should exit."""
         from ce_runner.run_task import discover_tasks
-        
+
         with pytest.raises(SystemExit):
             discover_tasks(str(tmp_path), range_str="invalid")
+
+    def test_tag_scalar_matches_only_exactly(self, tmp_path):
+        """A scalar `tags:` value must not substring-match shorter tags.
+
+        YAML lets an author write `tags: general` (a string, not a list);
+        `tag in "general"` is a substring test, so `--tag gene` wrongly
+        matched such a task.
+        """
+        from ce_runner.run_task import discover_tasks
+
+        for name, tags_yaml in [
+            ("T001_scalar", "tags: general\n"),
+            ("T002_list", "tags: [general]\n"),
+        ]:
+            task_dir = tmp_path / name
+            task_dir.mkdir()
+            (task_dir / "task.yaml").write_text(f"task_id: {name}\n{tags_yaml}")
+
+        # Exact tag matches both the scalar and the list form.
+        assert len(discover_tasks(str(tmp_path), tag="general")) == 2
+        # A prefix of the tag is NOT the tag.
+        assert discover_tasks(str(tmp_path), tag="gene") == []
+        # Guard: unrelated tag still selects nothing.
+        assert discover_tasks(str(tmp_path), tag="multimodal") == []
 
 
 class TestDiscoverTasksCombined:
