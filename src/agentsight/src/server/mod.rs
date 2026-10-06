@@ -933,6 +933,7 @@ pub async fn run_server(
     auth_config: ServerAuthConfig,
     storage_config: StorageConfig,
     reuse_llm_judge_enabled: bool,
+    cmdline_rules: Vec<crate::config::CmdlineRule>,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
     let storage_base = storage_data_dir(&storage_path);
@@ -1049,7 +1050,8 @@ pub async fn run_server(
 
     // Spin up the background health checker
     let health_store = Arc::new(RwLock::new(HealthStore::new()));
-    let mut checker = HealthChecker::new(Arc::clone(&health_store), Duration::from_secs(30));
+    let mut checker = HealthChecker::new(Arc::clone(&health_store), Duration::from_secs(30))
+        .with_cmdline_rules(cmdline_rules);
     if let Some(ref istore) = interruption_store {
         checker = checker.with_interruption_store(Arc::clone(istore));
     }

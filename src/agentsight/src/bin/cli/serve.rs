@@ -64,6 +64,10 @@ impl ServeCommand {
             server_config.apply_verbose();
             let auth_config = server_config.server_auth;
             let storage_config = server_config.storage;
+            // The health checker discovers agents with the same rules the
+            // trace path uses, so the dashboard reports the agents this
+            // installation actually tracks.
+            let cmdline_rules = server_config.cmdline_rules;
             let judge_enabled = server_config.features.reuse_llm_judge_enabled;
 
             if let Some(dir) = db_path.parent() {
@@ -78,6 +82,7 @@ impl ServeCommand {
                     auth_config,
                     storage_config,
                     judge_enabled,
+                    cmdline_rules,
                 )
                 .await
                 {

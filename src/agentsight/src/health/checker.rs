@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use super::port_detector::detect_listening_ports;
 use super::store::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore, now_ms};
+use crate::config::CmdlineRule;
 use crate::discovery::AgentScanner;
 use crate::interruption::{
     InterruptionEvent, InterruptionType, ProcessExitStatus, is_reap_worker_agent,
@@ -94,6 +95,13 @@ pub struct HealthChecker {
     /// represent would go unrecorded and the entry would sit in the store until
     /// the TTL cleanup removed it.
     deferred_offline: Mutex<Vec<AgentHealthStatus>>,
+    /// Discovery rules used by each scan.
+    ///
+    /// Seeded with the built-in set so an embedder that never supplies a
+    /// configuration keeps working, and replaced by
+    /// [`Self::with_cmdline_rules`] with the rules the loaded configuration
+    /// resolved to — the same source the trace path scans with.
+    cmdline_rules: Vec<CmdlineRule>,
 }
 
 impl HealthChecker {
@@ -110,7 +118,20 @@ impl HealthChecker {
             interruption_store: None,
             genai_store: None,
             deferred_offline: Mutex::new(Vec::new()),
+            cmdline_rules: crate::config::default_cmdline_rules(),
         }
+    }
+
+    /// Scan with the configured `cmdline` rules instead of the built-in ones.
+    ///
+    /// An empty list means the configuration carried no `cmdline` section, so
+    /// the built-in rules stay in effect — the fallback `AgentSight::new`
+    /// applies on the trace path.
+    pub fn with_cmdline_rules(mut self, rules: Vec<CmdlineRule>) -> Self {
+        if !rules.is_empty() {
+            self.cmdline_rules = rules;
+        }
+        self
     }
 
     /// Create with an interruption store so offline events trigger `agent_crash`.
@@ -151,7 +172,7 @@ impl HealthChecker {
 
     /// Perform a single health check cycle for all discovered agents.
     fn check_once(&self) {
-        let mut scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
+        let mut scanner = AgentScanner::from_rules(&self.cmdline_rules, &[]);
         let agents = scanner.scan();
 
         let active_pids: HashSet<u32> = agents.iter().map(|a| a.pid).collect();
@@ -687,6 +708,61 @@ mod tests {
         checker.start(running).join().unwrap();
 
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Discovery rules come from the loaded configuration, the same source the
+    /// trace path scans with. Scanning with the embedded defaults meant an
+    /// agent a user added to `cmdline.allow` never got a health row (so it was
+    /// missing from the dashboard and from the offline/`agent_crash`
+    /// detection), while an agent the user's `cmdline.deny` excluded still did.
+    #[test]
+    fn check_once_uses_the_configured_cmdline_rules() {
+        use std::os::unix::process::CommandExt;
+
+        let Ok(mut fixture) = std::process::Command::new("sleep")
+            .arg0("agentsight-health-fixture")
+            .arg("30")
+            .spawn()
+        else {
+            // No `sleep` on PATH: there is no process to observe.
+            return;
+        };
+        let pid = fixture.id();
+
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(Arc::clone(&store), Duration::from_secs(60))
+            .with_cmdline_rules(vec![CmdlineRule {
+                patterns: vec!["*agentsight-health-fixture*".to_string()],
+                agent_name: Some("HealthFixture".to_string()),
+                allow: true,
+            }]);
+        checker.check_once();
+
+        let found = store
+            .read()
+            .unwrap()
+            .all_agents()
+            .into_iter()
+            .find(|status| status.pid == pid);
+
+        let _ = fixture.kill();
+        let _ = fixture.wait();
+
+        let status = found.expect("the configured rule must discover the fixture process");
+        assert_eq!(status.agent_name, "HealthFixture");
+    }
+
+    #[test]
+    fn with_cmdline_rules_keeps_the_builtin_set_for_an_empty_configuration() {
+        // `AgentSight::new` treats "no cmdline section" as "use the built-in
+        // rules"; the checker must resolve it the same way, or a serve on a
+        // configuration without a `cmdline` block would report no agents.
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(store, Duration::from_secs(60)).with_cmdline_rules(vec![]);
+        assert_eq!(
+            checker.cmdline_rules.len(),
+            crate::config::default_cmdline_rules().len()
+        );
     }
 
     #[test]
