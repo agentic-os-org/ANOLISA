@@ -813,12 +813,17 @@ def run_agent_with_user_agent(session_id: str, task_yaml: str, timeout: int,
         ua_replies.append(ua_reply)
         log(f"  [user-agent] Round {round_num}: {ua_reply[:100]}...")
 
-        # Continue agent session with UserAgent's reply
+        # Continue agent session with UserAgent's reply. A failed continue
+        # must NOT overwrite session_file: rounds 1..N-1 already produced a
+        # complete, gradeable session on disk, and returning "" made the
+        # caller record the whole run as an execution error instead.
         ua_message = f"[user_agent]\n{ua_reply}"
-        session_file = _run_agent_continue(session_id, ua_message, timeout,
-                                           agent_id=agent_id)
-        if not session_file:
-            log(f"  [user-agent] Failed to continue session at round {round_num}")
+        continued = _run_agent_continue(session_id, ua_message, timeout,
+                                        agent_id=agent_id)
+        if not continued:
+            log(f"  [user-agent] Failed to continue session at round {round_num}; "
+                f"keeping the session from the previous round")
             break
+        session_file = continued
 
     return session_file
