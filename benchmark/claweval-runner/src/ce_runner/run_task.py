@@ -160,6 +160,15 @@ def discover_tasks(tasks_dir: str, tag: str = None, range_str: str = None,
         if step < 1:
             log(f"[ERROR] Invalid --range step: {step} (must be >= 1)")
             sys.exit(1)
+        # Positions are 1-based: lo-1 must stay >= 0 or the slice turns
+        # negative (index -1 silently selects the LAST task), and lo > hi
+        # selects nothing at all. Reject both like other malformed ranges.
+        if lo < 1:
+            log(f"[ERROR] Invalid --range start: {lo} (positions are 1-based)")
+            sys.exit(1)
+        if lo > hi:
+            log(f"[ERROR] Invalid --range bounds: {range_str} (start > end)")
+            sys.exit(1)
         # Sort by name for consistent ordering, then slice by 1-based positional index
         task_dirs = sorted(task_dirs, key=lambda d: Path(d).name)
         task_dirs = task_dirs[lo - 1 : hi : step]

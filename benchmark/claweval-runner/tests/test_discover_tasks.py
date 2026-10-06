@@ -243,9 +243,40 @@ class TestDiscoverTasksRange:
     def test_range_invalid_format(self, tmp_path):
         """Invalid range format should exit."""
         from ce_runner.run_task import discover_tasks
-        
+
         with pytest.raises(SystemExit):
             discover_tasks(str(tmp_path), range_str="invalid")
+
+    def test_range_zero_start_rejected(self, tmp_path):
+        """A 0-based start is not a 1-based positional range; it must exit.
+
+        ``task_dirs[lo - 1 : hi]`` with lo=0 slices from index -1, which
+        silently returns the LAST task (or nothing) instead of the requested
+        positions.
+        """
+        from ce_runner.run_task import discover_tasks
+
+        for i in range(1, 15):
+            name = f"T{i:03d}_test"
+            task_dir = tmp_path / name
+            task_dir.mkdir()
+            (task_dir / "task.yaml").write_text(f"task_id: {name}\n")
+
+        with pytest.raises(SystemExit):
+            discover_tasks(str(tmp_path), range_str="0-10")
+
+    def test_range_reversed_bounds_rejected(self, tmp_path):
+        """lo > hi selects nothing; reject it like other malformed ranges."""
+        from ce_runner.run_task import discover_tasks
+
+        for i in range(1, 15):
+            name = f"T{i:03d}_test"
+            task_dir = tmp_path / name
+            task_dir.mkdir()
+            (task_dir / "task.yaml").write_text(f"task_id: {name}\n")
+
+        with pytest.raises(SystemExit):
+            discover_tasks(str(tmp_path), range_str="10-1")
 
 
 class TestDiscoverTasksCombined:
