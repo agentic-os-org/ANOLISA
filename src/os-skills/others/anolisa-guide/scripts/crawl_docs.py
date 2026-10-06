@@ -188,6 +188,18 @@ def crawl_all_docs(reference_dir):
         
         # 提取 Markdown
         data = extract_markdown(html, url)
+
+        # 空内容视为失败：选择器漂移或页面改版会拿到空容器，把空文件
+        # 记为成功会让 check_docs.py 认为缓存已更新并一直提供空文档。
+        if not data['content'].strip():
+            print(f"  ⚠️ 内容为空，视为失败")
+            results.append({
+                'filename': filename,
+                'url': url,
+                'status': 'failed',
+                'error': '内容为空'
+            })
+            continue
         
         # 保存文件
         output_path = reference_dir / f"{filename}.md"
@@ -263,7 +275,12 @@ def main():
     print(f"输出目录: {reference_dir}")
     
     # 爬取文档
-    crawl_all_docs(reference_dir)
+    summary = crawl_all_docs(reference_dir)
+
+    # 一个文档都没爬到时必须以非零退出：check_docs.py 的 run_crawl()
+    # 把 returncode 0 当作"文档已更新"，随后会把从未刷新过的缓存目录
+    # 当作新鲜文档提供出去。
+    return 0 if summary['success_count'] > 0 else 1
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
