@@ -92,6 +92,16 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 {"applied": 5, "score_after": 35, "score_before": 30}
 ```
 
+当本环境过滤掉了部分建议（不可写，或运行时危险）时，真实 `tune` 会在
+`would_skip` 中列出这些项及原因，形状与 dry-run 预览一致，便于与 `check`
+对账——部分成功后 `check` 仍会对这些参数报 exit 1：
+
+```json
+{"applied": 4, "failed": [], "score_after": 35, "score_before": 30, "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
+```
+
+全部被过滤时的短路输出同样携带 `would_skip` 列表（与计数并存）。
+
 `tune --dry-run` 输出的是预览；`status` 与短路路径使用同一套取值
 （此处为 `planned`；无可应用项时为 `optimal`/`blocked`）。`would_apply`
 列出真实运行会写入的项，`would_skip` 列出本环境过滤掉的项及原因

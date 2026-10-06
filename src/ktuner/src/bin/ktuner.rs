@@ -179,7 +179,9 @@ fn tune_short_circuit(
     // Recommendations exist but every one was filtered out before any write.
     // Reporting "optimal" here is false: `check` exits 1 on the same host.
     // skip_reason classifies each rec exactly once, so the two counts always
-    // add up to in_scope.len().
+    // add up to in_scope.len(). A non-dry-run tune answers with this body
+    // too, and the counts alone cannot be reconciled with what `check` keeps
+    // reporting — `would_skip` names the entries, same shape as the preview.
     let unwritable = in_scope
         .iter()
         .filter(|r| skip_reason(r) == Some(UNWRITABLE))
@@ -195,6 +197,7 @@ fn tune_short_circuit(
             "recommendations": in_scope.len(),
             "blocked_unwritable": unwritable,
             "blocked_runtime_dangerous": runtime_dangerous,
+            "would_skip": would_skip_json(in_scope),
         }),
         // Mirror check's exit-1 "has recommendations" convention: the system
         // is not optimal, tune simply cannot act on it in this environment.
@@ -246,6 +249,42 @@ fn dry_run_preview(mut body: serde_json::Value, in_scope: &[Recommendation]) -> 
     body
 }
 
+/// JSON body of a real (non-dry-run) `tune` run. Pure so the body stays
+/// unit-testable without root: a real `tune` only runs as root, and its
+/// accounting — what a partial plan wrote, what failed, what the kernel
+/// adjusted — must stay assertable on a dev host.
+///
+/// `would_skip` names the entries this environment filtered out (unwritable
+/// or runtime-dangerous), in the dry-run preview's shape: a partial tune
+/// answers exit 0 while `check` keeps exiting 1 on the same host, and the
+/// filtered entries are exactly the difference between the two — without
+/// them in the body, a caller cannot reconcile a real `tune` with `check`
+/// or with its own dry-run preview.
+fn tune_output(
+    in_scope: &[Recommendation],
+    outcome: &tuner::ApplyOutcome,
+    score_before: usize,
+    score_after: usize,
+) -> serde_json::Value {
+    let failed: Vec<serde_json::Value> = outcome
+        .failed
+        .iter()
+        .map(|f| json!({ "param": f.param, "error": f.error }))
+        .collect();
+    // Disjoint from `failed`: parameters the kernel accepted but adjusted.
+    // They ARE applied (with the kernel's value) and are recorded in the
+    // rollback ledger / sysctl.d; the note makes the delta visible (#4160).
+    let clamped = serde_json::to_value(&outcome.clamped).unwrap_or_else(|_| json!([]));
+    json!({
+        "applied": outcome.applied,
+        "failed": failed,
+        "clamped": clamped,
+        "score_before": score_before,
+        "score_after": score_after,
+        "would_skip": would_skip_json(in_scope),
+    })
+}
+
 fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i32> {
     if !dry_run {
         let is_root = unsafe { libc::geteuid() } == 0;
@@ -293,27 +332,11 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
         return Ok(0);
     }
 
-    let recs = applicable;
-    let outcome = tuner::apply_quiet(&recs)?;
+    let outcome = tuner::apply_quiet(&applicable)?;
     let (_, eval_after) = gather()?;
     let score_after = eval_after.score();
 
-    let failed: Vec<serde_json::Value> = outcome
-        .failed
-        .iter()
-        .map(|f| json!({ "param": f.param, "error": f.error }))
-        .collect();
-    // Disjoint from `failed`: parameters the kernel accepted but adjusted.
-    // They ARE applied (with the kernel's value) and are recorded in the
-    // rollback ledger / sysctl.d; the note makes the delta visible (#4160).
-    let clamped = serde_json::to_value(&outcome.clamped)?;
-    let output = json!({
-        "applied": outcome.applied,
-        "failed": failed,
-        "clamped": clamped,
-        "score_before": score_before,
-        "score_after": score_after,
-    });
+    let output = tune_output(&recs, &outcome, score_before, score_after);
     println!("{}", serde_json::to_string_pretty(&output)?);
     // Mirror `check`'s exit convention (1 = attention needed): a tune that
     // failed some or all writes must not report success — the old code exited
@@ -755,6 +778,11 @@ mod tests {
                 "recommendations": 3,
                 "blocked_unwritable": 3,
                 "blocked_runtime_dangerous": 0,
+                "would_skip": [
+                    { "param": "vm.swappiness", "reason": "unwritable" },
+                    { "param": "fs.file-max", "reason": "unwritable" },
+                    { "param": "net.core.somaxconn", "reason": "unwritable" },
+                ],
             })
         );
     }
@@ -803,6 +831,71 @@ mod tests {
             rec("net.core.somaxconn", true),
         ];
         assert!(tune_short_circuit(&recs, 1).is_none());
+    }
+
+    #[test]
+    fn tune_short_circuit_blocked_names_every_skipped_entry() {
+        // A real (non-dry-run) blocked tune answers with this body as-is: the
+        // counts alone cannot be reconciled with the recommendations `check`
+        // keeps reporting (exit 1) on the same host. The dry-run preview got
+        // the names (#6134); the real run needs the same list, or a caller
+        // reading plain `tune` output still cannot tell which parameters the
+        // environment dropped.
+        let recs = vec![
+            rec("vm.swappiness", false),  // unwritable
+            rec("vm.nr_hugepages", true), // writable but runtime-dangerous
+        ];
+        let (output, code) = tune_short_circuit(&recs, 0).expect("all blocked short-circuits");
+        assert_eq!(code, 1);
+        assert_eq!(
+            output["would_skip"],
+            json!([
+                { "param": "vm.swappiness", "reason": "unwritable" },
+                { "param": "vm.nr_hugepages", "reason": "runtime_dangerous" },
+            ]),
+            "a blocked tune must name what it dropped, not only count it: {output}"
+        );
+    }
+
+    #[test]
+    fn tune_output_names_what_the_environment_skipped() {
+        // A partial real tune never short-circuits, so the filtered entries
+        // are only visible in its output body: without `would_skip` a tune
+        // that applied something answers exit 0 while `check` keeps exiting 1
+        // on the same host, and nothing in the output explains the
+        // difference. The list must carry the dry-run preview's shape so a
+        // script can diff the preview against the real run.
+        let in_scope = vec![
+            rec("vm.swappiness", true),   // applicable
+            rec("fs.file-max", false),    // unwritable
+            rec("vm.nr_hugepages", true), // writable but runtime-dangerous
+        ];
+        let outcome = tuner::ApplyOutcome {
+            applied: 1,
+            failed: vec![],
+            clamped: vec![],
+        };
+        let output = tune_output(&in_scope, &outcome, 30, 35);
+        assert_eq!(output["applied"], json!(1));
+        assert_eq!(output["failed"], json!([]));
+        assert_eq!(
+            output["would_skip"],
+            json!([
+                { "param": "fs.file-max", "reason": "unwritable" },
+                { "param": "vm.nr_hugepages", "reason": "runtime_dangerous" },
+            ]),
+            "a real tune must name what the environment filtered out: {output}"
+        );
+        // Nothing failed or clamped here, so applied + would_skip partitions
+        // the in-scope recommendations exactly.
+        assert_eq!(
+            output["applied"].as_u64().unwrap()
+                + output["would_skip"].as_array().unwrap().len() as u64,
+            in_scope.len() as u64
+        );
+        // A host with nothing filtered reports the same keys, empty list.
+        let clean = tune_output(&[rec("vm.swappiness", true)], &outcome, 30, 35);
+        assert_eq!(clean["would_skip"], json!([]));
     }
 
     #[test]
