@@ -43,7 +43,12 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("clickhouse");
     let has_cache = info.has_process("redis-server")
         || info.has_process("memcached")
-        || info.has_process("etcd");
+        || info.has_process("etcd")
+        // ZooKeeper and Consul are the same in-memory coordination-KV class
+        // as etcd; the runtime marker table already resolves
+        // org.apache.zookeeper to the "zookeeper" service.
+        || info.has_process("zookeeper")
+        || info.has_process("consul");
     let has_web = info.has_process("nginx")
         || info.has_process("httpd")
         // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; RHEL and
@@ -205,6 +210,28 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["elasticsearch"])),
             WorkloadType::MemoryIntensive
+        );
+    }
+
+    #[test]
+    fn test_classify_coordination_kv() {
+        // ZooKeeper and Consul are the same in-memory coordination-KV class
+        // as etcd - which classify already routes to memory-intensive - and
+        // both are services the engine detects (the runtime marker table
+        // resolves org.apache.zookeeper to "zookeeper"). A ZooKeeper-only
+        // host must not classify as mixed.
+        assert_eq!(
+            classify(&make_info(vec!["zookeeper"])),
+            WorkloadType::MemoryIntensive
+        );
+        assert_eq!(
+            classify(&make_info(vec!["consul"])),
+            WorkloadType::MemoryIntensive
+        );
+        // A database still outranks coordination on a combined host.
+        assert_eq!(
+            classify(&make_info(vec!["zookeeper", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 
