@@ -9,4 +9,6 @@ regex: |-
   \bssl\._create_unverified_context\s*\(
   |\burllib3\.disable_warnings\s*\(
   |\bcert_reqs\s*=\s*['"]?CERT_NONE
+  |\brequests\.\w+\s*\([^)]*verify\s*=\s*False\b
+  |\bhttpx\.\w+\s*\([^)]*verify\s*=\s*False\b
 severity: warn
