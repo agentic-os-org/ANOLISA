@@ -1231,7 +1231,15 @@ class OpenClawExternalAgent(BaseAgent):
                         and c.get("name") == "exec"
                     ):
                         args = c.get("arguments", {})
-                        if isinstance(args, dict) and args.get("command"):
+                        # A non-string command (a number or list from a
+                        # malformed tool call) used to pass through and
+                        # crash the loop's cmd_str[:200] slice with a
+                        # TypeError, killing the whole agent run.
+                        if (
+                            isinstance(args, dict)
+                            and isinstance(args.get("command"), str)
+                            and args["command"]
+                        ):
                             commands.append(args["command"])
 
         # Also check meta-level toolCalls.
@@ -1245,7 +1253,11 @@ class OpenClawExternalAgent(BaseAgent):
                         and call.get("name") == "exec"
                     ):
                         args = call.get("arguments", {})
-                        if isinstance(args, dict) and args.get("command"):
+                        if (
+                            isinstance(args, dict)
+                            and isinstance(args.get("command"), str)
+                            and args["command"]
+                        ):
                             commands.append(args["command"])
         return commands
 
