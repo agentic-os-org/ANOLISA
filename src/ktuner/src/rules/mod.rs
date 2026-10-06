@@ -1428,19 +1428,31 @@ fn eval_zone_reclaim_mode(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
     1
 }
 
+/// Shared gate for the `vm.vfs_cache_pressure` rule: every database /
+/// cache server that suffers from aggressive dentry/inode cache reclaim.
+/// mongod and mariadbd are the same class of workload as mysqld and
+/// clickhouse (both are counted in the swappiness / dirty_ratio /
+/// read_ahead_kb gates) but were missing here, so MongoDB and MariaDB
+/// hosts silently skipped this tuning.
+fn is_vfs_cache_db_or_cache(info: &SystemInfo) -> bool {
+    info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd - the same OLTP database.
+        || info.has_process("mariadbd")
+        || info.has_process("mongod")
+        || info.has_process("clickhouse")
+        || info.has_process("redis-server")
+        || info.has_process("memcached")
+        || info.has_process("etcd")
+        || info.has_process("elasticsearch")
+}
+
 fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/vfs_cache_pressure";
     if !info.param_exists(path) {
         return 1;
     }
-    let is_db_or_cache = info.has_process("postgres")
-        || info.has_process("mysqld")
-        || info.has_process("clickhouse")
-        || info.has_process("redis-server")
-        || info.has_process("memcached")
-        || info.has_process("etcd")
-        || info.has_process("elasticsearch");
-    if !is_db_or_cache {
+    if !is_vfs_cache_db_or_cache(info) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -6055,6 +6067,45 @@ mod tests {
         );
         // Malformed input: no recommendation rather than a partial write.
         assert_eq!(sem_recommendation(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn vfs_cache_db_detection_matches_at_name_boundaries() {
+        fn info_with(names: &[&str]) -> SystemInfo {
+            let mut info = make_test_info();
+            info.processes = names
+                .iter()
+                .map(|n| ProcessInfo {
+                    name: n.to_string(),
+                })
+                .collect();
+            info
+        }
+        // Real database/cache servers, including role-prefixed workers.
+        for name in [
+            "postgres",
+            "postgres: writer",
+            "mysqld",
+            "mariadbd",
+            "mongod",
+            "clickhouse",
+            "redis-server",
+            "memcached",
+            "etcd",
+            "elasticsearch",
+        ] {
+            assert!(
+                is_vfs_cache_db_or_cache(&info_with(&[name])),
+                "{name} should be treated as a vfs-cache-sensitive workload"
+            );
+        }
+        // Client tools and unrelated names must not count.
+        for name in ["mysql", "mysqldump", "mongosh", "mongodump", "mariadb-dump", "etcdctl"] {
+            assert!(
+                !is_vfs_cache_db_or_cache(&info_with(&[name])),
+                "{name} is not a vfs-cache-sensitive workload"
+            );
+        }
     }
 
     #[test]
