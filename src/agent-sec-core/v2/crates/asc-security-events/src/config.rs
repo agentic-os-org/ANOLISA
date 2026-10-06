@@ -297,6 +297,18 @@ fn non_empty_path(key: &str) -> Option<PathBuf> {
 
 fn prepare_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
+    // The final component must be a directory we just created or that already
+    // existed as a real directory. A symlink here would make the chmod below
+    // retarget an arbitrary directory and every later stream write follow the
+    // link — the same refusal the tmp tier (safe_tmp_dir) and the daemon
+    // resolver (prepare_daemon_dir) already apply.
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{} is a symlink — refusing to use",
+            path.display()
+        )));
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(DIR_MODE))
 }
 
@@ -428,6 +440,54 @@ mod tests {
 
         let err = resolve_data_dir_with(&env).expect_err("override failure must propagate");
         assert!(matches!(err, ConfigError::DataDirUnusable { .. }));
+    }
+
+    #[test]
+    fn override_pointing_at_a_symlink_is_refused_and_never_chmods_the_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("shared-data");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = temp.path().join("override-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut env = env_under(temp.path());
+        env.override_dir = Some(link);
+
+        // A symlink override must be a hard error, not a silent write-through:
+        // resolving through it would chmod and write into the linked
+        // directory, which belongs to another consumer.
+        let err = resolve_data_dir_with(&env).expect_err("symlink override must be refused");
+        assert!(matches!(err, ConfigError::DataDirUnusable { .. }));
+        assert_eq!(
+            mode_of(&target),
+            0o755,
+            "the target of the refused symlink must keep its own mode"
+        );
+    }
+
+    #[test]
+    fn home_fallback_symlink_falls_through_to_the_tmp_tier() {
+        let temp = tempfile::tempdir().unwrap();
+        // A file at the primary slot keeps tier 1 out of the way (tests run
+        // as root, where a created directory is always writable).
+        fs::write(temp.path().join("primary"), b"x").unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join(FALLBACK_DIR_NAME)).unwrap();
+        let mut env = env_under(temp.path());
+        env.home = Some(home);
+
+        // The HOME tier is a soft fallback: an unusable (symlinked) entry must
+        // fall through to the validated tmp tier instead of resolving through
+        // the link — matching the tiering philosophy v1 wraps in try/except.
+        let resolved = resolve_data_dir_with(&env).unwrap();
+        assert_eq!(
+            resolved,
+            env.tmp_dir(),
+            "a symlinked HOME fallback must fall through to the tmp tier"
+        );
     }
 
     #[test]
