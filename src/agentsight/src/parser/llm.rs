@@ -58,6 +58,21 @@ pub fn is_llm_api_path(path: &str) -> bool {
         || path.contains("/completions")
         || path.contains("/api/v1/copilot/generate_copilot")
         || is_dashscope_native_path(path)
+        // Gemini embeds the model in the URL and the inference action in the
+        // path tail: `/v1beta/models/{model}:streamGenerateContent?alt=sse`
+        // and `:generateContent`, plus the Vertex AI publisher spelling that
+        // carries the same tail. Must stay in lockstep with
+        // `MessageParser::gemini_model_from_path` (which defines the action
+        // set and strips the query first) so a Gemini call neither vanishes
+        // from the genai pipeline (a non-streaming `:generateContent` request
+        // has no `is_sse` fallback in `build_pending_from_request`) nor gets
+        // rejected by the audit gate that re-uses this set — the gate that
+        // e31dd68f8 tightened made the Gemini labeling merged in cd55e0b5b
+        // unreachable and turned its own test red on main. Token counting
+        // (`:countTokens`) is not an inference call and stays out, the same
+        // way Anthropic's count_tokens does.
+        || path.contains(":streamGenerateContent")
+        || path.contains(":generateContent")
 }
 
 /// Normalize the messages array from a parsed request body.
@@ -214,6 +229,24 @@ mod tests {
         // full-URL and compatible-mode shapes.
         assert!(is_llm_api_path("/v1/responses"));
         assert!(is_llm_api_path("https://api.openai.com/v1/responses"));
+
+        // Gemini inference actions, in lockstep with
+        // `MessageParser::gemini_model_from_path`: the generative-language
+        // spelling (streaming with its `?alt=sse` query, and plain), the
+        // Vertex AI publisher spelling, and the non-inference exclusions.
+        assert!(is_llm_api_path(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        ));
+        assert!(is_llm_api_path(
+            "/v1/models/gemini-2.0-flash:generateContent"
+        ));
+        assert!(is_llm_api_path(
+            "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent"
+        ));
+        assert!(!is_llm_api_path(
+            "/v1beta/models/gemini-2.5-pro:countTokens"
+        ));
+        assert!(!is_llm_api_path("/v1beta/models"));
         assert!(is_llm_api_path(
             "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
         ));
