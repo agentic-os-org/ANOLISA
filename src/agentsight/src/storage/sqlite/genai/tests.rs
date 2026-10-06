@@ -508,6 +508,73 @@ fn test_get_token_timeseries_zero_width_range_with_buckets() {
     cleanup_db(&path);
 }
 
+/// A NULL `model` and the literal `'unknown'` are one series: the select list
+/// labels both `COALESCE(model, 'unknown')`, and the dashboard folds the rows
+/// into a `Map` keyed by that label — overwriting, not summing
+/// (`dashboard/src/utils/timeseriesBuckets.ts`). Grouping on the raw column
+/// emitted two rows with the same `(bucket_start_ns, model)` key, so one of them
+/// was silently discarded. Both producers are live: a pending row enriched from
+/// its SSE body keeps `model = COALESCE(?2, model)` (NULL when the request
+/// carried none) while carrying real token counts, and a completed call whose
+/// body had no model is stored as the literal `'unknown'`.
+#[test]
+fn test_get_model_timeseries_merges_null_and_literal_unknown_model_rows() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_mts_unknown_model_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               status, event_json, process_name\
+               ) VALUES (?1,'llm_call',?2,?3,1000,'openai',?4,?5,?6,?7,'complete','{}','proc')";
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            sql,
+            params![
+                "call-null-model",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                None::<&str>,
+                5_i64,
+                2_i64,
+                7_i64
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "call-unknown-model",
+                BASE_NS + 1,
+                BASE_NS + STEP_NS,
+                "unknown",
+                11_i64,
+                4_i64,
+                15_i64
+            ],
+        )
+        .unwrap();
+    }
+
+    let rows = store
+        .get_model_timeseries(BASE_NS, BASE_NS + STEP_NS, None, 1)
+        .unwrap();
+    let unknown: Vec<_> = rows.iter().filter(|row| row.model == "unknown").collect();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "one row per (bucket, model); got {rows:?}"
+    );
+    assert_eq!(unknown[0].total_tokens, 22);
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_model_timeseries_zero_width_range_with_buckets() {
     let (store, path) = create_populated_store("model_ts_zero_width");
