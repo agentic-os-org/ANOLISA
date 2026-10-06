@@ -132,8 +132,22 @@ def extract_name_refs(formula: str) -> list[str]:
     This is approximate. False positives are possible; false negatives are rare.
     """
     names = []
+    # Remove structured table references first (Table1[Col],
+    # Sales[[#Totals],[Amount]] — one nesting level, the most Excel
+    # emits). Table and column names are defined in xl/tables/*.xml, not
+    # in workbook definedNames, so both the table name and every column
+    # name inside the brackets were reported as unknown named ranges.
+    formula_clean = re.sub(
+        r"[A-Za-z_][A-Za-z0-9_.]*\[(?:[^\[\]]|\[[^\[\]]*\])*\]",
+        "",
+        formula,
+    )
+    # Bare bracket groups ([Price], [[#This Row],[Units]]) are the
+    # same-table shorthand; brackets in formulas are only ever
+    # structured references, so nothing else can be lost here.
+    formula_clean = re.sub(r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]", "", formula_clean)
     # Remove quoted sheet references first to avoid false matches
-    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula)
+    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula_clean)
     formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
