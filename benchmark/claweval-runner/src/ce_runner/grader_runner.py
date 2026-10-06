@@ -203,8 +203,12 @@ def main():
         "base_url": args.judge_base_url or os.environ.get("JUDGE_BASE_URL", ""),
         "api_key": args.judge_api_key or os.environ.get("JUDGE_API_KEY", ""),
     }
-    # Remove None values
-    judge_config = {k: v for k, v in judge_config.items() if v is not None}
+    # Drop UNSET entries so grade_trace's `if judge_config:` skips judge
+    # construction when nothing was configured. The `or` fallbacks above
+    # already turn missing values into "" (never None), so filtering None
+    # kept an all-empty 3-key dict — truthy — and a judge with an empty
+    # model/base_url was constructed and used for every rubric call.
+    judge_config = {k: v for k, v in judge_config.items() if v}
 
     env_snapshot = None
     if args.env_snapshot:
