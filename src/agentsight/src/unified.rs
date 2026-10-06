@@ -332,6 +332,57 @@ const RETRO_FIXUP_CAPACITY: usize = 256;
 /// The agent name guards against pid reuse (see `apply_retro_session_fixup`).
 type RetroFixupEntry = (String, std::time::Instant, Option<String>);
 
+/// Resolve a configured tokenizer path to the `tokenizer.json` file.
+///
+/// The two places that describe this setting disagree: the environment
+/// variable's row in the user guide says "directory holding local tokenizer
+/// models" while the config-file field documents the file itself. Accept both,
+/// so following either description works — a directory resolves to the
+/// `tokenizer.json` inside it, and its `tokenizer_config.json` sibling is then
+/// found by the existing parent lookup.
+fn resolve_tokenizer_file(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.join("tokenizer.json")
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Load the tokenizer configured at `path`, or `None` when there is none to load.
+///
+/// `None` covers both "no such file" and "the file would not load": each means
+/// the caller runs without a tokenizer, and each is logged with the resolved
+/// file so the message names what was actually opened rather than what was
+/// configured.
+fn load_tokenizer(path: &Path) -> Option<LlmTokenizer> {
+    let tokenizer_file = resolve_tokenizer_file(path);
+    if !tokenizer_file.exists() {
+        log::warn!(
+            "Tokenizer file not found: {tokenizer_file:?}. Using analyzer without tokenizer."
+        );
+        return None;
+    }
+
+    // Assume tokenizer_config.json is in the same directory
+    let config_path = tokenizer_file
+        .parent()
+        .map(|p| p.join("tokenizer_config.json"))
+        .unwrap_or_else(|| Path::new("tokenizer_config.json").to_path_buf());
+
+    match LlmTokenizer::from_file(&tokenizer_file, &config_path) {
+        Ok(tokenizer) => {
+            log::info!("Tokenizer loaded from: {tokenizer_file:?}");
+            Some(tokenizer)
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to load tokenizer from {tokenizer_file:?}: {e}. Using analyzer without tokenizer."
+            );
+            None
+        }
+    }
+}
+
 fn trace_database_specs(config: &AgentsightConfig) -> Vec<DatabaseSpec> {
     vec![
         DatabaseSpec::new(
@@ -675,34 +726,13 @@ impl AgentSight {
         crate::tokenizer::configure_global_tokenizer(config.features.tokenizer_cache_size);
 
         // Create analyzer with tokenizer if configured
-        let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
-            if Path::new(tokenizer_path).exists() {
-                // Assume tokenizer_config.json is in the same directory
-                let config_path = Path::new(tokenizer_path)
-                    .parent()
-                    .map(|p| p.join("tokenizer_config.json"))
-                    .unwrap_or_else(|| Path::new("tokenizer_config.json").to_path_buf());
-
-                match LlmTokenizer::from_file(tokenizer_path, &config_path) {
-                    Ok(tokenizer) => {
-                        log::info!("Tokenizer loaded from: {tokenizer_path:?}");
-                        Analyzer::with_tokenizer(tokenizer.clone(), tokenizer)
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to load tokenizer from {tokenizer_path:?}: {e}. Using analyzer without tokenizer."
-                        );
-                        Analyzer::new()
-                    }
-                }
-            } else {
-                log::warn!(
-                    "Tokenizer file not found: {tokenizer_path:?}. Using analyzer without tokenizer."
-                );
-                Analyzer::new()
-            }
-        } else {
-            Analyzer::new()
+        let analyzer = match config
+            .tokenizer_path
+            .as_deref()
+            .and_then(|path| load_tokenizer(Path::new(path)))
+        {
+            Some(tokenizer) => Analyzer::with_tokenizer(tokenizer.clone(), tokenizer),
+            None => Analyzer::new(),
         };
 
         // Initialize interruption store only when interruption detection is enabled.
@@ -3158,6 +3188,77 @@ mod tests {
         assert!(
             AgentSight::start_resource_sampler_if_enabled(true, None, targets, running).is_none()
         );
+    }
+
+    /// The environment variable's row in the user guide calls this setting a
+    /// *directory* ("Directory holding local tokenizer models") while the
+    /// config field documents the `tokenizer.json` file, so following the guide
+    /// used to end in "Tokenizer file not found" and an analyzer without a
+    /// tokenizer. Both forms now resolve.
+    #[test]
+    fn a_tokenizer_directory_resolves_to_its_tokenizer_json() {
+        let dir = unique_tmp_dir("tokenizer-path");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tokenizer.json");
+        std::fs::write(&file, b"{}").unwrap();
+
+        assert_eq!(resolve_tokenizer_file(&dir), file);
+        assert_eq!(resolve_tokenizer_file(&file), file);
+        // A path that does not exist yet stays as given, so the existing
+        // "not found" warning keeps naming what the operator configured.
+        let missing = dir.join("missing.json");
+        assert_eq!(resolve_tokenizer_file(&missing), missing);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Minimal WordLevel tokenizer + config, single-line so the fixtures stay
+    /// readable next to the assertions that use them.
+    fn write_tokenizer_fixture(dir: &Path) {
+        let tokenizer = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0},"unk_token":"[UNK]"}}"#;
+        let config = r#"{"tokenizer_class":"PreTrainedTokenizerFast","chat_template":"{% for message in messages %}{{ message['role'] + '\n' + message['content'] + '\n' }}{% endfor %}","bos_token":null,"eos_token":null,"unk_token":"[UNK]","model_max_length":32768}"#;
+        std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), config).unwrap();
+    }
+
+    /// The guide's *directory* form loads the `tokenizer.json` inside it.
+    #[test]
+    fn a_tokenizer_directory_loads_its_tokenizer_json() {
+        let dir = unique_tmp_dir("tokenizer-load-dir");
+        write_tokenizer_fixture(&dir);
+        assert!(load_tokenizer(&dir).is_some(), "directory form must load");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The config field's *file* form still loads.
+    #[test]
+    fn a_tokenizer_file_loads_from_its_own_directory() {
+        let dir = unique_tmp_dir("tokenizer-load-file");
+        write_tokenizer_fixture(&dir);
+        assert!(load_tokenizer(&dir.join("tokenizer.json")).is_some());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Nothing to load is not an error: the caller just runs without one.
+    #[test]
+    fn a_missing_tokenizer_loads_nothing() {
+        let dir = unique_tmp_dir("tokenizer-load-missing");
+        assert!(load_tokenizer(&dir.join("tokenizer.json")).is_none());
+        assert!(load_tokenizer(&dir.join("models")).is_none());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A file that will not load falls back instead of aborting startup.
+    #[test]
+    fn an_unloadable_tokenizer_loads_nothing() {
+        let dir = unique_tmp_dir("tokenizer-load-broken");
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        assert!(load_tokenizer(&dir.join("tokenizer.json")).is_none());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
