@@ -961,8 +961,14 @@ fn rollback_preview_at(path: &str) -> Result<Vec<(String, String, String)>> {
 /// BTreeMap order. A corrupt ledger is an error, never an empty list —
 /// silently treating a corrupt ledger as empty is how the original values
 /// get lost (cf. #3578).
+///
+/// Legacy duplicate spellings are healed first, so the preview describes the
+/// restore `rollback` will actually perform: `restore_entries` heals before
+/// restoring, and an unhealed preview would promise a second restore that
+/// never runs and report a `previous` the kernel will never receive.
 fn parse_rollback_entries(json: &str) -> Result<Vec<(String, String, String)>> {
-    let data: RollbackData = serde_json::from_str(json).context("解析 rollback 文件失败")?;
+    let mut data: RollbackData = serde_json::from_str(json).context("解析 rollback 文件失败")?;
+    heal_alias_duplicates(&mut data);
     Ok(data
         .entries
         .iter()
@@ -1444,6 +1450,54 @@ mod tests {
         // Fresh install / post-rollback state: empty, not an error.
         let entries = parse_rollback_entries(r#"{"version":1,"entries":{}}"#).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn preview_heals_a_legacy_duplicate_spelling_ledger() {
+        // The same legacy ledger restore_entries heals: tune recorded
+        // vm.swappiness 60->10, a later import recorded vm/swappiness 10->5.
+        // The preview must describe the healed restore — one pending entry
+        // returning the pristine 60 — not promise a second restore (10) that
+        // rollback never performs.
+        let entries = parse_rollback_entries(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"5","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![(
+                "vm.swappiness".to_string(),
+                "5".to_string(),
+                "60".to_string()
+            )],
+            "preview must match the healed restore set: one knob, pristine previous, newest applied"
+        );
+    }
+
+    #[test]
+    fn preview_heals_unrelated_duplicates_to_the_last_write() {
+        // No chain relation: the survivor is the greatest key, exactly the
+        // record restore_entries writes today, so preview and restore agree
+        // on both the row count and the previous value that lands.
+        let entries = parse_rollback_entries(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"20","applied":"30","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![(
+                "vm/swappiness".to_string(),
+                "30".to_string(),
+                "20".to_string()
+            )],
+            "preview must keep the last-write record, matching restore_entries"
+        );
     }
 
     #[test]
