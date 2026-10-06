@@ -129,10 +129,19 @@ impl InterruptionStore {
 
     // ─── Write ──────────────────────────────────────────────────────────────
 
-    /// Insert a single interruption event (ignores duplicates by interruption_id).
+    /// Insert one event, ignoring duplicates, and export it to the SLS logtail
+    /// file.
+    ///
+    /// The export lives here rather than at each call site because it is the
+    /// second home of the same fact: four of the seven insert sites had forgotten
+    /// it (the retry-storm event, the drain-path OOM crash, the startup OOM
+    /// recovery and the serve-side crash), so `agent_crash` rows with `oom: true`
+    /// and every `retry_storm` row were missing from the cloud index while
+    /// present in the local dashboard. Doing it on the insert also means a row
+    /// rejected as a duplicate is not exported twice.
     pub fn insert(&self, event: &InterruptionEvent) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+        let inserted = conn.execute(
             "INSERT OR IGNORE INTO interruption_events (
                 interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                 interruption_type, severity, occurred_at_ns, detail, resolved
@@ -152,6 +161,10 @@ impl InterruptionStore {
                 event.resolved as i32,
             ],
         )?;
+        drop(conn);
+        if inserted > 0 {
+            crate::genai::logtail::export_interruption_events(std::slice::from_ref(event));
+        }
         Ok(())
     }
 

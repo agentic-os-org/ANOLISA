@@ -1706,9 +1706,6 @@ impl AgentSight {
                                     &recent,
                                 ) {
                                     let _ = istore.insert(&loop_event);
-                                    crate::genai::logtail::export_interruption_events(
-                                        std::slice::from_ref(&loop_event),
-                                    );
                                     log::warn!(
                                         "DeadLoop detected in conversation {}: {:?}",
                                         cid,
@@ -1768,7 +1765,6 @@ impl AgentSight {
                         if let Err(e) = istore.insert(ie) {
                             log::warn!("Failed to store tool_failure interruption: {e}");
                         }
-                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
                         log::warn!(
                             "ToolFailure detected: tool={} error={:?}",
                             tool.tool_name,
@@ -2784,13 +2780,8 @@ fn store_interruption(
             ie.conversation_id,
             error
         );
-    } else {
-        if let Err(e) = istore.insert(ie) {
-            log::warn!("Failed to store interruption event: {e}");
-        }
-        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
-        // so the SLS index keeps interruption records co-located with LLM calls.
-        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
+    } else if let Err(e) = istore.insert(ie) {
+        log::warn!("Failed to store interruption event: {e}");
     }
     // Stamp the genai_events row, then run the type-counted RetryStorm check
     // on both paths: the dedup above matches one *message*, while the storm

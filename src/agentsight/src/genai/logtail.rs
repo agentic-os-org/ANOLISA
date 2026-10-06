@@ -1433,6 +1433,60 @@ pub mod tests {
         reset_logtail_state();
     }
 
+    /// The export is a property of the store, not of each caller: four of the
+    /// seven insert sites had forgotten it, so the OOM-recovered and retry-storm
+    /// rows never reached SLS while they were present locally. Doing it on the
+    /// insert also means a row rejected as a duplicate is exported only once.
+    #[test]
+    fn a_new_interruption_is_exported_by_the_store() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_interruption_store_export_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("interruption.jsonl");
+        // SAFETY: tests acquire ENV_LOCK before mutating this variable.
+        unsafe { std::env::set_var(LOGTAIL_ENV_VAR, path.to_str().unwrap()) };
+
+        let store = crate::storage::sqlite::InterruptionStore::new_with_path(
+            &tmp.join("interruption_events.db"),
+        )
+        .expect("interruption store");
+        let mut event = InterruptionEvent::new(
+            crate::interruption::InterruptionType::AgentCrash,
+            Some("session-export".to_string()),
+            None,
+            Some("conv-export".to_string()),
+            None,
+            Some(4242),
+            Some("test-agent".to_string()),
+            1_000_000,
+            Some(serde_json::json!({"pid": 4242, "oom": true})),
+        );
+        event.interruption_id = "int-store-export".to_string();
+
+        store.insert(&event).expect("first insert");
+        // The same id again: `INSERT OR IGNORE` accepts it without writing, and
+        // the export must not repeat either.
+        store.insert(&event).expect("duplicate insert");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let exported = content
+            .lines()
+            .filter(|line| line.contains("int-store-export"))
+            .count();
+        assert_eq!(
+            exported, 1,
+            "the row must reach SLS exactly once: {content}"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
     #[test]
     fn test_export_interruption_events_skips_missing_default_path() {
         // When no env var is set, active_logtail_paths() returns the default path.
