@@ -116,13 +116,20 @@ fn build_ranking_messages(query: &str, candidates: &[SemanticSearchCandidate]) -
     ]
 }
 
-/// Clamp `relevance` to the documented `high` / `medium` buckets.
+/// Clamp `relevance` to the documented `high` / `medium` buckets, and order the
+/// results by them.
+///
+/// The response is documented as ranked, and the prompt only *asks* the model
+/// for relevance order rather than enforcing it, so a `medium` answered before a
+/// `high` used to reach the caller as-is. The sort is stable, so the model's own
+/// order survives inside a bucket.
 fn normalize_results(mut items: Vec<SemanticSearchResult>) -> Vec<SemanticSearchResult> {
     for item in &mut items {
         if item.relevance != "high" && item.relevance != "medium" {
             item.relevance = "medium".to_string();
         }
     }
+    items.sort_by_key(|item| item.relevance != "high");
     items
 }
 
@@ -302,6 +309,52 @@ mod tests {
         assert!(!messages[1].content.contains(&"x".repeat(600)));
         assert!(messages[1].content.contains(&"x".repeat(500)));
         assert!(messages[1].content.contains("[session_id=sess-1]"));
+    }
+
+    /// The response is documented as relevance-ordered, and the prompt only asks
+    /// the model for that order — so a `medium` returned ahead of a `high` used
+    /// to reach the caller unchanged. The dashboard masked it by re-sorting;
+    /// every other consumer of `POST /api/sessions/search` did not.
+    #[test]
+    fn normalize_results_orders_high_before_medium() {
+        let results = vec![
+            SemanticSearchResult {
+                session_id: "m1".into(),
+                relevance: "medium".into(),
+                reason: "medium".into(),
+            },
+            SemanticSearchResult {
+                session_id: "h1".into(),
+                relevance: "high".into(),
+                reason: "high".into(),
+            },
+            SemanticSearchResult {
+                session_id: "u1".into(),
+                relevance: "?".into(),
+                reason: "unknown bucket".into(),
+            },
+            SemanticSearchResult {
+                session_id: "h2".into(),
+                relevance: "high".into(),
+                reason: "high".into(),
+            },
+        ];
+
+        let normalized = normalize_results(results);
+
+        let order: Vec<&str> = normalized
+            .iter()
+            .map(|result| result.session_id.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["h1", "h2", "m1", "u1"],
+            "highs first, and the model's order kept inside a bucket"
+        );
+        assert_eq!(
+            normalized[3].relevance, "medium",
+            "an unrecognised bucket still clamps to medium"
+        );
     }
 
     #[test]
