@@ -2174,6 +2174,36 @@ def test_regression_runner_records_command_result(tmp_path: Path) -> None:
     assert read_json["cargo_jobs"] is None
 
 
+def test_regression_runner_records_a_launch_failure(tmp_path: Path) -> None:
+    """An unrunnable check is recorded as a failure instead of aborting the run.
+
+    A missing executable is the canonical case here (the runner builds its
+    cargo checks from a toolchain path, and `rustup` absent means nothing
+    launches): `subprocess.run` raises before any record is appended, no
+    handler exists at the call site, and `write_report` runs only after the
+    first check — so the whole regression died with a traceback, wrote no
+    ``regression.json`` and skipped every later gate, the opposite of the
+    runner's preserve-all-logs contract.
+    """
+    checks: list[dict[str, object]] = []
+    missing = tmp_path / "definitely-not-a-real-tool"
+    log_path = tmp_path / "missing.log"
+
+    status = run_regression.run_check([str(missing)], tmp_path, log_path, checks)
+
+    assert status != 0
+    assert len(checks) == 1
+    assert checks[0]["exit_code"] != 0
+    assert checks[0]["command"] == str(missing)
+    # The failure evidence is preserved in the check's own log.
+    assert str(missing) in log_path.read_text(encoding="utf-8")
+    # The record is serializable, so a run that starts with an unrunnable check
+    # still publishes its report.
+    run_regression.write_report(tmp_path / "regression.json", checks)
+    published = json.loads((tmp_path / "regression.json").read_text())
+    assert published["checks"][0]["exit_code"] != 0
+
+
 def test_regression_progress_reports_coverage_and_log_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
