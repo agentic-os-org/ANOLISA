@@ -465,3 +465,88 @@ class TestTokenConsistency:
         assert trace_end["model_input_tokens"] == 1000
         assert trace_end["model_output_tokens"] == 200
         assert trace_end["total_tokens"] == 1200
+
+
+class TestMcporterDispatchStatus:
+    """The virtual mcporter tool_dispatch status must reflect real failures only.
+
+    claw-eval's AbstractGrader.compute_robustness counts status >= 400 as an
+    error, so a successful MCP call mis-recorded as 500 halves robustness.
+    """
+
+    def _convert(self, tmp_path, result_body, is_error=False):
+        from ce_runner.session_trace_converter import convert_session_to_trace
+        from ce_runner._common import load_task_yaml
+
+        session_file = tmp_path / "session.jsonl"
+        lines = [
+            {
+                "type": "message",
+                "timestamp": "2024-01-15T10:00:05.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "tool_mcp_1",
+                            "name": "exec",
+                            "arguments": {
+                                "command": (
+                                    "mcporter call --config /tmp/mcp.json "
+                                    "claw-eval-mock search foo"
+                                )
+                            },
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "timestamp": "2024-01-15T10:00:06.000Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolName": "exec",
+                    "toolCallId": "tool_mcp_1",
+                    "isError": is_error,
+                    "content": [{"type": "text", "text": result_body}],
+                },
+            },
+        ]
+        session_file.write_text(
+            "".join(json.dumps(line) + "\n" for line in lines)
+        )
+
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text("task_id: T001\nservices: []\ntools:\n  - name: search\n")
+        task = load_task_yaml(str(task_yaml))
+
+        output_file = tmp_path / "output.jsonl"
+        convert_session_to_trace(str(session_file), task, str(output_file))
+        return [
+            json.loads(line)
+            for line in output_file.read_text().strip().split("\n")
+            if line.strip()
+        ]
+
+    @staticmethod
+    def _virtual_dispatch(events):
+        matches = [
+            e for e in events
+            if e.get("tool_use_id") == "mcporter_tool_mcp_1"
+        ]
+        assert len(matches) == 1, matches
+        return matches[0]
+
+    def test_unknown_substring_in_success_body_stays_200(self, tmp_path):
+        """A body containing "unknown" is not an mcporter error marker."""
+        events = self._convert(tmp_path, '{"from": "unknown@example.com"}')
+
+        dispatch = self._virtual_dispatch(events)
+        assert dispatch["tool_name"] == "search"
+        assert dispatch["response_status"] == 200
+
+    def test_error_marker_still_reports_500(self, tmp_path):
+        """The "Error:" marker, including "Error: unknown tool", still fails."""
+        events = self._convert(tmp_path, "Error: unknown tool: nope")
+
+        assert self._virtual_dispatch(events)["response_status"] == 500
