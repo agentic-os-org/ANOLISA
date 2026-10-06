@@ -108,9 +108,12 @@ def fetch_audit_data(task: dict, port_offset: int = 0) -> dict[str, dict]:
         audit_url = reset_ep.rsplit("/reset", 1)[0] + "/audit"
         # Apply port offset for batch mode (port 9100 → 9100 + offset)
         if port_offset:
+            # Same loopback shift as parallel.py / mcp_mock_services.py —
+            # 127.0.0.1 URLs must shift too or batch mode audits the wrong
+            # service.
             audit_url = re.sub(
-                r"localhost:(\d+)",
-                lambda m: f"localhost:{int(m.group(1)) + port_offset}",
+                r"(localhost|127\.0\.0\.1):(\d+)",
+                lambda m: f"{m.group(1)}:{int(m.group(2)) + port_offset}",
                 audit_url,
             )
         try:

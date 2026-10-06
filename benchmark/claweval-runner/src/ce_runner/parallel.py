@@ -71,8 +71,8 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
         # Apply port offset to health_check URL
         if health_check and port_offset:
             health_check = re.sub(
-                r"localhost:(\d+)",
-                lambda m: f"localhost:{int(m.group(1)) + port_offset}",
+                r"(localhost|127\.0\.0\.1):(\d+)",
+                lambda m: f"{m.group(1)}:{int(m.group(2)) + port_offset}",
                 health_check,
             )
 
@@ -129,8 +129,8 @@ def reset_services_with_offset(task_yaml: str, port_offset: int):
         reset_ep = svc.get("reset_endpoint", "")
         if reset_ep and port_offset:
             reset_ep = re.sub(
-                r"localhost:(\d+)",
-                lambda m: f"localhost:{int(m.group(1)) + port_offset}",
+                r"(localhost|127\.0\.0\.1):(\d+)",
+                lambda m: f"{m.group(1)}:{int(m.group(2)) + port_offset}",
                 reset_ep,
             )
         if reset_ep:

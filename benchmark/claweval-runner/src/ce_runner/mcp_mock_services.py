@@ -49,12 +49,18 @@ except ImportError:
 
 
 def _shift_url(url: str, offset: int) -> str:
-    """Replace localhost:<port> with localhost:<port+offset>."""
+    """Shift the port of a loopback URL by *offset*.
+
+    Both loopback spellings — ``localhost`` and ``127.0.0.1`` — are
+    shifted: a task.yaml URL written with the numeric host used to skip
+    the offset entirely, so batch runs hit the un-shifted (or another
+    task's) service.
+    """
     if offset == 0:
         return url
     return re.sub(
-        r"localhost:(\d+)",
-        lambda m: f"localhost:{int(m.group(1)) + offset}",
+        r"(localhost|127\.0\.0\.1):(\d+)",
+        lambda m: f"{m.group(1)}:{int(m.group(2)) + offset}",
         url,
     )
 
