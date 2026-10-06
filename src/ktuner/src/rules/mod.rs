@@ -4417,14 +4417,19 @@ fn eval_shm_rmid_forced(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 }
 
 fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sem";
+    eval_sem_at(info, recs, "/proc/sys/kernel/sem")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+fn eval_sem_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let has_db = info
-        .processes
-        .iter()
-        .any(|p| p.name == "postgres" || p.name == "mysqld" || p.name == "oracle");
+    // The shared boundary-aware predicate, not raw name equality: worker
+    // comms are role-suffixed ("postgres: writer") and collectors are not
+    // the database — is_database_present already encodes both.
+    let has_db = is_database_present(info);
     if !has_db {
         return 1;
     }
@@ -4477,14 +4482,19 @@ fn eval_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_shmmni(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/shmmni";
+    eval_shmmni_at(info, recs, "/proc/sys/kernel/shmmni")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+fn eval_shmmni_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !std::path::Path::new(path).exists() {
         return 1;
     }
-    let has_db = info
-        .processes
-        .iter()
-        .any(|p| p.name == "postgres" || p.name == "mysqld" || p.name == "oracle");
+    // The shared boundary-aware predicate, not raw name equality: worker
+    // comms are role-suffixed ("postgres: writer") and collectors are not
+    // the database — is_database_present already encodes both.
+    let has_db = is_database_present(info);
     if !has_db && info.memory_total_gb < 128 {
         return 1;
     }
@@ -6093,6 +6103,64 @@ mod tests {
             );
         }
         assert!(!is_database_present(&info_with(&[])));
+    }
+
+    #[test]
+    fn sysv_ipc_rules_gate_on_boundary_aware_db_detection() {
+        // The sem/shmmni gates re-implemented db detection with raw
+        // `p.name ==` equality instead of is_database_present, so a process
+        // list holding only role-suffixed worker comms ("postgres: writer",
+        // the shape /proc shows for a busy PostgreSQL) skipped the SysV IPC
+        // sizing recommendations entirely.
+        fn info_with(names: &[&str]) -> SystemInfo {
+            let mut info = make_test_info();
+            info.processes = names
+                .iter()
+                .map(|n| ProcessInfo {
+                    name: n.to_string(),
+                })
+                .collect();
+            info
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_ipc_gate_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sem_path = dir.join("sem");
+        std::fs::write(&sem_path, b"250 32000 32 128\n").unwrap();
+        let shmmni_path = dir.join("shmmni");
+        std::fs::write(&shmmni_path, b"4096\n").unwrap();
+
+        // Role-suffixed worker comms are the database: the recommendations
+        // must fire.
+        for name in ["postgres: writer", "mysqld: foo"] {
+            let info = info_with(&[name]);
+            let mut recs = Vec::new();
+            eval_sem_at(&info, &mut recs, sem_path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "kernel.sem"),
+                "{name} must gate the sem rule in"
+            );
+            let mut recs = Vec::new();
+            eval_shmmni_at(&info, &mut recs, shmmni_path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "kernel.shmmni"),
+                "{name} must gate the shmmni rule in"
+            );
+        }
+
+        // Client tools are not the database (guard): nothing fires.
+        for name in ["mysqldump", "pg_dump"] {
+            let info = info_with(&[name]);
+            let mut recs = Vec::new();
+            eval_sem_at(&info, &mut recs, sem_path.to_str().unwrap());
+            eval_shmmni_at(&info, &mut recs, shmmni_path.to_str().unwrap());
+            assert!(recs.is_empty(), "{name} must not gate the IPC rules in");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
