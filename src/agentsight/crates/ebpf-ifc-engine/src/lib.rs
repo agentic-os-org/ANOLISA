@@ -906,15 +906,21 @@ fn rewrite_session_state<T: std::borrow::BorrowMut<MapData>>(
                 );
                 failed = true;
             }
-            for (domain, _) in &session.stale {
-                let stale_key = PidDomainKey {
-                    pid: session.pid,
-                    domain_id: *domain,
-                };
-                if ignore_missing_remove(proc.remove(&stale_key), "remove stale domain state")
-                    .is_err()
-                {
-                    failed = true;
+            // Only drop the stale entries once the merged state is safely
+            // written into the new domain: a rejected rewrite must keep them
+            // so a later sweep can retry instead of losing the session's
+            // labels and lineage gates.
+            if !failed {
+                for (domain, _) in &session.stale {
+                    let stale_key = PidDomainKey {
+                        pid: session.pid,
+                        domain_id: *domain,
+                    };
+                    if ignore_missing_remove(proc.remove(&stale_key), "remove stale domain state")
+                        .is_err()
+                    {
+                        failed = true;
+                    }
                 }
             }
         }
@@ -8547,6 +8553,89 @@ finally:
         assert!(summary.contains("migrated 3"), "{summary}");
         assert!(summary.contains("stale domains"), "{summary}");
         assert!(!summary.contains("remain outside"), "{summary}");
+    }
+
+    #[test]
+    #[ignore = "requires root/CAP_BPF (creates real BPF maps)"]
+    fn failed_rewrite_keeps_stale_session_state_for_retry() {
+        // A full `ts_proc_domains` map rejects the rewrite into the new
+        // domain while the stale-entry deletion would still succeed. The
+        // stale per-domain entries must survive that rejection (the
+        // documented `failed_pids` contract) so a later sweep can retry
+        // instead of silently dropping the session's labels.
+        let fd = unsafe {
+            let name = b"ts_proc_domains_full\0";
+            libbpf_sys::bpf_map_create(
+                libbpf_sys::BPF_MAP_TYPE_HASH,
+                name.as_ptr() as *const std::os::raw::c_char,
+                std::mem::size_of::<PidDomainKey>() as u32,
+                std::mem::size_of::<ProcState>() as u32,
+                2,
+                std::ptr::null(),
+            )
+        };
+        assert!(
+            fd >= 0,
+            "bpf_map_create failed: {}",
+            io::Error::last_os_error()
+        );
+        let data = MapData::from_fd(unsafe { OwnedFd::from_raw_fd(fd) }).expect("MapData::from_fd");
+        let mut proc: HashMap<MapData, PidDomainKey, ProcState> =
+            HashMap::try_from(Map::HashMap(data)).expect("open hash map");
+
+        let pid = 421_000_001i32;
+        // The pid's stale state in the old domain, as the fork handler and a
+        // previous sweep leave it behind.
+        proc.insert(
+            PidDomainKey {
+                pid,
+                domain_id: 300,
+            },
+            ProcState {
+                labels: 2,
+                lin_gates: 0,
+            },
+            0,
+        )
+        .expect("seed stale domain state");
+        // An unrelated session member occupies the second slot, so the map is
+        // full and the rewrite below is rejected with E2BIG.
+        proc.insert(
+            PidDomainKey {
+                pid: 421_000_099,
+                domain_id: 500,
+            },
+            ProcState {
+                labels: 1,
+                lin_gates: 0,
+            },
+            0,
+        )
+        .expect("fill map to capacity");
+
+        let sessions = vec![SessionPidState {
+            pid,
+            has_new_domain_entry: false,
+            stale: vec![(
+                300,
+                ProcState {
+                    labels: 2,
+                    lin_gates: 0,
+                },
+            )],
+        }];
+        let report = rewrite_session_state(&mut proc, sessions, 500);
+        assert_eq!(report.failed_pids, vec![pid], "{report:?}");
+        let stale = proc
+            .get(
+                &PidDomainKey {
+                    pid,
+                    domain_id: 300,
+                },
+                0,
+            )
+            .expect("stale state must be kept after a failed rewrite");
+        assert_eq!(stale.labels, 2, "kept stale state must be unchanged");
     }
 
     #[test]
