@@ -1272,15 +1272,22 @@ class OpenClawExternalAgent(BaseAgent):
         except json.JSONDecodeError:
             pass
 
-        # Substring fallback: find outermost {...}.
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start != -1 and end > start:
+        # Substring fallback: extract the first complete top-level JSON
+        # object. Scanning with raw_decode handles output that carries
+        # several JSON objects (OpenClaw --json prints one per event) or
+        # trailing non-JSON text with braces: the old first-'{'-to-last-'}'
+        # span stitched multiple objects into one invalid document and
+        # returned None, losing every command in the output.
+        decoder = json.JSONDecoder(strict=False)
+        for start, ch in enumerate(cleaned):
+            if ch != "{":
+                continue
             try:
-                parsed = json.loads(cleaned[start:end + 1], strict=False)
-                if isinstance(parsed, dict):
-                    return parsed
+                parsed, _end = decoder.raw_decode(cleaned, start)
             except json.JSONDecodeError:
-                pass
+                continue
+            if isinstance(parsed, dict):
+                return parsed
         return None
 
     @staticmethod
