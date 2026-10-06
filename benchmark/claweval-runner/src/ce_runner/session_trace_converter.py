@@ -69,16 +69,27 @@ def normalize_timestamp(ts: str) -> str:
 
 import re
 
+# OpenClaw prepends the user turn with a bracketed wall-clock header in one
+# of two shapes: "[Day YYYY-MM-DD HH:MM TZ]" (e.g.
+# "[Tue 2026-03-31 17:19 GMT+8]") or "[Day, DD Mon YYYY HH:MM:SS TZ]"
+# (e.g. "[Tuesday, 31 Mar 2026 17:19:05 +0800]" — the day name may be long
+# or short, seconds are optional, and the zone is any short run of
+# non-bracket text). Anchored at the start so a user's own bracketed text
+# (e.g. "[0:10]" or "[status: 1]") can never satisfy it.
 _TIMESTAMP_PREFIX_RE = re.compile(
-    r"^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{2}:\d{2} GMT[+-]\d+\]\s*"
+    r"^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+"
+    r"(?:\d{4}[-\s]\d{1,2}[-\s]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?"
+    r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?)"
+    r"\s+[^\]\[]{0,32}\]\s*"
 )
 
 
 def strip_timestamp_prefix(text: str) -> str:
     """Strip openclaw's timestamp prefix from user message text.
 
-    openclaw CLI prepends a timestamp like ``[Wed 2026-05-27 11:09 GMT+8] ``
-    to user messages.  This breaks the claw-eval grader's ``_split_phases``
+    openclaw CLI prepends a timestamp header — ``[Wed 2026-05-27 11:09
+    GMT+8]`` or ``[Tuesday, 31 Mar 2026 17:19:05 +0800]`` — to user
+    messages.  This breaks the claw-eval grader's ``_split_phases``
     method, which looks for ``[user_agent]`` at position 0 to identify the
     clarification phase.  Stripping the prefix restores compatibility.
     """

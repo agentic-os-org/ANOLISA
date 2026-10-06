@@ -153,6 +153,40 @@ class TestTimestampNormalization:
         assert normalize_timestamp(ts) == ts
 
 
+class TestStripTimestampPrefix:
+    """Both documented OpenClaw header shapes must be stripped.
+
+    OpenClaw emits the header either as ``[Day YYYY-MM-DD HH:MM TZ]`` or as
+    ``[Day, DD Mon YYYY HH:MM:SS TZ]`` (long day names, optional seconds,
+    arbitrary zone text). The converter's grader-aligned stripping must
+    handle both, and must never eat a user's own bracketed text.
+    """
+
+    def test_strips_first_documented_shape(self):
+        from ce_runner.session_trace_converter import strip_timestamp_prefix
+
+        assert (
+            strip_timestamp_prefix("[Wed 2026-05-27 11:09 GMT+8] [user_agent] hi")
+            == "[user_agent] hi"
+        )
+
+    def test_strips_second_documented_shape(self):
+        from ce_runner.session_trace_converter import strip_timestamp_prefix
+
+        assert (
+            strip_timestamp_prefix("[Tuesday, 31 Mar 2026 17:19:05 +0800] hello")
+            == "hello"
+        )
+        assert strip_timestamp_prefix("[Sun 8 Mar 2026 9:05 UTC] q") == "q"
+
+    def test_keeps_user_bracketed_text(self):
+        from ce_runner.session_trace_converter import strip_timestamp_prefix
+
+        assert strip_timestamp_prefix("[0:10] slice these") == "[0:10] slice these"
+        assert strip_timestamp_prefix("[status: 1] check") == "[status: 1] check"
+        assert strip_timestamp_prefix("plain text") == "plain text"
+
+
 class TestTraceEvents:
     """Test trace event structure."""
 
