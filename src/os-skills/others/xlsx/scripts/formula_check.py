@@ -349,6 +349,13 @@ def main() -> None:
 
     results = check(args_clean[0], sheet_filter=sheet_filter)
 
+    # Heuristic-only warnings (unknown_name_ref) do not block delivery in the
+    # human-readable path below; machine modes must agree or pipelines gate
+    # on heuristics the tool itself calls non-blocking.
+    hard_error_count = sum(
+        1 for e in results["errors"] if e["type"] != "unknown_name_ref"
+    )
+
     if use_report:
         report = build_report(results)
         output = json.dumps(report, indent=2, ensure_ascii=False)
@@ -357,11 +364,11 @@ def main() -> None:
                 f.write(output + "\n")
         else:
             print(output)
-        sys.exit(1 if results["error_count"] > 0 else 0)
+        sys.exit(1 if hard_error_count > 0 else 0)
 
     if use_json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
-        sys.exit(1 if results["error_count"] > 0 else 0)
+        sys.exit(1 if hard_error_count > 0 else 0)
 
     # Human-readable output
     sheets = ", ".join(results["sheets_checked"]) or "(none)"
