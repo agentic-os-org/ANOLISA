@@ -70,6 +70,22 @@ def phase_convert(session_file: str, task_yaml: str, output: str,
     if audit_data_path:
         cmd.extend(["--audit-data", audit_data_path])
     r = subprocess.run(cmd, capture_output=True, text=True)
+    # A failed conversion used to vanish entirely: capture_output=True held
+    # the converter's traceback and the caller only reported "Trace
+    # conversion failed". Mirror phase_grade's err-log discipline so the
+    # cause stays next to the trace; a clean run leaves nothing behind.
+    if r.returncode != 0:
+        err_log = os.path.join(
+            os.path.dirname(output),
+            f"convert_{Path(output).stem}.err.log",
+        )
+        try:
+            with open(err_log, "w", encoding="utf-8") as ef:
+                ef.write(str(r.stderr or ""))
+        except OSError:
+            pass
+        log(f"  [ERROR] trace conversion failed (rc={r.returncode}); "
+            f"see {err_log}")
     return r.returncode == 0 and os.path.exists(output)
 
 

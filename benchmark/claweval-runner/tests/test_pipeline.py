@@ -115,22 +115,75 @@ class TestPhaseConvert:
     def test_convert_failure_returncode(self, tmp_path):
         """phase_convert returns False on non-zero returncode."""
         from ce_runner.pipeline import phase_convert
-        
+
         session_file = tmp_path / "session.jsonl"
         session_file.write_text('{"type": "message"}\n')
-        
+
         task_yaml = tmp_path / "task.yaml"
         task_yaml.write_text("task_id: T001\nservices: []\ntools: []\n")
-        
+
         output_file = tmp_path / "output.jsonl"
-        
+
         mock_result = MagicMock()
         mock_result.returncode = 1
-        
+
         with patch('ce_runner.pipeline.subprocess.run', return_value=mock_result):
             result = phase_convert(str(session_file), str(task_yaml), str(output_file))
-        
+
         assert result is False
+
+    def test_convert_failure_keeps_stderr_for_debug(self, tmp_path):
+        """A failed conversion must keep its stderr observable.
+
+        capture_output=True swallowed the converter's traceback, so a
+        failing conversion left only "Trace conversion failed" with no
+        diagnostic anywhere in the trace dir.
+        """
+        from ce_runner.pipeline import phase_convert
+
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text('{"type": "message"}\n')
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text("task_id: T001\nservices: []\ntools: []\n")
+        output_file = tmp_path / "output.jsonl"
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "Traceback ... KeyError: 'task_id'"
+
+        with patch('ce_runner.pipeline.subprocess.run',
+                   return_value=mock_result):
+            result = phase_convert(str(session_file), str(task_yaml),
+                                   str(output_file))
+
+        assert result is False
+        err_log = tmp_path / "convert_output.err.log"
+        assert err_log.exists(), "failed conversion must leave its stderr"
+        assert "KeyError" in err_log.read_text()
+
+    def test_convert_success_leaves_no_err_log(self, tmp_path):
+        """A clean conversion must not clutter the trace dir."""
+        from ce_runner.pipeline import phase_convert
+
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text('{"type": "message"}\n')
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text("task_id: T001\nservices: []\ntools: []\n")
+        output_file = tmp_path / "output.jsonl"
+
+        def mock_run(*args, **kwargs):
+            output_file.write_text("{}\n")
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch('ce_runner.pipeline.subprocess.run', side_effect=mock_run):
+            result = phase_convert(str(session_file), str(task_yaml),
+                                   str(output_file))
+
+        assert result is True
+        assert not (tmp_path / "convert_output.err.log").exists()
 
 
 class TestPhaseGrade:
