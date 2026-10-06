@@ -64,13 +64,25 @@ def pack(source_dir: str, xlsx_path: str) -> None:
 
     print("✓ All XML files are well-formed")
 
-    # Count files to pack
-    file_count = sum(len(files) for _, _, files in os.walk(source_dir))
+    # Count files to pack (the output file itself never counts)
+    output_real = os.path.realpath(xlsx_path)
+    file_count = sum(
+        1
+        for dirpath, _, filenames in os.walk(source_dir)
+        for fname in filenames
+        if os.path.realpath(os.path.join(dirpath, fname)) != output_real
+    )
 
     with zipfile.ZipFile(xlsx_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for dirpath, _, filenames in os.walk(source_dir):
             for fname in filenames:
                 fpath = os.path.join(dirpath, fname)
+                # Never zip the archive into itself: an output path inside
+                # the working dir (e.g. xlsx_pack.py work/ work/out.xlsx)
+                # used to embed the partially-written zip as an undeclared
+                # package part, which Excel flags for repair.
+                if os.path.realpath(fpath) == output_real:
+                    continue
                 arcname = os.path.relpath(fpath, source_dir)
                 z.write(fpath, arcname)
 
