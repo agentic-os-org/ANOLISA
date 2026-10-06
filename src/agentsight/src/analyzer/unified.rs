@@ -716,32 +716,45 @@ impl Analyzer {
             .filter_map(|e| self.token.parse_event(e))
             .fold(None, merge_usage);
 
-        if usage.is_none() {
-            // Fallback: OpenAI Responses API embeds usage in a final
-            // `response.completed` event whose `data:` field routinely
-            // exceeds a single TLS record. The aggregator buffers the
-            // raw continuation bytes; re-parse them with the legacy
-            // SSEParser (which concatenates multi-line data fields)
-            // and merge all events. If reassembled events still don't
-            // yield usage, fall back to a partial-scan over the raw
-            // buffer text.
-            if let Some(extra) = continuation_bytes {
-                let text = String::from_utf8_lossy(extra);
-                let reassembled = SSEParser::parse_stream(&text);
-                usage = reassembled
-                    .events
-                    .iter()
-                    .filter_map(|e| self.token.parse_data(&e.data))
-                    .fold(None, merge_usage);
+        // The continuation buffer holds the bytes of events a TLS record split,
+        // and a split event produces no `ParsedSseEvent` of its own. Its usage
+        // therefore has to be merged into what the events yielded, not used
+        // only as a replacement for "nothing at all": Anthropic splits its
+        // counters across events (`message_start` carries input plus the cache
+        // counters and a placeholder `output_tokens` of 1, the terminal
+        // `message_delta` carries the real output count), so a split that lands
+        // on the terminal event left the placeholder in place while the bytes
+        // that would correct it sat unread in the same call. `merge_usage` takes
+        // the max of each cumulative counter, so folding the reassembled events
+        // in can only raise a counter, never lose one.
+        if let Some(extra) = continuation_bytes {
+            // Re-parse with the legacy SSEParser, which concatenates
+            // multi-line `data:` fields — what the OpenAI Responses API's
+            // final `response.completed` event needs when its payload exceeds
+            // a single record.
+            let text = String::from_utf8_lossy(extra);
+            let reassembled = SSEParser::parse_stream(&text);
+            let from_reassembled = reassembled
+                .events
+                .iter()
+                .filter_map(|e| self.token.parse_data(&e.data))
+                .fold(None, merge_usage);
+            if let Some(from_reassembled) = from_reassembled {
+                usage = merge_usage(usage, from_reassembled);
+            }
+            if usage.is_none() {
+                // Last resort: a regex-free scan over the raw buffer text. It
+                // reads the number after a usage field name in arbitrary text,
+                // so it only runs when nothing parseable was recovered — over a
+                // stream that already produced exact counters it could only add
+                // noise.
+                usage = self.token.parse_data(&text);
                 if usage.is_none() {
-                    usage = self.token.parse_data(&text);
-                    if usage.is_none() {
-                        log::debug!(
-                            "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
-                            extra.len(),
-                            reassembled.events.len(),
-                        );
-                    }
+                    log::debug!(
+                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                        extra.len(),
+                        reassembled.events.len(),
+                    );
                 }
             }
         }
@@ -2073,6 +2086,49 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         assert_eq!(record.output_tokens, 42);
         assert_eq!(record.cache_creation_tokens, Some(5678));
         assert_eq!(record.cache_read_tokens, Some(90));
+    }
+
+    /// Anthropic splits its counters across events, and the terminal one can be
+    /// split by a TLS record — in which case it produces no `ParsedSseEvent` and
+    /// its bytes exist only in the continuation buffer. That buffer used to be
+    /// consulted only when *no* event yielded usage, so the terminal event's
+    /// real count was invisible whenever the earlier `message_start` had already
+    /// supplied the placeholder `output_tokens: 1`.
+    #[test]
+    fn a_split_terminal_usage_event_is_merged_into_the_partial_counters() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
+        )];
+        // The tail of the terminal event, as the aggregator buffered it: the
+        // parser keeps no cross-read remainder, so these bytes arrive as RawData.
+        let continuation = b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("the split terminal event must still produce a record");
+
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
+    }
+
+    #[test]
+    fn a_continuation_buffer_cannot_lower_the_event_counters() {
+        // The merge takes the max of each counter, so a continuation buffer
+        // whose text mentions a smaller count leaves the exact value in place.
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":42}}",
+        )];
+        let continuation =
+            b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("the event usage must be kept");
+
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
     }
 
     #[test]
