@@ -1750,10 +1750,20 @@ impl AgentSight {
                         if should_detect {
                             if let Some(ref sqlite) = self.genai_sqlite_store {
                                 let loop_detector = crate::interruption::LoopDetector::default();
-                                let recent = sqlite.get_recent_calls_for_conversation(
+                                // A failed lookup is not a short window: the
+                                // detector reads a short list as "too few
+                                // repetitions to be a loop", so the DeadLoop
+                                // interruption — and with it the auto-kill —
+                                // would never fire for this conversation.
+                                let Some(recent) = sqlite.get_recent_calls_for_conversation(
                                     cid,
                                     loop_detector.config.window_size,
-                                );
+                                ) else {
+                                    log::warn!(
+                                        "Skipping DeadLoop detection for conversation {cid}: the recent-calls lookup failed"
+                                    );
+                                    continue;
+                                };
                                 if let Some(loop_event) = loop_detector.detect(
                                     cid,
                                     llm_call.metadata.get("session_id").map(|s| s.as_str()),

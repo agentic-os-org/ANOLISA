@@ -3927,3 +3927,106 @@ fn call_turn_indices_survive_a_null_call_id_row() {
     drop(store);
     let _ = std::fs::remove_file(&path);
 }
+
+/// A failed recent-calls lookup must not be reported as an empty window.
+///
+/// The DeadLoop detector reads a short list as "too few repetitions to be a
+/// loop", so folding a storage error into an empty result silently disabled the
+/// interruption — and the auto-kill that hangs off it — for that conversation.
+#[test]
+fn a_failed_recent_calls_lookup_is_not_an_empty_window() {
+    let dir = std::env::temp_dir().join(format!(
+        "test_recent_calls_failure_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("foreign.db");
+    // A database whose events table lacks the columns the lookup selects — the
+    // shape a foreign or legacy file has.
+    rusqlite::Connection::open(&db)
+        .expect("fixture connection")
+        .execute_batch("CREATE TABLE genai_events (id INTEGER PRIMARY KEY);")
+        .expect("fixture schema");
+
+    let store = GenAISqliteStore::open_read_only_existing(&db).expect("foreign store");
+
+    assert!(
+        store
+            .get_recent_calls_for_conversation("conv-1", 10)
+            .is_none(),
+        "a failed lookup must be reported as unknown, not as an empty window"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The answer the detector actually consumes: the conversation's calls, oldest
+/// first, with the tokens and the parsed output summary it counts repetitions
+/// over.
+#[test]
+fn a_successful_recent_calls_lookup_returns_the_calls_oldest_first() {
+    let path = std::env::temp_dir().join(format!(
+        "test_recent_calls_success_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns,\
+                   conversation_id, agent_name, pid, status, input_tokens,\
+                   output_tokens, output_messages, event_json\
+                   ) VALUES (?1,'llm_call',?2,?3,'conv-success','agent-s',7,'complete',?4,?5,?6,'{}')";
+        // Inserted newest-first, so the ascending order the detector replays is
+        // asserted rather than inherited from the insertion order.
+        conn.execute(
+            sql,
+            params![
+                "call-b",
+                BASE_NS + STEP_NS,
+                BASE_NS + 2 * STEP_NS,
+                20_i64,
+                5_i64,
+                r#"[{"parts":[{"type":"tool_call","name":"read_file","arguments":{"path":"a"}}]}]"#,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "call-a",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                100_i64,
+                50_i64,
+                r#"[{"parts":[{"type":"text","content":"first answer"}]}]"#,
+            ],
+        )
+        .unwrap();
+    }
+
+    let calls = store
+        .get_recent_calls_for_conversation("conv-success", 10)
+        .expect("a successful lookup answers with the calls it found");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].call_id, "call-a", "oldest first");
+    assert_eq!(calls[1].call_id, "call-b");
+    assert_eq!((calls[0].input_tokens, calls[0].output_tokens), (100, 50));
+    assert_eq!(
+        calls[0].output_text_snippet, "first answer",
+        "the snippet must come from the row's output_messages"
+    );
+    assert_eq!(calls[1].tool_calls.len(), 1);
+    assert_eq!(calls[1].tool_calls[0].name, "read_file");
+
+    let _ = std::fs::remove_file(&path);
+}
