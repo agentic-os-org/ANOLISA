@@ -106,9 +106,14 @@ def extract_sheet_refs(formula: str) -> list[str]:
       - 'Sheet Name'!A1  (quoted, may contain spaces)
       - SheetName!A1     (unquoted, no spaces)
 
+    Double-quoted string literals are stripped first: prose inside a
+    formula (e.g. ="Warning: check Q3!") is data, not a reference, and
+    used to be reported as a broken sheet reference.
+
     Returns a list of sheet name strings (may contain duplicates if the same
     sheet is referenced multiple times in one formula).
     """
+    formula = re.sub(r'"[^"]*"', "", formula)
     refs = []
     # Quoted sheet names: 'Sheet Name'!
     for m in re.finditer(r"'([^']+)'!", formula):
@@ -132,8 +137,11 @@ def extract_name_refs(formula: str) -> list[str]:
     This is approximate. False positives are possible; false negatives are rare.
     """
     names = []
+    # Remove double-quoted string literals first: prose identifiers inside
+    # a formula are data, not name references.
+    formula_clean = re.sub(r'"[^"]*"', "", formula)
     # Remove quoted sheet references first to avoid false matches
-    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula)
+    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula_clean)
     formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
