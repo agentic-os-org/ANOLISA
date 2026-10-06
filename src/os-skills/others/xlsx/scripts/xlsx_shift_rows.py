@@ -73,7 +73,10 @@ def _shift_refs(text: str, at: int, delta: int) -> str:
             row = max(1, row + delta)
         return f"{dollar_col}{col_part}{dollar_row}{row}"
 
-    pattern = r'(\$?)([A-Z]+)(\$?)(\d+)'
+    # Lookarounds keep the match a standalone token: a following "(" means a
+    # function call (ATAN2(, LOG10(), and adjacent alphanumerics mean part of
+    # a longer identifier or scientific notation (1E5) — neither is a cell ref.
+    pattern = r'(?<![A-Za-z0-9_$])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Za-z0-9_(])'
     return re.sub(pattern, replacer, text)
 
 
