@@ -34,8 +34,12 @@ DEFAULT_OPENCLAW_PROFILES_DIR = Path("output/run/openclaw-profiles")
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
+    # Decode per line with errors="replace": OpenClaw transcripts capture raw
+    # tool output, and a single stray non-UTF-8 byte used to abort the whole
+    # read (UnicodeDecodeError from read_text) and lose the entire session
+    # instead of just the mangled line.
+    for line_number, raw_line in enumerate(path.read_bytes().splitlines(), start=1):
+        line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         try:

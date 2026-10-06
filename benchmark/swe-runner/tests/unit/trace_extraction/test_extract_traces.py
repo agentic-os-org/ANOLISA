@@ -167,6 +167,61 @@ class TestRecordOpenClawJsonlTracesInWindow:
             {"type": "tool_call", "id": "tc-1", "name": "exec", "arguments": {"cmd": "pytest"}},
         ]
 
+    def test_survives_a_non_utf8_byte_in_one_jsonl_line(self, tmp_path):
+        """One mangled byte in a captured transcript must not lose the session.
+
+        OpenClaw transcripts embed raw tool output, so a stray non-UTF-8
+        byte in a single line is expected in the wild. The reader must
+        salvage that line without aborting the whole file with
+        UnicodeDecodeError, and the session's other lines must still be
+        reconstructed.
+        """
+        profiles_root = tmp_path / "openclaw-profiles"
+        sessions_dir = profiles_root / "pydata__xarray-5131" / "agents" / "pydata__xarray-5131" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        session_file = sessions_dir / "session-1.jsonl"
+        raw_lines = [
+            json.dumps(
+                {
+                    "type": "message",
+                    "id": "user-1",
+                    "timestamp": "2026-04-24T15:22:05.726Z",
+                    "message": {
+                        "role": "user",
+                        "content": "Repository: pydata/xarray\nIssue ID: pydata__xarray-5131\nBase Commit: abc",
+                    },
+                }
+            ).encode("utf-8"),
+            # A captured tool-output line carrying one invalid UTF-8 byte (0xff).
+            b'{"type":"message","id":"mangled-1","content":"tool output with \xff byte"}',
+            json.dumps(
+                {
+                    "type": "message",
+                    "id": "assistant-1",
+                    "timestamp": "2026-04-24T15:22:06.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Done."}],
+                        "usage": {"input": 100, "output": 25},
+                    },
+                }
+            ).encode("utf-8"),
+        ]
+        session_file.write_bytes(b"\n".join(raw_lines) + b"\n")
+
+        recorded = record_openclaw_jsonl_traces_in_window(
+            parse_time_value("2026-04-24T15:22:00+00:00"),
+            parse_time_value("2026-04-24T15:23:00+00:00"),
+            profiles_root=profiles_root,
+            trace_root=tmp_path / "traces",
+        )
+
+        assert len(recorded) == 1
+        data = json.loads(recorded[0].read_text(encoding="utf-8"))
+        assert data["issue_id"] == "pydata__xarray-5131"
+        assert data["total_input_tokens"] == 100
+        assert data["total_output_tokens"] == 25
+
     def test_records_openclaw_assistant_steps_with_zero_usage(self, tmp_path):
         profiles_root = tmp_path / "openclaw-profiles"
         sessions_dir = profiles_root / "astropy__astropy-12907" / "agents" / "astropy__astropy-12907" / "sessions"
