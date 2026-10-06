@@ -39,6 +39,11 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd; the same OLTP workload as MySQL.
         || info.has_process("mariadbd")
+        // TiDB is an OLTP database and TiKV its distributed KV store — both
+        // are services the engine already detects (KNOWN_SERVICES); the
+        // io-latency profile is defined as "OLTP databases, KV stores".
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     let has_cache = info.has_process("redis-server")
@@ -188,6 +193,26 @@ mod tests {
         // Role-suffixed worker comms classify the same.
         assert_eq!(
             classify(&make_info(vec!["mariadbd: writer"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_tidb() {
+        // TiDB is an OLTP database and TiKV its distributed KV store — both
+        // are services the detector already knows (KNOWN_SERVICES). classify
+        // must route a TiDB host to the io-latency profile, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["tidb-server"])),
+            WorkloadType::IoLatency
+        );
+        assert_eq!(
+            classify(&make_info(vec!["tikv-server"])),
+            WorkloadType::IoLatency
+        );
+        // A database still outranks the web tier on a combined host.
+        assert_eq!(
+            classify(&make_info(vec!["tidb-server", "nginx"])),
             WorkloadType::IoLatency
         );
     }
