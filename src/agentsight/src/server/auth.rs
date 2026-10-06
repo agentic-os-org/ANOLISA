@@ -385,7 +385,18 @@ fn normalize_path(mut path: String) -> String {
     path
 }
 
-fn is_enforcement_mutation_path(method: &actix_web::http::Method, path: &str) -> bool {
+/// Whether this request makes the root server act on the host.
+///
+/// Loopback is a network location, not an authorization boundary, so the
+/// endpoints that put the server's privileges or credentials to work require a
+/// credential of their own even from the local machine. That covers the
+/// kernel-policy mutations plus the two that are equally consequential and were
+/// missing: rewriting where the server sends its stored LLM credential
+/// (`POST /api/optimize/config`) and killing and re-execing an agent process as
+/// root (`POST /api/agent-health/{pid}/restart`). Data-plane writes (labels,
+/// triage, evaluations) stay on the loopback path: they change what the
+/// dashboard shows, not what the host does.
+fn is_privileged_mutation_path(method: &actix_web::http::Method, path: &str) -> bool {
     match *method {
         actix_web::http::Method::POST => {
             matches!(
@@ -393,11 +404,16 @@ fn is_enforcement_mutation_path(method: &actix_web::http::Method, path: &str) ->
                 "/api/enforcement/bindings"
                     | "/api/enforcement/file-bindings"
                     | "/api/enforcement/credential-bindings"
-            ) || ["/contain", "/review"].iter().any(|suffix| {
-                path.strip_prefix("/api/audit/cases/")
-                    .and_then(|case_id| case_id.strip_suffix(suffix))
-                    .is_some_and(|case_id| !case_id.is_empty() && !case_id.contains('/'))
-            })
+                    | "/api/optimize/config"
+            ) || path
+                .strip_prefix("/api/agent-health/")
+                .and_then(|rest| rest.strip_suffix("/restart"))
+                .is_some_and(|pid| !pid.is_empty() && !pid.contains('/'))
+                || ["/contain", "/review"].iter().any(|suffix| {
+                    path.strip_prefix("/api/audit/cases/")
+                        .and_then(|case_id| case_id.strip_suffix(suffix))
+                        .is_some_and(|case_id| !case_id.is_empty() && !case_id.contains('/'))
+                })
         }
         actix_web::http::Method::DELETE => path
             .strip_prefix("/api/enforcement/bindings/")
@@ -491,10 +507,10 @@ where
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
 
-        // Kernel-policy mutations always require an explicit credential. Loopback is a
+        // Privileged mutations always require an explicit credential. Loopback is a
         // network location, not an authorization boundary: unprivileged local processes
         // must not be able to use the root server as a confused deputy.
-        if path.matches(|value| is_enforcement_mutation_path(req.method(), value)) {
+        if path.matches(|value| is_privileged_mutation_path(req.method(), value)) {
             let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
                 let fut = self.service.call(req);
