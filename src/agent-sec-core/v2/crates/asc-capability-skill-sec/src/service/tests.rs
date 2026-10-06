@@ -575,3 +575,57 @@ fn unicode_override_cannot_be_signed_as_pass_or_activated() {
         );
     }
 }
+
+#[test]
+fn scan_reports_special_files_instead_of_skipping_them() {
+    let ledger_findings = |skill_dir: &std::path::Path| {
+        let ledger: Value =
+            serde_json::from_slice(&fs::read(skill_dir.join(".skill-meta/latest.json")).unwrap())
+                .unwrap();
+        ledger["scans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|scan| scan["findings"].as_array().cloned().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    let (_temporary, service, root) = fixture();
+    let listener = std::os::unix::net::UnixListener::bind(root.io_dir.join("agent.sock")).unwrap();
+    service
+        .scan(&root, &ScanOptions::default(), deadline())
+        .unwrap();
+    drop(listener);
+    let findings = ledger_findings(&root.io_dir);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding["rule"] == "special-file"),
+        "socket entry produced no finding: {findings:?}"
+    );
+
+    // FIFOs are the other common special node; mkfifo is a standard tool.
+    // Content capture skips special nodes, so force a scanner re-run.
+    let fifo = root.io_dir.join("progress.pipe");
+    std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    service
+        .scan(
+            &root,
+            &ScanOptions {
+                scanners: None,
+                force: true,
+            },
+            deadline(),
+        )
+        .unwrap();
+    let findings = ledger_findings(&root.io_dir);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding["rule"] == "special-file"),
+        "FIFO entry produced no finding: {findings:?}"
+    );
+    fs::remove_file(&fifo).unwrap();
+}

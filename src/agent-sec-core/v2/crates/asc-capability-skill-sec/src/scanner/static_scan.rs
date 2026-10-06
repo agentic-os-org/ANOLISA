@@ -75,6 +75,11 @@ pub(super) fn scan(
                 "remediation":"Replace symlinks with regular files inside the Skill directory.","target":target})));
             continue;
         }
+        if let EntryKind::Special = entry.kind {
+            findings.push(item("special-file", "medium", "Skill contains a special file (FIFO, socket or device node); special files are not scanned.", Some(&entry.path), None,
+                json!({"category":"filesystem","title":"Special file included","remediation":"Package regular files only; special nodes do not belong in a Skill directory."})));
+            continue;
+        }
         if entry.kind != EntryKind::File {
             continue;
         }
