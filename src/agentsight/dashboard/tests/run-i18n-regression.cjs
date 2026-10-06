@@ -22,6 +22,10 @@ try {
       '--esModuleInterop',
       '--skipLibCheck',
       'src/i18n.tsx',
+      // The risk-conclusion renderer decides per locale whether the server's
+      // `because` clause is translated; it is locale behaviour, so it is
+      // covered here.
+      'src/utils/ruleReason.ts',
     ],
     { stdio: 'inherit' },
   );
@@ -29,6 +33,7 @@ try {
     env: {
       ...process.env,
       AGENTSIGHT_I18N_BUILD: join(outputDir, 'i18n.js'),
+      AGENTSIGHT_RULE_REASON_BUILD: join(outputDir, 'utils', 'ruleReason.js'),
       NODE_PATH: join(process.cwd(), 'node_modules'),
     },
     stdio: 'inherit',

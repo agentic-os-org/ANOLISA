@@ -22,6 +22,7 @@ import {
   type SecuritySessionSummary,
   type SecuritySummary,
 } from '../utils/apiClient';
+import { translateRuleReason } from '../utils/ruleReason';
 
 type AuditTab = 'overview' | 'sessions' | 'cases' | 'events';
 const CASE_PAGE_SIZE = 20;
@@ -65,22 +66,6 @@ const eventLabel: Record<string, MessageKey> = {
   policy_decision: 'audit.event.policyDecision',
   enforcement_state: 'audit.event.enforcementState',
 };
-
-// Risk conclusions come from the policy DSL `because` clause, which is authored
-// in English on the backend. Translate the known rule reasons to Chinese for
-// display; unknown reasons fall back to the original text unchanged.
-const ruleReasonZh: Record<string, string> = {
-  'credential-derived data reached an untrusted network target': '凭据衍生数据访问了不可信网络目标',
-  'credential reached an untrusted target': '凭据数据访问了不可信目标',
-  'credential taint reached unknown public endpoint': '凭据污点数据到达未知公网目标',
-  'agentsight sensitive file policy': 'AgentSight 敏感文件策略',
-};
-
-function translateRuleReason(reason: string): string {
-  if (!reason) return reason;
-  const key = reason.trim().toLowerCase();
-  return ruleReasonZh[key] ?? reason;
-}
 
 interface ProcessTreeNode {
   pid: number;
@@ -296,7 +281,7 @@ const Pagination: React.FC<{
 export const SystemAuditPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const localeTag = useLocaleTag();
   const [activeTab, setActiveTab] = useState<AuditTab>('overview');
   const [summary, setSummary] = useState<SecuritySummary | null>(null);
@@ -662,7 +647,7 @@ export const SystemAuditPage: React.FC = () => {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-medium text-gray-900">{translateRuleReason(item.summary)}</p>
+                      <p className="font-medium text-gray-900">{translateRuleReason(item.summary, locale)}</p>
                       <p className="mt-1 text-xs text-gray-500">
                         {item.agent_id} · {item.session_id || t('audit.case.noSession')} · {formatTime(item.updated_at_ns, localeTag)}
                       </p>
@@ -702,7 +687,7 @@ export const SystemAuditPage: React.FC = () => {
                     <div>
                       <p className="text-xs font-medium text-gray-500">{t('audit.case.summaryTitle')}</p>
                       <div className="mt-1 flex flex-wrap items-center gap-2">
-                        <h2 className="text-xl font-semibold text-gray-900">{translateRuleReason(selectedCase.summary)}</h2>
+                        <h2 className="text-xl font-semibold text-gray-900">{translateRuleReason(selectedCase.summary, locale)}</h2>
                         {caseProtection === 'enforce' ? (
                           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">拦截保护中</span>
                         ) : caseProtection === 'audit' ? (
