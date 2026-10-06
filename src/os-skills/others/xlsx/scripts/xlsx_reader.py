@@ -66,6 +66,9 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
                 df = pd.read_csv(file_path, sep=sep, encoding=enc)
                 df._reader_encoding = enc  # attach metadata (non-standard, for reporting)
                 return {path.stem: df}
+            except pd.errors.EmptyDataError:
+                # A 0-byte CSV/TSV is a valid empty sheet, not an encoding failure
+                return {path.stem: pd.DataFrame()}
             except (UnicodeDecodeError, Exception) as e:
                 last_error = e
                 continue
