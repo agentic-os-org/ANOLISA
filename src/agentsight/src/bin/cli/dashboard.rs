@@ -1,7 +1,7 @@
 //! Dashboard subcommand — display dashboard URL, auth status, and ECS access guide
 
 use std::ffi::OsStr;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ pub struct DashboardCommand {
 impl DashboardCommand {
     pub fn execute(&self) {
         // Check if the server is running
-        if !check_server_running(self.port) {
+        if !check_server_running(&self.host, self.port) {
             eprintln!("AgentSight 服务未启动。请先运行 `agentsight serve`。");
             std::process::exit(1);
         }
@@ -267,12 +267,24 @@ fn local_addresses() -> Vec<String> {
 }
 
 /// Quick TCP connect to check whether the server is listening.
-fn check_server_running(port: u16) -> bool {
-    TcpStream::connect_timeout(
-        &std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
-        Duration::from_millis(500),
-    )
-    .is_ok()
+///
+/// Probes the host the user told `serve` to bind (`--host`), not loopback: a
+/// server bound to one concrete address is not reachable on 127.0.0.1, so the
+/// fixed loopback probe answered "not running" and the command exited 1 even
+/// though it had just been handed the address the server listens on. A
+/// wildcard bind is still probed on loopback, the only address such a socket is
+/// guaranteed to answer on from here.
+fn check_server_running(host: &str, port: u16) -> bool {
+    let target = match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" | "*" => "127.0.0.1",
+        other => other,
+    };
+    let Ok(addresses) = (target, port).to_socket_addrs() else {
+        return false;
+    };
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok())
 }
 
 /// Try to open a URL in the default browser.
@@ -377,7 +389,7 @@ mod tests {
     #[test]
     fn check_server_running_returns_false_when_no_listener() {
         // Pick a port that is almost certainly not in use
-        let result = check_server_running(1);
+        let result = check_server_running("127.0.0.1", 1);
         assert!(
             !result,
             "port 1 should not have a listener, so check should return false"
@@ -389,8 +401,51 @@ mod tests {
         // Bind a TCP listener on a random port
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
         let port = listener.local_addr().unwrap().port();
-        let result = check_server_running(port);
+        let result = check_server_running("127.0.0.1", port);
         assert!(result, "should detect the active listener on port {port}");
+    }
+
+    #[test]
+    fn check_server_running_probes_the_configured_host() {
+        // A server bound to one concrete address is unreachable on loopback, so
+        // the probe has to use `--host` rather than a fixed 127.0.0.1. Linux
+        // answers on the whole 127/8 range, which gives two distinct loopback
+        // addresses to tell the two behaviours apart.
+        let listener = TcpListener::bind("127.0.0.2:0").expect("failed to bind 127.0.0.2");
+        let port = listener.local_addr().unwrap().port();
+
+        assert!(
+            check_server_running("127.0.0.2", port),
+            "the configured host must be probed"
+        );
+        assert!(
+            !check_server_running("127.0.0.1", port),
+            "an address the server is not bound to must not report as running"
+        );
+    }
+
+    #[test]
+    fn check_server_running_treats_a_wildcard_bind_as_loopback() {
+        // `serve` binds 0.0.0.0 by default; `dashboard`'s own default host value
+        // is the same wildcard, so the probe must still resolve to loopback
+        // rather than trying to connect to 0.0.0.0.
+        let listener = TcpListener::bind("0.0.0.0:0").expect("failed to bind");
+        let port = listener.local_addr().unwrap().port();
+
+        for host in ["0.0.0.0", "", "::"] {
+            assert!(
+                check_server_running(host, port),
+                "wildcard host {host:?} must be probed on loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn check_server_running_rejects_a_malformed_host() {
+        // A resolution failure is a "not running" answer, not a panic. The host
+        // string is malformed rather than merely absent from DNS, because a
+        // resolver that wildcards NXDOMAIN would otherwise answer it.
+        assert!(!check_server_running("no such host", 7396));
     }
 
     #[test]
