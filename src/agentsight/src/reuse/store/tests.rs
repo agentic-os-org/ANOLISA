@@ -502,6 +502,63 @@ fn pending_review_rows_can_be_listed() {
 }
 
 #[test]
+fn an_override_that_repeats_the_auto_label_counts_as_a_confirmation() {
+    // `LabelAction::Override` records `Overridden` for any label the person
+    // picks, so choosing the label already in force used to be counted as a
+    // rule misfire even though the decision agreed with the rules. The sibling
+    // counter in `reuse::api::tally_override` requires a real disagreement.
+    let store = store("stats-same-label");
+    store
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &["R3(exit0)", "shared"]),
+            "h",
+            "v1",
+        )
+        .unwrap();
+    store
+        .upsert_auto_label(
+            "s2",
+            identity(),
+            outcome(TrajectoryLabel::Good, &["R3(exit0)"]),
+            "h",
+            "v1",
+        )
+        .unwrap();
+
+    // Picks the label the rules had already assigned.
+    store
+        .apply_decision(
+            "s1",
+            LabelAction::Override(TrajectoryLabel::Good),
+            "alice",
+            None,
+        )
+        .unwrap();
+    // A genuine replacement of the rules' verdict.
+    store
+        .apply_decision(
+            "s2",
+            LabelAction::Override(TrajectoryLabel::Bad),
+            "alice",
+            None,
+        )
+        .unwrap();
+
+    let stats = store.rule_override_stats().unwrap();
+    let by_rule = |rule: &str| stats.iter().find(|s| s.rule == rule).unwrap().clone();
+    assert_eq!(
+        by_rule("shared").overridden,
+        0,
+        "agreeing with the rules is not a misfire"
+    );
+    assert_eq!(by_rule("shared").confirmed, 1);
+    assert_eq!(by_rule("R3(exit0)").overridden, 1);
+    assert_eq!(by_rule("R3(exit0)").confirmed, 1);
+}
+
+#[test]
 fn rule_stats_separate_overrides_from_confirmations() {
     let store = store("stats");
     store

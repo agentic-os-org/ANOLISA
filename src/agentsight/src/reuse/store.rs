@@ -634,10 +634,20 @@ impl ReuseStore {
         let mut tally: std::collections::BTreeMap<String, (usize, usize)> =
             std::collections::BTreeMap::new();
         for label in self.list_labels(&LabelFilter::default())? {
+            // `LabelAction::Override` records `Overridden` for whatever label
+            // the person picks, including the one already in force. Such a
+            // decision agrees with the rules rather than replacing them, so
+            // bucketing on the state alone counted an agreement as a misfire —
+            // the opposite of how `reuse::api::tally_override` reads the same
+            // row. Require an actual disagreement, which is what the statistic
+            // documents.
+            let overridden = label.confirm_state == ConfirmState::Overridden
+                && label
+                    .human_label
+                    .is_some_and(|human| human != label.auto_label);
             let bucket = match label.confirm_state {
-                ConfirmState::Overridden => 0,
-                ConfirmState::Confirmed => 1,
                 ConfirmState::Unconfirmed => continue,
+                _ => usize::from(!overridden),
             };
             for rule in &label.auto_rules {
                 let entry = tally.entry(rule.clone()).or_insert((0, 0));
