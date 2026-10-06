@@ -108,6 +108,7 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
         # Wait for health
         timeout_s = svc.get("ready_timeout", 15)
         deadline = time.monotonic() + timeout_s
+        healthy = False
         while time.monotonic() < deadline:
             try:
                 if health_method == "POST":
@@ -115,10 +116,17 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
                 else:
                     r = httpx.get(health_check, timeout=2)
                 if r.status_code == 200:
+                    healthy = True
                     break
             except Exception:
                 pass
             time.sleep(0.5)
+        # Name an unhealthy service here instead of failing much later inside
+        # the agent run with confusing errors — the mcp_mock bridge's
+        # _start_service twin already reports this condition.
+        if not healthy:
+            log(f"  [WARNING] mock service '{name}' not healthy after "
+                f"{timeout_s}s (port {port}, check {health_check})")
 
 
 def reset_services_with_offset(task_yaml: str, port_offset: int):
