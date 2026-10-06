@@ -1763,6 +1763,13 @@ fn hand_handshake_pipe_to_child(
         // close/drop on the client side would not produce the EOF that means
         // "client lost".
         let _ = libc::close(write_fd);
+        // Round-7 review: with nothing open past the std streams, pipe()
+        // hands back exactly (3, 4) — the read end IS the reserved fd, and
+        // dup2(read_fd, 3) would be a documented no-op whose unconditional
+        // companion close(read_fd) closed the handshake itself, leaving the
+        // supervisor to read EBADF as "no handshake" and start serving
+        // unrecorded. Move (and close) the original only when it is a
+        // genuinely different descriptor.
         if read_fd != SUPERVISOR_HANDSHAKE_FD {
             if libc::dup2(read_fd, SUPERVISOR_HANDSHAKE_FD) == -1 {
                 return Err(std::io::Error::last_os_error());
@@ -4943,6 +4950,477 @@ mod tests {
         assert!(
             !signal_identity(&recorded, libc::SIGTERM),
             "a signal must not be delivered after the recorded process is gone"
+        );
+    }
+
+    /// The descriptor numbers currently open in `pid`, from Linux `/proc`.
+    /// Enumerated with opendir/readdir. For a SELF listing the directory fd
+    /// itself — which the kernel hands the LOWEST free descriptor, i.e.
+    /// exactly the fd under test — is excluded from its own listing (a plain
+    /// `read_dir` would report a free fd 3 as open); for another process's
+    /// listing the directory fd lives in OUR table, so nothing is excluded.
+    /// Empty when `/proc` is unavailable — the suite's process tests are
+    /// Linux-only regardless (see [`live_supervise_pids`]).
+    fn proc_fd_names(pid: u32) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let path = std::ffi::CString::new(format!("/proc/{pid}/fd")).unwrap();
+        let self_listing = pid == std::process::id();
+        unsafe {
+            let dir = libc::opendir(path.as_ptr());
+            if !dir.is_null() {
+                let dirfd = libc::dirfd(dir);
+                loop {
+                    let entry = libc::readdir(dir);
+                    if entry.is_null() {
+                        break;
+                    }
+                    let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_string_lossy();
+                    if name != "." && name != ".." && !(self_listing && name == dirfd.to_string()) {
+                        names.insert(name.to_string());
+                    }
+                }
+                libc::closedir(dir);
+            }
+        }
+        names
+    }
+
+    /// Single-quote `raw` for `/bin/sh` (the role wrapper embeds this test
+    /// harness's path, which may contain spaces).
+    fn sh_quote(raw: &str) -> String {
+        format!("'{}'", raw.replace('\'', r"'\''"))
+    }
+
+    /// Read a role's redirected output files for failure diagnostics.
+    fn read_role_output(out_path: &Path, err_path: &Path) -> String {
+        let mut out = std::fs::read_to_string(out_path).unwrap_or_default();
+        out.push_str(&std::fs::read_to_string(err_path).unwrap_or_default());
+        out
+    }
+
+    #[ignore]
+    #[test]
+    fn handshake_lowest_fd_client_role() {
+        // Test-only role process, re-executed by
+        // [`handshake_pipe_reaches_the_supervisor_child_when_client_dies`]
+        // with `--ignored <name> --nocapture` (round-7 review regression).
+        // A fresh harness process carries only the std streams, and the role
+        // explicitly clears fds 3 and 4 below, so the descriptor allocation
+        // inside `spawn_supervisor` is fully deterministic: the supervisor
+        // log takes 3 and 4, and `pipe()` comes back on the next free pair —
+        // a read end that is NOT fd 3, i.e. exactly the branch of
+        // [`hand_handshake_pipe_to_child`] that must move the read end onto
+        // fd 3 and close the original. The env sentinel keeps the role
+        // inert outside its parent's explicit invocation (a full
+        // `--ignored` run included).
+        if std::env::var("SKILLFS_HANDSHAKE_FD_ROLE").as_deref() != Ok("spawn-client") {
+            return;
+        }
+        let program = PathBuf::from(
+            std::env::var_os("SKILLFS_HANDSHAKE_FD_SUPERVISOR_PROGRAM")
+                .expect("the role needs the supervisor child program"),
+        );
+        let instance_id =
+            std::env::var("SKILLFS_HANDSHAKE_FD_INSTANCE").expect("the role needs the instance id");
+        let mark = PathBuf::from(
+            std::env::var_os("SKILLFS_HANDSHAKE_FD_MARK").expect("the role needs the mark path"),
+        );
+        secure_runtime_dir().expect("the role needs the runtime dir");
+
+        // Explicitly clear fds 3 and 4 (the round-7 review's own direction):
+        // the harness may carry leftovers on the first descriptors past the
+        // std streams, and this regression needs a fully controlled
+        // allocation — the supervisor log must land on exactly 3 and 4 so
+        // the pipe lands on the next free pair. Log what was there, then
+        // close.
+        let describe = |fd: libc::c_int| {
+            std::fs::read_link(format!("/proc/self/fd/{fd}"))
+                .map(|target| target.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "free".to_string())
+        };
+        eprintln!("role-fds-before: fd3={} fd4={}", describe(3), describe(4));
+        unsafe {
+            let _ = libc::close(3);
+            let _ = libc::close(4);
+        }
+
+        let before = proc_fd_names(std::process::id());
+        assert!(
+            !before.contains("3") && !before.contains("4"),
+            "the role must start with fds 3 and 4 free to control the allocation, got {before:?}"
+        );
+
+        let paths = ManagedPaths::new(&instance_id);
+        let (child, _handshake) = spawn_supervisor(&program, &instance_id, &paths)
+            .expect("the role must spawn its supervisor");
+
+        // `spawn()` returns only after the child exec'd, so its descriptor
+        // table is stable. The moved shape must be visible on both sides:
+        // the client closed its read end and holds exactly one descriptor
+        // past the std streams (the pipe's write end), and the child exec'd
+        // with the handshake pipe itself on fd 3.
+        let mine = proc_fd_names(std::process::id());
+        let child_fds = proc_fd_names(child.id());
+        let extras: Vec<&String> = mine
+            .iter()
+            .filter(|fd| fd.as_str() != "0" && fd.as_str() != "1" && fd.as_str() != "2")
+            .collect();
+        assert!(
+            !mine.contains("3"),
+            "spawn_supervisor must close the client's read end, fds now {mine:?}"
+        );
+        assert!(
+            extras.len() == 1,
+            "the client must hold exactly one descriptor past the std streams — \
+             the handshake write end, read end closed; fds {mine:?}"
+        );
+        assert!(
+            child_fds.contains("3"),
+            "the supervisor child must exec with the handshake pipe on fd 3, \
+             child fds {child_fds:?} — the round-7 bug closed it"
+        );
+        std::fs::write(
+            &mark,
+            format!(
+                "child-pid {}\nclient-fd3 absent\nclient-write present\nchild-fd3 present\n",
+                child.id()
+            ),
+        )
+        .expect("the role must write its mark file");
+
+        // Park exactly inside the spawn/publish window until the parent
+        // SIGKILLs us; bounded, so an interrupted run cannot wedge the role
+        // for good.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[ignore]
+    #[test]
+    fn handshake_lowest_fd_supervise_child_role() {
+        // Test-only role process: the supervisor CHILD of the round-7
+        // regression. It runs the real production handshake reader
+        // (`await_publish_handshake`) — the code the shipped
+        // `skillfs supervise` executes — inside this harness process
+        // because cargo test cannot hand a unit test
+        // `CARGO_BIN_EXE_skillfs` (round-7 review, P1: the gate must stay
+        // green on a clean checkout). Its findings go to stdout, stderr and
+        // — authoritatively, for the parent's asserts — the append-only log
+        // file the parent points `SKILLFS_HANDSHAKE_FD_CHILDLOG` at. The env
+        // sentinel keeps the role inert outside its parent's explicit
+        // invocation.
+        if std::env::var("SKILLFS_HANDSHAKE_FD_ROLE").as_deref() != Ok("supervise-child") {
+            return;
+        }
+        let log_line = |text: &str| {
+            eprintln!("{text}");
+            println!("{text}");
+            if let Some(path) = std::env::var_os("SKILLFS_HANDSHAKE_FD_CHILDLOG") {
+                use std::io::Write;
+                if let Ok(mut log) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(path)
+                {
+                    let _ = writeln!(log, "{text}");
+                }
+            }
+        };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let fd3 = if unsafe { libc::fstat(3, &mut stat) } != 0 {
+            "missing"
+        } else if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
+            "fifo"
+        } else {
+            "other"
+        };
+        log_line(&format!("handshake-fd3: {fd3}"));
+        match await_publish_handshake() {
+            ParentHandshake::Proceed => {
+                log_line("handshake-outcome: proceed");
+                // Keep "serving" like a wrongly-proceeding supervisor
+                // would: stay alive, so the parent's gone-check fails
+                // loudly on a regression. Bounded, so an interrupted run
+                // cannot leak a parked process forever.
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            ParentHandshake::ParentLost => {
+                log_line("handshake-outcome: parent-lost");
+            }
+        }
+    }
+
+    #[test]
+    fn handshake_handoff_keeps_the_pipe_when_the_read_end_is_fd_3() {
+        // Round-7 review, the literal scenario: with nothing open past the
+        // std streams, pipe() hands back exactly (3, 4) — the read end IS
+        // the reserved fd. dup2(read_fd, 3) is then a documented no-op, and
+        // the old unconditional close(read_fd) closed the handshake itself:
+        // the supervisor exec'd without fd 3, took EBADF as "no handshake"
+        // and served unrecorded. Craft exactly that shape here (fd 3 is
+        // verified free first) and drive the real hand-off helper in a
+        // forked child that then exec's the supervise-child role, so the
+        // EOF exit runs through the real `await_publish_handshake`. The
+        // parent plays the client: closing the write end is exactly the
+        // kernel-side effect of a client dying before the publication.
+        let before = proc_fd_names(std::process::id());
+        assert!(
+            !before.contains("3"),
+            "fd 3 must be free to craft pipe() == (3, 4), got {before:?}"
+        );
+        use std::os::unix::process::CommandExt;
+        let childlog = std::env::temp_dir().join(format!(
+            "skillfs-handshake-fd3-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        unsafe {
+            let mut pipe_fds: [libc::c_int; 2] = [0; 2];
+            assert_eq!(libc::pipe(pipe_fds.as_mut_ptr()), 0, "pipe() must succeed");
+            let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
+            assert_eq!(
+                read_fd, SUPERVISOR_HANDSHAKE_FD,
+                "the crafted shape must put the read end on fd 3 itself, got {read_fd}"
+            );
+
+            // Pre-build the exec before forking: the child between fork and
+            // exec only runs the hand-off helper (async-signal-safe
+            // syscalls) and exec — no allocation, no locks.
+            let harness = std::env::current_exe().expect("this test harness path");
+            let mut child_cmd = std::process::Command::new(harness);
+            child_cmd
+                .args([
+                    "--ignored",
+                    "handshake_lowest_fd_supervise_child_role",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env("SKILLFS_HANDSHAKE_FD_ROLE", "supervise-child")
+                .env("SKILLFS_HANDSHAKE_FD_CHILDLOG", &childlog)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+
+            let forked = libc::fork();
+            assert!(forked >= 0, "fork() must succeed");
+            if forked == 0 {
+                if hand_handshake_pipe_to_child(read_fd, write_fd).is_err() {
+                    libc::_exit(126);
+                }
+                let _ = child_cmd.exec();
+                libc::_exit(127);
+            }
+
+            // The parent is the publishing client: drop our read-end copy,
+            // then die — the write end's close is the EOF the supervisor
+            // must take as "client lost, never published".
+            let _ = libc::close(read_fd);
+            let _ = libc::close(write_fd);
+
+            let mut status: libc::c_int = 0;
+            assert_eq!(
+                libc::waitpid(forked, &mut status, 0),
+                forked,
+                "waitpid on the forked supervisor child"
+            );
+            assert!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "the supervisor child must exit cleanly through the EOF \
+                 branch, status {status:#x}"
+            );
+            let log = std::fs::read_to_string(&childlog).unwrap_or_default();
+            let _ = std::fs::remove_file(&childlog);
+            assert!(
+                log.contains("handshake-fd3: fifo"),
+                "the supervisor child must see the crafted FIFO on fd 3 — \
+                 the no-op dup2 must not have closed it — child log:\n{log}"
+            );
+            assert!(
+                log.contains("handshake-outcome: parent-lost"),
+                "the supervisor child must exit through the handshake EOF \
+                 branch, child log:\n{log}"
+            );
+            assert!(
+                !log.contains("handshake-outcome: proceed"),
+                "the supervisor child must not proceed without the GO byte, \
+                 child log:\n{log}"
+            );
+        }
+    }
+
+    #[test]
+    fn handshake_pipe_reaches_the_supervisor_child_when_client_dies() {
+        // Round-7 review: the supervisor's startup handshake silently
+        // depended on descriptor-allocation luck — when pipe() handed the
+        // client a read end that already WAS fd 3, the no-op dup2 followed
+        // by the unconditional close(read_fd) closed the handshake pipe IN
+        // THE CHILD. The child then exec'd without fd 3, read EBADF as "no
+        // handshake" and started serving unrecorded — the two-instance race
+        // reopened. This regression re-executes this harness as the
+        // publishing client in a fresh subprocess with a fully controlled
+        // allocation, spawns the supervisor child through the real
+        // `spawn_supervisor` plumbing, SIGKILLs the client inside the
+        // spawn/publish window, and requires the child to end through the
+        // handshake EOF branch — seen as a FIFO on fd 3, never as EBADF,
+        // never serving. The no-op-dup2 shape itself (read end already on
+        // fd 3) is pinned by
+        // [`handshake_handoff_keeps_the_pipe_when_the_read_end_is_fd_3`].
+        let base = tempfile::tempdir().unwrap();
+        let harness = std::env::current_exe().expect("this test harness path");
+        // The role names are unique, so a plain (substring) filter matches
+        // exactly one test each — `--exact` would need the full libtest
+        // path, which differs from `module_path!()` in a binary crate.
+        let client_role = "handshake_lowest_fd_client_role";
+        let child_role = "handshake_lowest_fd_supervise_child_role";
+        // The supervisor child program: a wrapper that re-executes this
+        // harness into the child role, flipping the role sentinel to the
+        // child value (the client role's env would otherwise propagate
+        // down and keep the child role inert). It receives (and drops)
+        // the production `supervise --instance <id>` arguments.
+        let supervise_role = base.path().join("supervise-child-role.sh");
+        std::fs::write(
+            &supervise_role,
+            format!(
+                "#!/bin/sh\nSKILLFS_HANDSHAKE_FD_ROLE=supervise-child exec {} \
+                 --ignored {child_role} --test-threads=1 --nocapture\n",
+                sh_quote(&harness.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&supervise_role, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mountpoint = base.path().join("mnt");
+        let instance_id = instance_id_for(&normalize_mountpoint(&mountpoint));
+        let paths = ManagedPaths::new(&instance_id);
+        secure_runtime_dir().unwrap();
+
+        let mark = base.path().join("spawn.mark");
+        // Redirect the role's output into files, not pipes: the child must
+        // exec with only the std streams open (pipe fds would survive as
+        // fd 3/4 leftovers and mask the production allocation under test).
+        let role_out_path = base.path().join("client-role.out");
+        let role_err_path = base.path().join("client-role.err");
+        let role_out = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&role_out_path)
+            .unwrap();
+        let role_err = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&role_err_path)
+            .unwrap();
+        let mut client = std::process::Command::new(&harness)
+            .args(["--ignored", client_role, "--test-threads=1", "--nocapture"])
+            .env("SKILLFS_HANDSHAKE_FD_ROLE", "spawn-client")
+            .env("SKILLFS_HANDSHAKE_FD_SUPERVISOR_PROGRAM", &supervise_role)
+            .env("SKILLFS_HANDSHAKE_FD_INSTANCE", &instance_id)
+            .env("SKILLFS_HANDSHAKE_FD_MARK", &mark)
+            .env(
+                "SKILLFS_HANDSHAKE_FD_CHILDLOG",
+                base.path().join("childrole.log"),
+            )
+            .stdout(std::process::Stdio::from(role_out))
+            .stderr(std::process::Stdio::from(role_err))
+            .spawn()
+            .expect("spawn the lowest-fd client role");
+
+        // Wait for the role to reach its post-spawn park; a role that exits
+        // early (any role-side assert) fails this test immediately with the
+        // role's own diagnostics instead of burning the whole deadline.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut early_exit = None;
+        while Instant::now() < deadline {
+            match client.try_wait() {
+                Ok(Some(status)) => {
+                    early_exit = Some(status);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => panic!("failed to poll the client role: {e}"),
+            }
+            if mark.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(status) = early_exit {
+            panic!(
+                "the client role exited before its park (status {status}); role output:\n{}",
+                read_role_output(&role_out_path, &role_err_path)
+            );
+        }
+        assert!(
+            mark.exists(),
+            "the client role never reported the controlled handshake allocation; \
+             role output:\n{}",
+            read_role_output(&role_out_path, &role_err_path)
+        );
+        let report = std::fs::read_to_string(&mark).unwrap();
+        assert!(
+            report.contains("client-fd3 absent")
+                && report.contains("client-write present")
+                && report.contains("child-fd3 present"),
+            "the moved shape must hold on both sides of the spawn: {report:?}"
+        );
+        let child_pid: i32 = report
+            .lines()
+            .find_map(|line| line.strip_prefix("child-pid "))
+            .and_then(|pid| pid.trim().parse().ok())
+            .expect("the role report must name the supervisor child pid");
+
+        // Kill the publishing client inside the window. The kernel closes
+        // its descriptors, the handshake pipe's write end dies with it, and
+        // the child must take the EOF branch: exit, never record, never
+        // serve.
+        let _ = client.kill();
+        let status = client.wait().expect("reap the killed client role");
+        assert!(
+            status.code().is_none(),
+            "the client role must have died by our SIGKILL inside the park, \
+             got {status}"
+        );
+
+        assert!(
+            wait_process_gone(child_pid, Duration::from_secs(10)),
+            "the supervisor child kept running after the publishing client \
+             died: the handshake EOF did not end it (fd 3 lost on exec?)"
+        );
+        let childlog =
+            std::fs::read_to_string(base.path().join("childrole.log")).unwrap_or_default();
+        assert!(
+            childlog.contains("handshake-fd3: fifo"),
+            "the supervisor child must see a FIFO on fd 3 — the crafted \
+             handshake pipe — not a missing descriptor, child log:\n{childlog}"
+        );
+        assert!(
+            childlog.contains("handshake-outcome: parent-lost"),
+            "the supervisor child must exit through the handshake EOF branch \
+             (EOF on the pipe whose write end died with the client), \
+             child log:\n{childlog}"
+        );
+        assert!(
+            !childlog.contains("handshake-outcome: proceed"),
+            "the supervisor child must not proceed without the GO byte, \
+             child log:\n{childlog}"
+        );
+        // The child's stdout/stderr are the supervisor log — keep it out of
+        // the assertions (its buffering proved unreliable across exec), but
+        // sanity-check that it exists for operator diagnostics.
+        assert!(
+            paths.supervisor_log.exists(),
+            "the supervisor log must exist for diagnostics"
         );
     }
 }
