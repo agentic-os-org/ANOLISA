@@ -655,6 +655,16 @@ def _call_user_agent_llm(ua_config: dict, persona: str,
                 return text
             return None
         except Exception as exc:
+            # Permanent API rejections carry an HTTP status code on the
+            # openai SDK's errors (401/403 bad credentials, 404 unknown
+            # model, 4xx bad request). Retrying those cannot succeed, and
+            # the 10-attempt backoff burns roughly two minutes per round
+            # before giving up on a misconfigured key.
+            status = getattr(exc, "status_code", None)
+            if isinstance(status, int) and 400 <= status < 500:
+                log(f"  [user-agent-error] permanent API rejection "
+                    f"(HTTP {status}), not retrying: {exc}")
+                return None
             delay = min(2 ** (attempt + 1), 16) + random.uniform(0, 1)
             log(f"  [user-agent-retry] {type(exc).__name__}, "
                 f"attempt {attempt + 1}/{max_retries}, waiting {delay:.1f}s ...")
