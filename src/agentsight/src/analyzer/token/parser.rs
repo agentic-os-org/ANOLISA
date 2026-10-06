@@ -400,6 +400,35 @@ mod tests {
         assert_eq!(usage.provider, LLMProvider::Gemini);
     }
 
+    /// Thinking models report their reasoning budget in `thoughtsTokenCount`,
+    /// outside `candidatesTokenCount`, while `totalTokenCount` covers both (the
+    /// reasoning budget is billed as output). Reading only the candidate
+    /// counter under-reported such a call by orders of magnitude — 1 output
+    /// token instead of 816 for the shape below — and broke the
+    /// `input + output == total` reconciliation every other provider arm keeps
+    /// (asserted for DashScope above).
+    #[test]
+    fn test_parse_gemini_thinking_usage_reconciles_with_total() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "candidates": [
+                {"content": {"parts": [{"text": "4"}], "role": "model"},
+                 "finishReason": "STOP", "index": 0}
+            ],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1,
+                              "thoughtsTokenCount": 815, "totalTokenCount": 826},
+            "modelVersion": "gemini-2.5-flash"
+        }"#;
+        let usage = parser
+            .parse_data(data)
+            .expect("gemini usage must be parsed");
+        assert_eq!(
+            usage.output_tokens, 816,
+            "thinking tokens are billed as output tokens"
+        );
+        assert_eq!(usage.total_tokens(), 826, "reconciles with totalTokenCount");
+    }
+
     /// Regression guard from **real captured traffic**: Anthropic-protocol
     /// gateway responses carry `total_tokens` in `usage` but have no `output`
     /// envelope, so they must stay Anthropic.

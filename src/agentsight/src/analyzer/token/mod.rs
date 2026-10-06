@@ -175,7 +175,22 @@ pub fn extract_usage_object(
                 .or_else(|| usage.get("candidates_token_count"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            (input, output)
+            // Thinking models bill their reasoning budget as output but report
+            // it in a counter of its own, outside `candidatesTokenCount`. A
+            // gemini-2.5 response looks like `{promptTokenCount: 10,
+            // candidatesTokenCount: 1, thoughtsTokenCount: 815,
+            // totalTokenCount: 826}`: reading only the candidate counter
+            // reports 1 output token for that call and breaks the
+            // reconciliation this module keeps everywhere else (`input + output
+            // == total`, asserted for DashScope below). Fold the thoughts in,
+            // the way OpenAI already ships reasoning inside `completion_tokens`
+            // and Anthropic inside `output_tokens`.
+            let thoughts = usage
+                .get("thoughtsTokenCount")
+                .or_else(|| usage.get("thoughts_token_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            (input, output.saturating_add(thoughts))
         }
         LLMProvider::DashScope => {
             // Native protocol reuses Anthropic's field names.
