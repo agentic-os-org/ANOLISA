@@ -48,7 +48,7 @@ impl FactCheckStrategy {
                 "--exclude-dir=node_modules",
                 "--exclude-dir=target",
                 "--exclude-dir=dist",
-                // C / C++
+                // C / C++ / Objective-C
                 "--include=*.c",
                 "--include=*.h",
                 "--include=*.cpp",
@@ -57,6 +57,8 @@ impl FactCheckStrategy {
                 "--include=*.hpp",
                 "--include=*.hh",
                 "--include=*.hxx",
+                "--include=*.m",
+                "--include=*.mm",
                 // JVM / .NET
                 "--include=*.java",
                 "--include=*.kt",
@@ -72,10 +74,15 @@ impl FactCheckStrategy {
                 "--include=*.sh",
                 "--include=*.bash",
                 "--include=*.zsh",
-                // Web
+                "--include=*.lua",
+                "--include=*.pl",
+                "--include=*.pm",
+                // Web (incl. ES/CommonJS module files)
                 "--include=*.ts",
                 "--include=*.tsx",
                 "--include=*.js",
+                "--include=*.mjs",
+                "--include=*.cjs",
                 "--include=*.jsx",
                 "--include=*.vue",
                 // Go + data / config
@@ -211,6 +218,45 @@ mod tests {
             FactCheckStrategy::grep_symbol(&dir, "no_such_symbol_here", "function"),
             GrepOutcome::NotFound
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same blind-spot class as above for modern file types: a symbol
+    /// defined ONLY in an ES-module script, an Objective-C class file, a
+    /// Lua module, or a Perl script is a real symbol the answer may cite —
+    /// reporting it as fabricated (`NotFound` → L2) is a false accusation.
+    #[test]
+    fn grep_finds_symbols_in_modern_file_types() {
+        let dir = std::env::temp_dir().join("agentsight-opt-factcheck-modern-types");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The symbol exists ONLY in files the original include list skipped,
+        // one file per family.
+        std::fs::write(
+            dir.join("api.mjs"),
+            "export function esm_only_symbol() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ViewController.mm"),
+            "- (void)applyEsmOnlySymbol { esm_only_symbol(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("handler.lua"),
+            "local function esm_only_symbol() end\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("tool.pl"), "sub esm_only_symbol { return 1; }\n").unwrap();
+
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&dir, "esm_only_symbol", "function"),
+                GrepOutcome::Found
+            ),
+            "a symbol defined in .mjs/.mm/.lua/.pl files must not be reported as fabricated"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
