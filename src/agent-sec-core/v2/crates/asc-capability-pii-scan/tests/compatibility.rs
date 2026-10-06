@@ -1,6 +1,8 @@
 //! Frozen v1 outputs plus explicit evidence-completeness regressions.
 
-use asc_capability_pii_scan::{CoverageStatus, PiiScanOptions, PiiScanner, ScanError, Verdict};
+use asc_capability_pii_scan::{
+    CoverageStatus, PiiScanOptions, PiiScanner, SCANNER_VERSION, ScanError, Verdict,
+};
 use serde_json::Value;
 
 #[test]
@@ -17,7 +19,7 @@ fn frozen_v1_builtin_responses_match() {
         let result = scanner
             .scan(case["text"].as_str().unwrap(), &options)
             .unwrap();
-        assert_eq!(result.summary.scanner_version, "2.0.1");
+        assert_eq!(result.summary.scanner_version, "2.1.0");
         assert!(
             result
                 .findings
@@ -163,4 +165,47 @@ fn mixed_unicode_positions_and_overlapping_credentials_are_redacted() {
     }
     assert!(result.findings.len() >= 2);
     assert!(!result.redacted_text.unwrap().contains("abcdefghijklmnop"));
+}
+
+#[test]
+fn scanner_version_reflects_ci_cd_prefix_semantics() {
+    // The canonical CI/CD and cloud token prefixes (github_pat_, glpat-,
+    // pypi-, npm_, AKIA) are new matching semantics, so the detection
+    // identity moves with them: SCANNER_VERSION feeds the report summary and
+    // the ruleset id digest, keeping audit reproduction unambiguous.
+    assert_eq!(SCANNER_VERSION, "2.1.0");
+    let report = PiiScanner::new()
+        .unwrap()
+        .scan(
+            "github_pat_11ABCDEFG0abcdefghijabcdefghij1234567890ABCDEFGHIJKL",
+            &PiiScanOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(report.summary.scanner_version, "2.1.0");
+    assert!(report.findings.iter().any(|f| f.pii_type == "api_key"));
+}
+
+#[test]
+fn repeated_embedded_token_prefixes_stay_bounded_and_reach_the_trailing_credential() {
+    // A rejected api_key candidate advances the scan only past its start, so
+    // every embedded github_pat_ prefix re-runs the candidate pattern. The
+    // bounded github_pat_ tail keeps each rescan constant instead of making
+    // the whole remaining word quadratic, and the trailing valid credential
+    // is still reached and reported.
+    let token = format!("sk-{}", "B".repeat(32));
+    let text = format!("x{} {token}", "github_pat_".repeat(32_000));
+    let report = PiiScanner::new()
+        .unwrap()
+        .scan(&text, &PiiScanOptions::default())
+        .unwrap();
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+    let start = text.find("sk-").unwrap();
+    let api_keys: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.pii_type == "api_key")
+        .collect();
+    assert_eq!(api_keys.len(), 1);
+    assert_eq!(api_keys[0].span.start, start);
+    assert_eq!(api_keys[0].span.end, start + token.len());
 }

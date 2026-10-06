@@ -165,7 +165,21 @@ impl BuiltinDetector {
                 let pattern = match id.as_str() {
                     "_JWT_RE" => r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{8,}".into(),
                     "_API_KEY_RE" => {
-                        r"(?:sk|pk|rk|gh[pousr]|xox[baprs])[-_][A-Za-z0-9_=-]{16}".into()
+                        // Canonical CI/CD and cloud token prefixes alongside the
+                        // generic sk/pk/rk shapes: GitHub fine-grained personal
+                        // access tokens, GitLab personal access tokens, PyPI
+                        // upload tokens, npm tokens and AWS access key ids.
+                        // The api_key matcher extends every candidate to the
+                        // token's word boundary, so the {16} floors are
+                        // minima, not exact lengths. The github_pat_ tail is
+                        // bounded above as well: a rejected candidate advances
+                        // the scan only to prefix.start()+1, so an unbounded
+                        // greedy tail would re-scan the remaining word once
+                        // per embedded prefix (quadratic work); the bound caps
+                        // each attempt while the extension still covers the
+                        // full accepted token.
+                        r"(?:sk|pk|rk|gh[pousr]|xox[baprs]|glpat|npm|pypi)[-_][A-Za-z0-9_=-]{16}|github_pat_[A-Za-z0-9_]{16,64}|AKIA[0-9A-Z]{16}"
+                            .into()
                     }
                     "_EMAIL_RE" => r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}".into(),
                     _ => python_pattern(&pattern),

@@ -388,3 +388,66 @@ fn jwt_json_shape_does_not_inherit_python_integer_or_recursion_limits() {
         );
     }
 }
+
+#[test]
+fn canonical_ci_cd_and_cloud_token_prefixes_are_detected() {
+    let scanner = PiiScanner::new().unwrap();
+    for (positive, negative) in [
+        (
+            // GitHub fine-grained personal access token (github_pat_ + 22+ chars).
+            "github_pat_11ABCDEFG0abcdefghijabcdefghij1234567890ABCDEFGHIJKL",
+            "github_pat_short",
+        ),
+        ("glpat-abcdefghijklmnopqrst", "glpat-short"),
+        ("pypi-AgEIcHlwcm90ZWN0aW9uX3Rva2VuX2hlcmU", "pypi-index"),
+        ("npm_abcdefghijklmnopqrstuvwxyz", "npm_short"),
+        // The canonical AWS documentation example key; published, not live.
+        ("AKIAIOSFODNN7EXAMPLE", "AKIAshort"),
+    ] {
+        for (input, expected) in [(positive, true), (negative, false)] {
+            let report = scanner.scan(input, &PiiScanOptions::default()).unwrap();
+            assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+            assert_eq!(
+                report.findings.iter().any(|f| f.pii_type == "api_key"),
+                expected,
+                "api_key: {input}"
+            );
+        }
+    }
+}
+
+#[test]
+fn token_prefixes_respect_word_boundaries_and_minima() {
+    let scanner = PiiScanner::new().unwrap();
+    // A word character directly before the prefix disqualifies the match (the
+    // api_key matcher's own lookbehind), and prefixes below the length floor
+    // never become findings even inside longer words.
+    for embedded in [
+        "wordglpat-abcdefghijklmnopqrstuvwxyz",
+        "xnpm_abcdefghijklmnopqrstuvwxyz",
+        "myAKIAIOSFODNN7EXAMPLE",
+        "glpat-abc",
+    ] {
+        let report = scanner.scan(embedded, &PiiScanOptions::default()).unwrap();
+        assert!(
+            !report.findings.iter().any(|f| f.pii_type == "api_key"),
+            "api_key: {embedded}"
+        );
+    }
+}
+
+#[test]
+fn github_pat_candidates_past_the_bounded_tail_keep_full_spans() {
+    // The candidate tail is capped so rejected prefixes rescan a bounded
+    // span; accepted candidates still extend to the token's word boundary,
+    // so fine-grained PATs longer than the cap keep full-span findings.
+    let token = format!("github_pat_{}", "C".repeat(90));
+    let report = PiiScanner::new()
+        .unwrap()
+        .scan(&token, &PiiScanOptions::default())
+        .unwrap();
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].pii_type, "api_key");
+    assert_eq!(report.findings[0].span.start, 0);
+    assert_eq!(report.findings[0].span.end, token.chars().count());
+}

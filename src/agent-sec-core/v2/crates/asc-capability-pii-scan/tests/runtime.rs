@@ -151,7 +151,7 @@ fn each_normal_partial_and_failed_call_has_one_terminal_event() {
     assert!(completed.success);
     assert_eq!(completed.exit_code, 0);
     assert_eq!(completed.data["verdict"], "deny");
-    assert_eq!(completed.data["summary"]["scanner_version"], "2.0.1");
+    assert_eq!(completed.data["summary"]["scanner_version"], "2.1.0");
     assert_eq!(completed.data["summary"]["coverage"]["status"], "complete");
     assert!(
         completed.data["redacted_text"]
@@ -183,7 +183,7 @@ fn each_normal_partial_and_failed_call_has_one_terminal_event() {
     assert!(!failed.success);
     assert_eq!(failed.exit_code, 1);
     assert_eq!(failed.data["verdict"], "error");
-    assert_eq!(failed.data["summary"]["scanner_version"], "2.0.1");
+    assert_eq!(failed.data["summary"]["scanner_version"], "2.1.0");
     assert_eq!(failed.data["summary"]["coverage"]["status"], "unavailable");
     assert_eq!(failed.data["summary"]["scanned_bytes"], 0);
     assert_eq!(
@@ -202,7 +202,7 @@ fn each_normal_partial_and_failed_call_has_one_terminal_event() {
     for record in &records[..3] {
         assert_eq!(
             record.details["result"]["summary"]["scanner_version"],
-            "2.0.1"
+            "2.1.0"
         );
     }
     for record in &*records {
