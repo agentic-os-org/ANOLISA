@@ -2165,6 +2165,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// A `reuse.db` read failure must not be served as "the filter matched
+    /// nothing". `unwrap_or_default()` collapsed a store error into an empty
+    /// label set, which then read backwards in every branch: `label=good`
+    /// answered "no such trajectories", `human_backed=true` answered the same,
+    /// and `exclude_label=useless` *failed open* — it removed nothing and
+    /// returned exactly the trajectories the caller asked to keep out. The 400
+    /// path for typos exists for the same reason ("a typo used to be dropped
+    /// silently"), so a failing store must be a 500 like the other store
+    /// failures in this handler.
+    #[actix_web::test]
+    async fn trajectory_label_filter_reports_a_store_failure_instead_of_failing_open() {
+        let db = unique_handler_db("label-store-error");
+        let tstore = TrajectoryStore::new_with_path(&db).unwrap();
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-label-store-error");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        // Make every label query fail the way a missing/renamed table or an I/O
+        // error would, on the same database file the store keeps open.
+        let canonical = std::fs::canonicalize(&label_dir).unwrap();
+        let conn = rusqlite::Connection::open(canonical.join(crate::config::REUSE_DB_NAME))
+            .expect("open reuse.db");
+        conn.execute("DROP TABLE session_labels", [])
+            .expect("drop label table");
+
+        let data =
+            test_app_state_with_trajectory_and_reuse(Some(Arc::new(tstore)), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/trajectories?exclude_label=useless",
+            "/api/trajectories?label=good",
+            "/api/trajectories?human_backed=false",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{uri} must report the store failure, not filter on an empty label set"
+            );
+        }
+    }
+
     #[actix_web::test]
     async fn trajectory_label_filter_keeps_matches_beyond_the_newest_limit_window() {
         let db = unique_handler_db("label-filter-window");
@@ -5217,6 +5269,17 @@ fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
     query.label.is_some() || query.exclude_label.is_some() || query.human_backed.is_some()
 }
 
+/// A `reuse.db` read failure while resolving label filters.
+///
+/// Collapsing it into an empty label set is not a safe default: `label=good`
+/// would answer "no such trajectories", and `exclude_label` would fail open and
+/// serve the very rows the caller asked to keep out. The caller cannot tell
+/// either outcome from a filter that genuinely matched nothing, so the failure
+/// is reported as a 500 like the other store failures in this handler.
+fn reuse_store_failure(error: impl std::fmt::Display) -> HttpResponse {
+    HttpResponse::InternalServerError().json(json!({"error": error.to_string()}))
+}
+
 /// Applies the reuse-label query parameters to trajectory summary rows.
 ///
 /// The label lives in `reuse.db`, the summary in `trajectories.db`; rather
@@ -5270,20 +5333,16 @@ fn filter_rows_by_reuse_labels(
         }
         return Ok(());
     };
-    let keep: Option<std::collections::HashSet<String>> = requested.map(|parsed| {
-        labels
-            .sessions_with_labels(&parsed)
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    });
-    let drop: Option<std::collections::HashSet<String>> = excluded.map(|parsed| {
-        labels
-            .sessions_with_labels(&parsed)
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    });
+    let keep: Option<std::collections::HashSet<String>> = requested
+        .map(|parsed| labels.sessions_with_labels(&parsed))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|ids| ids.into_iter().collect());
+    let drop: Option<std::collections::HashSet<String>> = excluded
+        .map(|parsed| labels.sessions_with_labels(&parsed))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|ids| ids.into_iter().collect());
     // `human_backed` is a tri-state filter: absent keeps every row, `true`
     // keeps only human-settled rows, and `false` keeps only rows no person has
     // settled — including never-triaged rows, which have no label row at all.
@@ -5291,15 +5350,17 @@ fn filter_rows_by_reuse_labels(
     // answer with every trajectory, which the caller cannot tell from a filter
     // that matched everything.
     let human_backed = query.human_backed;
-    let settled: Option<std::collections::HashSet<String>> = human_backed.map(|_| {
-        labels
-            .list_labels(&crate::reuse::LabelFilter::default())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|l| l.is_human_backed())
-            .map(|l| l.session_id)
-            .collect()
-    });
+    let settled: Option<std::collections::HashSet<String>> = human_backed
+        .map(|_| labels.list_labels(&crate::reuse::LabelFilter::default()))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|labels| {
+            labels
+                .into_iter()
+                .filter(|l| l.is_human_backed())
+                .map(|l| l.session_id)
+                .collect::<std::collections::HashSet<String>>()
+        });
     rows.retain(|row| {
         let id = row.session_id.as_str();
         keep.as_ref().is_none_or(|set| set.contains(id))
