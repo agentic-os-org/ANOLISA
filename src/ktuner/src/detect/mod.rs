@@ -675,26 +675,48 @@ pub(crate) fn is_monitoring_helper(pid: &str) -> bool {
 }
 
 /// Whether a command line names a metrics collector. Only the program being
-/// run decides — argv[0], or the payload of a `sh -c` wrapper — because a
-/// bare `exporter` token in a later argument (a config path, say) does not
-/// make the process a collector.
-fn cmdline_names_helper<'a>(mut args: impl Iterator<Item = &'a str>) -> bool {
-    let program = args.next().unwrap_or_default();
+/// run decides — argv[0], the payload of a `sh -c` wrapper, or the jar a JVM
+/// runs — because a bare `exporter` token in a later argument (a config
+/// path, say) does not make the process a collector.
+fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
+    let args: Vec<&str> = args.collect();
+    let Some(&program) = args.first() else {
+        return false;
+    };
     if is_monitoring_helper_name(program) {
         return true;
     }
-    // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
-    // the payload, not as argv[0]; the payload's first word is its command.
-    let is_shell = matches!(
-        program.rsplit('/').next().unwrap_or_default(),
-        "sh" | "bash" | "dash" | "zsh" | "ksh"
-    );
-    is_shell
-        && args.next() == Some("-c")
-        && args
-            .next()
-            .and_then(|payload| payload.split_whitespace().next())
-            .is_some_and(is_monitoring_helper_name)
+    match program.rsplit('/').next().unwrap_or_default() {
+        // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
+        // the payload, not as argv[0]; the payload's first word is its command.
+        "sh" | "bash" | "dash" | "zsh" | "ksh" => {
+            args.get(1) == Some(&"-c")
+                && args
+                    .get(2)
+                    .and_then(|&payload| payload.split_whitespace().next())
+                    .is_some_and(is_monitoring_helper_name)
+        }
+        // A JVM names its program in the jar after `-jar`; argv[0] is only the
+        // launcher. `java -jar jmx_prometheus_httpserver-1.2.1.jar 5556
+        // config.yaml` is the Prometheus JMX exporter's documented standalone
+        // form — a collector whose jar carries no "exporter" token, which is
+        // how a metrics-only host kept being detected as a Java workload.
+        "java" => args
+            .iter()
+            .position(|a| *a == "-jar")
+            .and_then(|i| args.get(i + 1))
+            .is_some_and(|&jar| jvm_jar_names_helper(jar)),
+        _ => false,
+    }
+}
+
+/// Whether the jar a JVM runs names a metrics collector. The Prometheus JMX
+/// exporter's standalone jars are `jmx_prometheus_httpserver-<v>.jar` (the
+/// name carries no "exporter" token), while other JVM collectors carry it
+/// (`cassandra_exporter-<v>.jar`).
+fn jvm_jar_names_helper(jar: &str) -> bool {
+    let basename = jar.rsplit('/').next().unwrap_or(jar);
+    is_monitoring_helper_name(basename) || basename.starts_with("jmx_prometheus")
 }
 
 fn is_generic_runtime(comm: &str) -> bool {
@@ -1621,5 +1643,47 @@ mod tests {
             "sh\0-c\0cat /etc/exporter.conf".split('\0')
         ));
         assert!(!cmdline_names_helper("".split('\0')));
+    }
+
+    #[test]
+    fn cmdline_names_helper_recognizes_a_jvm_collector() {
+        // The Prometheus JMX exporter's documented standalone form: the jar
+        // after -jar names the program, and its name carries no "exporter"
+        // token. Before the JVM form was known, argv[0] "java" hid the
+        // collector and a metrics-only host was detected as a Java workload.
+        assert!(cmdline_names_helper(
+            "java\0-jar\0jmx_prometheus_httpserver-1.2.1.jar\x005556\0config.yaml".split('\0')
+        ));
+        // A path to the jar resolves by its basename.
+        assert!(cmdline_names_helper(
+            "/usr/bin/java\0-jar\0/opt/exporters/jmx_prometheus_httpserver.jar".split('\0')
+        ));
+        // Other JVM collectors carry the token.
+        assert!(cmdline_names_helper(
+            "java\0-jar\0/opt/cassandra_exporter-2.3.8.jar".split('\0')
+        ));
+    }
+
+    #[test]
+    fn cmdline_names_helper_keeps_jvm_workloads_visible() {
+        // The -javaagent form attaches the exporter TO the monitored
+        // application: that process is the workload, and only the -jar value
+        // may decide.
+        assert!(!cmdline_names_helper(
+            "java\0-javaagent:jmx_prometheus_javaagent-1.2.1.jar\0-jar\0cassandra.jar".split('\0')
+        ));
+        // A workload jar with no collector token stays a workload...
+        assert!(!cmdline_names_helper(
+            "java\0-jar\0/opt/cassandra/apache-cassandra-4.1.0.jar".split('\0')
+        ));
+        // ...and the arguments around -jar never decide.
+        assert!(!cmdline_names_helper(
+            "java\0-jar\0app.jar\0--config=/etc/exporter.conf".split('\0')
+        ));
+        assert!(!cmdline_names_helper(
+            "java\0-Xmx1g\0com.example.Main".split('\0')
+        ));
+        // A dangling -jar decides nothing.
+        assert!(!cmdline_names_helper("java\0-jar".split('\0')));
     }
 }
