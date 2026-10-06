@@ -686,12 +686,37 @@ impl GenAIBuilder {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
-                            args_json: String::new(),
+                            // A compatible gateway may send the whole call on the
+                            // start event and no deltas at all. The standard
+                            // stream sends the placeholder `input: {}` that its
+                            // `input_json_delta` fragments replace, so an empty
+                            // object must not become the arguments.
+                            args_json: match content_block.get("input") {
+                                Some(serde_json::Value::Null) | None => String::new(),
+                                Some(serde_json::Value::Object(map)) if map.is_empty() => {
+                                    String::new()
+                                }
+                                Some(value) => value.to_string(),
+                            },
                         },
-                        Some("thinking") => Block::Thinking(String::new()),
+                        Some("thinking") => Block::Thinking(
+                            content_block
+                                .get("thinking")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                        ),
                         // Text and any future block kind default to a text
-                        // accumulator; unknown deltas are then ignored.
-                        _ => Block::Text(String::new()),
+                        // accumulator, seeded from the start block so a gateway
+                        // that sends the finished text there and no deltas keeps
+                        // it; unknown deltas are then ignored.
+                        _ => Block::Text(
+                            content_block
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                        ),
                     };
                     blocks.insert(index, block);
                 }
@@ -1465,6 +1490,75 @@ mod tests {
             other => panic!("expected ToolCall part, got {other:?}"),
         }
         assert_eq!(finish.as_deref(), Some("tool_use"));
+    }
+
+    /// A compatible gateway may send a content block's complete payload on
+    /// `content_block_start` and no deltas at all. The analyzer's typed parser
+    /// already seeds its buffers from the start block for that capture shape;
+    /// this merger — the only aggregation the drain path has — started every
+    /// block empty, so a drained such stream recorded a tool call with
+    /// `arguments: None` and dropped its text and thinking while the same
+    /// stream captured live kept them.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_keeps_the_start_block_payload() {
+        let body = r#"[
+            {"type":"message_start","message":{"id":"msg_9","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":1}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"weigh the options"}},
+            {"type":"content_block_stop","index":0},
+            {"type":"content_block_start","index":1,"content_block":{"type":"text","text":"It is 4."}},
+            {"type":"content_block_stop","index":1},
+            {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_9","name":"read_file","input":{"path":"/tmp/a"}}},
+            {"type":"content_block_stop","index":2},
+            {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("an Anthropic stream with content blocks must yield parts");
+        assert_eq!(finish.as_deref(), Some("tool_use"));
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::Text { content } if content == "It is 4.")),
+            "the text carried by content_block_start must survive: {parts:?}"
+        );
+        assert!(
+            parts.iter().any(
+                |p| matches!(p, MessagePart::Reasoning { content } if content == "weigh the options")
+            ),
+            "the thinking carried by content_block_start must survive: {parts:?}"
+        );
+        assert!(
+            parts.iter().any(|p| matches!(
+                p,
+                MessagePart::ToolCall { name, arguments, .. }
+                    if name == "read_file"
+                        && arguments == &Some(serde_json::json!({"path": "/tmp/a"}))
+            )),
+            "the input carried by content_block_start must survive: {parts:?}"
+        );
+    }
+
+    /// The placeholder `input: {}` a standard stream sends before its
+    /// `input_json_delta` fragments must not become the arguments, and seeding
+    /// must not disturb the ordinary delta accumulation.
+    #[test]
+    fn test_merge_anthropic_sse_chunks_placeholder_input_is_not_arguments() {
+        let body = r#"[
+            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}},
+            {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}},
+            {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Paris\"}"}},
+            {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "Hel"
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::ToolCall { arguments, .. }
+                if arguments == &Some(serde_json::json!({"city": "Paris"}))
+        ));
     }
 
     /// Mixed protocol bodies cannot happen (one stream is one protocol), but a
