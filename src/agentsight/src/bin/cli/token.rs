@@ -13,8 +13,8 @@ pub struct TokenCommand {
     #[structopt(long, possible_values = &["today", "yesterday", "week", "last_week", "month", "last_month"])]
     pub period: Option<String>,
 
-    /// Query last N hours
-    #[structopt(long)]
+    /// Query last N hours (cannot be combined with --period)
+    #[structopt(long, conflicts_with = "period")]
     pub hours: Option<u64>,
 
     /// Compare with previous period
@@ -132,5 +132,40 @@ fn print_human_readable(result: &TokenQueryResult, show_compare: bool) {
             format_tokens_with_commas(result.input_tokens),
             format_tokens_with_commas(result.output_tokens)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--hours` used to win unconditionally and `--period` was then never
+    /// read: `token --period week --hours 24` answered the 24-hour window while
+    /// the caller believed it asked for the calendar week — with exit 0 and a
+    /// header naming the window actually used, so the mismatch was invisible.
+    /// The sibling `interruption list --unresolved/--resolved` flags are
+    /// declared mutually exclusive for the same reason.
+    #[test]
+    fn hours_and_period_are_rejected_together() {
+        let both = TokenCommand::from_iter_safe(["token", "--period", "week", "--hours", "24"]);
+        let err = both.expect_err("two window selectors must not be silently reduced to one");
+        let message = err.to_string();
+        assert!(
+            message.contains("--hours") && message.contains("--period"),
+            "the error must name both flags: {message}"
+        );
+
+        // Either selector alone keeps working, in both flag orders.
+        let hours =
+            TokenCommand::from_iter_safe(["token", "--hours", "24"]).expect("--hours alone");
+        assert_eq!(hours.hours, Some(24));
+        let period =
+            TokenCommand::from_iter_safe(["token", "--period", "week"]).expect("--period alone");
+        assert_eq!(period.period.as_deref(), Some("week"));
+        let compared = TokenCommand::from_iter_safe(["token", "--hours", "24", "--compare"])
+            .expect("--hours with --compare");
+        assert!(compared.compare);
+        let reversed = TokenCommand::from_iter_safe(["token", "--hours", "24", "--period", "week"]);
+        assert!(reversed.is_err(), "the order of the flags must not matter");
     }
 }
