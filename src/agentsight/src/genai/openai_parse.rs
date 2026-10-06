@@ -939,7 +939,7 @@ impl GenAIBuilder {
     /// when the new value extends it and appending otherwise — AgentSight is a
     /// passive observer and cannot see the request's `incremental_output` flag
     /// on the response path.
-    fn extract_dashscope_native_parts(
+    pub(super) fn extract_dashscope_native_parts(
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         /// Accumulate cumulative-or-incremental text into `buf`.

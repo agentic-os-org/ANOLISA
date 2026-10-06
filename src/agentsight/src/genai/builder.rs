@@ -589,7 +589,21 @@ impl GenAIBuilder {
         // The old hand-built `[{"Text": …}]` externally-tagged payload failed
         // `Vec<OutputMessage>` parsing ("missing field `type`"), silently
         // losing the row in skill metrics and ATIF export.
-        let (parts, finish_reason) = Self::merge_sse_chunks(&chunks);
+        let (mut parts, mut finish_reason) = Self::merge_sse_chunks(&chunks);
+        // The DashScope/Bailian native envelope has no top-level `choices`, so
+        // the OpenAI merger yields nothing for it. The live path
+        // (`extract_parts_from_sse_body`) falls back to the native
+        // reconstruction; the drain path stopped at the merger, so an
+        // interrupted native stream was persisted with token counts but no
+        // output content — and `enrich_pending_from_sse` derives `tool_call_ids`
+        // from `output_messages`, so its tool calls vanished with it.
+        if parts.is_empty()
+            && let Some((native_parts, native_finish)) =
+                Self::extract_dashscope_native_parts(&chunks)
+        {
+            parts = native_parts;
+            finish_reason = native_finish;
+        }
         let output_messages = if parts.is_empty() {
             None
         } else {
@@ -814,6 +828,44 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(drain_json, live_json);
+    }
+
+    /// A DashScope/Bailian *native* stream has no top-level `choices`, so the
+    /// shared OpenAI merger yields no parts for it. The live response path
+    /// falls back to the native reconstruction; the drain path did not, so an
+    /// interrupted native call was persisted with token counts but a NULL
+    /// output_messages — and the SSE enrichment derives `tool_call_ids` from
+    /// that column, so the call's tool invocations were lost with it.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_dashscope_native_output() {
+        let events = vec![
+            make_sse_event(
+                r#"{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}}"#,
+            ),
+            make_sse_event(
+                r#"{"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Beijing\"}"}}]}}]}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a drained native stream must keep its output");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("output_messages must round-trip as OutputMessage");
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments.as_ref().unwrap()["city"], "Beijing");
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_calls"));
     }
 
     #[test]
