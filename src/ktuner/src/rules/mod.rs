@@ -2984,16 +2984,25 @@ fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
     1
 }
 
+/// Whether a fork-heavy server workload runs here: the web servers and
+/// databases whose children immediately do useful work, so
+/// `sched_child_runs_first=1` costs an unnecessary COW copy. Debian/Ubuntu
+/// run the Apache binary as `apache2` — RHEL's `httpd` is the same server,
+/// and the gate must not go quiet on a Debian Apache host.
+fn fork_server_present(info: &SystemInfo) -> bool {
+    info.has_process("nginx")
+        || info.has_process("httpd")
+        || info.has_process("apache2")
+        || info.has_process("postgres")
+        || info.has_process("mysqld")
+}
+
 fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_child_runs_first";
     if !info.param_exists(path) {
         return 1;
     }
-    let has_server = info.has_process("nginx")
-        || info.has_process("httpd")
-        || info.has_process("postgres")
-        || info.has_process("mysqld");
-    if !has_server {
+    if !fork_server_present(info) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -7672,6 +7681,31 @@ mod tests {
         {
             assert_eq!(rec.recommended_value, "0");
         }
+    }
+
+    #[test]
+    fn fork_server_present_covers_the_apache_names() {
+        // The rule's gate, driven directly: whether a server name opens the
+        // gate is pure, while the live sysctl read inside the rule is not.
+        // Debian/Ubuntu run Apache as `apache2`; RHEL's `httpd` is the same
+        // server, and the gate must open under both names.
+        for name in ["nginx", "httpd", "apache2", "postgres", "mysqld"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            assert!(fork_server_present(&info), "{name} must open the gate");
+        }
+        // A client tool with a shared prefix is not the server...
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "apache2ctl".to_string(),
+        }];
+        assert!(!fork_server_present(&info), "apache2ctl is a control tool");
+        // ...and neither is an empty process list.
+        let mut info = make_test_info();
+        info.processes = vec![];
+        assert!(!fork_server_present(&info));
     }
 
     #[test]

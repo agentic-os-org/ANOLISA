@@ -44,6 +44,10 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("etcd");
     let has_web = info.has_process("nginx")
         || info.has_process("httpd")
+        // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; RHEL and
+        // the httpd name cover the same server. Without this branch every
+        // Debian Apache host classified as mixed, not network-intensive.
+        || info.has_process("apache2")
         || info.has_process("envoy")
         || info.has_process("haproxy")
         || info.has_process("caddy");
@@ -148,6 +152,26 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["envoy"])),
             WorkloadType::NetworkIntensive
+        );
+    }
+
+    #[test]
+    fn test_classify_apache_under_its_debian_name() {
+        // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; the RHEL
+        // name `httpd` is the same server. A pure Apache host is a web
+        // workload under either name — not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["apache2"])),
+            WorkloadType::NetworkIntensive
+        );
+        assert_eq!(
+            classify(&make_info(vec!["httpd"])),
+            WorkloadType::NetworkIntensive
+        );
+        // apache2 wins over nothing: a db still classifies first.
+        assert_eq!(
+            classify(&make_info(vec!["apache2", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 
