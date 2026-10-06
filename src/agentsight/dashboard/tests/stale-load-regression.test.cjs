@@ -186,6 +186,23 @@ test('conversation-list: query and agent-name loaders drop stale responses', () 
     /fetchTraces\(sessionId, startNs, endNs\)[\s\S]{0,600}if \(!cancelled\) setLoading\(false\);/,
     'ConversationList.TraceSubTable: the loading flag must belong to the newest request',
   );
+
+  // The agent filter matches the dropdown option against the row's label. The
+  // option list comes from `/api/agent-names`, whose SQL groups by
+  // `agent_name COLLATE NOCASE`, while the session rows render
+  // `COALESCE(agent_name, process_name)` — so the same agent can appear as
+  // `Qoder` in one and `qoder` in the other, exactly the split
+  // AgentSessionsPage documents. An exact `===` comparison then emptied the
+  // table for the only option the dropdown offered.
+  assert.match(
+    source,
+    /data\.filter\(\(s\) => \(s\.agent_name \?\? ''\)\.toLowerCase\(\) === agent\.toLowerCase\(\)\)/,
+    'ConversationList.runQuery: the agent filter must compare case-insensitively',
+  );
+  assert.ok(
+    !/data\.filter\(\(s\) => s\.agent_name === agent\)/.test(source),
+    'ConversationList.runQuery: the exact-match agent filter must be gone',
+  );
 });
 
 test('atif-viewer: the document loader drops stale responses', () => {
