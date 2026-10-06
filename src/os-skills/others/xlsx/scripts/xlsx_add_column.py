@@ -92,9 +92,11 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     for rel in rels_tree.getroot():
         if rel.get("Id") == rid:
             target = rel.get("Target")
-            # Handle absolute paths (starting with /) and relative paths
-            if target.startswith("/"):
-                target = target[1:]  # Remove leading /
+            # Targets are relative to xl/ (e.g. "worksheets/sheet1.xml");
+            # package-absolute targets start with "/" (e.g. "/xl/worksheets/sheet1.xml")
+            target = target.lstrip("/")
+            if not target.startswith("xl/"):
+                target = "xl/" + target
             return os.path.join(work_dir, target)
 
     print(f"ERROR: Relationship not found: {rid}")
