@@ -139,17 +139,23 @@ def parse_openclaw_arguments(args_value: Any) -> dict:
             kwargs_str = args_value["kwargs"]
             if isinstance(kwargs_str, str):
                 try:
-                    return json.loads(kwargs_str)
+                    parsed = json.loads(kwargs_str)
                 except json.JSONDecodeError:
                     return {}
+                # The result feeds tool_use.input and tool_dispatch
+                # request_body, both objects in the claw-eval schema —
+                # a JSON list/scalar ("[1,2]", "null") must not leak
+                # through with the wrong shape.
+                return parsed if isinstance(parsed, dict) else {}
             return kwargs_str if isinstance(kwargs_str, dict) else {}
         # Direct dict - return as-is
         return args_value
     elif isinstance(args_value, str):
         try:
-            return json.loads(args_value)
+            parsed = json.loads(args_value)
         except json.JSONDecodeError:
             return {}
+        return parsed if isinstance(parsed, dict) else {}
     return {}
 
 

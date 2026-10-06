@@ -127,6 +127,21 @@ class TestToolCallParsing:
         assert result["query"] == "test"
         assert result["limit"] == 10
 
+    def test_parse_non_dict_json_falls_back_to_empty(self):
+        """JSON that parses to a non-object must not leak the wrong shape.
+
+        The result becomes tool_use.input and tool_dispatch.request_body,
+        both objects in the claw-eval schema; a JSON list/scalar used to
+        pass straight through despite the dict contract.
+        """
+        from ce_runner.session_trace_converter import parse_openclaw_arguments
+
+        assert parse_openclaw_arguments('["a", "b"]') == {}
+        assert parse_openclaw_arguments("null") == {}
+        assert parse_openclaw_arguments("3") == {}
+        assert parse_openclaw_arguments({"kwargs": "null"}) == {}
+        assert parse_openclaw_arguments({"kwargs": "[1,2]"}) == {}
+
     def test_parse_kwargs_wrapper(self):
         """Parse kwargs wrapper format."""
         from ce_runner.session_trace_converter import parse_openclaw_arguments
