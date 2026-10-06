@@ -546,6 +546,14 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         if not value:
             return _err("workspace requires a path value")
         new_path = str(value).strip()
+        # Refuse when the session cwd is inside the NEW workspace: ws-ckpt
+        # replaces the workspace inode, so every ws-ckpt tool call from this
+        # session would then be refused by the same guard — switching the
+        # config now would silently point the plugin at a workspace it
+        # cannot operate on. Mirrors the autoCheckpoint branch above.
+        rejection = _reject_if_cwd_inside_workspace(new_path)
+        if rejection:
+            return rejection
         mgr = get_manager()
         old_path = mgr.config.workspace
         mgr.set_workspace(new_path)
