@@ -257,6 +257,11 @@ function renderOptimizationPage() {
       '../utils/formatDuration': {},
       '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en' },
       '../utils/accuracyAttribution': {},
+      // `OptimizationPage` renders its finding texts through the `RichText`
+      // sanitizer; the page module cannot be loaded without it ("unexpected
+      // require ... ../utils/richText"), which left every case in this file
+      // failing at setup.
+      '../utils/richText': { RichText: () => null },
       '../components/TokenFlameChart': {},
     },
     driver,
