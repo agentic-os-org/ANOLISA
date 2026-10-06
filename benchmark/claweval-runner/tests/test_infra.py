@@ -42,9 +42,32 @@ class TestGatewayService:
     def test_gateway_check_function_exists(self):
         """Gateway check function is available."""
         from ce_runner.infra import check_gateway
-        
+
         # Function should be callable
         assert callable(check_gateway)
+
+    def test_gateway_check_survives_config_without_gateway_section(self, tmp_path):
+        """A config lacking (or corrupting) the gateway section must read as
+        "gateway not running" (0), not crash with KeyError/JSONDecodeError.
+
+        `ce-runner run` calls check_gateway before anything else; a fresh or
+        hand-edited ~/.openclaw/openclaw.json used to abort with a traceback
+        instead of the actionable "gateway is not running" message.
+        """
+        from ce_runner.infra import check_gateway
+
+        # No gateway section at all.
+        cfg = tmp_path / "openclaw.json"
+        cfg.write_text('{"agents": {}}')
+        assert check_gateway(str(cfg)) == 0
+
+        # gateway section without a port.
+        cfg.write_text('{"gateway": {"mode": "local"}}')
+        assert check_gateway(str(cfg)) == 0
+
+        # Corrupt JSON.
+        cfg.write_text("{not json")
+        assert check_gateway(str(cfg)) == 0
 
 
 class TestMockServices:

@@ -104,9 +104,17 @@ def _check_user_bus(env: dict) -> None:
 
 
 def check_gateway(config_path: str) -> int:
-    with open(config_path) as f:
-        config = json.load(f)
-    port = config["gateway"]["port"]
+    # `ce-runner run/batch` call this first; a fresh or hand-edited config
+    # (no gateway section, no port, corrupt JSON) must read as "gateway not
+    # running" so the caller prints its actionable message instead of a
+    # KeyError/JSONDecodeError traceback.
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        port = config["gateway"]["port"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+        log(f"[DEBUG] gateway config unusable ({config_path}): {e}")
+        return 0
     try:
         r = httpx.get(f"http://127.0.0.1:{port}/health", timeout=3)
         if r.status_code == 200:
