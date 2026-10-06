@@ -101,10 +101,39 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     sys.exit(1)
 
 
+def _ensure_content_types_override(work_dir: str) -> None:
+    """Declare xl/sharedStrings.xml in [Content_Types].xml if not present."""
+    ct_path = os.path.join(work_dir, "[Content_Types].xml")
+    ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+    tree = ET.parse(ct_path)
+    root = tree.getroot()
+    part = "/xl/sharedStrings.xml"
+    for ov in root.findall(f"{{{ct_ns}}}Override"):
+        if ov.get("PartName") == part:
+            return
+    ov = ET.SubElement(root, f"{{{ct_ns}}}Override")
+    ov.set("PartName", part)
+    ov.set("ContentType",
+           "application/vnd.openxmlformats-officedocument.spreadsheetml"
+           ".sharedStrings+xml")
+    ET.register_namespace("", ct_ns)
+    _write_tree(tree, ct_path)
+
+
 def add_shared_string(work_dir: str, text: str) -> int:
     ss_path = os.path.join(work_dir, "xl", "sharedStrings.xml")
-    tree = ET.parse(ss_path)
-    root = tree.getroot()
+    if os.path.isfile(ss_path):
+        tree = ET.parse(ss_path)
+        root = tree.getroot()
+    else:
+        # Package has no sharedStrings part (inline-string or numeric-only
+        # workbooks, e.g. written by openpyxl). Create it and declare it in
+        # [Content_Types].xml so the repacked file stays valid.
+        root = ET.Element(_tag("sst"))
+        root.set("count", "0")
+        root.set("uniqueCount", "0")
+        tree = ET.ElementTree(root)
+        _ensure_content_types_override(work_dir)
 
     idx = 0
     for si in root.findall(_tag("si")):
