@@ -284,3 +284,64 @@ class TestPiiScanCapability:
         mock_cli.return_value = _scan_result(verdict, [_GENERAL_FINDING])
 
         assert capability._on_pre_llm_call(user_message="hello") is None
+
+
+class TestScanPiiArgvContract:
+    """The scan-pii argv itself must be pinned, not just its kwargs.
+
+    The suite asserted stdin payloads, trace contexts and the
+    --include-low-confidence flag but never the argv: dropping --stdin
+    (the CLI would then receive no input, exit non-zero, and the
+    capability would silently fail open - PII checking disabled) kept
+    28/28 tests green. The sibling capabilities pin their argv exactly
+    (test_prompt_scan.py, test_skill_ledger.py); this closes the gap.
+    """
+
+    @pytest.mark.parametrize(
+        ("method", "kwargs", "expected_source"),
+        [
+            ("_on_pre_llm_call", {"user_message": "hello"}, "user_input"),
+            ("_on_post_llm_call", {"assistant_response": "world"}, "model_output"),
+        ],
+    )
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_scan_pii_argv_pipes_stdin_with_source(
+        self, mock_cli, method, kwargs, expected_source
+    ):
+        """scan-pii must read the text via --stdin and label the source."""
+        mock_cli.return_value = _scan_result("pass")
+        capability = _make_capability()
+
+        getattr(capability, method)(**kwargs)
+
+        argv = mock_cli.call_args.args[0]
+        assert argv == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--source",
+            expected_source,
+        ]
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_include_low_confidence_appends_flag_after_base_argv(
+        self,
+        mock_cli,
+    ):
+        """The low-confidence flag must ride the same argv, after the base."""
+        mock_cli.return_value = _scan_result("pass")
+        capability = _make_capability(include_low_confidence=True)
+
+        capability._on_pre_llm_call(user_message="hello")
+
+        argv = mock_cli.call_args.args[0]
+        assert argv == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--source",
+            "user_input",
+            "--include-low-confidence",
+        ]
