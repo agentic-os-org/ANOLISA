@@ -20,13 +20,17 @@ def numeric_measurement(value: float | bool | None) -> float | None:
     """Return a usable numeric measurement.
 
     Booleans are not measurements (True must not satisfy a >= gate by
-    pretending to be 1), and non-finite floats cannot be compared against
-    frozen thresholds, so both are reported as missing instead of being
-    used as pass/fail evidence.
+    pretending to be 1), non-finite floats cannot be compared against
+    frozen thresholds, and an integer too large for float overflows
+    math.isfinite, so all of them are reported as missing instead of
+    being used as pass/fail evidence or crashing the evaluation.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return value if math.isfinite(value) else None
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
 
 
 def lifecycle_gate(value: float | bool | None) -> bool | None:

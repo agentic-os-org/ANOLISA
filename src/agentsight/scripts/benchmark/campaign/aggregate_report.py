@@ -23,6 +23,19 @@ def read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _artifact_number(value: Any) -> float | None:
+    """Read an int/float artifact field, or None for anything else.
+
+    campaign_evidence.finite_float rejects integers too large for float
+    (a corrupted counter in a metrics artifact raises OverflowError from
+    float() and math.isfinite()) and non-finite values, so one outlier
+    reads as missing instead of crashing the whole report.
+    """
+    if not isinstance(value, (int, float)):
+        return None
+    return campaign_evidence.finite_float(value)
+
+
 def nested(value: dict[str, Any], *keys: str) -> float | bool | None:
     """Read a finite numeric or boolean value from nested dictionaries."""
     current: Any = value
@@ -32,9 +45,7 @@ def nested(value: dict[str, Any], *keys: str) -> float | bool | None:
         current = current.get(key)
     if isinstance(current, bool):
         return current
-    if isinstance(current, (int, float)) and math.isfinite(current):
-        return float(current)
-    return None
+    return _artifact_number(current)
 
 
 def display(value: Any, suffix: str = "") -> str:
@@ -491,11 +502,9 @@ def comparison_summary(
     def values(field: str) -> tuple[float | None, float | None]:
         if before is None or after is None:
             return None, None
-        baseline = before.get(field)
-        optimized = after.get(field)
         return (
-            float(baseline) if isinstance(baseline, (int, float)) else None,
-            float(optimized) if isinstance(optimized, (int, float)) else None,
+            _artifact_number(before.get(field)),
+            _artifact_number(after.get(field)),
         )
 
     def regular_metric(field: str) -> dict[str, float | None]:
@@ -510,16 +519,8 @@ def comparison_summary(
     drop_baseline, drop_optimized = values("drop_rate")
     capacity_baseline = capacities.get("baseline", {}).get("maximum_sustainable_qps")
     capacity_optimized = capacities.get("optimized", {}).get("maximum_sustainable_qps")
-    capacity_before = (
-        float(capacity_baseline)
-        if isinstance(capacity_baseline, (int, float))
-        else None
-    )
-    capacity_after = (
-        float(capacity_optimized)
-        if isinstance(capacity_optimized, (int, float))
-        else None
-    )
+    capacity_before = _artifact_number(capacity_baseline)
+    capacity_after = _artifact_number(capacity_optimized)
     soak_slopes: dict[str, float | None] = {}
     for version in ("baseline", "optimized"):
         runs = [

@@ -25,6 +25,7 @@ sys.path.insert(0, str(SINGLE_RUN_DIR))
 import campaign
 import campaign_manifest
 from campaign_config import safety_settings, validate_campaign
+from campaign_evidence import finite_float
 from collect_metrics import GIB, MIB, allocated_size, available_memory_bytes
 
 BTF_PATH = Path("/sys/kernel/btf/vmlinux")
@@ -681,7 +682,10 @@ def quick_value(summary: dict[str, Any], path: tuple[str, ...]) -> float | None:
             return None
         value = value.get(key)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        # finite_float tolerates integers too large for float and drops
+        # non-finite values, so one corrupted counter in a summary cannot
+        # crash the final comparison.
+        return finite_float(value)
     return None
 
 
