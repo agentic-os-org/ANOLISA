@@ -628,7 +628,14 @@ where
 /// Chain rule: when `x.applied == y.previous`, `y` was recorded while the
 /// value `x` had applied was live, so `x` is the earlier record and the pair
 /// collapses to `x.previous` (the pristine original) with `y.applied` (the
-/// newest value), under `x`'s key. Records with no chain relation — the knob
+/// newest value), under `x`'s key. A pair where the reverse relation also
+/// holds (`y.applied == x.previous`) proves nothing: both readings of the
+/// pair are internally consistent (60 -> 10 -> 60 and 10 -> 60 -> 10), so the
+/// values alone cannot order the records; the pair falls through to the
+/// greatest-key rule instead of letting the key spelling decide which
+/// `previous` is the "pristine" one — collapsing it anyway recorded an
+/// intermediate value as the original and changed what a restore writes.
+/// Records with no chain relation — the knob
 /// was changed manually between the two ktuner runs — cannot be ordered, so
 /// the entry with the greatest key survives verbatim: that is exactly the
 /// record whose `previous` the key-order double write leaves in the kernel
@@ -649,12 +656,17 @@ fn heal_alias_duplicates(data: &mut RollbackData) {
         }
         keys.sort();
         // Collapse chain links first: x.applied == y.previous proves y was
-        // recorded after x, so x's previous is the older original.
+        // recorded after x, so x's previous is the older original — unless
+        // the reverse also holds, in which case both orderings of the pair
+        // are consistent and the greatest-key rule below decides it.
         loop {
             let mut chain: Option<(String, String)> = None;
             'pairs: for x in &keys {
                 for y in &keys {
-                    if x != y && data.entries[x].applied == data.entries[y].previous {
+                    if x != y
+                        && data.entries[x].applied == data.entries[y].previous
+                        && data.entries[y].applied != data.entries[x].previous
+                    {
                         chain = Some((x.clone(), y.clone()));
                         break 'pairs;
                     }
@@ -2127,6 +2139,86 @@ mod tests {
         let entry = &data.entries["vm/swappiness"];
         assert_eq!(entry.previous, "20", "last-write previous survives");
         assert_eq!(entry.applied, "30", "last-write applied survives");
+    }
+
+    #[test]
+    fn merge_keeps_a_bidirectional_duplicate_pair_unordered() {
+        // Both readings of this pair are internally consistent: tune recorded
+        // vm.swappiness 50 -> 100 and import recorded vm/swappiness 100 -> 50
+        // (or the other way around). x.applied == y.previous holds in BOTH
+        // directions, so the values cannot order the records — the chain
+        // collapse used to let the sorted-key iteration pick a direction
+        // anyway, recording the intermediate 50 as the "pristine" original.
+        // The pair must fall through to the greatest-key rule instead, exactly
+        // like the unrelated pair above.
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"50","applied":"100","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"100","applied":"50","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(data, []);
+        assert_eq!(data.entries.len(), 1, "one entry per knob");
+        let entry = &data.entries["vm/swappiness"];
+        assert_eq!(
+            entry.previous, "100",
+            "an unordered pair keeps the greatest key's record verbatim"
+        );
+        assert_eq!(entry.applied, "50", "last-write applied survives");
+    }
+
+    #[test]
+    fn rollback_restores_the_key_order_value_for_a_bidirectional_pair() {
+        // The user-visible contract of the greatest-key fallback: the healed
+        // restore writes exactly what today's un-healed key-order double
+        // write leaves in the kernel (both spellings restored in BTreeMap
+        // order, so the greatest key's previous — 100 — wins). Collapsing the
+        // bidirectional pair by iteration order instead restored the
+        // intermediate 50 while reporting Full and finalizing the ledger.
+        let dir = AtomicTestDir::new("rollback_bidirectional");
+        let path = dir.0.join("swappiness");
+        fs::write(&path, "50").unwrap(); // live value after both applies
+        let mut data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"50","applied":"100","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"100","applied":"50","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        for entry in data.entries.values_mut() {
+            entry.path = path.to_str().unwrap().to_string();
+        }
+        let outcome = restore_entries(&data, true);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "100",
+            "the healed restore must change no outcome: the key-order double write leaves 100"
+        );
+        assert_eq!(outcome.restored, 1, "one knob, one restore write");
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn merge_still_collapses_a_one_directional_chain_with_repeated_values() {
+        // Regression guard for the ambiguity check: a genuine chain whose
+        // second run re-applied the first run's value (60 -> 10, then 10 -> 10)
+        // is one-directional (10 == 10 forward, 10 != 60 backward), so it must
+        // keep collapsing to the pristine 60 — the reverse-match rejection
+        // must only bite when both directions hold.
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"10","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(data, []);
+        assert_eq!(data.entries.len(), 1, "one entry per knob");
+        let entry = &data.entries["vm.swappiness"];
+        assert_eq!(entry.previous, "60", "pristine value survives the heal");
+        assert_eq!(entry.applied, "10", "newest applied survives the heal");
     }
 
     #[test]
