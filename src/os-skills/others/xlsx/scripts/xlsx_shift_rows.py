@@ -73,7 +73,10 @@ def _shift_refs(text: str, at: int, delta: int) -> str:
             row = max(1, row + delta)
         return f"{dollar_col}{col_part}{dollar_row}{row}"
 
-    pattern = r'(\$?)([A-Z]+)(\$?)(\d+)'
+    # The lookbehind/ahead keep digit-suffixed tokens that are not cell
+    # references intact: function names (LOG10, ATAN2, DAYS360, BIN2DEC are
+    # always followed by "(" or more letters) and scientific literals (1E5).
+    pattern = r'(?<![A-Za-z0-9_.])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Za-z0-9_(])'
     return re.sub(pattern, replacer, text)
 
 
