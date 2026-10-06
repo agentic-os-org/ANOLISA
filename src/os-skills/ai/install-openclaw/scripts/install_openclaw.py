@@ -321,7 +321,8 @@ def build_config(args):
     api_key = resolve_api_key(args, plan)
     validate_api_key_for_billing(billing, api_key, plan)
     model_id = strip_provider_prefix(args.model_id or plan["default_model"])
-    model_refs = ordered_unique([model_id, *args.extra_model, *plan["models"]])
+    extra_models = [strip_provider_prefix(model) for model in args.extra_model]
+    model_refs = ordered_unique([model_id, *extra_models, *plan["models"]])
 
     primary_ref = f"{provider_id}/{model_id}"
     config = {
