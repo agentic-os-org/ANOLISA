@@ -229,6 +229,19 @@ test('atif-viewer: the document loader drops stale responses', () => {
     /onerror[\s\S]{0,200}setLoading\(false\);/,
     'AtifViewerPage.handleFileImport: a terminal read failure must release loading',
   );
+  // An imported document replaces the loaded session through a path that never
+  // fetches savings, so the object fetched for the previous session has to be
+  // dropped: leaving it rendered another session's original/actual/saved
+  // numbers (and the per-call "optimized tokens" badges) under the import.
+  const clearsSavings = importBody.indexOf('setSavingsDetail(null);');
+  assert.ok(
+    clearsSavings >= 0,
+    'AtifViewerPage.handleFileImport: importing a document must clear the previous session savings',
+  );
+  assert.ok(
+    clearsSavings > importBody.indexOf('setDoc(parsed as AtifDocument);'),
+    'AtifViewerPage.handleFileImport: the savings reset belongs with the other document resets',
+  );
 });
 
 test('optimization: a dimension result must not land in another session', () => {

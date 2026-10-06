@@ -797,6 +797,12 @@ export const AtifViewerPage: React.FC = () => {
         setQueryId(parsed.session_id ?? '');
         setExpandedSections(new Set());
         setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument), t), new Set()));
+        // Savings belong to the session they were fetched for and an imported
+        // file never carries them. Leaving the previous object in place
+        // rendered another session's original/actual/saved numbers under the
+        // imported trajectory, and fed the same stale object into the
+        // per-call "optimized tokens" badges.
+        setSavingsDetail(null);
       } catch {
         setError(t('atif.jsonParseFailed'));
       } finally {
