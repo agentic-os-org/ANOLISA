@@ -351,8 +351,20 @@ def main() -> None:
             "quality": quality,
             "stats": stats,
         }
+
+        def json_safe(value):
+            # float('nan')/inf are emitted as bare NaN/Infinity literals by
+            # json.dumps, which strict JSON parsers (jq, most languages) reject.
+            if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+                return None
+            if isinstance(value, dict):
+                return {str(k): json_safe(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [json_safe(v) for v in value]
+            return value
+
         # Convert preview records to serializable form (handle non-JSON types)
-        print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+        print(json.dumps(json_safe(output), indent=2, ensure_ascii=False, default=str))
     else:
         report = render_report(args.file, structure, quality, stats)
         print(report)
