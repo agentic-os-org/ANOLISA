@@ -827,6 +827,11 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Tools whose target file identifies the artifact a turn produced.
+///
+/// The single write-tool set for the crate: the turn ledger's rework targets
+/// (`write_target`) and the accuracy coverage evidence
+/// (`requirement_check::aggregate_files_touched`) must agree, or edits made with
+/// a name one of them misses vanish from that consumer.
 const WRITE_TOOLS: &[&str] = &[
     "write",
     "edit",
@@ -835,6 +840,8 @@ const WRITE_TOOLS: &[&str] = &[
     "str_replace_editor",
     "create_file",
     "apply_patch",
+    "writefile",
+    "editfile",
 ];
 
 /// Above this turn count the ledger switches to short heads to stay in context.
