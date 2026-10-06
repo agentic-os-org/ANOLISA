@@ -1841,12 +1841,17 @@ impl AgentSight {
         }
 
         // 3. Query all pending calls for this PID (including any persisted earlier)
-        let pending_calls = if let Some(ref store) = self.genai_sqlite_store {
-            store
-                .list_pending_for_pids(&[pid as i32])
-                .unwrap_or_default()
-        } else {
-            vec![]
+        let Some(pending_calls) =
+            pending_calls_for_crash_detection(self.genai_sqlite_store.as_deref(), pid)
+        else {
+            // The lookup itself failed: "we could not ask" is not "there were
+            // none", and only the empty answer means a normal shutdown. The
+            // trace process gets no second chance at this decision, so it must
+            // not record one on an answer it never received.
+            log::error!(
+                "[CrashDetect] pending-call lookup failed for pid={pid}; skipping the crash decision",
+            );
+            return;
         };
 
         if pending_calls.is_empty() {
@@ -2876,6 +2881,27 @@ fn maybe_record_retry_storm(
 ///
 /// Extracted as a free function so the crash decision is unit-testable
 /// without constructing a full `AgentSight` instance.
+/// Pending calls for one pid, with "could not ask" kept apart from "none".
+///
+/// The empty list is the signal for a normal shutdown: the caller `return`s on
+/// it without recording anything. A failed query therefore has to be reported as
+/// something else, or a storage error is indistinguishable from a clean exit and
+/// the crash it may represent is never recorded. `None` covers "no store
+/// configured" for the same reason — there is no evidence either way.
+fn pending_calls_for_crash_detection(
+    store: Option<&GenAISqliteStore>,
+    pid: u32,
+) -> Option<Vec<(String, Option<String>, Option<String>, Option<String>)>> {
+    let store = store?;
+    match store.list_pending_for_pids(&[pid as i32]) {
+        Ok(calls) => Some(calls),
+        Err(error) => {
+            log::error!("[CrashDetect] failed to query pending calls for pid={pid}: {error}");
+            None
+        }
+    }
+}
+
 fn record_agent_crash_interruptions(
     pid: u32,
     agent_name: &str,
@@ -3432,6 +3458,48 @@ mod tests {
             1,
             "pending call must stay pending on graceful reap"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed pending-call lookup must not be reported as an empty answer.
+    ///
+    /// The empty list is the signal for a normal shutdown, so folding a storage
+    /// error into it made a crash indistinguishable from a clean exit — and the
+    /// trace process never revisits the decision.
+    #[test]
+    fn a_failed_pending_lookup_is_not_an_empty_answer() {
+        let dir = unique_tmp_dir("crashdetect-lookup-failure");
+        let db = dir.join("foreign.db");
+        // A database whose events table has none of the columns the lookup
+        // selects: the shape a foreign or legacy file has.
+        rusqlite::Connection::open(&db)
+            .expect("fixture connection")
+            .execute_batch("CREATE TABLE genai_events (id INTEGER PRIMARY KEY);")
+            .expect("fixture schema");
+        let store = GenAISqliteStore::open_read_only_existing(&db).expect("foreign store");
+
+        // "could not ask" must not read as "there were none".
+        let failed = pending_calls_for_crash_detection(Some(&store), 4242);
+        assert!(failed.is_none(), "a failed lookup is not empty");
+        // No store is the same kind of answer: there is no evidence either way.
+        assert!(pending_calls_for_crash_detection(None, 4242).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An answered lookup is passed through unchanged.
+    ///
+    /// The two "no answer" cases above only stay distinguishable from a clean
+    /// shutdown because a real answer still arrives as `Some`.
+    #[test]
+    fn an_answered_pending_lookup_is_passed_through() {
+        let pid = 4_242_001;
+        let (dir, genai_store, _istore) = setup_crash_stores("crashdetect-lookup-ok", pid);
+
+        let calls = pending_calls_for_crash_detection(Some(genai_store.as_ref()), pid as u32);
+        let calls = calls.expect("an answered lookup is not unknown");
+        assert_eq!(calls.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
