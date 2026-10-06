@@ -9,6 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::bench::BenchResult;
+use crate::category;
 use crate::rules::Recommendation;
 
 const ROLLBACK_PATH: &str = "/var/lib/ktuner/rollback.json";
@@ -215,6 +216,18 @@ pub struct WriteOutcome {
 pub fn write_and_verify(param: &str, value: &str) -> Result<WriteOutcome> {
     if is_forbidden_param(param) {
         anyhow::bail!("拒绝写入可执行代码的内核参数 {param}（core_pattern / modprobe 等）");
+    }
+    // The runtime-dangerous policy tune and fix enforce (tune filters the
+    // knob out of the plan and names it in would_skip; fix refuses with the
+    // advice to persist instead) holds here too: a library import routes
+    // through the same choke point and must not apply vm.nr_hugepages at
+    // runtime — allocating hugepages on a live host is what the policy
+    // exists to prevent. Dotted-normalize the spelling first: the guard is
+    // exact-match while import accepts slashed aliases of the same knob.
+    if category::is_runtime_dangerous(&param.replace('/', ".")) {
+        anyhow::bail!(
+            "拒绝在运行时写入 {param}（运行时危险参数，请写入 /etc/sysctl.d 在重启时生效）"
+        );
     }
 
     let path = param_to_path(param);
@@ -796,6 +809,15 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         anyhow::bail!("invalid parameter name {param}: traversal, empty segment, or absolute path");
     }
     validate_import_value(param, value)?;
+    // Refuse runtime-dangerous knobs before touching the filesystem: the
+    // ledger lock create_dir_all's /var/lib/ktuner, which fails in an
+    // unprivileged environment before write_and_verify's refusal can surface.
+    // Dotted-normalize the spelling exactly like the write choke point does.
+    if category::is_runtime_dangerous(&param.replace('/', ".")) {
+        anyhow::bail!(
+            "拒绝在运行时写入 {param}（运行时危险参数，请写入 /etc/sysctl.d 在重启时生效）"
+        );
+    }
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?;
     let previous = match read_previous(param) {
@@ -2846,6 +2868,48 @@ mod tests {
         // write attempt, even for a param whose path does not exist.
         let err = write_and_verify("kernel.core_pattern", "x").unwrap_err();
         assert!(err.to_string().contains("拒绝写入"));
+    }
+
+    #[test]
+    fn test_write_and_verify_rejects_runtime_dangerous_params() {
+        // tune filters vm.nr_hugepages out of the plan (would_skip names it
+        // runtime_dangerous) and fix refuses it with the advice to persist
+        // instead; the write choke point must hold the same line for every
+        // other caller — a library import routes through here, and applying a
+        // runtime-dangerous knob from an imported .conf allocates hugepages
+        // on a live host, exactly what the policy exists to prevent. The
+        // guard fires before any path or write attempt, so both spellings of
+        // the knob are refused without side effects even on a host with a
+        // writable /proc/sys.
+        for spelling in ["vm.nr_hugepages", "vm/nr_hugepages"] {
+            let err = write_and_verify(spelling, "10").unwrap_err();
+            assert!(
+                err.to_string().contains("运行时危险"),
+                "the runtime-dangerous guard must refuse {spelling}: {err}"
+            );
+        }
+        // A knob outside the policy keeps flowing through the choke point:
+        // the refusal is the guard's, not a blanket write failure. On this
+        // read-only container the write itself fails, so assert the error is
+        // NOT the guard's message.
+        let err = write_and_verify("vm.ktuner_no_such", "1").unwrap_err();
+        assert!(!err.to_string().contains("运行时危险"));
+    }
+
+    #[test]
+    fn test_apply_import_refuses_runtime_dangerous_params() {
+        // The public import entrance is the caller the CLI guard never saw:
+        // an imported .conf carrying vm.nr_hugepages (either spelling) must
+        // be refused by the policy — before the original is read, before any
+        // write, before anything lands in the ledger — not applied live with
+        // the "same safety net as fix/tune" that entrance promises.
+        for spelling in ["vm.nr_hugepages", "vm/nr_hugepages"] {
+            let err = apply_import(spelling, "10", None).unwrap_err().to_string();
+            assert!(
+                err.contains("运行时危险"),
+                "import must refuse the runtime-dangerous {spelling}: {err}"
+            );
+        }
     }
 
     #[test]
