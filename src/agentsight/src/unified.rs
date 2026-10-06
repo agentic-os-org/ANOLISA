@@ -2745,7 +2745,7 @@ fn apply_retro_session_fixup(
         // safe and is required: dropping the entry after only one store
         // succeeded would leave the other permanently unrepaired.
         let interruption_repaired = match istore {
-            Some(istore) => match istore.backfill_null_session_id(&call_id, &session_id) {
+            Some(istore) => match istore.backfill_placeholder_session_id(&call_id, &session_id) {
                 Ok(n) => {
                     if n > 0 {
                         log::debug!(
