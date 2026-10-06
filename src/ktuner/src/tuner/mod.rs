@@ -14,14 +14,14 @@ use crate::rules::Recommendation;
 const ROLLBACK_PATH: &str = "/var/lib/ktuner/rollback.json";
 const SYSCTL_PERSIST_PATH: &str = "/etc/sysctl.d/99-ktuner.conf";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct RollbackEntry {
     previous: String,
     applied: String,
     path: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct RollbackData {
     version: u32,
     entries: BTreeMap<String, RollbackEntry>,
@@ -579,17 +579,17 @@ fn save_rollback(guard: &LedgerLock, recommendations: &[Recommendation]) -> Resu
 /// multiple tune/fix/import runs; only refresh `applied`. New params are added.
 /// Pure (no I/O) so the keep-original-previous invariant is unit-testable.
 ///
-/// Known limitation: alias matching only prevents NEW duplicates. A ledger
-/// written before this fix may already hold two spellings of one kernel path
-/// (e.g. `vm.swappiness` from tune and `vm/swappiness` from import); both are
-/// kept, a new alias updates whichever is found first, and rollback restores
-/// both to the same path in key order, so the slashed entry (`'/'` sorts after
-/// `'.'`) writes last and may restore an intermediate value. Healing such
-/// ledgers at merge time is left to a follow-up.
+/// Ledgers written before the alias dedup may already hold two spellings of
+/// one kernel path (e.g. `vm.swappiness` from tune and `vm/swappiness` from
+/// import); [`heal_alias_duplicates`] collapses such pairs before the new
+/// entries are merged, so a legacy duplicate cannot survive into the next
+/// ledger generation — where it would restore an intermediate value over the
+/// original and double-render the knob in sysctl.d.
 fn merge_entries<I>(mut data: RollbackData, entries: I) -> RollbackData
 where
     I: IntoIterator<Item = (String, String, String)>,
 {
+    heal_alias_duplicates(&mut data);
     for (param, previous, applied) in entries {
         let path = param_to_path(&param);
         let identity = canonicalize_path(&path);
@@ -613,6 +613,67 @@ where
             });
     }
     data
+}
+
+/// Collapse ledger entries that record the same kernel path under two
+/// spellings.
+///
+/// Ledgers written before the alias dedup (#3563) may already hold both
+/// `vm.swappiness` (from tune) and `vm/swappiness` (from import). Left in
+/// place, a rollback restores both in BTreeMap key order, so the later
+/// spelling overwrites the pristine original with an intermediate value, and
+/// `render_persistence` emits two lines for one knob.
+///
+/// Chain rule: when `x.applied == y.previous`, `y` was recorded while the
+/// value `x` had applied was live, so `x` is the earlier record and the pair
+/// collapses to `x.previous` (the pristine original) with `y.applied` (the
+/// newest value), under `x`'s key. Records with no chain relation — the knob
+/// was changed manually between the two ktuner runs — cannot be ordered, so
+/// the entry with the greatest key survives verbatim: that is exactly the
+/// record whose `previous` the key-order double write leaves in the kernel
+/// today, so the healed restore changes no outcome, it only removes the
+/// duplicate write. Pure (no I/O) so both rules are unit-testable.
+fn heal_alias_duplicates(data: &mut RollbackData) {
+    // Group the entry keys by the kernel path they resolve to.
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, entry) in &data.entries {
+        groups
+            .entry(canonicalize_path(&entry.path))
+            .or_default()
+            .push(key.clone());
+    }
+    for (_path, mut keys) in groups {
+        if keys.len() < 2 {
+            continue;
+        }
+        keys.sort();
+        // Collapse chain links first: x.applied == y.previous proves y was
+        // recorded after x, so x's previous is the older original.
+        loop {
+            let mut chain: Option<(String, String)> = None;
+            'pairs: for x in &keys {
+                for y in &keys {
+                    if x != y && data.entries[x].applied == data.entries[y].previous {
+                        chain = Some((x.clone(), y.clone()));
+                        break 'pairs;
+                    }
+                }
+            }
+            let Some((x, y)) = chain else { break };
+            let newest = data.entries[&y].applied.clone();
+            data.entries.get_mut(&x).unwrap().applied = newest;
+            data.entries.remove(&y);
+            keys.retain(|k| *k != y);
+        }
+        // Whatever remains has no order evidence: keep the greatest key, the
+        // record today's key-order restore writes last.
+        let survivor = keys.last().expect("group is non-empty").clone();
+        for key in keys {
+            if key != survivor {
+                data.entries.remove(&key);
+            }
+        }
+    }
 }
 
 /// Guard holding an exclusive `flock` on the ledger's lockfile. The lock is
@@ -957,6 +1018,11 @@ pub fn rollback_quiet() -> Result<RollbackOutcome> {
 }
 
 fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
+    // Heal first: a legacy ledger may hold two spellings of one kernel path,
+    // and restoring both in key order would overwrite the pristine original
+    // with the intermediate value the second spelling recorded.
+    let mut data = data.clone();
+    heal_alias_duplicates(&mut data);
     let mut restored = 0;
     let mut failed = 0;
     let mut skipped = 0;
@@ -1941,6 +2007,85 @@ mod tests {
         assert_eq!(outcome.restored, 1);
         assert_eq!(outcome.failed, 0);
         assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn rollback_heals_a_legacy_duplicate_spelling_ledger() {
+        // Ledger shape from before the alias dedup (#3563): tune recorded
+        // vm.swappiness 60->10, a later import recorded vm/swappiness 10->5
+        // under its own spelling. Restoring both in BTreeMap key order
+        // writes 60 and then 10, so the kernel ends up on the INTERMEDIATE
+        // value and the pristine 60 never comes back.
+        let dir = AtomicTestDir::new("rollback_heal_dup");
+        let path = dir.0.join("swappiness");
+        fs::write(&path, "5").unwrap(); // live value after both applies
+        let mut data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"5","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        for entry in data.entries.values_mut() {
+            entry.path = path.to_str().unwrap().to_string();
+        }
+        let outcome = restore_entries(&data, true);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "60",
+            "rollback must restore the pristine pre-ktuner value, not the intermediate"
+        );
+        assert_eq!(outcome.restored, 1, "one knob, one restore write");
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn merge_heals_a_legacy_duplicate_spelling_ledger() {
+        // Same legacy ledger, then any later tune/fix/import merge: the pair
+        // must collapse instead of surviving into the next ledger
+        // generation (where it would double-render in sysctl.d).
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"5","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(
+            data,
+            [(
+                "net.core.somaxconn".to_string(),
+                "128".to_string(),
+                "4096".to_string(),
+            )],
+        );
+        assert_eq!(data.entries.len(), 2, "one entry per knob");
+        let entry = &data.entries["vm.swappiness"];
+        assert_eq!(entry.previous, "60", "pristine value survives the heal");
+        assert_eq!(entry.applied, "5", "newest applied survives the heal");
+    }
+
+    #[test]
+    fn merge_heals_unrelated_duplicates_to_the_last_write() {
+        // No chain relation between the two records (the knob was set to 20
+        // manually between them), so the pristine value cannot be
+        // identified. The survivor is the greatest key: exactly the record
+        // whose previous the key-order double write leaves in the kernel
+        // today, so the healed restore changes no outcome, it only removes
+        // the duplicate write.
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"20","applied":"30","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(data, []);
+        assert_eq!(data.entries.len(), 1, "one entry per knob");
+        let entry = &data.entries["vm/swappiness"];
+        assert_eq!(entry.previous, "20", "last-write previous survives");
+        assert_eq!(entry.applied, "30", "last-write applied survives");
     }
 
     #[test]
