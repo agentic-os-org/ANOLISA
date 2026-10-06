@@ -3,7 +3,7 @@
 //! Computes 9 skill-related metrics from extracted skill events.
 
 use chrono::Datelike;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::storage::sqlite::genai::TraceEventDetail;
 
@@ -124,7 +124,7 @@ impl ExtractedData {
 // --- Metric 1: Skill Download Count ---
 
 fn compute_downloads(data: &ExtractedData) -> SkillDownloadMetrics {
-    let mut downloads: HashMap<String, SkillFirstSeen> = HashMap::new();
+    let mut downloads: BTreeMap<String, SkillFirstSeen> = BTreeMap::new();
 
     // Track sessions per skill for total_sessions count. Records from
     // id-less rows carry an empty session id and are not real sessions.
@@ -167,7 +167,7 @@ fn compute_downloads(data: &ExtractedData) -> SkillDownloadMetrics {
 // --- Metric 2: Skill Load Count ---
 
 fn compute_loads(data: &ExtractedData) -> SkillLoadMetrics {
-    let mut loads: HashMap<String, u64> = HashMap::new();
+    let mut loads: BTreeMap<String, u64> = BTreeMap::new();
 
     for record in &data.load_records {
         *loads.entry(record.skill_name.clone()).or_default() += 1;
@@ -408,6 +408,35 @@ mod tests {
         assert_eq!(percentile(&data, 0.0), 1.0);
         assert_eq!(percentile(&data, 100.0), 10.0);
         assert!((percentile(&data, 50.0) - 5.5).abs() < 0.01);
+    }
+
+    /// The response carries `loads` and `downloads` as JSON objects, so their key
+    /// order is the map's iteration order. A `HashMap`'s is arbitrary and differs
+    /// between two identical requests, which makes the dashboard's tie-break
+    /// order — and any diff of two responses — unstable. The CLI tables were
+    /// ordered for exactly this reason; the HTTP path was not.
+    #[test]
+    fn the_load_map_serializes_in_a_defined_order() {
+        let events: Vec<TraceEventDetail> = ["zulu", "alpha", "mike", "kilo", "yankee"]
+            .iter()
+            .enumerate()
+            .map(|(i, skill)| {
+                load_event(
+                    i as i64 + 1,
+                    1_778_000_000_000_000_000 + i as i64,
+                    "s1",
+                    skill,
+                )
+            })
+            .collect();
+
+        let report = compute_skill_metrics(&events, &MetricOptions::all());
+        let json = serde_json::to_string(&report.loads.expect("loads")).unwrap();
+
+        assert!(
+            json.starts_with(r#"{"loads":{"alpha":1,"kilo":1,"mike":1,"yankee":1,"zulu":1}"#),
+            "the load map must serialize in a defined order, got {json}"
+        );
     }
 
     #[test]

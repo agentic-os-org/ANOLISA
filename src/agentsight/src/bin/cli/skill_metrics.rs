@@ -22,6 +22,8 @@
 //! agentsight skill-metrics all --last 168 --agent Cosh
 //! ```
 
+use std::collections::BTreeMap;
+
 use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::skill_metrics::{MetricOptions, compute_skill_metrics};
 use agentsight::storage::sqlite::GenAISqliteStore;
@@ -379,7 +381,7 @@ fn format_timestamp_ns(ns: i64) -> String {
 /// the same report. `9dd52fe12` / `947a9bde2` applied the same rule to the
 /// other aggregate views.
 fn sorted_downloads(
-    downloads: &std::collections::HashMap<String, agentsight::skill_metrics::types::SkillFirstSeen>,
+    downloads: &BTreeMap<String, agentsight::skill_metrics::types::SkillFirstSeen>,
 ) -> Vec<(&String, &agentsight::skill_metrics::types::SkillFirstSeen)> {
     let mut sorted: Vec<_> = downloads.iter().collect();
     sorted.sort_by(|a, b| {
@@ -391,7 +393,7 @@ fn sorted_downloads(
 }
 
 /// Table order for the loads view: count desc, name asc for count ties.
-fn sorted_loads(loads: &std::collections::HashMap<String, u64>) -> Vec<(&String, &u64)> {
+fn sorted_loads(loads: &BTreeMap<String, u64>) -> Vec<(&String, &u64)> {
     let mut sorted: Vec<_> = loads.iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     sorted
@@ -401,7 +403,7 @@ fn sorted_loads(loads: &std::collections::HashMap<String, u64>) -> Vec<(&String,
 mod tests {
     use super::*;
     use agentsight::skill_metrics::types::SkillFirstSeen;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn download(sessions: u64) -> SkillFirstSeen {
         SkillFirstSeen {
@@ -416,7 +418,7 @@ mod tests {
     /// runs over one report printed different tables.
     #[test]
     fn tied_load_counts_are_ordered_by_name() {
-        let loads: HashMap<String, u64> =
+        let loads: BTreeMap<String, u64> =
             (0..6).map(|index| (format!("skill-{index}"), 1)).collect();
 
         for _ in 0..16 {
@@ -434,7 +436,7 @@ mod tests {
     /// differ; sessions desc, name asc for ties.
     #[test]
     fn downloads_are_ordered_by_sessions_then_name() {
-        let mut downloads: HashMap<String, SkillFirstSeen> = HashMap::new();
+        let mut downloads: BTreeMap<String, SkillFirstSeen> = BTreeMap::new();
         downloads.insert("zeta".to_string(), download(3));
         downloads.insert("alpha".to_string(), download(3));
         downloads.insert("beta".to_string(), download(5));
