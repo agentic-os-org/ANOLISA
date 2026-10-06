@@ -242,6 +242,7 @@ impl StorageBackend for BtrfsBaseBackend {
     }
 
     async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+        btrfs_common::ensure_not_internal_snapshot_id(snapshot_id)?;
         let ws_subvol = self.data_root.join(ws_id);
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         btrfs_common::create_snapshot(&ws_subvol, &snap_path, true).await

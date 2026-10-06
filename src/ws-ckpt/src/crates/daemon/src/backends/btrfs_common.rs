@@ -1371,6 +1371,77 @@ pub async fn diff_between_snapshots(snap_from: &Path, snap_to: &Path) -> Result<
         .context("diff task panicked")?
 }
 
+/// Name prefix of the temporary snapshot [`diff_against_live`] creates.
+pub(crate) const DIFF_TMP_PREFIX: &str = ".diff-tmp-";
+
+/// Reject snapshot ids in the internal `.diff-tmp-` namespace.
+///
+/// [`diff_against_live`] sweeps `.diff-tmp-*` entries in the workspace
+/// snapshot directory as crash leftovers, so a user snapshot carrying the
+/// prefix would be deleted by that sweep. The v2 id validator admits the
+/// charset (ASCII letters, digits, `-`, `_`, `.`) and the legacy IPC path
+/// validates nothing upstream, so the backend — the one choke point both
+/// creation paths share — must reserve the prefix itself.
+pub(crate) fn ensure_not_internal_snapshot_id(snapshot_id: &str) -> Result<()> {
+    if snapshot_id.starts_with(DIFF_TMP_PREFIX) {
+        bail!(
+            "snapshot id {:?} starts with the reserved internal prefix {:?} \
+             (temporary diff snapshots); pick another id",
+            snapshot_id,
+            DIFF_TMP_PREFIX
+        );
+    }
+    Ok(())
+}
+
+/// Delete `.diff-tmp-*` snapshots stranded in `snap_dir` by an interrupted
+/// prior diff.
+///
+/// The temp name is freshly random per call, so a leftover from a previous
+/// run never matches the name about to be used — a same-name pre-check could
+/// only fire on a 1-in-2^24 hash collision and effectively reclaimed nothing.
+/// Stranded temp snapshots are read-only and pin backend space exactly like
+/// the cleaner-stalled zombies of #3053, and they also inflate the recovery
+/// preview's physical snapshot count and digest.
+///
+/// Safe to sweep wholesale: the daemon serializes backend calls per workspace
+/// under the ws_id mutex (both `diff` entry points hold it across the
+/// backend call), so every `.diff-tmp-*` entry here is by construction a
+/// leftover — the only live one, ours, does not exist yet — and user
+/// snapshots can no longer carry the prefix
+/// ([`ensure_not_internal_snapshot_id`]).
+async fn cleanup_stale_diff_snapshots(snap_dir: &Path, fs_root: &Path) {
+    match recovery_snapshot_paths(snap_dir).await {
+        Ok(entries) => {
+            for path in entries {
+                let is_temp = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(DIFF_TMP_PREFIX));
+                if !is_temp {
+                    continue;
+                }
+                match delete_subvolume_space_aware(&path, fs_root).await {
+                    Ok(()) => info!(
+                        "removed stale temp diff snapshot {} left by an interrupted diff",
+                        path.display()
+                    ),
+                    Err(e) => warn!(
+                        "failed to remove stale temp diff snapshot {}: {:#}",
+                        path.display(),
+                        e
+                    ),
+                }
+            }
+        }
+        Err(e) => warn!(
+            "cannot scan {} for stale temp diff snapshots: {:#}",
+            snap_dir.display(),
+            e
+        ),
+    }
+}
+
 /// Diff a snapshot against the live (writable) workspace subvolume.
 ///
 /// Creates a temporary read-only snapshot of `live_subvol` inside `snap_dir`,
@@ -1390,12 +1461,13 @@ pub async fn diff_against_live(
     use std::hash::{BuildHasher, Hasher, RandomState};
 
     let h = RandomState::new().build_hasher().finish();
-    let tmp_snap = snap_dir.join(format!(".diff-tmp-{:06x}", h & 0xFFFFFF));
+    let tmp_snap = snap_dir.join(format!("{}{:06x}", DIFF_TMP_PREFIX, h & 0xFFFFFF));
 
-    // Clean up stale temp snapshot from a prior crash before creating a new one.
-    if path_exists_fallible(&tmp_snap).await? {
-        let _ = delete_subvolume_space_aware(&tmp_snap, fs_root).await;
-    }
+    // Sweep temp snapshots stranded by a prior crash BEFORE creating a new
+    // one: the fresh name is freshly random, so checking only the name about
+    // to be used reclaimed nothing — a leftover from a previous run has a
+    // different name by construction.
+    cleanup_stale_diff_snapshots(snap_dir, fs_root).await;
 
     create_snapshot(live_subvol, &tmp_snap, true)
         .await
@@ -3662,5 +3734,99 @@ proc /proc proc rw 0 0
             wait_clean_baseline(&mount).await,
             "cleaner did not drain after the shared-sweep kick"
         );
+    }
+
+    /// Only the full `.diff-tmp-` prefix is reserved; a user id that merely
+    /// starts with `.diff-tmp` (no dash) names no temp snapshot and stays
+    /// legal, and ordinary ids are unaffected.
+    #[test]
+    fn internal_snapshot_id_prefix_is_rejected() {
+        assert!(ensure_not_internal_snapshot_id(".diff-tmp-000001").is_err());
+        assert!(ensure_not_internal_snapshot_id(".diff-tmp-").is_err());
+        assert!(ensure_not_internal_snapshot_id("ckpt-20261006T120000.000").is_ok());
+        assert!(ensure_not_internal_snapshot_id(".hidden").is_ok());
+        assert!(ensure_not_internal_snapshot_id(".diff-tmp").is_ok());
+    }
+
+    // ── Stale `.diff-tmp-*` cleanup (crash leftovers) ──
+    //
+    // A self-contained `btrfs` fake so the test needs no btrfs filesystem:
+    // `subvolume delete <path>` removes the directory (the filesystem effect
+    // the real binary has), everything else exits 0 with no output —
+    // including `filesystem usage` (unparseable ⇒ fail-closed High) and
+    // `inspect-internal rootid` (no id ⇒ best-effort delete), so the stale
+    // entry's deletion rides the guarded path exactly as it would on a
+    // degraded backend. PATH is restored on Drop, following the BtrfsShim
+    // precedent; the only concurrently running tests that spawn `btrfs` (the
+    // `cleanup_init_storage` ones) ignore its exit status and assert nothing
+    // about the subvolume path.
+    struct FakeBtrfs {
+        _dir: tempfile::TempDir,
+        saved_path: std::ffi::OsString,
+    }
+
+    impl FakeBtrfs {
+        fn install() -> FakeBtrfs {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let shim = dir.path().join("btrfs");
+            std::fs::write(
+                &shim,
+                concat!(
+                    "#!/bin/sh\n",
+                    "if [ \"$1\" = 'subvolume' ] && [ \"$2\" = 'delete' ]; then\n",
+                    "  rm -rf -- \"$3\"\n",
+                    "fi\n",
+                    "exit 0\n",
+                ),
+            )
+            .expect("write shim");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod shim");
+            let saved_path = std::env::var_os("PATH").unwrap_or_default();
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dir.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+            FakeBtrfs {
+                _dir: dir,
+                saved_path,
+            }
+        }
+    }
+
+    impl Drop for FakeBtrfs {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.saved_path);
+        }
+    }
+
+    /// A temp snapshot stranded by a crashed diff is a read-only subvolume
+    /// pinning backend space; the fresh random name never matches it, so the
+    /// old same-name pre-check reclaimed nothing. The next diff must sweep
+    /// every `.diff-tmp-*` entry — and must not touch real snapshots.
+    #[tokio::test]
+    async fn diff_against_live_removes_stale_temp_snapshots() {
+        let _shim = FakeBtrfs::install();
+        let snap_dir = tempfile::tempdir().expect("snap dir");
+        let snap_from = snap_dir.path().join("snap-1");
+        std::fs::create_dir_all(&snap_from).expect("create base snapshot dir");
+        let stale = snap_dir.path().join(".diff-tmp-000001");
+        std::fs::create_dir_all(&stale).expect("create stale temp dir");
+        let live = tempfile::tempdir().expect("live dir");
+
+        diff_against_live(&snap_from, live.path(), snap_dir.path(), snap_dir.path())
+            .await
+            .expect("diff must succeed against the fake backend");
+
+        assert!(
+            !stale.exists(),
+            "stale .diff-tmp-* snapshot must be removed by the next diff"
+        );
+        assert!(snap_from.exists(), "real snapshots must not be touched");
     }
 }
