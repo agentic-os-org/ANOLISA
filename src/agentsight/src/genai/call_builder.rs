@@ -309,6 +309,20 @@ impl GenAIBuilder {
                             meta.insert("server.port".to_string(), port);
                         }
                     }
+                    // Record the transport scheme the client actually used.
+                    // The `:scheme` pseudo-header is decoded verbatim like
+                    // `:authority`, and a call captured over plaintext h2c
+                    // says "http" there — without reading it the FFI
+                    // request_url exports every call as https. HTTP/1.1
+                    // headers carry no scheme marker (TLS state is not in
+                    // the header list), so the attribute stays absent there
+                    // and the https default holds.
+                    if let Some(scheme) = headers
+                        .get(":scheme")
+                        .filter(|scheme| *scheme == "http" || *scheme == "https")
+                    {
+                        meta.insert("url.scheme".to_string(), scheme.clone());
+                    }
                 }
                 if let Some(addr) = meta.get("server.address").cloned() {
                     meta.insert("http.domain".to_string(), addr);
@@ -1246,6 +1260,38 @@ mod tests {
         );
         assert_eq!(call.metadata.get("server.port").unwrap(), "443");
         assert_eq!(call.metadata.get("http.domain").unwrap(), "api.openai.com");
+    }
+
+    /// The `:scheme` pseudo-header is the one decoded h2 field nothing
+    /// consumed: a plaintext h2c call says "http" there, but no scheme
+    /// attribute was recorded and the FFI request_url hardcoded https, so
+    /// plaintext calls were exported as TLS.
+    #[test]
+    fn test_build_llm_call_records_the_http2_scheme_pseudo_header() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{":method":"POST",":path":"/v1/chat/completions",":scheme":"http",":authority":"127.0.0.1:11434","content-type":"application/json"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("url.scheme").unwrap(),
+            "http",
+            "a plaintext h2c call must record the http scheme"
+        );
+    }
+
+    /// Without a decodable `:scheme` — an HTTP/1.1 capture, whose header list
+    /// cannot tell plaintext from TLS — no scheme attribute is recorded
+    /// rather than a guess; the FFI keeps its https default there.
+    #[test]
+    fn test_build_llm_call_scheme_attribute_stays_absent_without_the_pseudo_header() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers =
+            r#"{"host":"api.openai.com","content-type":"application/json"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert!(!call.metadata.contains_key("url.scheme"));
     }
 
     /// An IPv6 authority is bracketed (`[::1]:11434`); the recorded

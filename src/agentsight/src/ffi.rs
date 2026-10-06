@@ -579,10 +579,21 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .cloned()
         .unwrap_or_default();
     let path = call.metadata.get("path").cloned().unwrap_or_default();
+    // The scheme comes from the decoded `:scheme` pseudo-header when the call
+    // was captured over HTTP/2 — a plaintext h2c call says "http" there —
+    // while HTTP/1.1 headers carry no scheme marker, so the URL keeps the
+    // https default. Only the two valid schemes pass; anything else falls
+    // back rather than reaching a C consumer's URL parser.
+    let scheme = call
+        .metadata
+        .get("url.scheme")
+        .map(String::as_str)
+        .filter(|scheme| *scheme == "http" || *scheme == "https")
+        .unwrap_or("https");
     let url = if server_port.is_empty() {
-        format!("https://{server_addr}{path}")
+        format!("{scheme}://{server_addr}{path}")
     } else {
-        format!("https://{server_addr}:{server_port}{path}")
+        format!("{scheme}://{server_addr}:{server_port}{path}")
     };
     let request_url = safe_cstring(&url);
 
@@ -2182,6 +2193,44 @@ mod tests {
     fn test_build_llm_data_agent_name_none_is_null() {
         let holder = build_llm_data(&make_llm_call(None, 1234));
         assert!(holder.c_data.agent_name.is_null());
+    }
+
+    /// A call captured over plaintext h2c records `url.scheme: http`; the
+    /// exported request_url must say http, not the hardcoded https.
+    #[test]
+    fn test_build_llm_data_request_url_honors_the_recorded_scheme() {
+        let mut call = make_llm_call(None, 1234);
+        call.metadata
+            .insert("server.address".to_string(), "127.0.0.1".to_string());
+        call.metadata
+            .insert("server.port".to_string(), "11434".to_string());
+        call.metadata
+            .insert("path".to_string(), "/v1/chat/completions".to_string());
+        call.metadata
+            .insert("url.scheme".to_string(), "http".to_string());
+        let holder = build_llm_data(&call);
+        let url = unsafe { CStr::from_ptr(holder.c_data.request_url) };
+        assert_eq!(
+            url.to_str().unwrap(),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+    }
+
+    /// Without a recorded scheme — an HTTP/1.1 capture, whose header list
+    /// cannot tell plaintext from TLS — the URL keeps the https default.
+    #[test]
+    fn test_build_llm_data_request_url_defaults_to_https() {
+        let mut call = make_llm_call(None, 1234);
+        call.metadata
+            .insert("server.address".to_string(), "api.openai.com".to_string());
+        call.metadata
+            .insert("path".to_string(), "/v1/chat/completions".to_string());
+        let holder = build_llm_data(&call);
+        let url = unsafe { CStr::from_ptr(holder.c_data.request_url) };
+        assert_eq!(
+            url.to_str().unwrap(),
+            "https://api.openai.com/v1/chat/completions"
+        );
     }
 
     #[test]
