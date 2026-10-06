@@ -149,7 +149,7 @@ fn is_unauthorized_error_text(text: &str) -> bool {
 fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
-        || lower.contains("exit code")
+        || mentions_failing_exit_code(&lower)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
         || lower.contains("command not found")
@@ -157,6 +157,27 @@ fn text_has_tool_error_signal(text: &str) -> bool {
         || lower.contains("eperm")
         || lower.contains("\"status\": \"error\"")
         || lower.contains("\"status\":") && lower.contains("\"error\"")
+}
+
+/// Whether any `exit code N` mention carries a non-zero status.
+///
+/// `exit code 0` is the success spelling a passing command's output routinely
+/// carries ("60 passing (exit code 0)"), and Anthropic's `is_error` is
+/// optional while `content` may be a plain string, so that success spelling
+/// reaches the bare-text scan with no explicit flag to vouch for it — the
+/// bare `exit code` substring flagged it. Only a non-zero status is a failure
+/// signal; the status may be separated by spaces, a colon, or an equals sign.
+fn mentions_failing_exit_code(lower: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(found) = lower[search_from..].find("exit code") {
+        let after = &lower[search_from + found + "exit code".len()..];
+        let status = after.trim_start_matches([' ', ':', '=']);
+        if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
+            return true;
+        }
+        search_from += found + "exit code".len();
+    }
+    false
 }
 
 fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
@@ -1868,6 +1889,96 @@ mod tests {
         let events = detector.detect(&call);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+    }
+
+    #[test]
+    fn an_unflagged_exit_code_zero_output_is_not_a_tool_failure() {
+        // Anthropic's `is_error` is optional (it defaults to false) and a
+        // tool_result may carry its output as a plain string, so a successful
+        // command's result reaches the detector with neither an explicit flag
+        // nor an object shape: just `Value::String("... exit code 0")`. The
+        // bare `exit code` substring flagged exactly that success spelling.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-tests".to_string()),
+                response: serde_json::json!("npm test\n\n60 passing (exit code 0)"),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "all green".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "a successful command's exit code 0 output is not a failure: {events:?}"
+        );
+
+        // The same shape nested under `content` (a tool_result whose payload
+        // was wrapped as an object but still reports no explicit outcome)
+        // must stay clean too.
+        call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+            id: Some("toolu-tests".to_string()),
+            response: serde_json::json!({"content": "make check\n(exit code 0)"}),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "an object-wrapped exit code 0 output is not a failure: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_exit_code_still_signals_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-build".to_string()),
+                response: serde_json::json!("make build\nexit code 2"),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "checking".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+
+        // 127 (command not found by exit status) and a trailing success
+        // mention after an earlier failure both keep the signal: only the
+        // zero status itself is the success spelling.
+        for payload in [
+            "sh -c missing-tool\nexit code 127",
+            "first run: exit code 1, rerun: exit code 0",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-build".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "a non-zero exit status must keep the failure signal: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
     }
 
     // ── Rule 11: EmptyResponse ─────────────────────────────────────────────────
