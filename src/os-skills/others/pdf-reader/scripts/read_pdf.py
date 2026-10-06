@@ -12,14 +12,28 @@ def _install():
         import subprocess; subprocess.check_call([sys.executable,"-m","pip","install","-q","PyMuPDF"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         import pymupdf; return pymupdf
 
+def _bad_page_spec(spec, token):
+    print(f'ERROR: invalid page spec {spec!r} at {token!r} (expected e.g. "1-5,7")', file=sys.stderr)
+    sys.exit(1)
+
 def _pages(spec, total):
     ps = set()
     for p in spec.split(","):
         p = p.strip()
+        if not p:
+            continue
         if "-" in p:
-            a, b = p.split("-",1); [ps.add(i) for i in range(max(0,int(a)-1), min(total,int(b)))]
+            a, b = p.split("-",1)
+            try:
+                lo, hi = int(a), int(b)
+            except ValueError:
+                _bad_page_spec(spec, p)
+            [ps.add(i) for i in range(max(0,lo-1), min(total,hi))]
         else:
-            i = int(p)-1
+            try:
+                i = int(p)-1
+            except ValueError:
+                _bad_page_spec(spec, p)
             if 0 <= i < total: ps.add(i)
     return sorted(ps)
 
