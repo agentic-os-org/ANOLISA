@@ -61,44 +61,18 @@ pub fn convert_qoder_events(
                 .unwrap_or(serde_json::Value::Null);
 
             let tool_results = extract_tool_results(&content);
+            // A mixed event (tool_result + genuine text) is a user turn,
+            // but the structured observation it carries must survive too.
+            let mixed_event = !tool_results.is_empty() && has_text_block(&content);
+            let result_ts = e.get("timestamp").and_then(|v| v.as_str());
 
             // If this user event only has tool_results, attach to previous step
-            if !tool_results.is_empty() && !has_text_block(&content) {
+            if !tool_results.is_empty() && !mixed_event {
                 if let Some(prev) = steps.last_mut() {
-                    let result_ts = e.get("timestamp").and_then(|v| v.as_str());
-                    let mut obs_results = Vec::new();
-                    for tr in &tool_results {
-                        let extra = if tr.is_error {
-                            let mut m = HashMap::new();
-                            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                            Some(m)
-                        } else {
-                            None
-                        };
-                        obs_results.push(ObservationResult {
-                            source_call_id: Some(tr.tool_use_id.clone()),
-                            content: Some(serde_json::Value::String(tr.content.clone())),
-                            subagent_trajectory_ref: None,
-                            extra,
-                        });
-                        // Write result_timestamp into matching ToolCall.extra
-                        if let (Some(ts), Some(tcs)) = (result_ts, prev.tool_calls.as_mut()) {
-                            for tc in tcs.iter_mut() {
-                                if tc.tool_call_id == tr.tool_use_id {
-                                    let mut extra = tc.extra.take().unwrap_or_default();
-                                    extra.insert(
-                                        "result_timestamp".into(),
-                                        serde_json::Value::String(ts.to_string()),
-                                    );
-                                    tc.extra = Some(extra);
-                                }
-                            }
-                        }
-                    }
-                    if !obs_results.is_empty() {
-                        prev.observation = Some(Observation {
-                            results: obs_results,
-                        });
+                    let timestamps = result_timestamps_for(&tool_results, result_ts);
+                    enrich_result_timestamps(prev, &timestamps);
+                    if let Some(obs) = observation_from_tool_results(&tool_results) {
+                        prev.observation = Some(obs);
                     }
                 }
                 i += 1;
@@ -108,6 +82,26 @@ pub fn convert_qoder_events(
             // Regular user message
             step_id += 1;
             let text = extract_text_from_content(&content);
+            // A mixed event's observation attaches to the previous step
+            // exactly like a pure result carrier (with the
+            // result_timestamp enrichment); when there is no previous step
+            // (e.g. replayed context) it rides on the user step itself.
+            let observation = if mixed_event {
+                match (
+                    steps.last_mut(),
+                    observation_from_tool_results(&tool_results),
+                ) {
+                    (Some(prev), Some(obs)) => {
+                        let timestamps = result_timestamps_for(&tool_results, result_ts);
+                        enrich_result_timestamps(prev, &timestamps);
+                        prev.observation = Some(obs);
+                        None
+                    }
+                    (_, obs) => obs,
+                }
+            } else {
+                None
+            };
             steps.push(Step {
                 step_id,
                 timestamp: e
@@ -120,7 +114,7 @@ pub fn convert_qoder_events(
                 reasoning_effort: None,
                 reasoning_content: None,
                 tool_calls: None,
-                observation: None,
+                observation,
                 metrics: None,
                 extra: None,
                 llm_call_count: None,
@@ -509,6 +503,62 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
     }
 }
 
+/// Build an `Observation` from extracted `tool_result` blocks.
+fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option<Observation> {
+    if tool_results.is_empty() {
+        return None;
+    }
+    let results = tool_results
+        .iter()
+        .map(|tr| {
+            let extra = if tr.is_error {
+                let mut m = HashMap::new();
+                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
+                Some(m)
+            } else {
+                None
+            };
+            ObservationResult {
+                source_call_id: Some(tr.tool_use_id.clone()),
+                content: Some(serde_json::Value::String(tr.content.clone())),
+                subagent_trajectory_ref: None,
+                extra,
+            }
+        })
+        .collect();
+    Some(Observation { results })
+}
+
+/// Map every extracted result id to the event timestamp.
+fn result_timestamps_for(
+    tool_results: &[ExtractedToolResult],
+    ts: Option<&str>,
+) -> HashMap<String, String> {
+    match ts {
+        Some(ts) => tool_results
+            .iter()
+            .map(|tr| (tr.tool_use_id.clone(), ts.to_string()))
+            .collect(),
+        None => HashMap::new(),
+    }
+}
+
+/// Write `result_timestamp` into the matching `ToolCall.extra` entries.
+fn enrich_result_timestamps(step: &mut Step, timestamps: &HashMap<String, String>) {
+    if let Some(tcs) = step.tool_calls.as_mut() {
+        for tc in tcs.iter_mut() {
+            if let Some(ts) = timestamps.get(&tc.tool_call_id) {
+                let mut extra = tc.extra.take().unwrap_or_default();
+                extra.insert(
+                    "result_timestamp".into(),
+                    serde_json::Value::String(ts.clone()),
+                );
+                tc.extra = Some(extra);
+            }
+        }
+    }
+}
+
 /// A tool_result block extracted from a user-message `content` array.
 #[derive(Debug, Clone)]
 struct ExtractedToolResult {
@@ -693,6 +743,71 @@ mod tests {
             "user text must be preserved, got {:?}",
             user_step.message
         );
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_after_assistant_keeps_observation_and_text() {
+        // A user event carrying both a tool_result and genuine text is a
+        // user turn (its text must survive), but the structured observation
+        // of the matching tool call must not be lost either: attach it to
+        // the previous assistant step exactly like a pure result carrier,
+        // including the result_timestamp enrichment.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        assert_eq!(traj.steps.len(), 2);
+        let tool_step = &traj.steps[0];
+        assert_eq!(tool_step.source, StepSource::Agent);
+        let obs = tool_step
+            .observation
+            .as_ref()
+            .expect("mixed event without a previous step keeps its observation");
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            obs.results[0].content.as_ref(),
+            Some(&serde_json::Value::String("a.txt".to_string()))
+        );
+        // result_timestamp enrichment reaches the matching tool call
+        let tc = tool_step.tool_calls.as_ref().unwrap()[0].clone();
+        assert_eq!(
+            tc.extra.as_ref().unwrap().get("result_timestamp"),
+            Some(&serde_json::Value::String(
+                "2026-07-25T10:00:03Z".to_string()
+            ))
+        );
+
+        let user_step = &traj.steps[1];
+        assert_eq!(user_step.source, StepSource::User);
+        assert!(user_step.message.contains("also update the docs"));
+    }
+
+    #[test]
+    fn test_convert_mixed_tool_result_without_assistant_keeps_observation_and_text() {
+        // The same mixed event as the session's first event (replayed
+        // context) has no previous step to attach to, so the observation
+        // rides on the emitted user step itself.
+        let content =
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a.txt\"},{\"type\":\"text\",\"text\":\"also update the docs\"}]}}\n";
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        assert_eq!(traj.steps.len(), 1);
+        let user_step = &traj.steps[0];
+        assert_eq!(user_step.source, StepSource::User);
+        assert!(user_step.message.contains("also update the docs"));
+        let obs = user_step
+            .observation
+            .as_ref()
+            .expect("first-event mixed user step carries its observation");
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t1"));
     }
 
     #[test]

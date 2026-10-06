@@ -48,14 +48,45 @@ impl FactCheckStrategy {
                 "--exclude-dir=node_modules",
                 "--exclude-dir=target",
                 "--exclude-dir=dist",
+                // C / C++
+                "--include=*.c",
+                "--include=*.h",
+                "--include=*.cpp",
+                "--include=*.cc",
+                "--include=*.cxx",
+                "--include=*.hpp",
+                "--include=*.hh",
+                "--include=*.hxx",
+                // JVM / .NET
+                "--include=*.java",
+                "--include=*.kt",
+                "--include=*.kts",
+                "--include=*.scala",
+                "--include=*.cs",
+                // Scripting
                 "--include=*.rs",
                 "--include=*.py",
+                "--include=*.rb",
+                "--include=*.php",
+                "--include=*.swift",
+                "--include=*.sh",
+                "--include=*.bash",
+                "--include=*.zsh",
+                // Web
                 "--include=*.ts",
                 "--include=*.tsx",
                 "--include=*.js",
                 "--include=*.jsx",
-                "--include=*.java",
+                "--include=*.vue",
+                // Go + data / config
                 "--include=*.go",
+                "--include=*.sql",
+                "--include=*.proto",
+                "--include=*.yaml",
+                "--include=*.yml",
+                "--include=*.toml",
+                "--include=*.json",
+                "--include=*.xml",
                 "--include=*.md",
                 "-F",
                 symbol,
@@ -153,5 +184,34 @@ impl Detector for FactCheckStrategy {
         }
 
         issues
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The verifier greps the repo for symbols the final answer cites; a
+    /// miss is reported as a fabricated-reference L2 issue. A symbol defined
+    /// in a C file or a shell script is a real symbol — the include list
+    /// must not be blind to whole language families.
+    #[test]
+    fn grep_finds_symbols_outside_the_original_include_list() {
+        let dir = std::env::temp_dir().join("agentsight-opt-factcheck-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.c"), "int parse_config(void) { return 0; }\n").unwrap();
+        std::fs::write(dir.join("run.sh"), "echo parse_config\n").unwrap();
+
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&dir, "parse_config", "function"),
+            GrepOutcome::Found
+        ));
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&dir, "no_such_symbol_here", "function"),
+            GrepOutcome::NotFound
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -207,6 +207,28 @@ test('atif-viewer: the document loader drops stale responses', () => {
     /if \(requestId === loadRequestIdRef\.current\) setSavingsDetail\(detail\);/,
     'AtifViewerPage: the savings write must be gated on the load request id',
   );
+
+  // Local FileReader imports share the load identity: taking the id before
+  // the read invalidates in-flight network loads, and both reader
+  // completions are gated so an invalidated read cannot replace the
+  // document, surface an obsolete error or finish another load's state.
+  const importStart = source.indexOf('const handleFileImport = useCallback(');
+  assert.ok(importStart >= 0, 'AtifViewerPage.handleFileImport must exist');
+  const importBody = source.slice(importStart, source.indexOf('}, [t]);', importStart));
+  const takesId = importBody.indexOf('const requestId = ++loadRequestIdRef.current;');
+  const startsRead = importBody.indexOf('reader.readAsText(file);');
+  assert.ok(
+    takesId >= 0 && takesId < startsRead,
+    'AtifViewerPage.handleFileImport: the import must take the load id before reading',
+  );
+  const gatedCompletions = importBody.match(/requestId !== loadRequestIdRef\.current\) return;/g) ?? [];
+  assert.equal(gatedCompletions.length, 2,
+    'AtifViewerPage.handleFileImport: onload and onerror must both be gated');
+  assert.match(
+    importBody,
+    /onerror[\s\S]{0,200}setLoading\(false\);/,
+    'AtifViewerPage.handleFileImport: a terminal read failure must release loading',
+  );
 });
 
 test('optimization: a dimension result must not land in another session', () => {
@@ -220,12 +242,12 @@ test('optimization: a dimension result must not land in another session', () => 
   // requests run for tens of seconds while the route param can change.
   assert.match(
     body,
-    /if \(activeSessionRef\.current === sessionId\) apply\(data\);/,
+    /if \(isCurrent\(\)\) apply\(data\);/,
     'OptimizationPage: dimension results must be gated on the active session',
   );
   assert.match(
     body,
-    /if \(activeSessionRef\.current !== sessionId\) return;\s*handleDimError\(e\);/,
+    /if \(!isCurrent\(\)\) return;\s*handleDimError\(e\);/,
     'OptimizationPage: dimension failures must be gated on the active session',
   );
   const guarded = body.match(/forSession<[A-Za-z]+>\(/g) ?? [];

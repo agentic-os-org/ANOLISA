@@ -13,13 +13,13 @@ Source0:        %{name}-%{version}.tar.gz
 # Build dependencies (required for OpenSSL compilation during cargo build)
 BuildRequires:  perl-IPC-Cmd
 BuildRequires:  perl-core
-# %systemd_* scriptlet macros expand at rpmbuild time (see %post/%preun/%postun)
+# %%systemd_* scriptlet macros expand at rpmbuild time (see %%post/%%preun/%%postun)
 BuildRequires:  systemd-rpm-macros
 
 # Runtime dependencies
 # Requires for eBPF components
 Requires:       elfutils-libelf
-# The expanded %systemd_post/%systemd_preun/%systemd_postun scriptlets call
+# The expanded %%systemd_post/%%systemd_preun/%%systemd_postun scriptlets call
 # systemctl (same pattern as cosh-ng.spec.in)
 Requires(post):   (%{_bindir}/systemctl if systemd)
 Requires(preun):  (%{_bindir}/systemctl if systemd)

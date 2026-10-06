@@ -261,8 +261,13 @@ impl ParsedHttp2Frame {
             }
             // Dynamic Table Size Update (001xxxxx)
             else if first_byte & 0xE0 == 0x20 {
-                // Skip this for stateless decoding
-                pos += 1;
+                // Skip this for stateless decoding. The 5-bit prefix is an
+                // HPACK integer (RFC 7541 §5.1): when it is all ones the new
+                // size continues in base-128 octets, the same encoding as
+                // the extended string length in `decode_literal_string`.
+                // Those octets belong to the update — skipping only the
+                // first one left the next field starting mid-integer.
+                pos += Self::hpack_integer_len(payload, pos);
             }
             // Literal Header Field without Indexing (0000xxxx) or Never Indexed (0001xxxx)
             else {
@@ -361,6 +366,29 @@ impl ParsedHttp2Frame {
         };
 
         (result, pos + length - start)
+    }
+
+    /// Number of octets in the HPACK integer beginning at `start`.
+    ///
+    /// A dynamic-table size update is a single HPACK integer (RFC 7541
+    /// §6.3) with a 5-bit prefix: a value below 31 fits in the first octet,
+    /// while the all-ones prefix continues in base-128 octets — the same
+    /// encoding as the extended string length in
+    /// [`Self::decode_literal_string`]. Only the octet count is needed to
+    /// skip one statelessly; a chain that never terminates inside the
+    /// block stops at the payload end, like that walk.
+    fn hpack_integer_len(payload: &[u8], start: usize) -> usize {
+        let mut len = 1;
+        if payload[start] & 0x1F != 0x1F {
+            return len;
+        }
+        while let Some(&b) = payload.get(start + len) {
+            len += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        len
     }
 
     /// Decode an HPACK Huffman-encoded string (RFC 7541 Appendix B) using the
@@ -632,6 +660,13 @@ mod tests {
         }
     }
 
+    fn headers_frame(payload: Vec<u8>) -> ParsedHttp2Frame {
+        let mut frame = data_frame(payload);
+        frame.frame_type = Http2FrameType::Headers;
+        frame.flags = 0x04; // END_HEADERS
+        frame
+    }
+
     #[test]
     fn trace_args_cuts_multibyte_body_preview_on_char_boundary() {
         // A non-JSON body of dense CJK text over 200 bytes: byte 200 falls
@@ -682,5 +717,85 @@ mod tests {
         let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&[0xff, 0x80], 0);
         assert_eq!(value, "");
         assert_eq!(consumed, 2, "the whole payload is consumed");
+    }
+
+    /// A dynamic-table size update is one HPACK integer (RFC 7541 §6.3)
+    /// with a 5-bit prefix. When the prefix is all ones (0x3F first octet)
+    /// the new size continues in base-128 octets — the same integer
+    /// encoding as an extended literal length. The stateless skip
+    /// advanced one octet, so `pos` landed on the continuation bytes and
+    /// the following well-formed literal decoded as garbage (or was
+    /// dropped), putting wrong headers in traces and diagnostics.
+    #[test]
+    fn test_stateless_skips_extended_size_update_before_literal() {
+        // Table size 159 = 31 + (0 << 0) + (1 << 7), i.e. 0x3F 0x80 0x01:
+        // all-ones prefix plus two continuation octets, then a literal
+        // header field with incremental indexing.
+        let mut payload = vec![0x3F, 0x80, 0x01, 0x40, 0x0A];
+        payload.extend_from_slice(b"custom-key");
+        payload.push(0x0C);
+        payload.extend_from_slice(b"custom-value");
+
+        let headers = headers_frame(payload).decode_headers_stateless();
+
+        assert_eq!(
+            headers,
+            vec![("custom-key".to_string(), Some("custom-value".to_string()))],
+            "the literal after the update must decode exactly"
+        );
+    }
+
+    /// Single-continuation form: 0x3F 0x00 is a table size of 31. The
+    /// one-octet skip parsed the 0x00 continuation as a literal header
+    /// field with an empty name, swallowing the indexed field behind it.
+    #[test]
+    fn test_stateless_skips_extended_size_update_before_indexed_field() {
+        let headers = headers_frame(vec![0x3F, 0x00, 0x82]).decode_headers_stateless();
+
+        assert_eq!(
+            headers,
+            vec![(":method".to_string(), Some("GET".to_string()))],
+            "the indexed field after the update must decode exactly"
+        );
+    }
+
+    /// Control: a prefix below 31 fits the whole update in its first
+    /// octet, so the one-octet skip was already correct and must stay so.
+    #[test]
+    fn test_stateless_skips_simple_size_update() {
+        let mut payload = vec![0x21, 0x40, 0x0A];
+        payload.extend_from_slice(b"custom-key");
+        payload.push(0x0C);
+        payload.extend_from_slice(b"custom-value");
+
+        let headers = headers_frame(payload).decode_headers_stateless();
+
+        assert_eq!(
+            headers,
+            vec![("custom-key".to_string(), Some("custom-value".to_string()))]
+        );
+    }
+
+    /// Control: an update-only block (extended, terminating) decodes to
+    /// nothing, and a continuation chain that never terminates inside the
+    /// block stops at the payload end instead of panicking — the same
+    /// contract `decode_literal_string` keeps for truncated lengths.
+    #[test]
+    fn test_stateless_size_update_boundaries_do_not_panic() {
+        assert!(
+            headers_frame(vec![0x3F, 0x00])
+                .decode_headers_stateless()
+                .is_empty()
+        );
+        assert!(
+            headers_frame(vec![0x3F, 0x80])
+                .decode_headers_stateless()
+                .is_empty()
+        );
+        assert!(
+            headers_frame(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF])
+                .decode_headers_stateless()
+                .is_empty()
+        );
     }
 }

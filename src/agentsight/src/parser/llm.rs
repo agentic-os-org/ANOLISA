@@ -117,6 +117,27 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
     None
 }
 
+/// Normalize the tool definitions from a parsed request body.
+///
+/// Supports:
+/// - OpenAI chat completions and the Anthropic Messages API: top-level
+///   `"tools"` array.
+/// - DashScope/Bailian native protocol: `"tools"` nested in the top-level
+///   `"parameters"` object, which is where that protocol carries every
+///   sampling parameter. The top-level spelling wins when both are
+///   present, matching `GenAIBuilder::parse_request_body`.
+///
+/// Returns `None` when the request declares no tools. Callers that count
+/// prompt tokens must use this rather than reading `"tools"` directly: a
+/// native request nests its tool definitions, so a top-level-only read
+/// silently drops them from the count.
+pub fn extract_tools_view(body: &Value) -> Option<Vec<Value>> {
+    body.get("tools")
+        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
+        .and_then(|t| t.as_array())
+        .cloned()
+}
+
 /// Extract text from Anthropic's top-level `system` field.
 ///
 /// The field is either a plain string or an array of content blocks
@@ -245,6 +266,61 @@ mod tests {
     fn test_extract_messages_view_none() {
         let body = serde_json::json!({"model": "gpt-4"});
         assert!(extract_messages_view(&body).is_none());
+    }
+
+    #[test]
+    fn test_extract_tools_view_chat_completions() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "read_file"}}]
+        });
+        let tools = extract_tools_view(&body).expect("tools exist");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "read_file");
+    }
+
+    /// DashScope/Bailian native requests nest their tool definitions under
+    /// the top-level `parameters` object, so a read of `"tools"` alone
+    /// returns nothing for that protocol.
+    #[test]
+    fn test_extract_tools_view_dashscope_native_parameters() {
+        let body = serde_json::json!({
+            "model": "qwen3-max",
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "parameters": {
+                "temperature": 0.5,
+                "tools": [{"type": "function", "function": {"name": "read_file"}}]
+            }
+        });
+        let tools = extract_tools_view(&body).expect("native tools exist");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "read_file");
+    }
+
+    /// When both spellings are present the top-level one wins, so the view
+    /// agrees with `GenAIBuilder::parse_request_body`.
+    #[test]
+    fn test_extract_tools_view_prefers_top_level() {
+        let body = serde_json::json!({
+            "model": "qwen3-max",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "top"}}],
+            "parameters": {"tools": [{"type": "function", "function": {"name": "nested"}}]}
+        });
+        let tools = extract_tools_view(&body).expect("tools exist");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "top");
+    }
+
+    #[test]
+    fn test_extract_tools_view_none() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "parameters": {"temperature": 0.5}
+        });
+        assert!(extract_tools_view(&body).is_none());
     }
 
     #[test]

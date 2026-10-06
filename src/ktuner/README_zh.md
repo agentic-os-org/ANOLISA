@@ -93,11 +93,12 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ```
 
 `tune --dry-run` 输出的是预览；`status` 与短路路径使用同一套取值
-（此处为 `planned`；无可应用项时为 `optimal`/`blocked`），`blocked`
-为本环境过滤掉的建议数（不可写或运行时危险）：
+（此处为 `planned`；无可应用项时为 `optimal`/`blocked`）。`would_apply`
+列出真实运行会写入的项，`would_skip` 列出本环境过滤掉的项及原因
+（`unwritable` 或 `runtime_dangerous`），`blocked` 为这些项的数量：
 
 ```json
-{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ]}
+{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
 ```
 
 ### rollback 输出

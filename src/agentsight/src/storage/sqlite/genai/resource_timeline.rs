@@ -58,7 +58,7 @@ impl GenAISqliteStore {
         let mut statement = conn.prepare(
             "SELECT start_timestamp_ns,
                     COALESCE(end_timestamp_ns, start_timestamp_ns),
-                    pid, tool_call_ids, input_messages
+                    COALESCE(pid, 0) AS pid, tool_call_ids, input_messages
              FROM genai_events
              WHERE event_type = 'llm_call' AND session_id = ?1
              ORDER BY start_timestamp_ns ASC",
@@ -69,7 +69,10 @@ impl GenAISqliteStore {
             Ok(SessionCall {
                 start_ns: row.get(0)?,
                 end_ns: row.get(1)?,
-                pid: row.get(2)?,
+                // `pid` is nullable in the schema; a NULL (only producible by
+                // a foreign writer) falls back to 0, which matches no
+                // samples, instead of failing the whole timeline query.
+                pid: row.get::<_, i64>(2)? as i32,
                 tool_call_ids: parse_string_array(tool_ids_json.as_deref()),
                 tool_response_ids: parse_tool_response_ids(input_messages_json.as_deref()),
             })

@@ -1065,6 +1065,44 @@ fn turn_indices_survive_a_null_call_id_row() {
     cleanup_db(&path);
 }
 
+/// The plain call-turn reader must survive the same NULL `call_id` row its
+/// sibling `get_tool_call_turn_indices` already skips (#5265): a NULL (only
+/// producible by a foreign writer) must not error the whole map, and the
+/// valid entries of every session must survive.
+#[test]
+fn call_turn_indices_survives_null_call_id_row() {
+    let (store, path) = create_populated_store("call_turns_null_id");
+    {
+        // Fixture-only raw insert: the malformed row is timestamped after
+        // every valid sess-1 row so the expected turn indices below are
+        // order-independent.
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (\
+             call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+             provider, model, input_tokens, output_tokens, total_tokens,\
+             session_id, trace_id, conversation_id, agent_name, pid,\
+             status, tool_call_ids, event_json, process_name, user_query\
+             ) VALUES (NULL,'llm_call',?1,?2,?3,'openai','gpt-4',1,1,2,\
+             'sess-1','trace-1','conv-1','agent-a',100,'pending',NULL,'{}','proc-a',NULL)",
+            params![BASE_NS + 6 * STEP_NS, BASE_NS + 7 * STEP_NS, STEP_NS],
+        )
+        .unwrap();
+    }
+
+    let m = store.get_call_turn_indices(&["sess-1", "sess-2"]).unwrap();
+
+    // Valid sess-1 entries survive with their expected turns.
+    assert_eq!(m["call-1"], 1);
+    assert_eq!(m["call-2"], 2);
+    assert_eq!(m["call-3"], 3);
+    assert_eq!(m["call-6"], 4);
+    // The malformed row must not poison other sessions either.
+    assert_eq!(m["call-4"], 1);
+    assert!(m.contains_key("call-5"));
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_list_traces_by_session() {
     let (store, path) = create_populated_store("traces");
@@ -1759,6 +1797,148 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     cleanup_db(&path);
 }
 
+/// Two idle snapshots can share one match key: `insert_pending` adopts a
+/// snapshot only when the candidate set is a single row ("Ambiguous idle
+/// snapshots … preserving snapshots"), so the completion then lands in
+/// `complete_pending`'s match-key branch instead of the call-id one. That
+/// branch wrote the evidence columns unconditionally, so a completion whose
+/// parsed request carried no messages erased the request view the drain had
+/// captured — the same loss the call-id branch already guards against.
+#[test]
+fn test_complete_pending_keeps_captured_evidence_on_the_match_key_branch() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_pending_evidence_match_key_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let info = PendingCallInfo {
+        call_id: "idle-dup-a".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-dup".to_string()),
+        session_id: Some("s-dup".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(
+            r#"[{"role":"user","content":"what changed in the parser?"}]"#.to_string(),
+        ),
+        system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
+        user_query: Some("what changed in the parser?".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-dup".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+    let second = PendingCallInfo {
+        call_id: "idle-dup-b".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-dup".to_string()),
+        session_id: Some("s-dup".to_string()),
+        start_timestamp_ns: (BASE_NS + 1) as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(
+            r#"[{"role":"user","content":"what changed in the parser?"}]"#.to_string(),
+        ),
+        system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
+        user_query: Some("what changed in the parser?".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-dup".to_string()),
+    };
+    store.insert_pending(&second).unwrap();
+
+    // The completing event carries no parsed request messages and does not
+    // reuse either snapshot's call id.
+    let mut call = LLMCall::new(
+        "real-dup".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "it changed".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "real-dup".to_string());
+    call.metadata
+        .insert("pending_match_key".to_string(), "match-dup".to_string());
+    call.metadata
+        .insert("status_code".to_string(), "200".to_string());
+    call.metadata
+        .insert("call_kind".to_string(), "main".to_string());
+
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (input, system): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT input_messages, system_instructions FROM genai_events
+             WHERE call_id = 'real-dup'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        input
+            .as_deref()
+            .is_some_and(|v| v.contains("what changed in the parser?")),
+        "the match-key branch must keep the captured request view, got {input:?}"
+    );
+    assert!(
+        system.as_deref().is_some_and(|v| v.contains("be terse")),
+        "the captured system instructions must survive too, got {system:?}"
+    );
+    drop(conn);
+    cleanup_db(&path);
+}
+
 /// A completion whose parsed request carries no messages must not erase the
 /// evidence the pending row captured: the request view is the only record of
 /// what the caller sent when the semantic parse failed.
@@ -2239,6 +2419,55 @@ fn test_enrich_pending_from_sse_records_tool_call_ids() {
     cleanup_db(&path);
 }
 
+/// A completed call must not be enriched: `insert_pending` returns early
+/// when the same call_id already exists (leaving a completed row in place),
+/// so a late SSE enrichment targeting that replay must leave the row's
+/// authoritative full-response values untouched.
+#[test]
+fn test_enrich_pending_from_sse_skips_completed_call() {
+    let (store, path) = create_populated_store("enrich_sse_done");
+    let e = SseEnrichment {
+        model: Some("gpt-4-turbo".to_string()),
+        trace_id: Some("trace-enriched".to_string()),
+        provider: Some("openai-e".to_string()),
+        output_messages: Some(
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"late_call","name":"read_file","arguments":{"path":"a"}}]}]"#
+                .to_string(),
+        ),
+        sse_event_count: Some(42),
+        input_tokens: Some(999),
+        output_tokens: Some(888),
+    };
+    // call-1 is status='complete' in the fixture.
+    store.enrich_pending_from_sse("call-1", &e).unwrap();
+    let conn = store.conn.lock().unwrap();
+    let (model, tid, it, ot): (String, String, i64, i64) = conn
+        .query_row(
+            "SELECT model, trace_id, input_tokens, output_tokens \
+             FROM genai_events WHERE call_id = 'call-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(model, "gpt-4");
+    assert_eq!(tid, "trace-1");
+    assert_eq!(it, 100);
+    assert_eq!(ot, 50);
+    // The guard must also cover the tool_call_ids column the drain path now
+    // writes (COALESCE(?9, …)): a completed row keeps the ids its own
+    // completion recorded, and never adopts the replay's tool calls.
+    let ids: String = conn
+        .query_row(
+            "SELECT tool_call_ids FROM genai_events WHERE call_id = 'call-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ids, r#"["tc-1","tc-2"]"#);
+    drop(conn);
+    cleanup_db(&path);
+}
+
 // ─── schema.rs tests ──────────────────────────────────────────────────────────
 
 #[test]
@@ -2524,6 +2753,90 @@ fn poison_recovery_flush_still_operational() {
     //   - last_flush.lock().unwrap_or_else(|e| e.into_inner())  (mod.rs)
     store.flush();
 
+    cleanup_db(&path);
+}
+
+/// A flush that loses the SQLite write race must keep the drained events so a
+/// later flush retries them instead of silently dropping completed LLM calls.
+#[test]
+fn flush_requeues_events_when_the_database_is_locked() {
+    use crate::genai::exporter::GenAIExporter;
+
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_busy_flush_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path_and_batch(
+        &path,
+        Some(crate::config::BatchConfig {
+            max_size: 2,
+            flush_ms: 100,
+        }),
+        crate::config::PeriodicStoragePolicy::default(),
+    )
+    .unwrap();
+
+    // Hold the write lock on a second connection so the synchronous batch flush
+    // fails with SQLITE_BUSY instead of persisting.
+    let blocker = rusqlite::Connection::open(&path).expect("blocker should open");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE;")
+        .expect("blocker should take the write lock");
+
+    let events: Vec<GenAISemanticEvent> = (0..2)
+        .map(|index| {
+            let call = LLMCall::new(
+                format!("busy-flush-{index}"),
+                BASE_NS as u64,
+                "openai".to_string(),
+                "gpt-4".to_string(),
+                LLMRequest {
+                    messages: vec![],
+                    temperature: None,
+                    max_tokens: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    top_p: None,
+                    top_k: None,
+                    seed: None,
+                    stop_sequences: None,
+                    stream: false,
+                    tools: None,
+                    raw_body: None,
+                },
+                100,
+                "test-agent".to_string(),
+            );
+            GenAISemanticEvent::LLMCall(call)
+        })
+        .collect();
+    store.export(&events);
+
+    blocker
+        .execute_batch("COMMIT;")
+        .expect("blocker should release the write lock");
+    store.flush();
+
+    let conn = store.conn.lock().unwrap();
+    for index in 0..2 {
+        let call_id = format!("busy-flush-{index}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM genai_events WHERE call_id = ?1",
+                rusqlite::params![call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "event {call_id} must survive a busy flush retry");
+    }
+    drop(conn);
+    drop(blocker);
+    drop(store);
     cleanup_db(&path);
 }
 

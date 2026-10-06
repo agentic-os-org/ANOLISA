@@ -9,6 +9,7 @@ execFileSync('node', [
   '--test',
   'tests/stale-load-regression.test.cjs',
   'tests/stale-load-deferred.test.cjs',
+  'tests/atif-import-deferred.test.cjs',
 ], {
   stdio: 'inherit',
 });

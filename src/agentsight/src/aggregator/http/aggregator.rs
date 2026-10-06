@@ -169,13 +169,14 @@ impl ConnectionMetrics {
 #[derive(Debug)]
 pub struct HttpConnectionAggregator {
     connections: LruCache<ConnectionId, ConnectionState>,
-    /// Raw bytes received as RawData while the connection is in SseActive
-    /// state. Some providers (e.g. OpenAI Responses API via dashscope) emit
-    /// a final `response.completed` SSE event whose data payload spans
+    /// Raw bytes received as RawData while the connection is in an
+    /// uncompressed SseActive state. Any provider's SSE event can span
     /// multiple TLS records: the first chunk parses as a SseEvent (with
-    /// truncated data), and subsequent chunks have no `data:` prefix so
-    /// they arrive as RawData. Buffering them lets us reconstruct the
-    /// original event for token-usage extraction when the stream ends.
+    /// truncated data), and subsequent chunks have no `data:` prefix so they
+    /// arrive as RawData. Buffering them lets us reconstruct the original
+    /// event for token-usage extraction when the stream ends. Without this,
+    /// a split event's fragment is dropped and the reconstructed content is
+    /// silently corrupted.
     sse_continuation_buffers: LruCache<ConnectionId, Vec<u8>>,
     /// Last `source_event` pointer appended into the continuation buffer per
     /// connection. Used to dedup when a single SSL_read produces multiple
@@ -191,26 +192,6 @@ pub struct HttpConnectionAggregator {
     idle_timeout: Duration,
     /// Cumulative automatic eviction count for diagnostics.
     eviction_count: u64,
-}
-
-/// Returns true if oversized-SSE-event continuation buffering should run for
-/// this SSE stream. Currently only the OpenAI Responses API
-/// (`/v1/responses`, dashscope `/compatible-mode/v1/responses`) emits a
-/// final `response.completed` event whose data field routinely spans
-/// multiple TLS records, so we restrict the extra buffering to that path.
-///
-/// Matching is intentionally precise: `ends_with("/responses")` catches
-/// exact path endings (covers both `/v1/responses` and
-/// `/compatible-mode/v1/responses`), while `contains("/responses?")`
-/// catches query-string variants. We must NOT use a broad `contains`
-/// because sub-paths like `/v1/responses/{id}/items` would be false
-/// positives.
-fn needs_sse_continuation_buffer(request: Option<&ParsedRequest>) -> bool {
-    let Some(req) = request else {
-        return false;
-    };
-    let path = req.path.as_str();
-    path.ends_with("/responses") || path.contains("/responses?")
 }
 
 /// Default per-connection body buffer cap (8 MiB).
@@ -527,14 +508,12 @@ impl HttpConnectionAggregator {
         }
     }
 
-    /// Finish a compressed SSE stream: de-frame chunked transfer-encoding,
-    /// decompress the buffered body, parse it into SSE events, and build the
-    /// aggregated result (mirrors the live `SseComplete` construction).
     /// Decode a buffered *compressed* SSE body into parsed events. Shared by the
     /// live completion path (`finish_compressed_sse`) and the drain path
     /// (`drain_and_persist_dead_connections`) so both decode identically. `src`
     /// supplies provenance (pid/tid/uid/comm/timestamps) for the synthetic event
-    /// handed to the parser.
+    /// handed to the parser; callers should pass the read that completed the
+    /// stream so the decoded events' timestamps reflect when its data arrived.
     pub(crate) fn decode_compressed_sse(
         raw_buffer: &[u8],
         content_encoding: Option<&str>,
@@ -584,6 +563,44 @@ impl HttpConnectionAggregator {
             .unwrap_or(false)
     }
 
+    /// Finalize a live-parsed SSE stream whose event list is already complete.
+    ///
+    /// Shared by the terminator path in `process_sse_event` and the
+    /// initial-body terminator check in `process_response` so both build the
+    /// same `SseComplete`/`ResponseOnly` result.
+    fn finish_sse(
+        &mut self,
+        connection_id: ConnectionId,
+        request: Option<ParsedRequest>,
+        response_headers: ParsedResponse,
+        sse_events: Vec<ParsedSseEvent>,
+    ) -> AggregatedResult {
+        let mut response = AggregatedResponse::from_parsed(response_headers);
+        response.set_sse_events(sse_events);
+        response.sse_continuation_bytes = self.sse_continuation_buffers.pop(&connection_id);
+        self.last_appended_src_ptr.pop(&connection_id);
+
+        if let Some(req) = request {
+            let parsed = response.parsed.clone();
+            let mut pair = HttpPair::from_parsed(connection_id, req, parsed);
+            pair.response = response;
+            AggregatedResult::SseComplete(pair)
+        } else {
+            AggregatedResult::ResponseOnly {
+                connection_id,
+                response,
+            }
+        }
+    }
+
+    /// Finalize a compressed SSE stream: de-frame chunked transfer-encoding,
+    /// decompress the buffered body, parse it into SSE events, and build the
+    /// aggregated result (mirrors the live `SseComplete` construction).
+    ///
+    /// `completion_event` is the read that completed the stream (the one
+    /// carrying the final body bytes or terminator). Its provenance stamps
+    /// every decoded event, so passing the response-headers event would
+    /// collapse `end_timestamp_ns` to the header round-trip.
     fn finish_compressed_sse(
         connection_id: ConnectionId,
         request: Option<ParsedRequest>,
@@ -591,6 +608,7 @@ impl HttpConnectionAggregator {
         content_encoding: Option<String>,
         raw_buffer: Vec<u8>,
         zstd_decoder: Option<Rc<RefCell<ZstdStreamDecoder>>>,
+        completion_event: &SslEvent,
     ) -> AggregatedResult {
         let is_chunked = Self::is_chunked_response(&response_headers);
         let sse_events = Self::decode_compressed_sse(
@@ -598,7 +616,7 @@ impl HttpConnectionAggregator {
             content_encoding.as_deref(),
             is_chunked,
             zstd_decoder.as_deref(),
-            &response_headers.source_event,
+            completion_event,
         );
         log::debug!(
             "[HttpAggregator] Decoded compressed SSE | conn={connection_id:?} | encoding={content_encoding:?} | events={}",
@@ -737,6 +755,9 @@ impl HttpConnectionAggregator {
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
+                    // The whole compressed body arrived with the headers, so
+                    // the response's own event is the completing read.
+                    let completion_event = response_headers.source_event.clone();
                     if let Some(buf) = &compressed_buffer {
                         if crate::utils::decompress::chunked_stream_complete(buf) {
                             return Some(Self::finish_compressed_sse(
@@ -746,8 +767,24 @@ impl HttpConnectionAggregator {
                                 content_encoding,
                                 buf.clone(),
                                 zstd_decoder,
+                                completion_event.as_ref(),
                             ));
                         }
+                    }
+                    // A short stream can be fully contained in the first read
+                    // (headers and terminator in one buffer). Completion is
+                    // otherwise only detected on a later read by
+                    // `process_sse_event`, so without this check the call
+                    // lingers in SseActive until the idle drain records it as
+                    // interrupted — or is lost when the connection is reused.
+                    if compressed_buffer.is_none() && sse_events.iter().any(ParsedSseEvent::is_done)
+                    {
+                        return Some(self.finish_sse(
+                            connection_id,
+                            Some(completed_request),
+                            response_headers,
+                            sse_events,
+                        ));
                     }
                     self.insert(
                         connection_id,
@@ -776,6 +813,9 @@ impl HttpConnectionAggregator {
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
+                    // The whole compressed body arrived with the headers, so
+                    // the response's own event is the completing read.
+                    let completion_event = response_headers.source_event.clone();
                     // Transition to SSE active state, wait for SSE events
                     if let Some(buf) = &compressed_buffer {
                         if crate::utils::decompress::chunked_stream_complete(buf) {
@@ -786,8 +826,20 @@ impl HttpConnectionAggregator {
                                 content_encoding,
                                 buf.clone(),
                                 zstd_decoder,
+                                completion_event.as_ref(),
                             ));
                         }
+                    }
+                    // See the RequestBodyPending branch: a terminator already
+                    // present in the first body read completes the call now.
+                    if compressed_buffer.is_none() && sse_events.iter().any(ParsedSseEvent::is_done)
+                    {
+                        return Some(self.finish_sse(
+                            connection_id,
+                            Some(request),
+                            response_headers,
+                            sse_events,
+                        ));
                     }
                     self.insert(
                         connection_id,
@@ -824,6 +876,9 @@ impl HttpConnectionAggregator {
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
+                    // The whole compressed body arrived with the headers, so
+                    // the response's own event is the completing read.
+                    let completion_event = response_headers.source_event.clone();
                     if let Some(buf) = &compressed_buffer {
                         if crate::utils::decompress::chunked_stream_complete(buf) {
                             return Some(Self::finish_compressed_sse(
@@ -833,8 +888,20 @@ impl HttpConnectionAggregator {
                                 content_encoding,
                                 buf.clone(),
                                 zstd_decoder,
+                                completion_event.as_ref(),
                             ));
                         }
+                    }
+                    // See the RequestBodyPending branch: a terminator already
+                    // present in the first body read completes the call now.
+                    if compressed_buffer.is_none() && sse_events.iter().any(ParsedSseEvent::is_done)
+                    {
+                        return Some(self.finish_sse(
+                            connection_id,
+                            None,
+                            response_headers,
+                            sse_events,
+                        ));
                     }
                     self.insert(
                         connection_id,
@@ -961,6 +1028,7 @@ impl HttpConnectionAggregator {
                         content_encoding,
                         buf,
                         zstd_decoder,
+                        ssl_event,
                     ));
                 }
                 if crate::utils::decompress::chunked_stream_complete(&buf) {
@@ -971,6 +1039,7 @@ impl HttpConnectionAggregator {
                         content_encoding,
                         buf,
                         zstd_decoder,
+                        ssl_event,
                     ))
                 } else {
                     self.insert(
@@ -988,30 +1057,28 @@ impl HttpConnectionAggregator {
                 }
             }
             other => {
-                // Not in RequestBodyPending / compressed-SSE state. If we are
-                // in an uncompressed SseActive stream targeting the OpenAI
-                // Responses API, buffer the bytes as a continuation of the
-                // last SSE event so we can recover token-usage from
-                // oversized events (e.g. `response.completed`) that span
-                // multiple TLS records. Other providers fit usage in a
-                // single small event, so skip the extra copy.
+                // Not in RequestBodyPending / compressed-SSE state. On any
+                // uncompressed SseActive stream, buffer RawData bytes as a
+                // continuation of the last SSE event: a TLS record can split
+                // an event (an oversized `response.completed` carrying the
+                // full prompt + tools, but equally any provider's event) and
+                // the parser keeps no cross-read remainder, so dropping the
+                // fragment would silently corrupt the reconstructed content
+                // and any usage it carries.
                 if let ConnectionState::SseActive {
-                    request,
                     compressed_buffer: None,
                     ..
                 } = &other
                 {
-                    if needs_sse_continuation_buffer(request.as_ref()) {
-                        const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
-                        let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
-                        let buf = self
-                            .sse_continuation_buffers
-                            .get_or_insert_mut(connection_id, Vec::new);
-                        let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
-                        let take = data.len().min(remaining);
-                        if take > 0 {
-                            buf.extend_from_slice(&data[..take]);
-                        }
+                    const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
+                    let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
+                    let buf = self
+                        .sse_continuation_buffers
+                        .get_or_insert_mut(connection_id, Vec::new);
+                    let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
+                    let take = data.len().min(remaining);
+                    if take > 0 {
+                        buf.extend_from_slice(&data[..take]);
                     }
                 }
                 self.insert(connection_id, other);
@@ -1050,6 +1117,7 @@ impl HttpConnectionAggregator {
                             content_encoding,
                             buf,
                             zstd_decoder,
+                            sse_event.source_event(),
                         ));
                     }
                     self.insert(
@@ -1075,36 +1143,36 @@ impl HttpConnectionAggregator {
                 );
 
                 // Append the underlying SSL chunk bytes to the continuation
-                // buffer so that oversized events (whose first chunk arrives
-                // here with truncated data) can still be reconstructed by
-                // downstream extractors. Only enable for the OpenAI
-                // Responses API — other providers emit usage in single
-                // small events. Dedup by source_event pointer so a single
-                // SSL_read producing multiple SSE events contributes only
-                // once — EXCEPT for the done event, which we always append
-                // because its source chunk carries usage data that must not
-                // be lost to dedup.
-                if needs_sse_continuation_buffer(request.as_ref()) {
-                    const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
-                    let src = sse_event.source_event();
-                    let src_ptr = src as *const _ as usize;
-                    let src_buf_len = src.buf_size() as usize;
-                    let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
-                    let should_append = is_done
-                        || (last_ptr != Some(src_ptr)
-                            && src_buf_len > 0
-                            && src_buf_len <= src.buf.len());
-                    if should_append && src_buf_len > 0 && src_buf_len <= src.buf.len() {
-                        let buf = self
-                            .sse_continuation_buffers
-                            .get_or_insert_mut(*connection_id, Vec::new);
-                        let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
-                        let take = src_buf_len.min(remaining);
-                        if take > 0 {
-                            buf.extend_from_slice(&src.buf[..take]);
-                        }
-                        self.last_appended_src_ptr.put(*connection_id, src_ptr);
+                // buffer so that split or oversized events (whose first chunk
+                // arrives here with truncated data) can still be reconstructed
+                // by downstream extractors. This runs for every uncompressed
+                // SSE stream: a TLS record boundary can fall inside an event
+                // for any provider, and the parser keeps no cross-read
+                // remainder, so a dropped fragment would silently corrupt the
+                // reconstructed content (and any usage it carries). Dedup by
+                // source_event pointer so a single SSL_read producing multiple
+                // SSE events contributes only once — EXCEPT for the done
+                // event, which we always append because its source chunk
+                // carries usage data that must not be lost to dedup.
+                const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
+                let src = sse_event.source_event();
+                let src_ptr = src as *const _ as usize;
+                let src_buf_len = src.buf_size() as usize;
+                let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
+                let should_append = is_done
+                    || (last_ptr != Some(src_ptr)
+                        && src_buf_len > 0
+                        && src_buf_len <= src.buf.len());
+                if should_append && src_buf_len > 0 && src_buf_len <= src.buf.len() {
+                    let buf = self
+                        .sse_continuation_buffers
+                        .get_or_insert_mut(*connection_id, Vec::new);
+                    let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
+                    let take = src_buf_len.min(remaining);
+                    if take > 0 {
+                        buf.extend_from_slice(&src.buf[..take]);
                     }
+                    self.last_appended_src_ptr.put(*connection_id, src_ptr);
                 }
 
                 // Add SSE event to the list
@@ -1114,26 +1182,7 @@ impl HttpConnectionAggregator {
                     log::trace!(
                         "[HttpAggregator] State transition: SseActive -> Complete | conn={connection_id:?}",
                     );
-
-                    // Build aggregated response with SSE events
-                    let mut response = AggregatedResponse::from_parsed(response_headers);
-                    response.set_sse_events(sse_events);
-                    response.sse_continuation_bytes =
-                        self.sse_continuation_buffers.pop(connection_id);
-                    self.last_appended_src_ptr.pop(connection_id);
-
-                    // Return appropriate result based on whether request exists
-                    if let Some(req) = request {
-                        let parsed = response.parsed.clone();
-                        let mut pair = HttpPair::from_parsed(*connection_id, req, parsed);
-                        pair.response = response;
-                        Some(AggregatedResult::SseComplete(pair))
-                    } else {
-                        Some(AggregatedResult::ResponseOnly {
-                            connection_id: *connection_id,
-                            response,
-                        })
-                    }
+                    Some(self.finish_sse(*connection_id, request, response_headers, sse_events))
                 } else {
                     // Continue SSE active state (uncompressed: parsed live)
                     self.insert(
@@ -1876,6 +1925,65 @@ mod tests {
         assert!(pair.response.parsed.body_str().is_empty());
     }
 
+    #[test]
+    fn test_sse_done_in_initial_response_body_completes_immediately() {
+        // Headers and the whole short stream — a content delta plus the
+        // terminator — can arrive in a single SSL read. Terminator detection
+        // only exists in `process_sse_event`, so without an initial-body check
+        // the completed call sits in SseActive until the idle drain records it
+        // as interrupted (or it is lost when the connection is reused).
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let req_event = create_mock_ssl_event_with_buf(
+            5555,
+            0x7100,
+            b"POST /stream HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            1,
+        );
+        let mut req_headers = HashMap::new();
+        req_headers.insert("content-length".to_string(), "2".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/stream".to_string(),
+            version: 1,
+            headers: req_headers,
+            body_offset: 43,
+            body_len: 2,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let resp_buf = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n".to_vec();
+        let body_offset = resp_buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let resp_event = create_mock_ssl_event_with_buf(5555, 0x7100, resp_buf.clone(), 0);
+        let response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("content-type".to_string(), "text/event-stream".to_string());
+                h
+            },
+            body_offset,
+            body_len: resp_buf.len() - body_offset,
+            source_event: resp_event,
+        };
+
+        let result = aggregator.process_response(response);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected immediate SseComplete, got {other:?}"),
+        };
+        assert_eq!(pair.response.sse_event_count(), 2);
+        assert_eq!(
+            pair.response.json_body()[0]["choices"][0]["delta"]["content"].as_str(),
+            Some("hi")
+        );
+        assert!(!aggregator.has_pending(), "connection must be finalized");
+    }
+
     // ── Compressed SSE tests ────────────────────────────────────────────
 
     fn make_zstd_chunked_sse() -> (Vec<u8>, Vec<u8>) {
@@ -2357,6 +2465,45 @@ mod tests {
     }
 
     #[test]
+    fn test_compressed_sse_end_timestamp_uses_last_data_read() {
+        // Every decoded event is synthesized from one `src` SslEvent. Stamping
+        // them with the header event's timestamp collapsed end_timestamp_ns()
+        // (and therefore HttpRecord.duration_ns / TTFT) to the header
+        // round-trip; the read that completes the stream must supply the
+        // provenance instead.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let (_, chunked) = make_zstd_chunked_sse();
+        enter_compressed_sse_active(&mut aggregator, 12, 0xC00);
+
+        let mid = chunked.len() / 2;
+        let first_ts = 5_000_000;
+        let last_ts = 9_000_000;
+        let first = SslEvent {
+            timestamp_ns: first_ts,
+            ..raw_frag(12, 0xC00, chunked[..mid].to_vec())
+        };
+        assert!(
+            aggregator.process_raw_body_data(&first).is_none(),
+            "first fragment must keep buffering"
+        );
+
+        let last = SslEvent {
+            timestamp_ns: last_ts,
+            ..raw_frag(12, 0xC00, chunked[mid..].to_vec())
+        };
+        let pair = match aggregator.process_raw_body_data(&last) {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete after terminator, got {other:?}"),
+        };
+        assert_eq!(
+            pair.response.end_timestamp_ns(),
+            last_ts,
+            "end timestamp must come from the completing data read, not the header read"
+        );
+        assert_eq!(pair.response.start_timestamp_ns(), 1000);
+    }
+
+    #[test]
     fn test_compressed_sse_done_event_triggers_finish() {
         let mut aggregator = HttpConnectionAggregator::new();
         let sse_plain = b"data: done-event\n\ndata: [DONE]\n\n";
@@ -2473,6 +2620,7 @@ mod tests {
         let sse_plain = b"data: no-chunks\n\ndata: [DONE]\n\n";
         let compressed = zstd::encode_all(&sse_plain[..], 3).unwrap();
         let event = create_mock_ssl_event(5, 0x600);
+        let completion_event = event.clone();
         let response_headers = ParsedResponse {
             version: 11,
             status_code: 200,
@@ -2493,6 +2641,7 @@ mod tests {
             Some("zstd".to_string()),
             compressed,
             None,
+            completion_event.as_ref(),
         );
         match result {
             AggregatedResult::ResponseOnly { response, .. } => {
@@ -2729,20 +2878,26 @@ mod tests {
         assert_eq!(aggregator.active_connections(), 0);
     }
 
-    #[test]
-    fn test_needs_sse_continuation_buffer_none_request() {
-        assert!(!needs_sse_continuation_buffer(None));
-    }
-
     fn enter_uncompressed_responses_sse_active(
         aggregator: &mut HttpConnectionAggregator,
         pid: u32,
         ssl_ptr: u64,
     ) -> ConnectionId {
+        enter_uncompressed_sse_active(aggregator, pid, ssl_ptr, "/v1/responses")
+    }
+
+    /// Drive `aggregator` into `SseActive` for an uncompressed SSE response
+    /// to a POST on `path`; returns the connection id.
+    fn enter_uncompressed_sse_active(
+        aggregator: &mut HttpConnectionAggregator,
+        pid: u32,
+        ssl_ptr: u64,
+        path: &str,
+    ) -> ConnectionId {
         let req_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, Vec::new(), 1);
         let request = ParsedRequest {
             method: "POST".to_string(),
-            path: "/v1/responses".to_string(),
+            path: path.to_string(),
             version: 11,
             headers: HashMap::new(),
             body_offset: 0,
@@ -2829,39 +2984,83 @@ mod tests {
         assert!(buf.windows(payload.len()).any(|w| w == payload));
     }
 
-    // ── Boundary tests requested in PR review (#8) ──────────────────────
+    #[test]
+    fn test_sse_continuation_buffer_chat_completions_split_event() {
+        // A TLS record boundary can split an SSE event on any provider, not
+        // just the OpenAI Responses API. The parser keeps no cross-read
+        // remainder, so the fragment arrives as RawData; for the stream to be
+        // reconstructable once it completes, those bytes must be retained.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id =
+            enter_uncompressed_sse_active(&mut aggregator, 40, 0xF000, "/v1/chat/completions");
+        assert!(aggregator.is_sse_active(&conn_id));
+
+        // First read: event head without the terminating blank line.
+        let head = b"event: message\ndata: {\"usage\":{\"input_tokens\":57";
+        let raw = create_mock_ssl_event_with_buf(40, 0xF000, head.to_vec(), 0);
+        assert!(
+            aggregator.process_raw_body_data(&raw).is_none(),
+            "raw body data on SseActive should keep buffering"
+        );
+
+        // Second read completes the event.
+        let tail = b",\"output_tokens\":7}}";
+        let raw = create_mock_ssl_event_with_buf(40, 0xF000, tail.to_vec(), 0);
+        assert!(aggregator.process_raw_body_data(&raw).is_none());
+
+        // Complete the stream and inspect the continuation buffer.
+        let done_event =
+            create_mock_ssl_event_with_buf(40, 0xF000, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should be present for any SSE stream");
+        let expected = [head.as_slice(), tail.as_slice()].concat();
+        assert!(
+            buf.windows(expected.len()).any(|w| w == expected),
+            "split event bytes must be retained"
+        );
+    }
 
     #[test]
-    fn test_needs_sse_continuation_buffer_non_responses_path() {
-        // Negative: chat completions and sub-paths must not trigger buffering.
-        let event = create_mock_ssl_event_with_buf(1, 1, Vec::new(), 1);
-        let make_req = |path: &str| ParsedRequest {
-            method: "POST".to_string(),
-            path: path.to_string(),
-            version: 11,
-            headers: HashMap::new(),
-            body_offset: 0,
-            body_len: 0,
-            source_event: event.clone(),
-            reassembled_body: None,
+    fn test_sse_continuation_buffer_chat_completions_sse_event() {
+        // The parsed-event path carries the same guarantee: the source chunk
+        // of a (possibly truncated) event on any provider must land in the
+        // continuation buffer, not just for the OpenAI Responses API.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id =
+            enter_uncompressed_sse_active(&mut aggregator, 41, 0xF100, "/v1/chat/completions");
+
+        let payload = b"data: {\"usage\":{\"input_tokens\":57";
+        let src_event = create_mock_ssl_event_with_buf(41, 0xF100, payload.to_vec(), 0);
+        let event = ParsedSseEvent::new(None, None, None, 0, payload.len(), src_event);
+        assert!(aggregator.process_sse_event(&conn_id, event).is_none());
+
+        let done_event =
+            create_mock_ssl_event_with_buf(41, 0xF100, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
         };
-        assert!(!needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/chat/completions"
-        ))));
-        assert!(!needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/responses/abc/items"
-        ))));
-        // Positive: exact and query-string variants should match.
-        assert!(needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/responses"
-        ))));
-        assert!(needs_sse_continuation_buffer(Some(&make_req(
-            "/compatible-mode/v1/responses"
-        ))));
-        assert!(needs_sse_continuation_buffer(Some(&make_req(
-            "/v1/responses?stream=true"
-        ))));
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should be present for any SSE stream");
+        assert!(
+            buf.windows(payload.len()).any(|w| w == payload),
+            "parsed event source chunk must be retained"
+        );
     }
+
+    // ── Boundary tests requested in PR review (#8) ──────────────────────
 
     #[test]
     fn test_sse_continuation_buffer_max_bytes_truncation() {

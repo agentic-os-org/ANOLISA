@@ -205,10 +205,12 @@ pub(super) fn select_candidate(
 
 pub(super) fn acknowledgement_matches(binding: &Binding, expected: &ApplyCredentialPolicy) -> bool {
     let request = &binding.request;
-    let expected_source = match expected.policy.source_patterns.as_slice() {
-        [source] => source,
-        _ => return false,
-    };
+    let expected_sources: HashSet<&str> = expected
+        .policy
+        .source_patterns
+        .iter()
+        .map(String::as_str)
+        .collect();
     if expected.policy.taint_label != "CREDENTIAL"
         || expected.policy.destination_scope != DestinationScope::PublicIpv4
         || expected.policy.mode != PolicyMode::Enforce
@@ -224,8 +226,15 @@ pub(super) fn acknowledgement_matches(binding: &Binding, expected: &ApplyCredent
     {
         return false;
     }
+    // The adapter compiles one `source` line per pattern, so the
+    // acknowledgement must carry exactly the requested source set; requiring
+    // a single expected entry rolled back every accepted multi-source policy.
     parse_compiled_policy(&request.policy_dsl, CompiledMode::Enforce).is_some_and(|compiled| {
-        compiled.source_paths.contains(&expected_source.to_string())
+        compiled.source_paths.len() == expected_sources.len()
+            && compiled
+                .source_paths
+                .iter()
+                .all(|source| expected_sources.contains(source.as_str()))
             && compiled.trusted_endpoints == expected.policy.trusted_endpoints
     })
 }

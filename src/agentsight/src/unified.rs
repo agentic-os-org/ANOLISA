@@ -2024,6 +2024,10 @@ impl AgentSight {
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
                             &response_headers,
                         );
+                    // A dead connection retains no completing read, so the
+                    // header event is the only provenance left for the
+                    // synthetic events; these feed pending-row usage
+                    // extraction only, not duration accounting.
                     crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
                         &buf,
                         content_encoding.as_deref(),
@@ -2190,16 +2194,21 @@ impl AgentSight {
                     .unwrap_or(0);
 
                 let mut checked_pids: HashSet<u32> = HashSet::new();
-                for (pid, _call_id, session_id, agent_name, conversation_id) in &persisted_pending {
+                for (pid, ..) in &persisted_pending {
                     if !checked_pids.insert(*pid) {
                         continue; // already checked this PID
                     }
-                    if was_pid_oom_killed(*pid as i32) {
-                        let call_ids: Vec<&str> = persisted_pending
-                            .iter()
-                            .filter(|(p, _, _, _, _)| *p == *pid)
-                            .map(|(_, c, _, _, _)| c.as_str())
-                            .collect();
+                    if !was_pid_oom_killed(*pid as i32) {
+                        continue;
+                    }
+                    // One event per conversation: writing only the first
+                    // tuple's session/conversation while marking every call
+                    // interrupted left the other conversations without a
+                    // parent agent_crash event (OpenClaw = one pid, many
+                    // sessions).
+                    for (agent_name, session_id, conversation_id, call_ids) in
+                        oom_crash_groups_for_pid(*pid, &persisted_pending)
+                    {
                         log::info!(
                             "[DrainCheck] PID {} was OOM-killed (confirmed via dmesg), agent={}, calls={:?}",
                             pid,
@@ -2208,16 +2217,16 @@ impl AgentSight {
                         );
                         let detail = serde_json::json!({
                             "pid": pid,
-                            "agent_name": agent_name,
+                            "agent_name": agent_name.clone(),
                             "call_ids": call_ids,
                             "oom": true,
                             "source": "drain+dmesg",
                         });
                         let event = InterruptionEvent::new(
                             InterruptionType::AgentCrash,
-                            session_id.clone(),
+                            session_id,
                             None,
-                            conversation_id.clone(),
+                            conversation_id,
                             None,
                             Some(*pid as i32),
                             agent_name.clone(),
@@ -2231,15 +2240,15 @@ impl AgentSight {
                         } else {
                             log::info!("[DrainCheck] Recorded OOM agent_crash for pid={pid}");
                         }
-                        // Mark all pending calls for this PID as interrupted
-                        if let Some(ref store) = self.genai_sqlite_store {
-                            if let Err(e) =
-                                store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
-                            {
-                                log::warn!(
-                                    "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
-                                );
-                            }
+                    }
+                    // Mark all pending calls for this PID as interrupted
+                    if let Some(ref store) = self.genai_sqlite_store {
+                        if let Err(e) =
+                            store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
+                        {
+                            log::warn!(
+                                "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
+                            );
                         }
                     }
                 }
@@ -2740,6 +2749,64 @@ fn apply_retro_session_fixup(
     }
 }
 
+/// Group LLM calls by `(session_id, conversation_id)`.
+///
+/// Returns groups in first-seen order, each carrying only the call ids that
+/// belong to its conversation. A single agent process can serve several
+/// conversations (OpenClaw is one gateway pid with many sessions); attributing
+/// a crash to only the first tuple leaves every other conversation's
+/// interrupted calls without a parent `agent_crash` event.
+fn group_calls_by_conversation<'a>(
+    calls: impl Iterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
+) -> Vec<(Option<String>, Option<String>, Vec<String>)> {
+    let mut groups: Vec<((Option<String>, Option<String>), Vec<String>)> = Vec::new();
+    for (call_id, session_id, conversation_id) in calls {
+        let key = (
+            session_id.map(str::to_owned),
+            conversation_id.map(str::to_owned),
+        );
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, call_ids)) => call_ids.push(call_id.to_owned()),
+            None => groups.push((key, vec![call_id.to_owned()])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((session_id, conversation_id), call_ids)| (session_id, conversation_id, call_ids))
+        .collect()
+}
+
+/// Per-conversation OOM crash groups for one dead pid.
+///
+/// `persisted_pending` rows are `(pid, call_id, session_id, agent_name,
+/// conversation_id)`; agent name is a property of the pid, so the first row
+/// of that pid is representative. Returned tuples are `(agent_name,
+/// session_id, conversation_id, call_ids)` — one per conversation, so the
+/// drain path can write one event each instead of only the first tuple's.
+fn oom_crash_groups_for_pid(
+    pid: u32,
+    persisted_pending: &[(u32, String, Option<String>, Option<String>, Option<String>)],
+) -> Vec<(Option<String>, Option<String>, Option<String>, Vec<String>)> {
+    let agent_name = persisted_pending
+        .iter()
+        .find(|(p, ..)| *p == pid)
+        .and_then(|(_, _, _, name, _)| name.clone());
+    group_calls_by_conversation(persisted_pending.iter().filter(|(p, ..)| *p == pid).map(
+        |(_, call_id, session_id, _, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ))
+    .into_iter()
+    .map(|(session_id, conversation_id, call_ids)| {
+        (agent_name.clone(), session_id, conversation_id, call_ids)
+    })
+    .collect()
+}
+
 /// Record `agent_crash` interruption events for the pending calls of an
 /// exited agent process, and mark those calls as interrupted.
 ///
@@ -2789,20 +2856,21 @@ fn record_agent_crash_interruptions(
     let is_oom = was_pid_oom_killed(pid as i32);
 
     // Group by (session_id, conversation_id) to produce one event per conversation
-    let mut by_conv: std::collections::HashMap<(Option<String>, Option<String>), Vec<String>> =
-        std::collections::HashMap::new();
-    for (call_id, session_id, _trace_id, conversation_id) in pending_calls {
-        by_conv
-            .entry((session_id.clone(), conversation_id.clone()))
-            .or_default()
-            .push(call_id.clone());
-    }
+    let groups = group_calls_by_conversation(pending_calls.iter().map(
+        |(call_id, session_id, _trace_id, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ));
 
-    for ((session_id, conversation_id), call_ids) in &by_conv {
+    for (session_id, conversation_id, call_ids) in groups {
         let mut detail = serde_json::json!({
             "pid": pid,
             "agent_name": agent_name,
-            "call_ids": call_ids,
+            "call_ids": call_ids.clone(),
             "source": "trace_procmon_exit",
             "exit_code": exit_status.code,
             "signal": exit_status.signal,
@@ -3272,6 +3340,46 @@ mod tests {
         assert_eq!(detail["exit_code"], 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The drain path checks each dead pid once but must still attribute its
+    /// OOM crash to every conversation it served: two pending tuples with the
+    /// same pid and different conversations must yield two groups, each with
+    /// its own call ids, not one event for the first tuple only.
+    #[test]
+    fn oom_crash_groups_cover_every_conversation_of_a_dead_pid() {
+        let pending: Vec<(u32, String, Option<String>, Option<String>, Option<String>)> = vec![
+            (
+                42,
+                "call-a".to_string(),
+                Some("sess-a".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-a".to_string()),
+            ),
+            (
+                42,
+                "call-b".to_string(),
+                Some("sess-b".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-b".to_string()),
+            ),
+        ];
+
+        let groups = oom_crash_groups_for_pid(42, &pending);
+
+        assert_eq!(groups.len(), 2, "one group per conversation");
+        let by_conv: std::collections::HashMap<Option<String>, Vec<String>> = groups
+            .iter()
+            .map(|(_, _, conversation_id, call_ids)| (conversation_id.clone(), call_ids.clone()))
+            .collect();
+        assert_eq!(by_conv[&Some("conv-a".to_string())], vec!["call-a"]);
+        assert_eq!(by_conv[&Some("conv-b".to_string())], vec!["call-b"]);
+        assert!(
+            groups
+                .iter()
+                .all(|(agent, ..)| agent.as_deref() == Some("OpenClaw")),
+            "every group must keep the pid's agent attribution"
+        );
     }
 
     // ── Tests for conn_scan_agent_name (agent identity, never a domain) ──

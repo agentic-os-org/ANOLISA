@@ -41,6 +41,9 @@ pub struct ParsedProcEvent {
     pub args: Option<String>,
     /// Stdout data (for stdout events)
     pub stdout_data: Option<String>,
+    /// Output file descriptor for stdout events (1 = stdout, 2 = stderr).
+    /// `None` for event types that carry no descriptor (exec, exit).
+    pub fd: Option<u32>,
 }
 
 impl ProcTraceParser {
@@ -61,11 +64,20 @@ impl ProcTraceParser {
                 timestamp_ns: header.timestamp_ns,
                 args: Some(args.clone()).filter(|s| !s.is_empty()),
                 stdout_data: None,
+                fd: None,
             }),
             VariableEvent::Stdout {
-                header, payload, ..
+                header,
+                fd,
+                payload,
             } => {
-                let stdout_data = String::from_utf8(payload.clone()).ok();
+                // A stdout chunk is arbitrary process bytes: a tool printing
+                // binary, or a multibyte character split across two chunks,
+                // has no valid UTF-8. Dropping the event for that lost the
+                // bytes entirely — the aggregation layer is byte-oriented and
+                // converts lossily at read time (`stdout_string`), so a lossy
+                // decode here keeps the same contract and the event.
+                let stdout_data = Some(String::from_utf8_lossy(payload).into_owned());
                 Some(ParsedProcEvent {
                     event_type: ProcEventType::Stdout,
                     pid: header.pid,
@@ -76,6 +88,7 @@ impl ProcTraceParser {
                     timestamp_ns: header.timestamp_ns,
                     args: None,
                     stdout_data,
+                    fd: Some(*fd),
                 })
             }
             VariableEvent::Exit { header, .. } => Some(ParsedProcEvent {
@@ -88,6 +101,7 @@ impl ProcTraceParser {
                 timestamp_ns: header.timestamp_ns,
                 args: None,
                 stdout_data: None,
+                fd: None,
             }),
             VariableEvent::Unknown(_) => None,
         }
@@ -289,7 +303,33 @@ mod tests {
             timestamp_ns: 0,
             args: None,
             stdout_data: Some(data.to_string()),
+            fd: Some(1),
         }
+    }
+
+    /// A stdout chunk is arbitrary process bytes; a non-UTF-8 chunk used to be
+    /// dropped outright, so its bytes never reached the aggregated stdout
+    /// (which is byte-oriented and decodes lossily when read) nor the trace.
+    #[test]
+    fn non_utf8_stdout_chunk_is_kept() {
+        // SAFETY: `proc_event_header` is a `#[repr(C)]` bindgen struct of
+        // plain integers, so an all-zero bit pattern is a valid value. Only
+        // the pid/tid fields are read from it.
+        let header: crate::probes::proctrace::ProcEventHeader = unsafe { std::mem::zeroed() };
+        let event = VariableEvent::Stdout {
+            header,
+            fd: 1,
+            payload: vec![0xff, 0xfe, b'A'],
+        };
+
+        let parsed =
+            ProcTraceParser::parse_variable(&event).expect("a stdout chunk must not be dropped");
+        assert_eq!(parsed.event_type, ProcEventType::Stdout);
+        let data = parsed.stdout_data.expect("stdout data");
+        assert!(
+            data.ends_with('A'),
+            "the decodable tail must survive: {data:?}"
+        );
     }
 
     #[test]
@@ -316,5 +356,35 @@ mod tests {
         // Short data is untouched.
         assert_eq!(boundary_preview("hello", 100), "hello");
         assert!(!preview.contains('中'));
+    }
+
+    /// The parser must forward the probe's fd so the aggregator can route
+    /// fd 2 output to the stderr buffer instead of stdout.
+    #[test]
+    fn stdout_parse_preserves_fd() {
+        use crate::probes::proctrace::{PROCTRACE_EVENT_STDOUT, ProcEventHeader};
+
+        let header = ProcEventHeader {
+            source: 0,
+            timestamp_ns: 1234,
+            pid: 42,
+            tid: 42,
+            ppid: 1,
+            ptid: 1,
+            uid: 0,
+            event_type: PROCTRACE_EVENT_STDOUT,
+            data_len: 0,
+            comm: [0; 16],
+            cgroup_id: 0,
+        };
+        let event = VariableEvent::Stdout {
+            header,
+            fd: 2,
+            payload: b"err\n".to_vec(),
+        };
+
+        let parsed = ProcTraceParser::parse_variable(&event).expect("stdout event parses");
+        assert_eq!(parsed.fd, Some(2));
+        assert_eq!(parsed.stdout_data.as_deref(), Some("err\n"));
     }
 }

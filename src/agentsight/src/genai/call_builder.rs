@@ -289,16 +289,24 @@ impl GenAIBuilder {
                     "sse_event_count".to_string(),
                     http.sse_event_count.to_string(),
                 );
-                // Extract server.address and server.port from Host header
+                // Extract server.address and server.port from the Host header.
+                // HTTP/2 has no Host header: the authority travels in the
+                // `:authority` pseudo-header (`request_headers_json` emits the
+                // decoded HPACK list verbatim), and pure-h2 clients — Go,
+                // undici, nghttp2 — send it with no legacy Host copy, so an
+                // LLM call captured over h2 recorded no server address at all.
                 if let Ok(headers) =
                     serde_json::from_str::<HashMap<String, String>>(&http.request_headers)
                 {
-                    if let Some(host) = headers.get("host").or_else(|| headers.get("Host")) {
-                        if let Some((addr, port)) = host.rsplit_once(':') {
-                            meta.insert("server.address".to_string(), addr.to_string());
-                            meta.insert("server.port".to_string(), port.to_string());
-                        } else {
-                            meta.insert("server.address".to_string(), host.clone());
+                    let host = headers
+                        .get("host")
+                        .or_else(|| headers.get("Host"))
+                        .or_else(|| headers.get(":authority"));
+                    if let Some(host) = host {
+                        let (addr, port) = split_host_port(host);
+                        meta.insert("server.address".to_string(), addr);
+                        if let Some(port) = port {
+                            meta.insert("server.port".to_string(), port);
                         }
                     }
                 }
@@ -879,6 +887,31 @@ impl GenAIBuilder {
     }
 }
 
+/// Split a Host / `:authority` value into the address and an optional port.
+///
+/// An IPv6 literal is bracketed (`[::1]:8443`): splitting at the last colon
+/// alone would shred a bracketed, port-less literal into garbage
+/// (`[2001:db8:` / `1]`), so the bracketed form is decoded first and the
+/// brackets stay out of the recorded `server.address` — the OTel field is the
+/// address itself, not its URI spelling. The bare `host:port` form — and a
+/// bare unbracketed IPv6 literal, which carries several colons and no port —
+/// is handled by requiring exactly one separating colon with a non-empty
+/// port on each side.
+fn split_host_port(host: &str) -> (String, Option<String>) {
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some((addr, tail)) = rest.split_once(']') {
+            let port = tail.strip_prefix(':').filter(|p| !p.is_empty());
+            return (addr.to_string(), port.map(str::to_string));
+        }
+    }
+    match host.rsplit_once(':') {
+        Some((addr, port)) if !addr.is_empty() && !addr.contains(':') && !port.is_empty() => {
+            (addr.to_string(), Some(port.to_string()))
+        }
+        _ => (host.to_string(), None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1192,6 +1225,54 @@ mod tests {
         assert_eq!(call.metadata.get("server.address").unwrap(), "example.com");
         assert!(!call.metadata.contains_key("server.port"));
         assert_eq!(call.metadata.get("http.domain").unwrap(), "example.com");
+    }
+
+    /// An HTTP/2 call has no Host header: the authority rides in the
+    /// `:authority` pseudo-header, exactly as `request_headers_json` emits the
+    /// decoded HPACK list. Pure-h2 clients send no legacy Host copy, so
+    /// without the pseudo-header lookup every h2 call recorded an empty
+    /// server.address — and the FFI request_url degenerated to "https:///path".
+    #[test]
+    fn test_build_llm_call_reads_http2_authority_pseudo_header() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{":method":"POST",":path":"/v1/chat/completions",":authority":"api.openai.com:443","content-type":"application/json"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("server.address").unwrap(),
+            "api.openai.com",
+            "the h2 :authority must name the server"
+        );
+        assert_eq!(call.metadata.get("server.port").unwrap(), "443");
+        assert_eq!(call.metadata.get("http.domain").unwrap(), "api.openai.com");
+    }
+
+    /// An IPv6 authority is bracketed (`[::1]:11434`); the recorded
+    /// `server.address` is the address itself, without the URI brackets.
+    #[test]
+    fn test_build_llm_call_unbrackets_ipv6_host_with_port() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{"host":"[::1]:11434"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(call.metadata.get("server.address").unwrap(), "::1");
+        assert_eq!(call.metadata.get("server.port").unwrap(), "11434");
+        assert_eq!(call.metadata.get("http.domain").unwrap(), "::1");
+    }
+
+    /// A bracketed IPv6 literal without a port used to split into garbage at
+    /// the last colon (`[2001:db8:` / `1]`); it is a plain address, no port.
+    #[test]
+    fn test_build_llm_call_keeps_portless_ipv6_host_intact() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{"host":"[2001:db8::1]"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(call.metadata.get("server.address").unwrap(), "2001:db8::1");
+        assert!(!call.metadata.contains_key("server.port"));
     }
 
     #[test]

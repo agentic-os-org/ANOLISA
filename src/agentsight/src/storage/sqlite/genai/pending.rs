@@ -390,6 +390,10 @@ impl GenAISqliteStore {
                 );
 
                 if let Some(match_key) = call.metadata.get("pending_match_key") {
+                    // A completion whose parsed request carries no messages
+                    // must not erase the evidence the idle snapshot captured:
+                    // the snapshot is then the only record of what the caller
+                    // sent. The call-id branch above carries the same guard.
                     let updated = conn.execute(
                         "UPDATE genai_events SET
                             status = 'complete',
@@ -414,8 +418,8 @@ impl GenAISqliteStore {
                             total_tokens        = ?19,
                             cache_creation_tokens = ?20,
                             cache_read_tokens   = ?21,
-                            system_instructions = ?22,
-                            input_messages      = ?23,
+                            system_instructions = COALESCE(?22, system_instructions),
+                            input_messages      = COALESCE(?23, input_messages),
                             output_messages     = ?24,
                             status_code         = ?25,
                             sse_event_count     = ?26,
@@ -721,6 +725,12 @@ impl GenAISqliteStore {
 
     /// Enrich a pending record with data extracted from captured SSE events.
     /// Updates model, trace_id, provider, output_messages, sse_event_count, and token counts.
+    ///
+    /// Only rows still in 'pending' are touched: a call that already completed
+    /// holds the authoritative full-response values, and `insert_pending`
+    /// returns early (leaving an existing completed row in place) when the
+    /// same call_id is captured twice, so an enrichment issued after such a
+    /// replay must not partially overwrite the completed row.
     pub fn enrich_pending_from_sse(
         &self,
         call_id: &str,
@@ -750,7 +760,7 @@ impl GenAISqliteStore {
                 total_tokens     = COALESCE(?7, input_tokens, 0)
                                  + COALESCE(?8, output_tokens, 0),
                 tool_call_ids    = COALESCE(?9, tool_call_ids)
-             WHERE call_id = ?1",
+             WHERE call_id = ?1 AND status = 'pending'",
             params![
                 call_id,
                 enrichment.model,

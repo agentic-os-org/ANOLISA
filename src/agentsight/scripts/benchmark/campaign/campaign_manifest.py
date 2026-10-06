@@ -45,27 +45,23 @@ def observes_mock_server(config_path: Path) -> bool:
 
 
 def command_version(command: list[str]) -> str | None:
-    """Capture the first version line without failing environment collection."""
-    try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, timeout=5, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    text = (result.stdout or result.stderr).strip()
+    """Capture the first successful version line without failing collection."""
+    text = command_output(command)
     return text.splitlines()[0] if text else None
 
 
 def command_output(command: list[str]) -> str | None:
-    """Capture complete command output for structured host metadata."""
+    """Capture successful UTF-8 output; failed optional probes are unavailable."""
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=5, check=False
+            command, capture_output=True, timeout=5, check=False
         )
-    except (OSError, subprocess.TimeoutExpired):
+        if result.returncode != 0:
+            return None
+        text = (result.stdout or result.stderr).decode("utf-8")
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return None
-    text = (result.stdout or result.stderr).strip()
-    return text or None
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip() or None
 
 
 def frozen_inputs(campaign_path: Path, campaign: dict[str, Any]) -> dict[str, Any]:

@@ -1430,6 +1430,20 @@ impl AgentsightConfig {
 
         // Parse runtime limits
         if let Some(limits) = parsed.runtime_limits.take() {
+            // A MiB budget becomes a byte budget with `* 1024 * 1024`. Do it
+            // checked: with overflow checks off (the workspace disables dev
+            // debug assertions) the multiply wraps silently in the shipped
+            // profile, and a wrapped 0 is read by ChannelBudget as "unlimited",
+            // which disables the memory guard instead of bounding it. Reject
+            // the config like the storage section does rather than running
+            // with a bogus budget.
+            let bytes_from_mb = |field: &str, mb: Option<usize>| -> Result<Option<usize>, String> {
+                mb.map(|mb| {
+                    mb.checked_mul(1024 * 1024)
+                        .ok_or_else(|| format!("runtime_limits.{field} is too large"))
+                })
+                .transpose()
+            };
             self.runtime_limits = RuntimeLimits {
                 event_channel_capacity: limits
                     .event_channel_capacity
@@ -1439,22 +1453,25 @@ impl AgentsightConfig {
                     .as_deref()
                     .map(ChannelPolicy::from)
                     .unwrap_or_default(),
-                event_channel_max_bytes: limits
-                    .event_channel_max_bytes_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
+                event_channel_max_bytes: bytes_from_mb(
+                    "event_channel_max_bytes_mb",
+                    limits.event_channel_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
                 pending_genai_max_count: limits
                     .pending_genai_max_count
                     .unwrap_or(DEFAULT_PENDING_GENAI_MAX_COUNT),
-                pending_genai_max_bytes: limits
-                    .pending_genai_max_bytes_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
+                pending_genai_max_bytes: bytes_from_mb(
+                    "pending_genai_max_bytes_mb",
+                    limits.pending_genai_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
                 pid_cache_size: limits.pid_cache_size.unwrap_or(DEFAULT_PID_CACHE_SIZE),
-                max_connection_body_bytes: limits
-                    .max_connection_body_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
+                max_connection_body_bytes: bytes_from_mb(
+                    "max_connection_body_mb",
+                    limits.max_connection_body_mb,
+                )?
+                .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
                 connection_idle_timeout_secs: limits
                     .connection_idle_timeout_secs
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
@@ -2237,6 +2254,34 @@ mod tests {
         );
         assert_eq!(config.runtime_limits.connection_idle_timeout_secs, 30);
         assert_eq!(config.runtime_limits.ring_buffer_mb, 16);
+    }
+
+    #[test]
+    fn runtime_limits_reject_byte_budgets_that_overflow() {
+        // A MiB budget is converted with an unchecked multiply. With overflow
+        // checks disabled (the shipped profile) the wrap is silent: 2^44 MiB
+        // wraps to exactly 0, which ChannelBudget reads as "unlimited" and
+        // silently disables the memory guard, while u64::MAX wraps to a
+        // 1 KiB-class budget that drops everything. Both must be rejected at
+        // load time, like the storage size limits already are.
+        for field in [
+            "event_channel_max_bytes_mb",
+            "pending_genai_max_bytes_mb",
+            "max_connection_body_mb",
+        ] {
+            for mb in [u64::MAX, 1u64 << 44] {
+                let json = format!(r#"{{"runtime_limits": {{"{field}": {mb}}}}}"#);
+                let mut config = AgentsightConfig::new();
+                let result = config.load_from_json(&json);
+                let err = result.expect_err(&format!(
+                    "{field}={mb} overflows the byte budget and must be rejected"
+                ));
+                assert!(
+                    err.contains(field),
+                    "error for {field} must name the offending field: {err}"
+                );
+            }
+        }
     }
 
     #[test]

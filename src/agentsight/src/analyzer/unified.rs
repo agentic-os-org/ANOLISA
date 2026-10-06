@@ -117,10 +117,8 @@ pub fn count_request_tokens(
     let template_messages: Vec<serde_json::Value> = messages.to_vec();
 
     // Extract tools JSON array for passing to template
-    let tools_json: Option<Vec<serde_json::Value>> = request_json
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .map(|arr| arr.to_vec());
+    let tools_json: Option<Vec<serde_json::Value>> =
+        crate::parser::llm::extract_tools_view(request_json);
 
     // Count tool definitions separately (for informational breakdown). The
     // count is also folded into the first tool-role message below so the
@@ -909,10 +907,8 @@ impl Analyzer {
                 }
 
                 // Extract tools JSON array for passing to template
-                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref
-                    .get("tools")
-                    .and_then(|t| t.as_array())
-                    .map(|arr| arr.to_vec());
+                let tools_json: Option<Vec<serde_json::Value>> =
+                    crate::parser::llm::extract_tools_view(request_json_ref);
                 let tools_slice = tools_json.as_deref();
 
                 // Apply chat template with tools to get the actual prompt sent to LLM

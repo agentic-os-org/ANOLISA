@@ -32,6 +32,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             i += 1;
             let start = i;
             while i < b.len() && b[i] != b'"' {
+                if b[i] == 0 {
+                    return Err("string literals must not contain NUL bytes: the engine's \
+                         prefix/suffix/contains matchers compare only the leading \
+                         nonzero bytes of a literal, so a NUL silently truncates \
+                         the installed matcher"
+                        .into());
+                }
                 i += 1;
             }
             if i >= b.len() {
@@ -413,6 +420,28 @@ mod tests {
                 Tok::Word("\u{e0}".into()),
                 Tok::Colon
             ]
+        );
+    }
+
+    /// The engine matchers compare only the leading nonzero bytes of a literal
+    /// (taint.h taint_prefix/taint_suffix/taint_contains), so a NUL inside a
+    /// path pattern silently truncates it: "/tmp/a\0b/**" installs a prefix
+    /// matcher on "/tmp/a" that matches every path under it — wider than the
+    /// authored policy. Reject NUL at lex time instead.
+    #[test]
+    fn lexer_rejects_nul_bytes_inside_string_literals() {
+        let error = match lex("source S = file \"/tmp/a\0b/**\"") {
+            Ok(_) => panic!("a NUL inside a string literal must be rejected at lex time"),
+            Err(error) => error,
+        };
+        assert!(error.contains("NUL"), "{error}");
+        let src = concat!(
+            "source S = file \"/tmp/a\0b/**\"\n",
+            "rule r:\n  block write file \"/x\" if S\n  because \"x\"\n"
+        );
+        assert!(
+            crate::dsl::compile_str(src).is_err(),
+            "a NUL inside a pattern literal must be rejected at compile time"
         );
     }
 }

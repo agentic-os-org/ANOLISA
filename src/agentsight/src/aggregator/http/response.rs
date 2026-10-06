@@ -232,17 +232,61 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
         }
     }
 
+    // Gemini streamGenerateContent: the payload rides under
+    // `candidates[].content.parts[]` — text as `{"text": ...}` parts, tool
+    // calls as `{"functionCall": {"name": ...}}` parts — and usage under
+    // `usageMetadata`. None of the shapes above match it, so a Gemini
+    // stream's first answer token never dated the stream and its TTFT
+    // stayed empty.
+    if let Some(candidates) = value
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+    {
+        return candidates.iter().any(|candidate| {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            parts.iter().any(|part| {
+                non_empty_string(part.get("text"))
+                    || part
+                        .get("functionCall")
+                        .is_some_and(|call| non_empty_string(call.get("name")))
+            })
+        });
+    }
+
     value
         .get("choices")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|choices| {
             choices.iter().any(|choice| {
                 let delta = choice.get("delta");
+                // SysOM/Bailian Copilot streams accumulated `choices[].message`
+                // chunks instead of `choices[].delta`, so its first answer
+                // token never dated the stream and the call had no TTFT.
+                let message = choice.get("message");
                 non_empty_string(choice.get("text"))
+                    || non_empty_string(message.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
                     || delta
                         .and_then(|item| item.get("tool_calls"))
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                let function = call.get("function");
+                                non_empty_string(function.and_then(|item| item.get("name")))
+                                    || non_empty_string(
+                                        function.and_then(|item| item.get("arguments")),
+                                    )
+                            })
+                        })
+                    || message
+                        .and_then(|item| item.get("tool_use"))
                         .and_then(serde_json::Value::as_array)
                         .is_some_and(|calls| {
                             calls.iter().any(|call| {
@@ -447,6 +491,50 @@ mod latency_tests {
     }
 
     #[test]
+    fn recognizes_sysom_cumulative_message_output() {
+        // The SysOM/Copilot endpoint streams `choices[].message` chunks whose
+        // content grows as the answer is produced; it never sends `delta`.
+        let chunk = serde_json::json!({
+            "choices": [{"message": {"content": "Hel", "tool_use": null}}]
+        });
+        assert!(event_has_meaningful_output(Some(&chunk)));
+
+        // A chunk that only opens the turn carries no output yet.
+        let opening = serde_json::json!({
+            "choices": [{"message": {"content": "", "tool_use": null}}]
+        });
+        assert!(!event_has_meaningful_output(Some(&opening)));
+
+        // A tool-only turn counts once the call arrives.
+        let tool_call = serde_json::json!({
+            "choices": [{"message": {"content": "", "tool_use": [
+                {"index": 0, "id": "c1", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}}]}}]
+        });
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+    }
+
+    #[test]
+    fn sysom_stream_dates_its_first_message_chunk() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","tool_use":null}}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello","tool_use":null}}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello there!","tool_use":null}}]}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    #[test]
     fn first_output_timestamp_uses_first_nonempty_output_delta() {
         let response = response_with_sse_events(vec![
             sse_event(r#"{"type":"response.created"}"#, 100),
@@ -484,5 +572,54 @@ mod latency_tests {
         ]);
 
         assert_eq!(response.first_output_timestamp_ns(), None);
+    }
+
+    /// Gemini streamGenerateContent streams its answer as
+    /// `candidates[].content.parts[]` — text as `{"text": ...}` parts, tool
+    /// calls as `{"functionCall": ...}` parts — so none of the shapes above
+    /// matched it: the stream never dated its first output and its TTFT
+    /// stayed empty.
+    #[test]
+    fn recognizes_gemini_candidates_output() {
+        let text = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "Hel"}], "role": "model"},
+                            "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let tool_call = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "X"}}}],
+                "role": "model"}}]
+        });
+        let usage_only = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": ""}], "role": "model"},
+                            "finishReason": "STOP", "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
+        });
+
+        assert!(event_has_meaningful_output(Some(&text)));
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+        assert!(!event_has_meaningful_output(Some(&usage_only)));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_text_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"},"index":0}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"index":0}],
+                    "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
     }
 }

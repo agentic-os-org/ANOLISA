@@ -95,11 +95,13 @@ keeps its JSON counts on stdout and preserves the ledger for retry.
 
 `tune --dry-run` previews the plan instead; `status` uses the same
 vocabulary as the short-circuit path (`planned` here; `optimal`/`blocked`
-when there is nothing to apply), and `blocked` counts recommendations this
-environment filtered out (unwritable or runtime-dangerous):
+when there is nothing to apply). `would_apply` lists the entries a real run
+would write, `would_skip` names the ones this environment filters out (with
+the reason: `unwritable` or `runtime_dangerous`), and `blocked` stays their
+count:
 
 ```json
-{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ]}
+{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
 ```
 
 ### rollback output

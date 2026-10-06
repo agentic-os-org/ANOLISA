@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -57,8 +58,21 @@ fn infer_agent_role(
     AgentRole::Gateway
 }
 
+/// Read the process working directory from the configured procfs root.
+///
+/// Returns None when `<PID>/cwd` cannot be read, e.g. the pid is gone.
 fn read_workspace_path(pid: u32) -> Option<String> {
-    fs::read_link(format!("/proc/{pid}/cwd"))
+    read_workspace_path_from(crate::utils::procfs::proc_root(), pid)
+}
+
+/// Read `<root>/<pid>/cwd` as a symlink target.
+///
+/// The root is a parameter so the lookup can be tested against a fixture
+/// procfs, mirroring [`read_ppid_from`]. Reading `cwd` through the configured
+/// root keeps `workspace_path` pointing at the agent's actual working
+/// directory when the observer reads a bind-mounted host procfs.
+fn read_workspace_path_from(root: &Path, pid: u32) -> Option<String> {
+    fs::read_link(root.join(pid.to_string()).join("cwd"))
         .ok()
         .and_then(|path| path.to_str().map(str::to_owned))
 }
@@ -307,6 +321,13 @@ impl HealthChecker {
                                 .or_default()
                                 .push((call_id.clone(), session_id.clone()));
                         }
+                        // Dedup against trace mode only: check once before the
+                        // loop. A per-iteration check would also match the
+                        // events this loop itself inserts, so for a single-pid
+                        // multi-session agent (OpenClaw) every conversation
+                        // after the first would be silently skipped.
+                        let trace_recorded_crash =
+                            istore.agent_crash_exists_recent(rep.pid as i32, 120);
                         for ((session_id, conversation_id), calls) in &by_conv {
                             let dedup_key = (
                                 agent_name.clone(),
@@ -321,7 +342,7 @@ impl HealthChecker {
                             }
                             // Dedup: skip if trace-mode already recorded a
                             // recent agent_crash for this PID (within 120s).
-                            if istore.agent_crash_exists_recent(rep.pid as i32, 120) {
+                            if trace_recorded_crash {
                                 log::debug!(
                                     "Skipping agent_crash for pid={} — already recorded by trace mode",
                                     rep.pid,
@@ -779,6 +800,27 @@ mod tests {
         }
     }
 
+    /// `workspace_path` is the documented default protection scope, so it must
+    /// resolve through the configurable procfs root like `read_ppid` does;
+    /// hardcoding `/proc` reports the observer namespace's unrelated process.
+    #[test]
+    fn read_workspace_path_resolves_through_the_given_root() {
+        let root = unique_tmp_dir("workspace-root");
+        let pid = 2_000_000_000;
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace dir");
+        let pid_dir = root.join(pid.to_string());
+        std::fs::create_dir_all(&pid_dir).expect("create pid dir");
+        std::os::unix::fs::symlink(&workspace, pid_dir.join("cwd")).expect("symlink cwd");
+
+        assert_eq!(
+            read_workspace_path_from(&root, pid).as_deref(),
+            workspace.to_str()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn reports_current_process_workspace() {
         let expected = std::env::current_dir()
@@ -900,6 +942,66 @@ mod tests {
                 .expect("list pending")
                 .is_empty(),
             "fallback path must mark the pending call as interrupted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One agent pid can serve several conversations (OpenClaw is a single
+    /// gateway pid). Each conversation needs its own agent_crash event:
+    /// the trace dedup guard must only see pre-existing events, not the rows
+    /// this loop just inserted, or every conversation after the first is left
+    /// with interrupted calls and no parent event.
+    #[test]
+    fn test_offline_multi_conversation_records_one_crash_event_each() {
+        let pid = 4_100_006;
+        let (dir, checker, genai_store, istore) = setup_checker("multiconv", pid);
+        // Second in-flight call on the same pid, in a different conversation.
+        let info = crate::storage::sqlite::genai::PendingCallInfo {
+            call_id: "hc-call-multiconv-b".to_string(),
+            trace_id: None,
+            conversation_id: Some("conv-b".to_string()),
+            session_id: Some("sess-b".to_string()),
+            start_timestamp_ns: 2_000_000_000,
+            pid,
+            process_name: "test".to_string(),
+            agent_name: Some("cosh-core".to_string()),
+            http_method: Some("POST".to_string()),
+            http_path: Some("/v1/chat/completions".to_string()),
+            input_messages: None,
+            system_instructions: None,
+            user_query: None,
+            is_sse: false,
+            model: Some("gpt-4".to_string()),
+            provider: Some("openai".to_string()),
+            call_kind: "main".to_string(),
+            pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+            pending_match_key: None,
+        };
+        genai_store
+            .insert_pending(&info)
+            .expect("insert second pending");
+
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        let events = list_crash_events(&istore);
+        let conversations: HashSet<Option<String>> =
+            events.iter().map(|e| e.conversation_id.clone()).collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "multi-conversation agent needs one agent_crash per conversation, got {conversations:?}"
+        );
+        assert!(
+            conversations.contains(&Some("conv-b".to_string())),
+            "the second conversation must get its own event, got {conversations:?}"
+        );
+        assert!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .is_empty(),
+            "all pending calls of the dead pid must be interrupted"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

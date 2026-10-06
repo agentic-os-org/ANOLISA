@@ -217,6 +217,52 @@ fn stores_and_queries_session_resource_timeline() {
     cleanup_store(&path);
 }
 
+/// A single `llm_call` row with a NULL `pid` must not fail the whole
+/// session timeline query (the handler answers 500 for the entire session).
+/// The Rust writer always binds a real pid, so a NULL row can only come
+/// from a foreign writer of the same DB; the reader must still serve every
+/// other call of the session.
+#[test]
+fn resource_timeline_survives_null_pid_row() {
+    let (path, store) = test_store("null_pid");
+    insert_call(&store, "call-1", 100, 200, None, None);
+    {
+        // Fixture-only raw insert: simulate a foreign writer's llm_call row
+        // carrying a NULL pid.
+        let conn = store.conn.lock().unwrap_or_else(|error| error.into_inner());
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, call_id, session_id, start_timestamp_ns,
+              end_timestamp_ns, pid, tool_call_ids, input_messages, event_json)
+             VALUES ('llm_call', 'call-null', 'session-1', 300, 400, NULL, NULL, NULL, '{}')",
+            [],
+        )
+        .expect("insert NULL-pid LLM call");
+    }
+
+    let timeline = store
+        .get_session_resource_timeline("session-1", None, None, 100)
+        .unwrap_or_else(|error| panic!("NULL pid row poisoned the whole timeline: {error:?}"))
+        .expect("known session");
+
+    // Both the valid and the malformed row still drive phase derivation; the
+    // NULL row's fallback pid 0 simply matches no resource samples.
+    assert!(
+        timeline
+            .phases
+            .iter()
+            .any(|phase| phase.kind == "llm" && phase.start_timestamp_ns == 100)
+    );
+    assert!(
+        timeline
+            .phases
+            .iter()
+            .any(|phase| phase.kind == "llm" && phase.start_timestamp_ns == 300)
+    );
+    drop(store);
+    cleanup_store(&path);
+}
+
 #[test]
 fn query_downsamples_and_rejects_unknown_session() {
     let (path, store) = test_store("downsample");

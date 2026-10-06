@@ -650,3 +650,78 @@ test('formatDurationSecs never renders 60 seconds inside a minute field', () => 
   assert.equal(formatDurationSecs(3599.7), '60m 0s');
   assert.equal(formatDurationSecs(125), '2m 5s');
 });
+
+// ─── richText: finding texts render only their two documented tags ──────────
+
+// The built component emits `require('react/jsx-runtime')` (compiled with
+// --jsx react-jsx, same as LoginPage), which does not resolve from the temp
+// outDir — stub it like the login regression does and run the built file in a
+// sandbox.
+function loadRichTextBuild() {
+  const { readFileSync } = require('node:fs');
+  const vm = require('node:vm');
+  const code = readFileSync(process.env.AGENTSIGHT_RICH_TEXT_BUILD, 'utf8');
+  const module = { exports: {} };
+  vm.runInNewContext(code, {
+    module,
+    exports: module.exports,
+    require: (name) => {
+      if (name === 'react/jsx-runtime') {
+        return {
+          jsx: (type, props) => ({ type, props }),
+          jsxs: (type, props) => ({ type, props }),
+        };
+      }
+      throw new Error(`unexpected require from richText.js: ${name}`);
+    },
+  });
+  return module.exports;
+}
+
+test('escapeRichText neutralizes markup injected through finding texts', () => {
+  const { escapeRichText } = loadRichTextBuild();
+
+  // Payload the server can really produce: confirm_before_act interpolates
+  // the raw tool command into the accuracy `detail` string.
+  const toolCmdPayload = 'tool `bash` ran `rm -rf <img src=x onerror=alert(1)>`';
+  const escaped = escapeRichText(toolCmdPayload);
+  assert.ok(!escaped.includes('<img'), 'an injected tag must not survive as markup');
+  assert.ok(escaped.includes('&lt;img src=x onerror=alert(1)&gt;'),
+    'the injected tag must render as literal text');
+
+  assert.ok(!escapeRichText('<script>alert(1)</script>').includes('<script'));
+  assert.ok(!escapeRichText('<svg onload=alert(1)>').includes('<svg'));
+  // Quotes and ampersands must not smuggle attributes into the allowed tags.
+  assert.equal(escapeRichText('a & b "c"'), 'a &amp; b &quot;c&quot;');
+});
+
+test('escapeRichText keeps only the exact documented tags', () => {
+  const { escapeRichText } = loadRichTextBuild();
+
+  assert.equal(escapeRichText('a <code>cmd</code> b'), 'a <code>cmd</code> b');
+  assert.equal(escapeRichText('<b>bold</b> stays'), '<b>bold</b> stays');
+  // A tag that merely starts like an allowed one must stay escaped, and no
+  // attributes may ride along on the allowed tags.
+  assert.equal(escapeRichText('<codeX>'), '&lt;codeX&gt;');
+  assert.ok(!escapeRichText('<code onclick=alert(1)>x</code>').includes('<code '));
+  assert.equal(escapeRichText('<i>no</i>'), '&lt;i&gt;no&lt;/i&gt;');
+});
+
+test('RichText sanitizes what it injects into the DOM', () => {
+  const { RichText } = loadRichTextBuild();
+
+  const element = RichText({ children: 'x <img src=x onerror=alert(1)> <code>ok</code>' });
+  const html = element.props.dangerouslySetInnerHTML.__html;
+  assert.ok(!html.includes('<img'), 'the component must not inject raw tags');
+  assert.ok(html.includes('<code>ok</code>'), 'the documented tag survives');
+});
+
+test('optimization findings render through the sanitizer, not raw strings', () => {
+  const { readFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const source = readFileSync(join(process.cwd(), 'src/pages/OptimizationPage.tsx'), 'utf8');
+  assert.match(source, /import \{ RichText \} from '\.\.\/utils\/richText';/,
+    'the page must render finding texts through utils/richText');
+  assert.doesNotMatch(source, /dangerouslySetInnerHTML=\{\{ __html: s \}\}/,
+    'the page must not inject the raw finding string into the DOM');
+});

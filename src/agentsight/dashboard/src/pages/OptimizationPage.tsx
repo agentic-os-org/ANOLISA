@@ -24,6 +24,7 @@ import type {
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { fixLocusDiverges, fixLocusLabel } from '../utils/accuracyAttribution';
+import { RichText } from '../utils/richText';
 import TokenFlameChart from '../components/TokenFlameChart';
 
 // ── 通用状态类型 ──────────────────────────────────────────────────────────────
@@ -63,12 +64,10 @@ function userFacingError(
   return e instanceof Error ? e.message : String(e);
 }
 
-const H = (s: string) => (
-  <span
-    className="[&_code]:bg-gray-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-xs [&_code]:text-gray-800"
-    dangerouslySetInnerHTML={{ __html: s }}
-  />
-);
+// Finding texts may carry the two documented tags (<code>, <b>), but they are
+// assembled from tool commands, user queries and model output, so they go
+// through the sanitizer in utils/richText before touching the DOM.
+const H = (s: string) => <RichText>{s}</RichText>;
 
 function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
@@ -910,9 +909,12 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   // the session currently on screen.
   const activeSessionRef = useRef(sessionId);
   activeSessionRef.current = sessionId;
+  const visitGenerationRef = useRef(0);
+  const analysisGenerationRef = useRef(0);
 
   // 进入分析页时先加载历史结果展示
   useEffect(() => {
+    ++visitGenerationRef.current;
     let cancelled = false;
     setLoadingResults(true);
     setReport(EMPTY_REPORT);
@@ -949,12 +951,17 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
     })();
     return () => {
       cancelled = true;
+      ++visitGenerationRef.current;
     };
   }, [sessionId]);
 
   // 维度请求失败的统一处理：400 llm_not_configured 时提示去设置里配置 LLM
   const handleDimError = useCallback((e: unknown) => {
-    if (e instanceof ApiRequestError && e.status === 400 && e.body?.error === 'llm_not_configured') {
+    if (
+      e instanceof ApiRequestError &&
+      e.status === 400 &&
+      e.body?.error === 'llm_not_configured'
+    ) {
       setLlmNotConfigured(true);
     }
   }, []);
@@ -963,14 +970,21 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const runDimensions = useCallback(
     (dims: DimKey[]) => {
       const has = (d: DimKey) => dims.includes(d);
-      // Apply a dimension's result only while this session is still active.
+      // Returning to the same session must not revive an earlier visit's
+      // requests; a full reanalysis also supersedes the previous run.
+      const visitGeneration = visitGenerationRef.current;
+      const analysisGeneration = analysisGenerationRef.current;
+      const isCurrent = () =>
+        activeSessionRef.current === sessionId &&
+        visitGenerationRef.current === visitGeneration &&
+        analysisGenerationRef.current === analysisGeneration;
       const forSession =
         <T,>(apply: (data: T) => void) =>
         (data: T) => {
-          if (activeSessionRef.current === sessionId) apply(data);
+          if (isCurrent()) apply(data);
         };
       const failed = (dim: DimKey) => (e: unknown) => {
-        if (activeSessionRef.current !== sessionId) return;
+        if (!isCurrent()) return;
         handleDimError(e);
         setProgress((prev) => ({ ...prev, [dim]: 'error' }));
       };
@@ -988,7 +1002,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           .then(
             forSession<TrajectorySummary>((data) => {
               setReport((prev) => ({ ...prev, summary: data }));
-            setProgress((prev) => ({ ...prev, summary: 'done' }));
+              setProgress((prev) => ({ ...prev, summary: 'done' }));
             }),
           )
           .catch(failed('summary'));
@@ -999,7 +1013,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           .then(
             forSession<PerfStats>((data) => {
               setReport((prev) => ({ ...prev, perf: data }));
-            setProgress((prev) => ({ ...prev, perf: 'done' }));
+              setProgress((prev) => ({ ...prev, perf: 'done' }));
             }),
           )
           .catch(failed('perf'));
@@ -1010,7 +1024,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           .then(
             forSession<PerfReport>((data) => {
               setReport((prev) => ({ ...prev, perf_issues: data }));
-            setProgress((prev) => ({ ...prev, perfIssues: 'done' }));
+              setProgress((prev) => ({ ...prev, perfIssues: 'done' }));
             }),
           )
           .catch(failed('perfIssues'));
@@ -1021,7 +1035,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           .then(
             forSession<CostStats>((data) => {
               setReport((prev) => ({ ...prev, cost: data }));
-            setProgress((prev) => ({ ...prev, cost: 'done' }));
+              setProgress((prev) => ({ ...prev, cost: 'done' }));
             }),
           )
           .catch(failed('cost'));
@@ -1032,7 +1046,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           .then(
             forSession<WasteReport>((data) => {
               setReport((prev) => ({ ...prev, cost_waste: data }));
-            setProgress((prev) => ({ ...prev, costWaste: 'done' }));
+              setProgress((prev) => ({ ...prev, costWaste: 'done' }));
             }),
           )
           .catch(failed('costWaste'));
@@ -1052,7 +1066,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
             }),
           )
           .catch((e) => {
-            if (activeSessionRef.current !== sessionId) return;
+            if (!isCurrent()) return;
             handleDimError(e);
             setProgress((prev) => ({ ...prev, accuracy: 'error' }));
             setAnalyzeError(t('opt.accuracy.analyzeFailed', { msg: userFacingError(e, t) }));
@@ -1063,6 +1077,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
 
   // 全量重新分析（「重新分析」按钮）：清空已有结果后并行触发全部维度
   const runAnalysis = useCallback(() => {
+    ++analysisGenerationRef.current;
     setReport(EMPTY_REPORT);
     setAnalyzeError(null);
     setLlmNotConfigured(false);
@@ -1098,7 +1113,9 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
         </button>
         <div className="min-w-0">
           <p className="text-xs text-gray-400">{t('opt.session.headerTitle')}</p>
-          <p className="font-mono text-sm text-gray-800 truncate" title={sessionId}>{sessionId}</p>
+          <p className="font-mono text-sm text-gray-800 truncate" title={sessionId}>
+            {sessionId}
+          </p>
           <div className="flex items-center gap-3 mt-1">
             {/* 轨迹在新标签页打开：分析页可能正在跑维度（LLM 调用 10–60s），
                 同标签跳走会卸载组件、丢掉进行中的分析 */}
@@ -1126,7 +1143,11 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
             disabled={running || loadingResults}
             className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
           >
-            {running ? t('opt.session.action.analyzing') : hasAnyResult ? t('opt.session.action.reanalyze') : t('opt.session.action.start')}
+            {running
+              ? t('opt.session.action.analyzing')
+              : hasAnyResult
+                ? t('opt.session.action.reanalyze')
+                : t('opt.session.action.start')}
           </button>
         </div>
       </div>

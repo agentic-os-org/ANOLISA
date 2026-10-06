@@ -23,6 +23,7 @@ sys.path.insert(0, str(CAMPAIGN_DIR))
 sys.path.insert(0, str(SINGLE_RUN_DIR))
 
 import aggregate_report
+import benchmark_stats
 import campaign
 import campaign_evaluation
 import campaign_evidence
@@ -1144,6 +1145,9 @@ def test_runner_shell_contract_is_valid() -> None:
     assert 'gzip -1 <"$K6_PIPE"' in runner_text
     assert 'BENCHMARK_MAX_VUS="$MAX_K6_VUS"' in runner_text
     assert '--safety-output "$OUTPUT_DIR/safety-stop.json"' in runner_text
+    marker_cleanup = runner_text.index('rm -f "$OUTPUT_DIR/safety-stop.json"')
+    assert marker_cleanup < runner_text.index("collect_metrics.py")
+    assert marker_cleanup < runner_text.index('wait "$LOAD_PID"')
     assert runner_text.index("VALIDATOR_PID=$!") < runner_text.index("k6 run")
     assert 'if [[ "$EXTERNAL_SERVER" -eq 0 ]]' in runner_text
     assert "`bench-${runId}-${__VU}-${__ITER}-${Date.now()}`" in load_text
@@ -1153,6 +1157,46 @@ def test_runner_shell_contract_is_valid() -> None:
     assert "tags:" not in load_text
     assert "requestCount.add(1," not in load_text
     assert "requestLatency.add(response.timings.duration," not in load_text
+
+
+def test_runner_ignores_a_stale_safety_marker(tmp_path: Path) -> None:
+    """Reusing an output dir must not resurrect a previous run's safety stop.
+
+    k6, curl, and python3 are PATH shims, so this exercises the runner's own
+    control flow rather than a real load run.
+    """
+    runner = SINGLE_RUN_DIR / "run.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for tool in ("k6", "curl", "python3"):
+        shim = fake_bin / tool
+        shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+    output = tmp_path / "reused"
+    output.mkdir()
+    marker = output / "safety-stop.json"
+    marker.write_text('{"reason": "stale"}\n', encoding="utf-8")
+    result = subprocess.run(
+        [
+            "bash",
+            str(runner),
+            "--external-server",
+            "--output-dir",
+            str(output),
+            "--duration",
+            "1",
+            "--qps",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "safety guard stopped" not in result.stderr
+    assert not marker.exists()
 
 
 def test_every_bpf_ring_reservation_failure_is_counted() -> None:
@@ -2746,3 +2790,80 @@ def test_regression_main_builds_targeted_and_full_commands(
     assert workspace_test[workspace_test.index("--jobs") + 1] == "1"
     report = json.loads((tmp_path / "single-job/regression.json").read_text())
     assert report["cargo_jobs"] == 1
+
+
+@pytest.mark.parametrize(
+    ("samples", "window_seconds", "expected"),
+    [
+        pytest.param([], 300, None, id="empty"),
+        pytest.param([(0.0, 5.0)], 300, None, id="single"),
+        pytest.param(
+            [(0.0, 10.0), (1.0, 9.0), (2.0, 8.0)], 300, 0.0, id="decreasing"
+        ),
+        pytest.param([(0.0, 10.0), (100.0, 5.0)], 50, 0.0, id="evicted-decrease"),
+        pytest.param(
+            [(5.0, 3.0), (5.0, 1.0), (6.0, 2.0)], 1, 1.0, id="duplicate-times"
+        ),
+        pytest.param(
+            [(0.0, 10.0), (300.0, 1.0), (600.0, 5.0)],
+            300,
+            4.0,
+            id="inclusive-boundary",
+        ),
+        pytest.param([(0.0, 1.0), (1.0, 5.0)], 300, 4.0, id="basic"),
+        pytest.param(
+            [(0.0, 100.0), (10.0, 50.0), (20.0, 300.0)],
+            100,
+            250.0,
+            id="full-window",
+        ),
+        pytest.param(
+            [(0.0, 5.0), (0.0, 3.0), (1.0, 4.0)], 0, 0.0, id="zero-window"
+        ),
+        pytest.param(
+            [(0.0, 8.0), (1.0, 2.0), (2.0, 6.0), (400.0, 1.0), (401.0, 9.0)],
+            300,
+            8.0,
+            id="trough-later",
+        ),
+    ],
+)
+def test_rolling_max_increase_preserves_window_outcomes(
+    samples: list[tuple[float, float]], window_seconds: float, expected: float | None
+) -> None:
+    """Window outcomes match the values produced by the rescan baseline."""
+    assert benchmark_stats.rolling_max_increase(samples, window_seconds) == expected
+
+
+class _ComparisonCountingValue:
+    """Sample value that counts value comparisons during trend scans."""
+
+    __slots__ = ("value",)
+    comparisons = 0
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __lt__(self, other: "_ComparisonCountingValue") -> bool:
+        type(self).comparisons += 1
+        return self.value < other.value
+
+    def __sub__(self, other: "_ComparisonCountingValue") -> float:
+        return self.value - other.value
+
+    def __rsub__(self, other: "_ComparisonCountingValue") -> float:
+        return other.value - self.value
+
+
+def test_rolling_max_increase_bounds_comparison_work() -> None:
+    """A monotonic-minimum deque keeps rolling scans linear in samples."""
+    size = 2000
+    samples = [
+        (float(second), _ComparisonCountingValue(second)) for second in range(size)
+    ]
+    _ComparisonCountingValue.comparisons = 0
+    result = benchmark_stats.rolling_max_increase(samples, 1000)
+    assert result == 1000
+    # The rescan baseline performs 1,499,500 value comparisons here; a
+    # monotonic minimum deque performs amortized constant work per sample.
+    assert _ComparisonCountingValue.comparisons <= 3 * size

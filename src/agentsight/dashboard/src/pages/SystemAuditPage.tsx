@@ -438,6 +438,11 @@ export const SystemAuditPage: React.FC = () => {
   const totalCases = summary?.risk_cases_total ?? caseTotal;
   const openCases = summary?.risk_cases_open ?? 0;
   const blockedCases = summary?.risk_cases_blocked ?? 0;
+  // The risk sort runs on the loaded page only, while paging follows the
+  // server's updated_at order; sorting by risk would therefore hide the
+  // highest-risk case on an unseen page. Lock the control to the honest
+  // server order whenever the result spans more than one page.
+  const caseSortLocked = caseTotal > CASE_PAGE_SIZE;
   const sortedEvidence = useMemo(() => (
     selectedCase ? [...selectedCase.evidence].sort((left, right) => (
       left.occurred_at_ns - right.occurred_at_ns
@@ -462,10 +467,13 @@ export const SystemAuditPage: React.FC = () => {
     if (caseStatusFilter !== 'all') list = list.filter((item) => item.status === caseStatusFilter);
     if (caseBlockedOnly) list = list.filter((item) => item.blocked);
     const sorted = [...list];
-    if (caseSort === 'risk') sorted.sort((left, right) => right.risk_score - left.risk_score);
-    else sorted.sort((left, right) => right.updated_at_ns - left.updated_at_ns);
+    if (caseSort === 'risk' && !caseSortLocked) {
+      sorted.sort((left, right) => right.risk_score - left.risk_score);
+    } else {
+      sorted.sort((left, right) => right.updated_at_ns - left.updated_at_ns);
+    }
     return sorted;
-  }, [cases, caseAgentFilter, caseStatusFilter, caseBlockedOnly, caseSort]);
+  }, [cases, caseAgentFilter, caseStatusFilter, caseBlockedOnly, caseSort, caseSortLocked]);
   const flatProcessTree = useMemo(() => {
     const out: Array<{ node: ProcessTreeNode; depth: number }> = [];
     flattenProcessTree(processTree.roots, 0, out);
@@ -481,6 +489,11 @@ export const SystemAuditPage: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keep the disabled control showing the order that is actually applied.
+  useEffect(() => {
+    if (caseSortLocked && caseSort === 'risk') setCaseSort('time');
+  }, [caseSortLocked, caseSort]);
 
   const loadMoreEvents = async () => {
     if (eventNextOffset === null || loadingMore) return;
@@ -605,7 +618,9 @@ export const SystemAuditPage: React.FC = () => {
                 <select
                   value={caseSort}
                   onChange={(event) => setCaseSort(event.target.value as 'time' | 'risk')}
-                  className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-700"
+                  disabled={caseSortLocked}
+                  title={caseSortLocked ? `案件超过 ${CASE_PAGE_SIZE} 条时，排序只覆盖当前页，已禁用"按风险分"` : undefined}
+                  className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-700 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400"
                 >
                   <option value="time">按时间</option>
                   <option value="risk">按风险分</option>

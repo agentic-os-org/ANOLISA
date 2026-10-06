@@ -124,6 +124,40 @@ fn cmd_check(cat: Option<String>, conservative: bool) -> Result<i32> {
     Ok(code)
 }
 
+/// Why a real `tune` run leaves a recommendation out: the parameter is not
+/// writable here. A parameter that is both unwritable and runtime-dangerous
+/// is reported as `unwritable` only, so the two reasons partition the skipped
+/// set exactly once — the counts in `tune_short_circuit` and the entries
+/// `would_skip` lists both rely on that.
+const UNWRITABLE: &str = "unwritable";
+/// Why a real `tune` run leaves a writable recommendation out: writing it at
+/// runtime is unsafe.
+const RUNTIME_DANGEROUS: &str = "runtime_dangerous";
+
+/// Why a real `tune` run would leave `rec` out, or `None` when this
+/// environment can take it. Pure, so the applicability filter, the
+/// short-circuit counts and the dry-run preview classify one list identically.
+fn skip_reason(rec: &Recommendation) -> Option<&'static str> {
+    if !rec.writable {
+        Some(UNWRITABLE)
+    } else if category::is_runtime_dangerous(&rec.param) {
+        Some(RUNTIME_DANGEROUS)
+    } else {
+        None
+    }
+}
+
+/// The `would_skip` payload: every in-scope recommendation a real run would
+/// leave out, in plan order, with the reason it is left out.
+fn would_skip_json(in_scope: &[Recommendation]) -> Vec<serde_json::Value> {
+    in_scope
+        .iter()
+        .filter_map(|rec| {
+            skip_reason(rec).map(|reason| json!({ "param": rec.param, "reason": reason }))
+        })
+        .collect()
+}
+
 /// Why `ktuner tune` exited without applying anything. Pure so the
 /// status/exit-code decision is unit-testable without touching the system.
 ///
@@ -144,12 +178,15 @@ fn tune_short_circuit(
     }
     // Recommendations exist but every one was filtered out before any write.
     // Reporting "optimal" here is false: `check` exits 1 on the same host.
-    // A rec that is both unwritable and runtime-dangerous counts only as
-    // unwritable, so the two counts always add up to in_scope.len().
-    let unwritable = in_scope.iter().filter(|r| !r.writable).count();
+    // skip_reason classifies each rec exactly once, so the two counts always
+    // add up to in_scope.len().
+    let unwritable = in_scope
+        .iter()
+        .filter(|r| skip_reason(r) == Some(UNWRITABLE))
+        .count();
     let runtime_dangerous = in_scope
         .iter()
-        .filter(|r| r.writable && category::is_runtime_dangerous(&r.param))
+        .filter(|r| skip_reason(r) == Some(RUNTIME_DANGEROUS))
         .count();
     Some((
         json!({
@@ -171,35 +208,40 @@ fn tune_short_circuit(
 /// The preview carries the same status vocabulary as the short-circuit path:
 /// reaching here means at least one recommendation is applicable, so the
 /// status is `"planned"` — never `"optimal"`, which the short-circuit path
-/// reserves for a host with nothing to recommend. `blocked` counts the
-/// recommendations this environment filtered out (unwritable or
-/// runtime-dangerous), so a script can tell a partial plan from a complete
-/// one without diffing `would_apply`.
-fn dry_run_output(applicable: &[Recommendation], requested: usize) -> serde_json::Value {
+/// reserves for a host with nothing to recommend. `would_apply` lists the
+/// entries a real run would write; `would_skip` names the ones this
+/// environment filtered out, with the reason, so the parameters a partial
+/// plan leaves behind are visible and not just counted. `blocked` stays their
+/// count.
+fn dry_run_output(in_scope: &[Recommendation], applicable: &[Recommendation]) -> serde_json::Value {
     let recs_json: Vec<serde_json::Value> = applicable.iter().map(rec_json).collect();
+    let would_skip = would_skip_json(in_scope);
     json!({
         "dry_run": true,
         "status": "planned",
-        "blocked": requested - applicable.len(),
+        "blocked": would_skip.len(),
         "would_apply": recs_json,
+        "would_skip": would_skip,
     })
 }
 
 /// Extend a short-circuit body with the keys a `--dry-run` caller reads.
 ///
-/// `--dry-run` answers with `dry_run` and `would_apply` on every host: the
-/// short-circuit shapes predate the flag, so a host where every recommendation
-/// was filtered out answered with neither key and a script could not tell that
-/// invocation from a non-dry-run one — it read `would_apply`, found nothing and
-/// had no way to distinguish "nothing to plan" from "the flag was ignored".
-/// `would_apply` is empty here because nothing is applicable, and `status`
+/// `--dry-run` answers with `dry_run`, `would_apply` and `would_skip` on every
+/// host: the short-circuit shapes predate the flag, so a host where every
+/// recommendation was filtered out answered with none of them and a script
+/// could not tell that invocation from a non-dry-run one — it read
+/// `would_apply`, found nothing and had no way to distinguish "nothing to
+/// plan" from "the flag was ignored". `would_apply` is empty here because
+/// nothing is applicable, `would_skip` lists everything in scope, and `status`
 /// keeps the short-circuit vocabulary (`optimal` / `blocked`).
-fn dry_run_preview(mut body: serde_json::Value) -> serde_json::Value {
+fn dry_run_preview(mut body: serde_json::Value, in_scope: &[Recommendation]) -> serde_json::Value {
     if let Some(object) = body.as_object_mut() {
         object.insert("dry_run".to_string(), json!(true));
         object
             .entry("would_apply".to_string())
             .or_insert_with(|| json!([]));
+        object.insert("would_skip".to_string(), json!(would_skip_json(in_scope)));
     }
     body
 }
@@ -228,30 +270,30 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
     // recommend" from "recommended, but nothing applicable here" (e.g. root
     // in a container with read-only /proc/sys, where every rec is refreshed
     // as unwritable) — reporting optimal in the latter case contradicts
-    // check's exit 1 on the same host.
+    // check's exit 1 on the same host. The dry-run preview lists the filtered
+    // entries themselves through the same skip_reason.
     let applicable: Vec<Recommendation> = recs
         .iter()
-        .filter(|r| r.writable && !category::is_runtime_dangerous(&r.param))
+        .filter(|r| skip_reason(r).is_none())
         .cloned()
         .collect();
-    let requested = recs.len();
     if let Some((output, code)) = tune_short_circuit(&recs, applicable.len()) {
         let output = if dry_run {
-            dry_run_preview(output)
+            dry_run_preview(output, &recs)
         } else {
             output
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(code);
     }
-    let recs = applicable;
 
     if dry_run {
-        let output = dry_run_output(&recs, requested);
+        let output = dry_run_output(&recs, &applicable);
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(0);
     }
 
+    let recs = applicable;
     let outcome = tuner::apply_quiet(&recs)?;
     let (_, eval_after) = gather()?;
     let score_after = eval_after.score();
@@ -767,47 +809,95 @@ mod tests {
     fn dry_run_output_reports_planned_and_blocked_count() {
         // Two applicable recommendations out of three gathered: the preview
         // must carry the short-circuit status vocabulary ("planned", never
-        // "optimal") and the count this environment filtered out, so a script
-        // can tell a partial plan from a complete one without diffing
-        // would_apply.
+        // "optimal") and name the one this environment filtered out, so a
+        // script can tell a partial plan from a complete one.
         let recs = vec![rec("vm.swappiness", true), rec("fs.file-max", true)];
-        let output = dry_run_output(&recs, 3);
+        let in_scope = vec![
+            rec("vm.swappiness", true),
+            rec("net.core.somaxconn", false),
+            rec("fs.file-max", true),
+        ];
+        let output = dry_run_output(&in_scope, &recs);
         assert_eq!(output["dry_run"], json!(true));
         assert_eq!(output["status"], json!("planned"));
         assert_eq!(output["blocked"], json!(1));
         assert_eq!(output["would_apply"].as_array().map(Vec::len), Some(2));
-        // A fully applicable plan reports zero blocked.
-        let full = dry_run_output(&recs, 2);
+        assert_eq!(
+            output["would_skip"],
+            json!([{ "param": "net.core.somaxconn", "reason": "unwritable" }])
+        );
+        // A fully applicable plan reports nothing blocked or skipped.
+        let full = dry_run_output(&recs, &recs);
         assert_eq!(full["status"], json!("planned"));
         assert_eq!(full["blocked"], json!(0));
+        assert_eq!(full["would_skip"], json!([]));
+    }
+
+    #[test]
+    fn dry_run_output_lists_every_skipped_entry_with_its_reason() {
+        // The preview has to name what a real run leaves out, not just count
+        // it: a script reconciling the plan against `check` needs the
+        // parameters, and the reason has to match the classification the
+        // short-circuit counts use.
+        let in_scope = vec![
+            rec("vm.swappiness", true),   // applicable
+            rec("fs.file-max", false),    // unwritable
+            rec("vm.nr_hugepages", true), // writable but runtime-dangerous
+        ];
+        let output = dry_run_output(&in_scope, &[rec("vm.swappiness", true)]);
+        assert_eq!(
+            output["would_skip"],
+            json!([
+                { "param": "fs.file-max", "reason": "unwritable" },
+                { "param": "vm.nr_hugepages", "reason": "runtime_dangerous" },
+            ])
+        );
+        assert_eq!(
+            output["blocked"].as_u64().unwrap(),
+            output["would_skip"].as_array().unwrap().len() as u64,
+            "blocked stays the skip-list length: {output}"
+        );
+        // A parameter that is both unwritable and runtime-dangerous counts as
+        // unwritable only, exactly like the short-circuit partition.
+        let both = vec![rec("vm.nr_hugepages", false)];
+        let output = dry_run_output(&both, &[]);
+        assert_eq!(
+            output["would_skip"],
+            json!([{ "param": "vm.nr_hugepages", "reason": "unwritable" }])
+        );
     }
 
     #[test]
     fn dry_run_preview_keeps_its_keys_on_a_short_circuit() {
         // A host whose every recommendation is filtered out short-circuits
         // before the preview is built. Under --dry-run the answer must still
-        // carry the two keys that flag promises: a script reading
-        // `would_apply` has no other way to tell "nothing to plan" from "the
-        // flag was ignored".
+        // carry the keys that flag promises: a script reading `would_apply`
+        // has no other way to tell "nothing to plan" from "the flag was
+        // ignored", and `would_skip` names the parameters it is missing.
         let recs = vec![rec("vm.swappiness", false)];
         let (blocked, code) =
             tune_short_circuit(&recs, 0).expect("everything blocked short-circuits");
         assert_eq!(code, 1);
 
-        let preview = dry_run_preview(blocked);
+        let preview = dry_run_preview(blocked, &recs);
         assert_eq!(preview["dry_run"], json!(true));
         assert_eq!(preview["would_apply"], json!([]));
+        assert_eq!(
+            preview["would_skip"],
+            json!([{ "param": "vm.swappiness", "reason": "unwritable" }])
+        );
         // The short-circuit vocabulary and its counts are untouched.
         assert_eq!(preview["status"], json!("blocked"));
         assert_eq!(preview["recommendations"], json!(1));
         assert_eq!(preview["blocked_unwritable"], json!(1));
 
-        // The truly-optimal body takes the same keys.
+        // The truly-optimal body takes the same keys, with an empty list.
         let (optimal, code) = tune_short_circuit(&[], 0).expect("nothing to recommend");
         assert_eq!(code, 0);
-        let preview = dry_run_preview(optimal);
+        let preview = dry_run_preview(optimal, &[]);
         assert_eq!(preview["dry_run"], json!(true));
         assert_eq!(preview["would_apply"], json!([]));
+        assert_eq!(preview["would_skip"], json!([]));
         assert_eq!(preview["status"], json!("optimal"));
     }
 
@@ -817,11 +907,10 @@ mod tests {
         // must serialize identically: rec_json used to drop subcategory and
         // writable from the preview, so an agent reconciling the plan
         // against the diagnosis saw the same param under two schemas
-        // (6 keys vs the documented 8).
-        let output = dry_run_output(
-            &[rec("vm.swappiness", true), rec("net.core.somaxconn", false)],
-            2,
-        );
+        // (6 keys vs the documented 8). This test is about that entry shape,
+        // not the skip classification, so in_scope mirrors would_apply.
+        let recs = vec![rec("vm.swappiness", true), rec("net.core.somaxconn", false)];
+        let output = dry_run_output(&recs, &recs);
         let entries = output["would_apply"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         // The recovered fields carry real values, not nulls.

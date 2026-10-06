@@ -54,6 +54,10 @@ export const SkillMetricsPage: React.FC = () => {
       setReport(data);
     } catch (e: any) {
       if (requestId === loadRequestIdRef.current) {
+        // Drop the previous report: the banner explains the failure, but its
+        // numbers would otherwise sit under the new filter controls and read
+        // as current. Same clear-on-failure as the security overview cards.
+        setReport(null);
         setError((e && e.message) || t('skill.error.loadFailed'));
       }
     } finally {

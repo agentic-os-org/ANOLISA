@@ -396,13 +396,13 @@ impl SslSniff {
             "[attach_process] pid={pid}: found {} libs: {:?}",
             libs.len(),
             libs.iter()
-                .map(|(p, f, k)| (p.as_str(), *f, format!("{k:?}")))
+                .map(|(p, f, k, m)| (p.as_str(), *f, format!("{k:?}"), m.as_str()))
                 .collect::<Vec<_>>()
         );
 
         let now = Instant::now();
         let mut attached_files: Vec<FileKey> = Vec::new();
-        for (path, file, kind) in libs {
+        for (path, file, kind, mapped_path) in libs {
             // Dedup by (device, inode): with pid=-1 global attach each library
             // only needs to be attached once — the kernel's uprobe_mmap
             // mechanism installs breakpoints for new processes that map an
@@ -433,7 +433,7 @@ impl SslSniff {
                 // Build the replacement BEFORE dropping the old links: if the
                 // re-attach fails, the previous (possibly still working) probes
                 // stay active instead of leaving the library untraced.
-                match self.build_attach(pid, &path, kind) {
+                match self.build_attach(pid, &path, kind, &mapped_path) {
                     AttachOutcome::Attached(links) => {
                         log::warn!(
                             "[attach_process] pid={pid}: re-attached stale {kind:?} uprobe on {path} ({}s old)",
@@ -453,7 +453,7 @@ impl SslSniff {
                 continue;
             }
 
-            match self.build_attach(pid, &path, kind) {
+            match self.build_attach(pid, &path, kind, &mapped_path) {
                 AttachOutcome::Attached(links) => {
                     self.record_attach(file, links);
                     attached_files.push(file);
@@ -502,9 +502,19 @@ impl SslSniff {
 
     /// Attach uprobes for a single SSL library.
     ///
+    /// `mapped_path` is the pathname the process actually mapped, which is what
+    /// operator-facing diagnostics must key off: the attach `path` is often a
+    /// generic `<pid>/exe` that carries no library identity.
+    ///
     /// Does not touch `traced_files` or `attachments`; the caller decides how
     /// to record or retry the outcome.
-    fn build_attach(&mut self, pid: i32, path: &str, kind: SslLibKind) -> AttachOutcome {
+    fn build_attach(
+        &mut self,
+        pid: i32,
+        path: &str,
+        kind: SslLibKind,
+        mapped_path: &str,
+    ) -> AttachOutcome {
         log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
 
         // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
@@ -518,8 +528,11 @@ impl SslSniff {
                     // AgentSight, and then its LLM calls are simply not
                     // capturable: there is no TLS-layer API to fall back to.
                     // Say so once per file instead of staying silent, which
-                    // would be indistinguishable from a probe bug.
-                    if missing_tap_is_a_coverage_gap(path) {
+                    // would be indistinguishable from a probe bug. The
+                    // decision uses the mapped pathname: `path` is the
+                    // `<pid>/exe` symlink for every ExplicitTap binary, so it
+                    // can never identify cosh-core.
+                    if missing_tap_is_a_coverage_gap(mapped_path) {
                         log::warn!(
                             "[attach_process] pid={pid}: {path} exports no {COSH_TAP_SYMBOL}; \
                              this cosh-ng predates the plaintext tap, so its LLM traffic \
@@ -1008,10 +1021,12 @@ fn cosh_tap_present(path: &str) -> bool {
 
 /// Whether a missing tap on this binary means lost LLM coverage.
 ///
-/// Only `cosh-core` issues LLM calls, so only there does an absent symbol mean
-/// a pre-tap build whose traffic goes unseen. The sibling binaries are mapped
-/// in the same process and never carry the tap, so their absence is expected
-/// and must not be reported as a problem.
+/// `path` is the mapped pathname from `<pid>/maps`, not the attach path: every
+/// `ExplicitTap` binary attaches through `<pid>/exe`, whose file name is always
+/// "exe" and therefore identifies nothing. Only `cosh-core` issues LLM calls,
+/// so only there does an absent symbol mean a pre-tap build whose traffic goes
+/// unseen. The sibling binaries are mapped in the same process and never carry
+/// the tap, so their absence is expected and must not be reported as a problem.
 fn missing_tap_is_a_coverage_gap(path: &str) -> bool {
     Path::new(path.strip_suffix(" (deleted)").unwrap_or(path))
         .file_name()
@@ -1104,21 +1119,37 @@ fn parse_maps_dev(dev: &str) -> Option<u64> {
     Some(((major as u64) << 32) | minor as u64)
 }
 
-/// Split one `maps` line into `((device, inode), pathname)`.
+/// Parse a maps `start-end` field (both hex) into its address range.
+///
+/// The range is what identifies the mapping inside `<pid>/map_files`, which is
+/// the only handle on an unlinked shared library that is still mapped.
+fn parse_maps_range(field: &str) -> Option<(u64, u64)> {
+    let (start, end) = field.split_once('-')?;
+    Some((
+        u64::from_str_radix(start, 16).ok()?,
+        u64::from_str_radix(end, 16).ok()?,
+    ))
+}
+
+/// Split one `maps` line into `((start, end), (device, inode), pathname)`.
 ///
 /// The line is `start-end perms offset dev inode pathname`, and the pathname is
 /// taken as the verbatim remainder rather than another whitespace token: it can
 /// contain spaces and carries a literal `" (deleted)"` suffix for unlinked files,
 /// which the caller keys off. Anonymous and pseudo mappings (`[heap]`, `[stack]`)
 /// return an empty pathname and are filtered by the caller.
-fn parse_maps_line(line: &str) -> Option<(FileKey, &str)> {
+fn parse_maps_line(line: &str) -> Option<((u64, u64), FileKey, &str)> {
     let mut rest = line;
+    let mut range = None;
     let mut dev = None;
     let mut inode = None;
     for field in 0..5 {
         rest = rest.trim_start();
         match rest.find(char::is_whitespace) {
             Some(end) => {
+                if field == 0 {
+                    range = parse_maps_range(&rest[..end]);
+                }
                 if field == 3 {
                     dev = parse_maps_dev(&rest[..end]);
                 }
@@ -1130,22 +1161,22 @@ fn parse_maps_line(line: &str) -> Option<(FileKey, &str)> {
             // Anonymous mappings end at the inode with neither a pathname nor
             // trailing whitespace; surface them with an empty path instead of
             // dropping the line.
-            None if field == 4 => return Some(((dev?, rest.parse::<u64>().ok()?), "")),
+            None if field == 4 => return Some((range?, (dev?, rest.parse::<u64>().ok()?), "")),
             None => return None,
         }
     }
-    Some(((dev?, inode?), rest.trim_start()))
+    Some((range?, (dev?, inode?), rest.trim_start()))
 }
 
 /// Parse `<procfs root>/<pid>/maps` and return
-/// `(attach_path, (device, inode), SslLibKind)` for every SSL-related library
-/// found.
+/// `(attach_path, (device, inode), SslLibKind, mapped_path)` for every
+/// SSL-related library found.
 ///
 /// Each unique file is returned at most once. Parsed by hand rather than via the
 /// `procfs` crate so the read honours the configured procfs root -- that crate
 /// hardcodes `/proc`, which an observer reading a bind-mounted host procfs cannot
 /// use.
-fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, FileKey, SslLibKind)>> {
+fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, FileKey, SslLibKind, String)>> {
     let maps_path = proc_pid_entry(pid, "maps");
     let maps =
         fs::read(&maps_path).with_context(|| format!("failed to read {}", maps_path.display()))?;
@@ -1153,12 +1184,16 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, FileKey, SslLibKind)>> {
 }
 
 /// Classify the SSL libraries of a process from the raw bytes of its
-/// `<pid>/maps` file, returning `(attach_path, (device, inode), SslLibKind)`
-/// per library.
+/// `<pid>/maps` file, returning
+/// `(attach_path, (device, inode), SslLibKind, mapped_path)` per library.
+///
+/// `mapped_path` is the verbatim pathname from maps (including a
+/// `" (deleted)"` suffix): the attach path can be a generic `<pid>/exe`, so
+/// diagnostics that need to know *which* file this is must use the mapped path.
 ///
 /// Split from [`ssl_libs_from_maps`] so tests can feed synthetic maps without a
 /// real procfs.
-fn ssl_libs_from_maps_text(maps: &[u8], pid: i32) -> Vec<(String, FileKey, SslLibKind)> {
+fn ssl_libs_from_maps_text(maps: &[u8], pid: i32) -> Vec<(String, FileKey, SslLibKind, String)> {
     // Linux pathnames are arbitrary bytes: one non-UTF-8 pathname must not
     // fail the whole maps read and silently drop every SSL library in the
     // process. Decode lossily -- the pathname only has to be classified and
@@ -1167,10 +1202,10 @@ fn ssl_libs_from_maps_text(maps: &[u8], pid: i32) -> Vec<(String, FileKey, SslLi
     let maps = String::from_utf8_lossy(maps);
 
     let mut seen_files: HashSet<FileKey> = HashSet::new();
-    let mut results: Vec<(String, FileKey, SslLibKind)> = Vec::new();
+    let mut results: Vec<(String, FileKey, SslLibKind, String)> = Vec::new();
 
     for line in maps.lines() {
-        let Some((file, path_str)) = parse_maps_line(line) else {
+        let Some((range, file, path_str)) = parse_maps_line(line) else {
             continue;
         };
         // Only care about file-backed mappings.
@@ -1179,32 +1214,41 @@ fn ssl_libs_from_maps_text(maps: &[u8], pid: i32) -> Vec<(String, FileKey, SslLi
         }
         if let Some(kind) = classify_ssl_lib(path_str) {
             seen_files.insert(file);
-            // When the backing file has been unlinked (" (deleted)" in maps),
-            // the filesystem path no longer exists.  Fall back to <pid>/exe
-            // which the kernel keeps accessible as long as the process is alive.
-            //
-            // For normal paths we prefix with `<pid>/root` so that the uprobe
-            // target resolves through the process's own mount namespace.
-            // This is intentional: `canonicalize()` would resolve overlayfs
-            // paths to the host's lower/upper dirs, which libbpf cannot always
-            // map back to an inode for uprobe attachment.  The kernel's uprobe
-            // mechanism natively understands `<pid>/root/<path>` because it
-            // follows the process's mount namespace, making this safe for both
-            // host and container processes -- and it keeps working when the
-            // `<pid>` entry itself comes from a bind-mounted host procfs.
-            let attach_path = if path_str.ends_with(" (deleted)") {
-                proc_pid_entry(pid, "exe")
-            } else if matches!(kind, SslLibKind::Static | SslLibKind::ExplicitTap) {
+            let attach_path = if matches!(kind, SslLibKind::Static | SslLibKind::ExplicitTap) {
                 // Statically-linked SSL binary (codex, node, cosh-core, etc).
                 // <pid>/exe is a kernel-maintained symlink that stays valid
                 // even when the backing file has been replaced or unlinked,
                 // which is common for npm-installed binaries that get updated
                 // while old processes are still running.
                 proc_pid_entry(pid, "exe")
+            } else if path_str.ends_with(" (deleted)") {
+                // An unlinked *shared* library: its pathname no longer exists,
+                // and <pid>/exe is the executable, which exports none of the
+                // library's SSL symbols -- attaching there fails on every
+                // sweep and leaves all of that process's LLM traffic
+                // invisible. The maps range names the still-mapped inode
+                // through <pid>/map_files, which the kernel keeps reachable
+                // exactly for this case.
+                proc_pid_entry(pid, &format!("map_files/{:x}-{:x}", range.0, range.1))
             } else {
+                // Prefix with `<pid>/root` so that the uprobe target resolves
+                // through the process's own mount namespace. This is
+                // intentional: `canonicalize()` would resolve overlayfs paths
+                // to the host's lower/upper dirs, which libbpf cannot always
+                // map back to an inode for uprobe attachment. The kernel's
+                // uprobe mechanism natively understands `<pid>/root/<path>`
+                // because it follows the process's mount namespace, making
+                // this safe for both host and container processes -- and it
+                // keeps working when the `<pid>` entry itself comes from a
+                // bind-mounted host procfs.
                 proc_pid_rooted(pid, path_str)
             };
-            results.push((attach_path.to_string_lossy().into_owned(), file, kind));
+            results.push((
+                attach_path.to_string_lossy().into_owned(),
+                file,
+                kind,
+                path_str.to_string(),
+            ));
         }
     }
 
@@ -1843,7 +1887,11 @@ mod tests {
                     /usr/lib64/libssl.so.1.1.1k";
         assert_eq!(
             parse_maps_line(line),
-            Some(((0xfd_0000_0001, 2621443), "/usr/lib64/libssl.so.1.1.1k"))
+            Some((
+                (0x7f2f0a000000, 0x7f2f0a028000),
+                (0xfd_0000_0001, 2621443),
+                "/usr/lib64/libssl.so.1.1.1k"
+            ))
         );
     }
 
@@ -1851,10 +1899,16 @@ mod tests {
     fn maps_line_anonymous_mapping_ends_at_inode() {
         // Anonymous vmas print neither a pathname nor trailing whitespace.
         let line = "7f2f09e00000-7f2f09e21000 rw-p 00000000 00:00 0";
-        assert_eq!(parse_maps_line(line), Some(((0, 0), "")));
+        assert_eq!(
+            parse_maps_line(line),
+            Some(((0x7f2f09e00000, 0x7f2f09e21000), (0, 0), ""))
+        );
         // Trailing whitespace without a pathname behaves the same.
         let padded = "7f2f09e00000-7f2f09e21000 rw-p 00000000 00:00 0   ";
-        assert_eq!(parse_maps_line(padded), Some(((0, 0), "")));
+        assert_eq!(
+            parse_maps_line(padded),
+            Some(((0x7f2f09e00000, 0x7f2f09e21000), (0, 0), ""))
+        );
     }
 
     #[test]
@@ -1866,6 +1920,7 @@ mod tests {
         assert_eq!(
             parse_maps_line(line),
             Some((
+                (0x7f2f09c00000, 0x7f2f09c28000),
                 (0xfd_0000_0001, 2621443),
                 "/usr/lib64/libssl.so.1.1.1k (deleted)"
             ))
@@ -1877,7 +1932,10 @@ mod tests {
         // [stack]/[heap]-style entries parse with a non-slash path; the caller
         // filters them out, the parser must not mangle them.
         let line = "7fffb6c40000-7fffb6c61000 rw-p 00000000 00:00 0   [stack]";
-        assert_eq!(parse_maps_line(line), Some(((0, 0), "[stack]")));
+        assert_eq!(
+            parse_maps_line(line),
+            Some(((0x7fffb6c40000, 0x7fffb6c61000), (0, 0), "[stack]"))
+        );
     }
 
     #[test]
@@ -1886,7 +1944,11 @@ mod tests {
                     /opt/my app (copy)/libssl.so";
         assert_eq!(
             parse_maps_line(line),
-            Some(((0xfd_0000_0001, 1048577), "/opt/my app (copy)/libssl.so"))
+            Some((
+                (0x7f2f09a00000, 0x7f2f09a10000),
+                (0xfd_0000_0001, 1048577),
+                "/opt/my app (copy)/libssl.so"
+            ))
         );
     }
 
@@ -1949,11 +2011,39 @@ mod tests {
             2,
             "same inode on different devices must not be deduped"
         );
-        let keys: Vec<FileKey> = libs.iter().map(|(_, key, _)| *key).collect();
+        let keys: Vec<FileKey> = libs.iter().map(|(_, key, _, _)| *key).collect();
         assert_eq!(
             keys,
             vec![(0x08_0000_0001, 42), (0xfd_0000_0001, 42)],
             "each library keeps its own (device, inode) identity"
+        );
+    }
+
+    #[test]
+    fn deleted_shared_library_attaches_through_its_mapped_range() {
+        // A shared libssl unlinked while its processes keep running cannot be
+        // attached via <pid>/exe: that file exports no SSL_* symbols, so the
+        // attach failed, the file was unmarked, and every later sweep retried
+        // the doomed attach while all TLS traffic of those processes stayed
+        // invisible. <pid>/map_files/<start>-<end> keeps the mapped (unlinked)
+        // inode reachable for exactly this case.
+        let maps: &[u8] = b"7f2f0a000000-7f2f0a028000 r-xp 00028000 fd:01 2621443 \
+                            /usr/lib64/libssl.so.3 (deleted)\n";
+        let libs = ssl_libs_from_maps_text(maps, 4242);
+        assert_eq!(libs.len(), 1);
+        assert_eq!(libs[0].2, SslLibKind::OpenSsl);
+        let attach_path = &libs[0].0;
+        assert!(
+            attach_path.contains("/map_files/"),
+            "deleted shared library must attach through its mapped range, got {attach_path}"
+        );
+        assert!(
+            attach_path.contains("map_files/7f2f0a000000-7f2f0a028000"),
+            "the attach target must be the mapping's own range, got {attach_path}"
+        );
+        assert!(
+            !attach_path.ends_with("/exe"),
+            "the exe fallback is only for statically-linked binaries, got {attach_path}"
         );
     }
 
@@ -2025,6 +2115,34 @@ mod tests {
                 "{sibling} never carries the tap; a missing symbol is expected there"
             );
         }
+    }
+
+    #[test]
+    fn cosh_core_keeps_its_coverage_gap_flag_through_the_attach_path() {
+        // The coverage-gap warning fires on the value the attach caller holds.
+        // Discovery resolves every ExplicitTap binary to <pid>/exe (the kernel
+        // symlink that stays valid even when the backing file is replaced), so
+        // the attach path alone can never identify cosh-core: its file name is
+        // always "exe" and the operator-facing warning never fired. The mapped
+        // pathname must therefore travel alongside the attach path.
+        let maps: &[u8] =
+            b"55f0c0d00000-55f0c0e00000 r-xp 00000000 fd:01 42 /opt/cosh-ng/cosh-core\n";
+        let libs = ssl_libs_from_maps_text(maps, 4242);
+        assert_eq!(libs.len(), 1);
+        let (attach_path, _file, kind, mapped_path) = &libs[0];
+        assert_eq!(*kind, SslLibKind::ExplicitTap);
+        assert!(
+            attach_path.ends_with("/exe"),
+            "cosh-core attaches through <pid>/exe, got {attach_path}"
+        );
+        assert!(
+            !missing_tap_is_a_coverage_gap(attach_path),
+            "the generic exe attach path must not be mistaken for an identity"
+        );
+        assert!(
+            missing_tap_is_a_coverage_gap(mapped_path),
+            "the mapped pathname is what the coverage-gap decision must use, got {mapped_path}"
+        );
     }
 
     /// The default re-attach TTL must cover short-lived processes (#3034).

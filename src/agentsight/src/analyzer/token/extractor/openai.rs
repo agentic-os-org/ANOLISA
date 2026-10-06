@@ -30,9 +30,9 @@ pub fn extract_token_data(
         }
 
         // Extract tools
-        if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
+        if let Some(tools) = crate::parser::llm::extract_tools_view(req) {
             for tool in tools {
-                if let Ok(tool_str) = serde_json::to_string(tool) {
+                if let Ok(tool_str) = serde_json::to_string(&tool) {
                     token_data.tools.push(tool_str);
                     has_content = true;
                 }
@@ -322,6 +322,33 @@ mod tests {
 
         let data = token_data.unwrap();
         assert_eq!(data.tools.len(), 1);
+    }
+
+    /// DashScope/Bailian native requests carry their tool definitions under
+    /// the top-level `parameters` object, so a top-level-only read reports no
+    /// tools at all for that protocol.
+    #[test]
+    fn test_extract_native_parameters_tools() {
+        let request = serde_json::json!({
+            "model": "qwen3-max",
+            "input": {"messages": [{"role": "user", "content": "What's the weather?"}]},
+            "parameters": {
+                "temperature": 0.5,
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather info"
+                    }
+                }]
+            }
+        });
+
+        let token_data = extract_token_data(Some(&request), None);
+        assert!(token_data.is_some());
+
+        let data = token_data.unwrap();
+        assert_eq!(data.tools.len(), 1, "native parameters.tools must be read");
     }
 
     #[test]

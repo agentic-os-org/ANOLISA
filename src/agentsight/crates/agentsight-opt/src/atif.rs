@@ -14,7 +14,10 @@
 //! - Producers may record the request **start** time in `extra.start_timestamp`
 //!   (ISO 8601). AgentSight's exporter always does.
 //! - Model inference time of a step = `end − start`. When `start_timestamp` is
-//!   absent, the previous step's timestamp is used as an approximation.
+//!   absent, the previous step's timestamp is used as an approximation —
+//!   unless that previous agent step issued tool calls (and no user step
+//!   intervenes): the interval is then booked as that step's tool window
+//!   instead, so the model/tool split never double-books one gap.
 //! - Tool execution time of a step = next agent step's `start` − this step's
 //!   `end`, valid only when no user step intervenes (a user step means the
 //!   turn ended and the gap is user idle, not tool time).

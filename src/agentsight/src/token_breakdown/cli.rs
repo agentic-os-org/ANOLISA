@@ -285,7 +285,7 @@ impl AnalyzeChatmlCommand {
         };
         let body = parsed.as_ref()?;
 
-        let tools = body.get("tools").and_then(|t| t.as_array().cloned());
+        let tools = crate::parser::llm::extract_tools_view(body);
 
         let (mut msgs, system_text) = crate::parser::llm::extract_messages_view(body)?;
         if let Some(system) = system_text {
@@ -403,6 +403,20 @@ impl AnalyzeChatmlCommand {
                             if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
                                     content_parts.push(delta.to_string());
+                                }
+                            }
+                        }
+                        // Reasoning models stream their thinking on the
+                        // same channel (dashscope qwen3-coder sends
+                        // reasoning_text, the o-series summary_text); both
+                        // belong in reasoning_content, like the chat-completions
+                        // reasoning_content delta and the analyzer's Responses
+                        // aggregation.
+                        Some("response.reasoning_text.delta")
+                        | Some("response.reasoning_summary_text.delta") => {
+                            if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
+                                if !delta.is_empty() {
+                                    reasoning_parts.push(delta.to_string());
                                 }
                             }
                         }
@@ -573,6 +587,8 @@ mod tests {
     use super::*;
     use crate::tokenizer::LlmTokenizer;
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Minimal HuggingFace tokenizer (WordLevel + Whitespace) so the ChatML
     /// path can be exercised in tests without the network or the real Qwen
@@ -618,15 +634,38 @@ mod tests {
   "model_max_length": 32768
 }"#;
 
+    /// Each call writes the fixture to a UNIQUE temp directory: the tests in
+    /// this module run in parallel inside one test binary (one PID), so a
+    /// PID-keyed path is shared by every test and a concurrent writer
+    /// truncates the JSON under a reader's feet ("EOF while parsing a
+    /// value"). Mirrors the `TemporaryRegularFile` idiom in
+    /// `enforcement::target`: PID + nanosecond timestamp + atomic counter.
     fn fixture_tokenizer() -> LlmTokenizer {
-        let dir =
-            std::env::temp_dir().join(format!("agentsight-chatml-fixture-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let pid = std::process::id();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after UNIX_EPOCH")
+            .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-chatml-fixture-{pid}-{timestamp}-{counter}"
+        ));
+        // `create_dir`, not `create_dir_all`: a path collision must fail
+        // loudly, never silently share the directory again.
+        std::fs::create_dir(&dir).expect("create unique fixture dir");
         let tokenizer_path = dir.join("tokenizer.json");
         let config_path = dir.join("tokenizer_config.json");
         std::fs::write(&tokenizer_path, TOKENIZER_JSON).expect("write tokenizer.json");
         std::fs::write(&config_path, TOKENIZER_CONFIG_JSON).expect("write tokenizer_config.json");
-        LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+        let tokenizer = LlmTokenizer::from_file(&tokenizer_path, &config_path)
+            .expect("fixture tokenizer loads");
+        // The tokenizer is loaded fully into memory, so the fixture files can
+        // go away immediately; unique paths must not pile up in the temp dir
+        // across test runs.
+        let _ = std::fs::remove_dir_all(&dir);
+        tokenizer
     }
 
     #[test]
@@ -973,6 +1012,38 @@ mod tests {
         );
     }
 
+    /// Reasoning models on the Responses API stream their thinking as
+    /// `response.reasoning_text.delta` (dashscope qwen3-coder) or
+    /// `response.reasoning_summary_text.delta` (the o-series); the analyzer
+    /// keeps both, but the trace breakdown dropped them, reporting no
+    /// reasoning at all for a stream that had one.
+    #[test]
+    fn sse_responses_reasoning_deltas_are_kept() {
+        let events = vec![
+            sse(r#"{"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1"}}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"Think "}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"hard."}"#),
+            sse(r#"{"type":"response.output_text.delta","delta":"Hello"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["Hello".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("Think hard."));
+    }
+
+    /// The o-series spelling (`reasoning_summary_text.delta`) carries the
+    /// same reasoning and must reach `reasoning_content` too.
+    #[test]
+    fn sse_responses_reasoning_summary_deltas_are_kept() {
+        let events = vec![
+            sse(r#"{"type":"response.reasoning_summary_text.delta","delta":"summar"}"#),
+            sse(r#"{"type":"response.reasoning_summary_text.delta","delta":"izing"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("summarizing"));
+    }
+
     /// The chrome trace stores the request body either as the parsed JSON
     /// object or as its string form; both must yield the same messages.
     #[test]
@@ -997,6 +1068,44 @@ mod tests {
             AnalyzeChatmlCommand::request_body_messages(&string).expect("string body parses");
         assert_eq!(msgs2, msgs);
         assert_eq!(tools2, tools);
+    }
+
+    /// DashScope/Bailian native generation requests carry the message list
+    /// under `input.messages` and every sampling parameter, tools included,
+    /// under a top-level `parameters` object. Only the top-level `tools` was
+    /// read, so a native request reported an empty tool list and its tool
+    /// definitions were missing from the breakdown, while the live request
+    /// parser has read both spellings since 30828845b.
+    #[test]
+    fn request_messages_reads_native_parameters_tools() {
+        let body = json!({
+            "model": "qwen3-max",
+            "input": {"messages": [{"role": "user", "content": "list the files"}]},
+            "parameters": {
+                "tools": [{"type": "function", "function": {"name": "noop"}}],
+            },
+        });
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("native body parses");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(
+            tools.as_ref().expect("native tools survive").len(),
+            1,
+            "parameters.tools must reach the breakdown"
+        );
+
+        // A top-level `tools` array still wins when both spellings are
+        // present, matching `parse_request_body`.
+        let both = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "top"}}],
+            "parameters": {"tools": [{"type": "function", "function": {"name": "nested"}}]},
+        });
+        let (_, tools) = AnalyzeChatmlCommand::request_body_messages(&both).expect("body parses");
+        let tools = tools.expect("tools survive");
+        assert_eq!(tools.len(), 1, "the top-level array is the one that counts");
+        assert_eq!(tools[0]["function"]["name"], "top");
     }
 
     /// An OpenAI Responses request (codex 0.137+ via /v1/responses) carries
