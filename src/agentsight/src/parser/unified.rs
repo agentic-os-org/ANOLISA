@@ -131,9 +131,21 @@ impl Parser {
                         is_handshake: ssl_event.is_handshake,
                         ssl_ptr: ssl_event.ssl_ptr,
                     };
-                    let prefix_events = self.sse_parser.parse(Rc::new(trimmed));
-                    for ev in prefix_events {
-                        messages.push(ParsedMessage::SseEvent(ev));
+                    let trimmed = Rc::new(trimmed);
+                    let prefix_events = self.sse_parser.parse(Rc::clone(&trimmed));
+                    if prefix_events.is_empty() {
+                        // Not SSE text: for a compressed body these are the
+                        // last compressed bytes, which only the aggregator's
+                        // compressed-buffer state can decode. Dropping them
+                        // truncated the frame, so `dechunk_body` +
+                        // `decompress_body` failed and the whole response
+                        // decoded to zero events. Forward them as a body
+                        // continuation instead.
+                        messages.push(ParsedMessage::RawData(Rc::clone(&trimmed)));
+                    } else {
+                        for ev in prefix_events {
+                            messages.push(ParsedMessage::SseEvent(ev));
+                        }
                     }
                 }
 
