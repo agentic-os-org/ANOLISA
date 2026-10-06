@@ -17,12 +17,15 @@
 import csv
 import json
 
+import pytest
+
 from swe_runner.trace_extraction import (
     analyze_trace_files,
     record_openclaw_jsonl_traces_in_window,
     write_trace_analysis_csvs,
 )
 from swe_runner.trace_extraction.helpers import (
+    ExtractionError,
     extract_issue_id,
     extract_user_text,
     ns_to_iso,
@@ -850,3 +853,14 @@ class TestTraceAnalysis:
         assert detail_dir.exists()
         assert not stale_file.exists()
         assert (detail_dir / "astropy__astropy-1.csv").exists()
+
+
+class TestTraceAnalysisNonObjectJson:
+    def test_rejects_non_object_trace_json_with_extraction_error(self, tmp_path):
+        trace_root = tmp_path / "traces"
+        case_dir = trace_root / "django__django-12345"
+        case_dir.mkdir(parents=True)
+        (case_dir / "trace1.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+        with pytest.raises(ExtractionError, match="JSON object"):
+            analyze_trace_files(trace_root)

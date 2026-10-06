@@ -136,6 +136,8 @@ def analyze_trace_files(
             trace_data = json.loads(trace_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ExtractionError(f"Failed to parse trace file {trace_file}: {exc}") from exc
+        if not isinstance(trace_data, dict):
+            raise ExtractionError(f"Trace file must contain a JSON object: {trace_file}")
 
         task_id = trace_data.get("session_id") or trace_file.stem
         model_value = _extract_model_value(trace_data)
