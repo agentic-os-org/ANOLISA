@@ -235,8 +235,13 @@ Examples:
         print(f"  python3 formula_check.py {args.output}")
         sys.exit(0)
     else:
-        # Distinguish "not installed" (exit 2) from "failed" (exit 1)
-        if "not found" in message.lower() or "not available" in message.lower():
+        # Distinguish "not installed" (exit 2) from "failed" (exit 1) by the
+        # availability probe itself. Recalculation failures routinely quote
+        # "not found" in LibreOffice's own stderr (e.g. "filter not found",
+        # "source file could not be loaded"), which the old message sniff
+        # misread as "Tier 2 unavailable" and silently downgraded a real
+        # failure to a skip.
+        if find_soffice() is None:
             print(f"SKIP (Tier 2 unavailable): {message}")
             sys.exit(2)
         else:
