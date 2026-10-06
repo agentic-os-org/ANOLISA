@@ -62,7 +62,31 @@ def _get_instance_ids(preds_path: Path) -> list[str]:
         return []
 
     instance_ids: list[str] = []
+    if isinstance(data, list):
+        # Standard SWE-bench preds.json is a list of prediction objects.
+        for pred in data:
+            if not isinstance(pred, dict):
+                logger.warning("EVAL_SKIP_MALFORMED_PREDICTION pred=%r", pred)
+                continue
+            iid = pred.get("instance_id")
+            if not isinstance(iid, str) or not iid:
+                logger.warning("EVAL_SKIP_PREDICTION_WITHOUT_INSTANCE_ID pred=%r", pred)
+                continue
+            if not pred.get("model_patch", ""):
+                logger.warning("EVAL_SKIP_EMPTY_PATCH instance=%s", iid)
+                continue
+            instance_ids.append(iid)
+        return instance_ids
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Predictions file must be a JSON object or list of prediction objects: {preds_path}"
+        )
+
     for iid, pred in data.items():
+        if not isinstance(pred, dict):
+            logger.warning("EVAL_SKIP_MALFORMED_PREDICTION instance=%s", iid)
+            continue
         if not pred.get("model_patch", ""):
             logger.warning("EVAL_SKIP_EMPTY_PATCH instance=%s", iid)
             continue

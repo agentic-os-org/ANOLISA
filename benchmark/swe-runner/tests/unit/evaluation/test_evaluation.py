@@ -71,6 +71,44 @@ def test_get_instance_ids_empty_file(tmp_path: Path) -> None:
     assert result == []
 
 
+def test_get_instance_ids_swebench_list_format(tmp_path: Path) -> None:
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(
+        json.dumps(
+            [
+                {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff --git"},
+                {"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": ""},
+                {"model_name_or_path": "cosh", "model_patch": "diff --git"},
+            ]
+        )
+    )
+    result = _get_instance_ids(preds_file)
+    assert result == ["i1"]
+
+
+def test_get_instance_ids_non_object_predictions_rejected(tmp_path: Path) -> None:
+    import pytest
+
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text('"just a string"')
+    with pytest.raises(ValueError, match="JSON object or list"):
+        _get_instance_ids(preds_file)
+
+
+def test_get_instance_ids_malformed_entries_skipped(tmp_path: Path) -> None:
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(
+        json.dumps(
+            {
+                "i1": {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff --git"},
+                "i2": "not-a-prediction",
+            }
+        )
+    )
+    result = _get_instance_ids(preds_file)
+    assert result == ["i1"]
+
+
 def test_get_dataset_name() -> None:
     assert _get_dataset_name("lite") == "princeton-nlp/SWE-bench_Lite"
     assert _get_dataset_name("verified") == "princeton-nlp/SWE-bench_Verified"
