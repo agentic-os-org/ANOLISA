@@ -628,8 +628,11 @@ class OpenClawExternalAgent(BaseAgent):
                             continue
                         inp: int = usage.get("input", 0)
                         out: int = usage.get("output", 0)
+                        # usage.input is cumulative (it includes the whole
+                        # conversation so far), so only the newly added
+                        # input counts toward the session total.
                         delta = inp - prev_input
-                        total_input += inp
+                        total_input += max(delta, 0)
                         total_output += out
                         prev_input = inp
                         rounds.append({
