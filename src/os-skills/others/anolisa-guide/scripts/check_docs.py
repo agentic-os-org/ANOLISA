@@ -214,35 +214,40 @@ def main():
         print(f"[静态过期] {msg}")
     
     # 2. 检查用户缓存目录
+    crawl_attempted = False
     if CACHE_DIR.exists():
         fresh, msg = check_freshness(CACHE_DIR)
-        
+
         if fresh:
             # 缓存文档新鲜，使用缓存
             print(f"[使用缓存] {msg}")
             print(CACHE_DIR)
             return 0
-        
+
         # 缓存过期，更新缓存
         print(f"[缓存过期] {msg}")
+        crawl_attempted = True
         if run_crawl(CACHE_DIR):
             print(CACHE_DIR)
             return 0
-    
-    # 3. 需要创建缓存并更新
-    print("[创建缓存] 正在准备文档...")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    if run_crawl(CACHE_DIR):
-        print(CACHE_DIR)
-        return 0
-    
+
+    # 3. 需要创建缓存并更新（缓存已存在且爬取刚失败时不重复爬取：
+    # 两次尝试之间没有任何状态变化，重复跑一遍 ensure_venv + 爬取
+    # 只会把失败时间拉长一倍，然后照样落到静态兜底）
+    if not crawl_attempted:
+        print("[创建缓存] 正在准备文档...")
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        if run_crawl(CACHE_DIR):
+            print(CACHE_DIR)
+            return 0
+
     # 4. 爬取失败，使用静态文档兜底
     if STATIC_DIR.exists():
         print("[兜底] 使用静态文档")
         print(STATIC_DIR)
         return 0
-    
+
     # 5. 完全失败
     print("[错误] 无法获取文档")
     return 1
