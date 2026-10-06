@@ -444,6 +444,10 @@ impl ProcessIdentity {
     /// pid, or a direct unreaped child), so the pid cannot already have
     /// been reused.
     fn capture(pid: i32) -> Option<Self> {
+        #[cfg(test)]
+        if MOCK_IDENTITY_CAPTURE_FAILURE.with(std::cell::Cell::get) {
+            return None;
+        }
         let boot_id = current_boot_id()?.to_string();
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let starttime = stat_starttime(&stat)?;
@@ -756,6 +760,17 @@ fn open_pidfd(pid: i32) -> std::io::Result<libc::c_long> {
 #[cfg(test)]
 thread_local! {
     static MOCK_PIDFD_ENOSYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// Test-only, thread-local "identity capture from /proc fails" switch, so the
+// bare-pid fallback publication path (and its failure handling) can be
+// exercised without an actually broken /proc. Thread-local on purpose, like
+// [`MOCK_PIDFD_ENOSYS`]: parallel tests capture real identities and must not
+// observe the mock.
+#[cfg(test)]
+thread_local! {
+    static MOCK_IDENTITY_CAPTURE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 // Test-only, thread-local "crash after the pid file was published" switch:
@@ -1547,13 +1562,29 @@ pub fn run_client(
                     "failed to capture supervisor identity from /proc; recording the pid only \
                      — the slot stays occupied but unverifiable until the supervisor records itself"
                 );
-                let _ = write_pid(&paths.supervisor_pid, supervisor_child.id());
+                if let Err(error) = write_pid(&paths.supervisor_pid, supervisor_child.id()) {
+                    // The bare-pid fallback failed too: releasing the lock
+                    // with neither an identity nor a bare-pid record on disk
+                    // presents a free slot to a concurrent mount while this
+                    // supervisor is about to serve — the same spawn/publish
+                    // race the handshake closes (review of this PR). Take the
+                    // publication-failure path: the handshake EOF ends the
+                    // parked child before it records or serves anything, and
+                    // the mount fails after the critical section.
+                    drop(supervisor_handshake.take());
+                    wait_child_exit(
+                        &mut supervisor_child,
+                        Duration::from_millis(HANDSHAKE_EXIT_BUDGET_MS),
+                    );
+                    publish_error = Some(error);
+                }
             }
         }
 
         // The identity is durably on disk (or its bare-pid fallback, which
         // holds the slot against concurrent mounts while the pid lives): the
-        // child may serve now (review of this PR).
+        // child may serve now (review of this PR). A failed fallback
+        // publication took the failure path above, which leaves no handshake.
         if let Some(handshake) = supervisor_handshake.as_ref() {
             handshake.release();
         }
@@ -2045,22 +2076,32 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         // Without a captured identity the file degrades to a pid-only
         // record that stop refuses to signal, and only unmount-based
         // teardown remains.
-        match ProcessIdentity::capture(worker_pid as i32) {
-            Some(identity) => {
-                if let Err(error) = write_pid_identity(&paths.worker_pid, &identity) {
-                    warn!(
-                        error = %error,
-                        "failed to write worker pid file; stop cannot signal this worker directly if the supervisor dies"
-                    );
-                }
-            }
-            None => {
-                warn!(
-                    "failed to capture worker identity from /proc; recording the pid only — \
-                     stop will refuse to signal this worker directly"
-                );
-                let _ = write_pid(&paths.worker_pid, worker_pid);
-            }
+        //
+        // A publication failure of either kind — a failed identity write, or
+        // a failed bare-pid fallback after /proc could not be read — must not
+        // end in a warn: a worker serving with no usable record is an orphan
+        // no stop or teardown can find or signal once this supervisor exits
+        // (review of this PR). The worker is our direct, unreaped child, so
+        // signaling its pid is safe by construction and the Child-handle wait
+        // is reuse-proof: terminate it and refuse to continue.
+        let publication = match ProcessIdentity::capture(worker_pid as i32) {
+            Some(identity) => write_pid_identity(&paths.worker_pid, &identity),
+            None => write_pid(&paths.worker_pid, worker_pid),
+        };
+        if let Err(error) = publication {
+            warn!(
+                worker_pid,
+                error = %error,
+                "failed to publish the managed worker's pid record; terminating the \
+                 unrecorded worker and refusing to continue"
+            );
+            send_signal(worker_pid as i32, libc::SIGTERM);
+            let _ = wait_child_timeout(&mut child, Duration::from_millis(STOP_TIMEOUT_MS));
+            return Err(format!(
+                "failed to publish the managed worker's pid record: {error}; the \
+                 unrecorded worker was terminated"
+            )
+            .into());
         }
         info!(worker_pid, "managed worker started");
 
@@ -3862,6 +3903,133 @@ mod tests {
     }
 
     #[test]
+    fn worker_record_publication_failure_terminates_the_worker_and_stops_the_supervisor() {
+        // Round-8 review: the supervisor's worker bookkeeping ignored the
+        // bare-pid fallback's write error (like the identity write's error)
+        // and let the just-spawned worker serve unrecorded — once this
+        // supervisor died, stop and teardown could neither find nor signal
+        // the worker: a record-less orphan. A worker whose pid record cannot
+        // be published must be terminated (it is our direct, unreaped child,
+        // so the Child-handle signal and wait are reuse-proof) and the
+        // supervisor must refuse to continue with it.
+        let base = tempfile::tempdir().unwrap();
+        let source = base.path().join("source");
+        let mountpoint = base.path().join("mnt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&mountpoint).unwrap();
+        let instance_id = instance_id_for(&normalize_mountpoint(&mountpoint));
+        let paths = ManagedPaths::new(&instance_id);
+        let worker_program = "/bin/sleep";
+        let worker_arg = "4711";
+        let state = ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            instance_id: instance_id.clone(),
+            mountpoint: normalize_mountpoint(&mountpoint)
+                .to_string_lossy()
+                .to_string(),
+            source: normalize_mountpoint(&source).to_string_lossy().to_string(),
+            worker_program: worker_program.to_string(),
+            worker_args: vec![worker_arg.to_string()],
+            desired_state: DesiredState::Mounted,
+        };
+        state.save(&paths.state).unwrap();
+
+        // The worker pid path is occupied by a directory, so neither the
+        // identity write nor the bare-pid fallback can land (EISDIR).
+        struct RemoveOccupancy(PathBuf);
+        impl Drop for RemoveOccupancy {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        std::fs::create_dir(&paths.worker_pid).unwrap();
+        let _occupancy = RemoveOccupancy(paths.worker_pid.clone());
+
+        // Cleanup on every path — including a failing assertion, which on the
+        // pre-fix code is exactly what happens (both processes stay alive).
+        struct SuperviseCleanup {
+            supervise: Option<std::process::Child>,
+            worker_program: &'static str,
+            worker_arg: &'static str,
+            paths: ManagedPaths,
+            mountpoint: PathBuf,
+        }
+        impl Drop for SuperviseCleanup {
+            fn drop(&mut self) {
+                if let Some(child) = self.supervise.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                for pid in live_worker_pids(self.worker_program, self.worker_arg) {
+                    send_signal(pid, libc::SIGKILL);
+                }
+                let _ = teardown_instance_with_timeout(
+                    &self.paths,
+                    &normalize_mountpoint(&self.mountpoint),
+                    Duration::from_secs(2),
+                );
+            }
+        }
+        let mut cleanup = SuperviseCleanup {
+            supervise: None,
+            worker_program,
+            worker_arg,
+            paths,
+            mountpoint: mountpoint.clone(),
+        };
+
+        // A real supervisor process, hand-started: fd 3 is closed pre-exec, so
+        // `await_publish_handshake` finds no handshake fd and serves as the
+        // rolled-back/hand-started case it must support.
+        let mut command = std::process::Command::new(built_skillfs_binary());
+        command
+            .args(["supervise", "--instance", &instance_id])
+            .stdin(std::process::Stdio::null());
+        // SAFETY: only closes fd 3 in the forked child, before exec.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                let _ = libc::close(3);
+                Ok(())
+            });
+        }
+        let supervise = command.spawn().expect("spawn the real supervise process");
+        cleanup.supervise = Some(supervise);
+
+        // On the fixed path the supervisor terminates the unrecorded worker
+        // and exits; the old warn-and-continue path kept both alive.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut exited = false;
+        while Instant::now() < deadline {
+            if matches!(cleanup.supervise.as_mut().unwrap().try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            exited,
+            "the supervisor must refuse to serve a worker whose pid record cannot \
+             be published, not keep running with an unrecorded worker"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut worker_gone = false;
+        while Instant::now() < deadline {
+            if live_worker_pids(worker_program, worker_arg).is_empty() {
+                worker_gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            worker_gone,
+            "the unrecorded worker must be terminated instead of serving with no \
+             record any stop or teardown could use, still live: {:?}",
+            live_worker_pids(worker_program, worker_arg)
+        );
+    }
+
+    #[test]
     fn hand_off_keeps_the_fifo_when_the_pipe_read_end_is_already_fd3() {
         // The handshake only protects the spawn/publish window if the
         // supervisor execs with the FIFO on SUPERVISOR_HANDSHAKE_FD and no
@@ -4111,6 +4279,127 @@ mod tests {
         // Remove the injected occupancy, then clean up what the failed
         // mount left behind (its teardown ran while the pid path was
         // occupied).
+        std::fs::remove_dir(&paths.supervisor_pid).unwrap();
+        let _ = teardown_instance_with_timeout(
+            &paths,
+            &normalize_mountpoint(&mountpoint),
+            Duration::from_secs(2),
+        );
+    }
+
+    #[test]
+    fn pid_only_fallback_publication_failure_ends_the_supervisor_and_fails_the_mount() {
+        // Round-8 review: when the /proc identity capture failed, the client
+        // fell back to a bare-pid record — and IGNORED the fallback's write
+        // error, then released the handshake GO anyway. With the capture
+        // failing AND the pid write failing, the instance lock was released
+        // with no supervisor record on disk while the child was approved to
+        // serve: a concurrent `mount --managed` passed the empty-slot gate
+        // and started a second supervisor. The fallback failure must take
+        // the same publication-failure path as a failed identity write: no
+        // GO, the parked child exits on the handshake EOF, and the mount
+        // fails naming the publication.
+        let base = tempfile::tempdir().unwrap();
+        let source = base.path().join("source");
+        let mountpoint = base.path().join("mnt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&mountpoint).unwrap();
+        let instance_id = instance_id_for(&normalize_mountpoint(&mountpoint));
+        let paths = ManagedPaths::new(&instance_id);
+        let supervisor_exe = built_skillfs_binary();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        {
+            let source = source.clone();
+            let mountpoint = mountpoint.clone();
+            let supervisor_exe = supervisor_exe.clone();
+            let hold_prefix = paths.state.clone();
+            std::thread::spawn(move || {
+                SUPERVISOR_CHILD_PROGRAM_OVERRIDE.with(|o| *o.borrow_mut() = Some(supervisor_exe));
+                // Injection half one: /proc identity capture fails for every
+                // pid on this thread (the client is the only capturer here).
+                MOCK_IDENTITY_CAPTURE_FAILURE.with(|m| m.set(true));
+                let result = with_hold_at_spawn(&hold_prefix, || {
+                    run_client(&[], &source, &mountpoint)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                });
+                MOCK_IDENTITY_CAPTURE_FAILURE.with(|m| m.set(false));
+                SUPERVISOR_CHILD_PROGRAM_OVERRIDE.with(|o| *o.borrow_mut() = None);
+                let _ = done_tx.send(result);
+            });
+        }
+
+        // The client parks after the spawn, before the publication: the
+        // supervisor exists, parked on the handshake, nothing on disk.
+        let parked = wait_for_file(
+            &instance_mark_path(&paths.state, ".spawned"),
+            Duration::from_secs(10),
+        );
+        assert!(
+            parked,
+            "the client never reached the post-spawn, pre-publication park"
+        );
+        let orphan = wait_for_one_supervise(&instance_id, Duration::from_secs(5))
+            .expect("the just-spawned supervisor must be parked on the handshake");
+        assert!(
+            read_pid_identity(&paths.supervisor_pid).is_none(),
+            "the park sits before the publication: no supervisor record may exist yet"
+        );
+
+        // Injection half two: the bare-pid fallback write cannot land because
+        // the supervisor pid path is occupied by a directory (EISDIR) — the
+        // same error an unwritable run directory produces, without freezing
+        // the park's own release markers, which share that directory.
+        struct RemoveOccupancy<'a>(&'a Path);
+        impl Drop for RemoveOccupancy<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(self.0);
+            }
+        }
+        std::fs::create_dir(&paths.supervisor_pid).unwrap();
+        let _occupancy = RemoveOccupancy(&paths.supervisor_pid);
+
+        // Release the park: the fallback write runs against the occupied pid
+        // path and must fail.
+        std::fs::write(instance_mark_path(&paths.state, ".spawn-release"), b"").unwrap();
+
+        // A generous bound: the failing client returns fast; a client that
+        // swallows the failure instead runs out the readiness clock first.
+        let outcome = done_rx.recv_timeout(Duration::from_secs(30));
+
+        let error = match outcome {
+            Ok(Err(error)) => error,
+            Ok(Ok(())) => panic!(
+                "the mount must fail when neither the identity nor the bare-pid \
+                 fallback could be published"
+            ),
+            Err(_) => panic!(
+                "the fallback publication-failure path never returned: the failed \
+                 bare-pid write must end the parked supervisor and fail the mount, \
+                 not release it to serve unrecorded"
+            ),
+        };
+        assert!(
+            error.contains("failed to publish supervisor identity"),
+            "the fallback write failure must take the publication-failure path \
+             and name it, got: {error}"
+        );
+
+        // The handshake-terminated supervisor is gone, and the failed
+        // publication left no record behind.
+        assert!(
+            wait_process_gone(orphan, Duration::from_secs(5)),
+            "the supervisor must not be released to serve when the bare-pid \
+             fallback write failed"
+        );
+        assert!(
+            read_pid_identity(&paths.supervisor_pid).is_none(),
+            "a failed fallback publication must leave no supervisor record"
+        );
+
+        // Remove the injected occupancy, then clean up what the failed mount
+        // left behind (its teardown ran while the pid path was occupied).
         std::fs::remove_dir(&paths.supervisor_pid).unwrap();
         let _ = teardown_instance_with_timeout(
             &paths,
@@ -4567,6 +4856,34 @@ mod tests {
     fn live_supervise_pids(instance_id: &str) -> Vec<i32> {
         let needle = format!("supervise\0--instance\0{instance_id}\0");
         let needle = needle.as_bytes();
+        let mut pids = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return pids;
+        };
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                continue;
+            };
+            let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            if cmdline.windows(needle.len()).any(|window| window == needle) {
+                pids.push(pid);
+            }
+        }
+        pids.sort_unstable();
+        pids
+    }
+
+    /// Live pids whose command line contains `<program>\0<arg>\0` — the
+    /// workers a supervisor spawns with one distinctive argv, used to prove a
+    /// test worker is (or is not) still running.
+    fn live_worker_pids(program: &str, arg: &str) -> Vec<i32> {
+        let mut needle = Vec::with_capacity(program.len() + arg.len() + 2);
+        needle.extend_from_slice(program.as_bytes());
+        needle.push(0);
+        needle.extend_from_slice(arg.as_bytes());
+        needle.push(0);
         let mut pids = Vec::new();
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return pids;
