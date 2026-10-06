@@ -55,8 +55,13 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("caddy");
     let has_java = info.has_process("java");
     let has_search = info.has_process("elasticsearch") || info.has_process("opensearch");
-    let has_streaming =
-        info.has_process("kafka") || info.has_process("flink") || info.has_process("spark");
+    let has_streaming = info.has_process("kafka")
+        || info.has_process("flink")
+        || info.has_process("spark")
+        // Pulsar is the same event-streaming class as Kafka; the runtime
+        // detector already resolves org.apache.pulsar broker cmdlines to
+        // the "pulsar" service.
+        || info.has_process("pulsar");
 
     if has_db {
         return WorkloadType::IoLatency;
@@ -240,6 +245,23 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["flink"])),
             WorkloadType::IoThroughput
+        );
+    }
+
+    #[test]
+    fn test_classify_pulsar() {
+        // Pulsar is the same event-streaming platform class as Kafka (the
+        // runtime detector even resolves org.apache.pulsar broker cmdlines
+        // to the "pulsar" service), so a Pulsar-only host is an
+        // io-throughput workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["pulsar"])),
+            WorkloadType::IoThroughput
+        );
+        // A database on the same host still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["pulsar", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 
