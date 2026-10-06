@@ -1000,6 +1000,35 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::Instant;
 
+    /// A restarted agent is reaped.
+    ///
+    /// Nothing in this crate installs a SIGCHLD handler or calls `waitpid`, so
+    /// a spawned `Child` that is simply dropped leaves the process as a zombie
+    /// until the server exits: one per restart, until the container's `pid_max`
+    /// runs out and every later spawn fails.
+    #[test]
+    fn restarted_agents_are_reaped() {
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
+        let pid = super::spawn_restarted_agent(&cmd).expect("the fixture should spawn");
+
+        // The child exits at once. Only a parent that waits removes its /proc
+        // entry; an unreaped one stays with state `Z`.
+        let stat_path = std::path::PathBuf::from(format!("/proc/{pid}/stat"));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while stat_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let stat = std::fs::read_to_string(&stat_path).unwrap_or_default();
+        assert!(!stat_path.exists(), "pid {pid} was not reaped: {stat}");
+    }
+
+    /// A restart command with no program is reported, not spawned.
+    #[test]
+    fn a_restart_command_without_a_program_is_an_error() {
+        let error = super::spawn_restarted_agent(&[]).expect_err("an empty command cannot spawn");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
     use actix_web::App;
     use actix_web::body::to_bytes;
     use actix_web::test as awtest;
@@ -4653,6 +4682,30 @@ pub async fn delete_agent_health(
 /// POST /api/agent-health/{pid}/restart
 ///
 /// Kill the hung process and re-launch it with its original command line.
+/// Spawn the restarted agent and hand its child handle to a reaper thread.
+///
+/// The request must not wait for the agent to finish, but the process still
+/// needs a parent that calls `wait`: nothing in this crate installs a SIGCHLD
+/// handler or calls `waitpid`, so dropping the `Child` left the re-exec'd agent
+/// as a zombie for the rest of the server's life. Agents restart repeatedly, so
+/// those zombies accumulated one per restart until the container's `pid_max`
+/// ran out and every later `spawn` failed.
+fn spawn_restarted_agent(cmd: &[String]) -> std::io::Result<u32> {
+    let (exe, args) = cmd.split_first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty restart command")
+    })?;
+    let mut child = std::process::Command::new(exe).args(args).spawn()?;
+    let new_pid = child.id();
+    // Detached by design: the handler answers as soon as the agent is started,
+    // so the wait has to happen somewhere that outlives the request.
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            log::warn!("reaping restarted agent pid={new_pid} failed: {error}");
+        }
+    });
+    Ok(new_pid)
+}
+
 #[post("/agent-health/{pid}/restart")]
 pub async fn restart_agent_health(
     data: web::Data<AppState>,
@@ -4710,12 +4763,9 @@ pub async fn restart_agent_health(
     // Step 2: short wait for process to exit
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Step 3: re-exec (background, don't wait)
-    let exe = &cmd[0];
-    let args = &cmd[1..];
-    match Command::new(exe).args(args).spawn() {
-        Ok(child) => {
-            let new_pid = child.id();
+    // Step 3: re-exec (background, don't wait for it to finish)
+    match spawn_restarted_agent(&cmd) {
+        Ok(new_pid) => {
             log::info!("Restarted agent pid={pid} -> new pid={new_pid}, cmd={cmd:?}");
             data.health_store
                 .write()
