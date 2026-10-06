@@ -563,7 +563,7 @@ export const SystemAuditPage: React.FC = () => {
 
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard labelKey="audit.stats.totalEvents.label" value={summary?.total ?? 0} hintKey="audit.stats.totalEvents.hint" />
-        <StatCard labelKey="audit.stats.sessions.label" value={summary?.affected_sessions ?? sessions.length} hintKey="audit.stats.sessions.hint" />
+        <StatCard labelKey="audit.stats.sessions.label" value={summary?.affected_sessions ?? sessionTotal} hintKey="audit.stats.sessions.hint" />
         <StatCard labelKey="audit.stats.cases.label" value={totalCases} hintKey="audit.stats.cases.hint" />
         <StatCard
           labelKey="audit.stats.open.label"

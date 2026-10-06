@@ -288,3 +288,26 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
   assert.equal(violationRows(rendered.element).length, 1,
     'the clamped page must not be empty: it must fall back to the remaining row');
 });
+
+// ─── Bug 5: the sessions stat card reports a page instead of the total ───────
+
+test('system-audit: the sessions card does not fall back to the loaded page length', () => {
+  const source = readSource('src/pages/SystemAuditPage.tsx');
+
+  // `sessions` is one page of at most SESSION_PAGE_SIZE rows (`fetchAuditSessions`
+  // with `limit: SESSION_PAGE_SIZE`, the response's `total` goes to sessionTotal),
+  // so falling back to `sessions.length` printed the page size as a headline count
+  // whenever the summary request failed — while the neighbouring cards read 0 and
+  // the sessions tab of the same page showed "1–20 / N". The server total is
+  // already in scope and is what the case card next to it uses.
+  assert.match(
+    source,
+    /labelKey="audit\.stats\.sessions\.label" value=\{summary\?\.affected_sessions \?\? sessionTotal\}/,
+    'the sessions card must fall back to the server total, not the loaded page',
+  );
+  assert.doesNotMatch(
+    source,
+    /affected_sessions \?\? sessions\.length/,
+    'the loaded page length must never be reported as the session count',
+  );
+});
