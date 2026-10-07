@@ -403,12 +403,28 @@ fn is_monitoring_helper_name(name: &str) -> bool {
 
 /// Match a process comm name to a known agent name.
 /// Returns Some(agent_name) if matched, None otherwise.
+///
+/// The agent set mirrors the runtimes the local collector's discovery module
+/// (`SESSION_SOURCES`) supports: OpenClaw, Cosh, Claude Code, Qoder,
+/// QoderWork, Codex and Cursor. A kill of any of them is an agent crash even
+/// without a pending llm_call correlation — an idle CLI between calls is the
+/// common case, and dropping it as noise hides the crash from the dashboard.
 fn match_agent_name(comm: &str) -> Option<&'static str> {
     let comm_lower = comm.to_lowercase();
     if comm_lower.starts_with("openclaw-gatewa") || comm_lower.starts_with("openclaw") {
         Some("OpenClaw")
     } else if comm_lower == "co" || comm_lower == "cosh" || comm_lower.starts_with("copilot") {
         Some("Cosh")
+    } else if comm_lower == "codex" || comm_lower.starts_with("codex-") {
+        Some("Codex")
+    } else if comm_lower.starts_with("claude") {
+        Some("Claude Code")
+    } else if comm_lower.starts_with("qoderwork") {
+        Some("QoderWork")
+    } else if comm_lower == "qoder" || comm_lower.starts_with("qoder-") {
+        Some("Qoder")
+    } else if comm_lower.starts_with("cursor") {
+        Some("Cursor")
     } else if comm_lower.starts_with("node") {
         // Node processes could be either; record with unknown agent but still
         // track. A collector is neither: an OOM-killed `node_exporter` without
@@ -1017,12 +1033,13 @@ esac
 
     #[test]
     fn unmatched_oom_kill_with_pending_correlation_is_kept() {
-        // A claude/qwen/codex-class comm is not in the narrow match table,
-        // but a pending llm_call row for the pid is the evidence this was an
+        // An agent-class comm the match table does not know (e.g. `aider`, a
+        // real CLI outside the supported set) is not an agent name, but a
+        // pending llm_call row for the pid is the evidence this was an
         // agent-class kill: the event must keep its session attribution and
         // agent_name: None, exactly as before the noise skip.
         let interruption = oom_interruption_for(
-            &oom_event("claude"),
+            &oom_event("aider"),
             Some("sess-9".to_string()),
             Some("conv-9".to_string()),
             &["conv-9".to_string()],
@@ -1039,6 +1056,35 @@ esac
             serde_json::from_str(&interruption.detail.expect("detail")).expect("valid json");
         assert_eq!(detail["agent_name"], serde_json::Value::Null);
         assert_eq!(detail["active_conversations"][0], "conv-9");
+    }
+
+    #[test]
+    fn supported_agent_oom_kills_become_agent_crash_without_correlation() {
+        // The local collector's discovery module supports Claude Code, Qoder,
+        // QoderWork, Codex and Cursor; an OOM kill of any of them is an agent
+        // crash even with no pending llm_call — an idle CLI between calls is
+        // the common case, and dropping it as noise hid the crash from the
+        // dashboard.
+        for (comm, expected) in [
+            ("codex", "Codex"),
+            ("codex-exec", "Codex"),
+            ("claude", "Claude Code"),
+            ("claude-code", "Claude Code"),
+            ("qoder", "Qoder"),
+            ("qoderwork", "QoderWork"),
+            ("cursor", "Cursor"),
+        ] {
+            let interruption = oom_interruption_for(&oom_event(comm), None, None, &[])
+                .unwrap_or_else(|| panic!("{comm} must be recognized as a supported agent"));
+            assert_eq!(
+                interruption.agent_name.as_deref(),
+                Some(expected),
+                "{comm} agent name"
+            );
+            let detail: serde_json::Value =
+                serde_json::from_str(&interruption.detail.expect("detail")).expect("valid json");
+            assert_eq!(detail["agent_name"], serde_json::json!(expected));
+        }
     }
 
     #[test]
