@@ -167,8 +167,24 @@ def test_user_prompt_observe_scans_and_allows_silently(mock_cli) -> None:
     assert proc.returncode == 0
     assert proc.stdout == ""
     captured = _captured_call(capture)
-    assert "--source" in captured["argv"]
-    assert captured["argv"][captured["argv"].index("--source") + 1] == "user_input"
+    # Pin the exact argv: dropping --stdin or renaming scan-pii makes the
+    # real CLI exit non-zero ("provide exactly one of --text, --input, or
+    # --stdin") and the hook silently fails open - PII checking disabled -
+    # with no test noticing. The qwen pii suite pins its argv this way.
+    # argv[0:2] is the injected --trace-context pair; pin the command tail
+    # after it (dropping --stdin / renaming scan-pii makes the real CLI exit
+    # non-zero: "provide exactly one of --text, --input, or --stdin" — the
+    # hook then silently fails open, PII checking disabled, with no test
+    # noticing; the qwen pii suite pins its argv the same way).
+    assert captured["argv"][2:] == [
+        "scan-pii",
+        "--stdin",
+        "--format",
+        "json",
+        "--redact-output",
+        "--source",
+        "user_input",
+    ]
     assert captured["stdin"] == "phone 13800138000"
 
 
@@ -461,7 +477,16 @@ def test_include_low_confidence_flag_is_forwarded(mock_cli) -> None:
     )
 
     assert proc.returncode == 0
-    assert "--include-low-confidence" in _captured_call(capture)["argv"]
+    assert _captured_call(capture)["argv"][2:] == [
+        "scan-pii",
+        "--stdin",
+        "--format",
+        "json",
+        "--redact-output",
+        "--source",
+        "user_input",
+        "--include-low-confidence",
+    ]
 
 
 def test_cli_failure_fails_open(mock_cli) -> None:
