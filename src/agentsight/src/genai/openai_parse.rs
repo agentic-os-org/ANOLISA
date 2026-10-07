@@ -885,6 +885,22 @@ impl GenAIBuilder {
                         refusal_buf.push_str(refusal);
                     }
                 }
+                "response.output_item.done" => {
+                    // A capture that started mid-stream may open with a done
+                    // item instead of an added one; the item router recovers
+                    // the complete call from it, so a function_call done item
+                    // proves this is a Responses stream with recoverable
+                    // content. Other item types carry no text here (text
+                    // arrives only as deltas) and must not flip the gate.
+                    if chunk
+                        .get("item")
+                        .and_then(|i| i.get("type"))
+                        .and_then(|t| t.as_str())
+                        == Some("function_call")
+                    {
+                        saw_responses_event = true;
+                    }
+                }
                 "response.function_call_arguments.done" => {
                     if let Some(arguments) = chunk.get("arguments").and_then(|a| a.as_str()) {
                         let item_id = chunk.get("item_id").and_then(|v| v.as_str());

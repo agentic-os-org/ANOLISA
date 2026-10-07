@@ -67,8 +67,9 @@ impl ResponsesToolCalls {
             return;
         }
         let added = kind == Some("response.output_item.added");
+        let item_done = kind == Some("response.output_item.done");
         let item = event.get("item");
-        let item_id = if added {
+        let item_id = if added || item_done {
             item.and_then(|i| i.get("id"))
         } else {
             event.get("item_id")
@@ -157,6 +158,64 @@ impl ResponsesToolCalls {
                 if !identified {
                     self.current = None;
                 }
+            }
+            Some("response.output_item.done") => {
+                let Some(item) = item else { return };
+                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                    return;
+                }
+                let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(p) = position {
+                    // The done item is authoritative: it supersedes whatever
+                    // partial deltas the capture caught, and fills identity
+                    // fields the added event may have carried empty.
+                    let call = &mut self.calls[p];
+                    if !call_id.is_empty() {
+                        call.id = call_id.to_owned();
+                    }
+                    if !name.is_empty() {
+                        call.name = name.to_owned();
+                    }
+                    if !arguments.is_empty() {
+                        call.arguments = arguments.to_owned();
+                    }
+                    call.done = true;
+                    // After a completed item, an unidentified follow-up event
+                    // belongs to a new call, matching the arguments-done path.
+                    if !identified {
+                        self.current = None;
+                    }
+                    return;
+                }
+                // No known call and no identity to anchor one: nothing to
+                // update and nothing safe to register.
+                if !identified {
+                    return;
+                }
+                // A capture that started mid-stream missed the added event,
+                // so the done item is the only complete record of the call.
+                // Recover it — unless this identity contradicts an existing
+                // call, which cannot be ordered safely.
+                if self.calls.iter().any(|call| {
+                    index.is_some_and(|i| call.index == Some(i))
+                        || item_id.is_some_and(|id| call.item_id.as_deref() == Some(id))
+                }) {
+                    return;
+                }
+                if self.calls.len() >= MAX_TOOL_CALL_SLOTS as usize {
+                    self.current = None;
+                    return;
+                }
+                self.calls.push(ResponseToolCall {
+                    index,
+                    item_id: item_id.map(str::to_owned),
+                    id: call_id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: arguments.to_owned(),
+                    done: true,
+                });
             }
             _ => {}
         }
