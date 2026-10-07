@@ -829,9 +829,10 @@ fn unsupported_runtime_handoff(source: &Binding) -> ReplaceOutcome {
 ///
 /// The current ActPlane endpoint-condition ABI can represent one trusted target
 /// per rule. Observe and audit policies use notify rules plus adapter-side TTL
-/// and `public_ipv4` filtering. Enforce mode emits a `block` rule with an
-/// `expires` clause so the pinned ABI honours taint TTL directly, and requires
-/// at least one trusted endpoint to avoid blocking all outbound connections.
+/// and `public_ipv4` filtering. Enforce mode is rejected outright: the pinned
+/// ABI would have to scope a block rule with `endpoint "*"`, which also denies
+/// loopback and private destinations, because it cannot express a public-only
+/// destination scope.
 ///
 /// # Errors
 ///
@@ -1569,25 +1570,29 @@ mod tests {
     }
 
     #[test]
-    fn enforce_policy_compiles_block_rule_with_expires() {
+    fn enforce_policy_fails_closed_while_public_scope_is_unsupported() {
+        // The pinned ActPlane ABI cannot express a public-only destination
+        // scope, so the compiler deliberately refuses enforce mode instead of
+        // emitting a `block` rule that would also drop loopback and private
+        // traffic. Only the outcome is asserted here: the diagnostic wording is
+        // tied to the roadmap and is free to change.
         let policy = credential_policy();
-        let dsl = compile_credential_exfiltration_policy(&policy)
-            .expect("enforce policy with a trusted endpoint should compile");
-
-        assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
-        assert!(dsl.contains("unless target \"10.0.0.8\""));
-        assert!(dsl.contains("expires 900s"));
-        assert!(compile_str(&dsl).is_ok());
+        assert!(compile_credential_exfiltration_policy(&policy).is_err());
     }
 
     #[test]
-    fn enforce_policy_requires_trusted_endpoint() {
+    fn audit_policy_compiles_without_a_trusted_endpoint() {
+        // A trusted-endpoint exception is optional: with an empty list the
+        // emitted rule simply drops the `unless target` clause rather than
+        // failing to compile.
         let mut policy = credential_policy();
+        policy.mode = PolicyMode::Audit;
         policy.trusted_endpoints.clear();
-        let error = compile_credential_exfiltration_policy(&policy)
-            .expect_err("enforce mode without a trusted endpoint must fail closed");
+        let dsl = compile_credential_exfiltration_policy(&policy)
+            .expect("audit policy without a trusted endpoint should compile");
 
-        assert!(error.to_string().contains("trusted_endpoint"));
+        assert!(dsl.contains("notify connect endpoint \"*\" if CREDENTIAL"));
+        assert!(!dsl.contains("unless target"));
     }
 
     #[test]
