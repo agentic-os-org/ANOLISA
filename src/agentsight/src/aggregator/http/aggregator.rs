@@ -515,6 +515,38 @@ impl HttpConnectionAggregator {
         }
     }
 
+    /// Seed the SSE continuation buffer with the first response read's body.
+    ///
+    /// [`SseParser::parse`] only yields newline-terminated lines, so a `data:`
+    /// line torn by the TLS record boundary between the first and second read
+    /// produces no event — and only reads *after* the headers reach
+    /// `process_sse_event` / `process_raw_body_data`, the two continuation
+    /// producers. Without seeding, the buffer starts at the second read and
+    /// the torn event's first half is gone for good: the downstream
+    /// reassembly (`extract_token_from_sse`'s continuation fallback) cannot
+    /// recover a usage that straddled the boundary. Compressed streams keep
+    /// their whole body in `compressed_buffer` instead, so only the
+    /// uncompressed live-parse path seeds here.
+    fn seed_sse_continuation_from_initial_body(
+        &mut self,
+        connection_id: &ConnectionId,
+        response_headers: &ParsedResponse,
+    ) {
+        const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
+        let body = response_headers.body();
+        if body.is_empty() {
+            return;
+        }
+        let buf = self
+            .sse_continuation_buffers
+            .get_or_insert_mut(*connection_id, Vec::new);
+        let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
+        let take = body.len().min(remaining);
+        if take > 0 {
+            buf.extend_from_slice(&body[..take]);
+        }
+    }
+
     /// Decode a buffered *compressed* SSE body into parsed events. Shared by the
     /// live completion path (`finish_compressed_sse`) and the drain path
     /// (`drain_and_persist_dead_connections`) so both decode identically. `src`
@@ -761,6 +793,15 @@ impl HttpConnectionAggregator {
                     let mut response_headers = response;
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
+                    // Seed before `body_len` is zeroed: `body()` indexes the
+                    // response's own read, which no later continuation
+                    // producer ever sees again.
+                    if compressed_buffer.is_none() {
+                        self.seed_sse_continuation_from_initial_body(
+                            &connection_id,
+                            &response_headers,
+                        );
+                    }
                     response_headers.body_len = 0;
                     // The whole compressed body arrived with the headers, so
                     // the response's own event is the completing read.
@@ -819,6 +860,14 @@ impl HttpConnectionAggregator {
                     let mut response_headers = response;
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
+                    // See the RequestBodyPending branch: seed the first read's
+                    // body before `body_len` is zeroed.
+                    if compressed_buffer.is_none() {
+                        self.seed_sse_continuation_from_initial_body(
+                            &connection_id,
+                            &response_headers,
+                        );
+                    }
                     response_headers.body_len = 0;
                     // The whole compressed body arrived with the headers, so
                     // the response's own event is the completing read.
@@ -882,6 +931,14 @@ impl HttpConnectionAggregator {
                     let mut response_headers = response;
                     let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
+                    // See the RequestBodyPending branch: seed the first read's
+                    // body before `body_len` is zeroed.
+                    if compressed_buffer.is_none() {
+                        self.seed_sse_continuation_from_initial_body(
+                            &connection_id,
+                            &response_headers,
+                        );
+                    }
                     response_headers.body_len = 0;
                     // The whole compressed body arrived with the headers, so
                     // the response's own event is the completing read.
@@ -1989,6 +2046,104 @@ mod tests {
             Some("hi")
         );
         assert!(!aggregator.has_pending(), "connection must be finalized");
+    }
+
+    /// The first read can carry the response headers plus the first half of a
+    /// usage-bearing event. The parser drops the torn tail line (no
+    /// terminating newline) and no later continuation producer ever sees the
+    /// first read's bytes, so the initial body must seed the continuation
+    /// buffer: without it the reassembled stream starts mid-JSON and the
+    /// usage that straddled the TLS record boundary is unrecoverable.
+    #[test]
+    fn initial_response_body_seeds_the_sse_continuation_buffer() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let req_event = create_mock_ssl_event_with_buf(
+            66,
+            0x7300,
+            b"POST /v1/responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            1,
+        );
+        let mut req_headers = HashMap::new();
+        req_headers.insert("content-length".to_string(), "2".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            version: 11,
+            headers: req_headers,
+            body_offset: 51,
+            body_len: 2,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // Headers plus the beginning of a `data:` line, torn mid-JSON.
+        let head = b"event: response.completed\ndata: {\"usage\":{\"input_tokens\":57";
+        let mut resp_buf = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".to_vec();
+        resp_buf.extend_from_slice(head);
+        let body_offset = resp_buf.len() - head.len();
+        let resp_event = create_mock_ssl_event_with_buf(66, 0x7300, resp_buf, 0);
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("content-type".to_string(), "text/event-stream".to_string());
+                h
+            },
+            body_offset,
+            body_len: head.len(),
+            source_event: resp_event,
+        };
+        assert!(
+            aggregator.process_response(response).is_none(),
+            "the torn stream must keep buffering in SseActive"
+        );
+
+        // The second read completes the usage event, as a raw fragment.
+        let tail = b",\"output_tokens\":7}}\n\n";
+        let raw = create_mock_ssl_event_with_buf(66, 0x7300, tail.to_vec(), 0);
+        assert!(aggregator.process_raw_body_data(&raw).is_none());
+
+        // A later read terminates the stream.
+        let done_event =
+            create_mock_ssl_event_with_buf(66, 0x7300, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let conn_id = ConnectionId {
+            pid: 66,
+            ssl_ptr: 0x7300,
+        };
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should be present");
+        let whole = b"data: {\"usage\":{\"input_tokens\":57,\"output_tokens\":7}}";
+        assert!(
+            buf.windows(whole.len()).any(|w| w == whole),
+            "the reassembled buffer must hold the whole usage event, got {:?}",
+            String::from_utf8_lossy(&buf)
+        );
+    }
+
+    /// Control: headers alone (empty body) seed nothing — the continuation
+    /// buffer must not materialize for a stream whose first read carried no
+    /// body bytes.
+    #[test]
+    fn empty_initial_body_seeds_no_continuation_buffer() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id = enter_uncompressed_responses_sse_active(&mut aggregator, 67, 0x7400);
+        assert!(aggregator.is_sse_active(&conn_id));
+        assert!(
+            aggregator.sse_continuation_buffers.peek(&conn_id).is_none(),
+            "an empty initial body must not create a continuation buffer"
+        );
     }
 
     // ── Compressed SSE tests ────────────────────────────────────────────
