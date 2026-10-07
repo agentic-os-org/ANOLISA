@@ -1111,6 +1111,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn strong_literal_facts_ground_through_typed_replay() {
+        use crate::grounding::evidence::{Grounding, build_index};
+        for (literal, extended) in [
+            ("1.2.3", "1.2.30"),
+            ("/tmp/report.txt", "/tmp/report.txt.bak"),
+            ("https://example.test/api", "https://example.test/apiv2"),
+        ] {
+            for (observed, unresolved) in [(literal, 0), (extended, 1)] {
+                for response in [
+                    serde_json::json!(format!("Observed: {observed}")),
+                    serde_json::json!({"value": observed}),
+                ] {
+                    let events = vec![
+                        call_event(
+                            1,
+                            1_000_000_000,
+                            Some(vec![OutputMessage {
+                                role: "assistant".into(),
+                                name: None,
+                                finish_reason: Some("tool_call".into()),
+                                parts: vec![MessagePart::ToolCall {
+                                    id: Some("literal-source".into()),
+                                    name: "Read".into(),
+                                    arguments: Some(
+                                        serde_json::json!({"file_path":"/tmp/facts.json"}),
+                                    ),
+                                }],
+                            }]),
+                            None,
+                            None,
+                        ),
+                        call_event(
+                            2,
+                            3_000_000_000,
+                            None,
+                            Some(vec![InputMessage {
+                                role: "tool".into(),
+                                name: None,
+                                parts: vec![MessagePart::ToolCallResponse {
+                                    id: Some("literal-source".into()),
+                                    response: response.clone(),
+                                }],
+                            }]),
+                            None,
+                        ),
+                        call_event(
+                            3,
+                            5_000_000_000,
+                            Some(vec![OutputMessage {
+                                role: "assistant".into(),
+                                name: None,
+                                finish_reason: Some("stop".into()),
+                                parts: vec![MessagePart::Text {
+                                    content: format!("The value is {literal}."),
+                                }],
+                            }]),
+                            None,
+                            None,
+                        ),
+                    ];
+                    let doc = convert_trace_to_atif("literal-facts", events).unwrap();
+                    let last = doc.steps.len() - 1;
+                    let index = build_index(&doc, last..doc.steps.len());
+                    assert_eq!(
+                        index.unresolved_count(),
+                        unresolved,
+                        "{response}: {literal}"
+                    );
+                    assert_eq!(index.has_deterministic_finding(), unresolved != 0);
+                    if unresolved == 0 {
+                        assert!(index.claims.iter().all(|c| matches!(&c.grounding,
+                            Grounding::Grounded { source_call_id: Some(id), .. } if id == "literal-source")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_ns_to_iso8601() {
         // 0 ns = Unix epoch
         let s = ns_to_iso8601(0);

@@ -264,6 +264,8 @@ struct EvidenceEntry {
     /// Lowercased text, for containment checks.
     haystack: String,
     numbers: Vec<f64>,
+    literal_text: String,
+    urls: Vec<String>,
 }
 
 /// Build the index for `round`, an index range into `doc.steps`.
@@ -490,16 +492,49 @@ fn push_entry(
     if text.trim().is_empty() {
         return;
     }
-    let numbers = extract_claims(text)
-        .into_iter()
+    let claims = extract_claims(text);
+    let numbers = claims
+        .iter()
         .filter(|c| c.class == ClaimClass::Number)
         .filter_map(|c| c.value)
+        .collect();
+    // JSON escape sequences delimit decoded values, not literal filenames or
+    // version suffixes. Keep the raw haystack for weak containment and digests.
+    let literal_text =
+        if let Ok(value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) =
+            serde_json::from_str::<serde_json::Value>(text)
+        {
+            let mut parts = Vec::new();
+            let mut pending = vec![&value];
+            while let Some(value) = pending.pop() {
+                match value {
+                    serde_json::Value::String(text) => parts.push(text.as_str()),
+                    serde_json::Value::Array(values) => pending.extend(values),
+                    serde_json::Value::Object(values) => {
+                        parts.extend(values.keys().map(String::as_str));
+                        pending.extend(values.values());
+                    }
+                    _ => {}
+                }
+            }
+            parts.join("\n").to_lowercase()
+        } else {
+            text.to_lowercase()
+        };
+    // Reuse URL extraction so valid continuations (query, slash, comma) cannot
+    // be mistaken for prose punctuation around a shorter URL.
+    let urls = extract_claims(&literal_text)
+        .into_iter()
+        .filter(|c| c.class == ClaimClass::Url)
+        .map(|c| c.text.to_lowercase())
         .collect();
     pool.push(EvidenceEntry {
         step_id,
         source_call_id,
         haystack: text.to_lowercase(),
         numbers,
+        literal_text,
+        urls,
     });
 }
 
@@ -597,13 +632,64 @@ fn ground_one(claim: &Claim, pool: &[EvidenceEntry]) -> Grounding {
     }
 
     let needle = claim.text.to_lowercase();
-    if let Some(entry) = pool.iter().find(|e| e.haystack.contains(&needle)) {
+    if let Some(entry) = pool.iter().find(|e| match claim.class {
+        ClaimClass::Url => e.urls.contains(&needle),
+        ClaimClass::Path | ClaimClass::Version => {
+            contains_literal(&e.literal_text, &needle, claim.class)
+        }
+        _ => e.haystack.contains(&needle),
+    }) {
         return Grounding::Grounded {
             step_id: entry.step_id,
             source_call_id: entry.source_call_id.clone(),
         };
     }
     Grounding::Unresolved
+}
+
+// Strong literals name complete values. Weak quotes/identifiers intentionally
+// retain containment, and numbers retain their separate approximate comparison.
+fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
+    let boundary = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '。'
+                    | '，'
+                    | '、'
+                    | '：'
+                    | '；'
+                    | '「'
+                    | '」'
+                    | '“'
+                    | '”'
+            )
+    };
+    haystack.match_indices(needle).any(|(start, _)| {
+        let prefix = &haystack[..start];
+        let before = prefix.chars().next_back();
+        let starts_value = before.is_none_or(|c| boundary(c) || matches!(c, ':' | '='))
+            || (class == ClaimClass::Version
+                && before == Some('v')
+                && prefix[..prefix.len() - 1]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| boundary(c) || matches!(c, ':' | '=')));
+        // A terminal period/comma is sentence decoration; the same character
+        // followed by more filename/version content is a continuation.
+        let suffix = haystack[start + needle.len()..].trim_start_matches(['.', ',', ';', '!', '?']);
+        starts_value && suffix.chars().next().is_none_or(boundary)
+    })
 }
 
 /// Whether a value follows arithmetically from two values already in evidence.
