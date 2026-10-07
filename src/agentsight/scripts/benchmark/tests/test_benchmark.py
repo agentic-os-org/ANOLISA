@@ -2012,6 +2012,69 @@ def test_aggregate_rows_deltas_and_partial_reports(tmp_path: Path) -> None:
     assert (tmp_path / "performance-comparison.csv").exists()
 
 
+def test_report_writers_survive_malformed_artifacts(tmp_path: Path) -> None:
+    """The fault and regression writers must tolerate the artifact shapes the
+    evidence gates tolerate: a malformed entry renders a placeholder instead
+    of raising and losing the whole report."""
+    run_path = tmp_path / "fault-run" / "run-result.json"
+    measurement = run_path.parent / "measurement"
+    measurement.mkdir(parents=True)
+    measurement.joinpath("fault-results.json").write_text(
+        json.dumps(
+            {
+                "outcomes": {
+                    "invalid_json": 3,
+                    "oversized_input": {"sent": True},
+                    "token_accuracy": {"handled": 2},
+                },
+                "server_healthy_after": True,
+                "process_alive_after": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    items = [
+        (
+            run_path,
+            {
+                "scenario": "fault",
+                "version": "baseline",
+                "summary": complete_summary(),
+            },
+        )
+    ]
+    results_by_version = aggregate_report.write_fault(
+        tmp_path,
+        items,
+        campaign_data(tmp_path)["fault"],
+        campaign_data(tmp_path)["thresholds"],
+    )
+    report = (tmp_path / "fault-report.md").read_text(encoding="utf-8")
+    assert "baseline" in report
+    assert "| 2 |" in report, "the usable case renders its counter total"
+    assert report.count("| — |") >= 2, "unusable cases render placeholders"
+    assert results_by_version["baseline"]["verdict"] == "INCONCLUSIVE"
+
+    (tmp_path / "regression.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {"command": "cargo test", "exit_code": 0},
+                    {"command": "cargo fmt", "exit_code": True},
+                    {"exit_code": 1},
+                    "cargo clippy",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    aggregate_report.write_regression(tmp_path)
+    report = (tmp_path / "regression-report.md").read_text(encoding="utf-8")
+    assert "`cargo test`" in report
+    assert "PASS" in report
+    assert report.count("| — | — | — |") == 3, "unusable checks render placeholders"
+
+
 def test_final_report_summarizes_headline_improvements(tmp_path: Path) -> None:
     items = []
     expected = {
