@@ -859,13 +859,38 @@ fn eval_netdev_max_backlog(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_tcp_max_syn_backlog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_max_syn_backlog";
+    eval_tcp_max_syn_backlog_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_max_syn_backlog",
+        "/proc/sys/net/ipv4/tcp_syncookies",
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_max_syn_backlog`] (the `eval_*_at`
+/// idiom) so the syncookies gate is assertable against temp files on any
+/// host, listener or not.
+///
+/// The syncookies input is read SIGNED: through v5.10 net/ipv4/
+/// sysctl_net_ipv4.c registered tcp_syncookies as a plain `proc_dointvec`
+/// int with no min/max, so -1 is a legal value there, and every consumer is
+/// a truthiness test (net/ipv4/tcp_input.c: `if (syncookies)`,
+/// `if (!syncookies && ...)`, plus the documented `syncookies == 2` mode).
+/// The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the backlog rule sized the knob on exactly the
+/// hosts where the kernel skips its only reader.
+fn eval_tcp_max_syn_backlog_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    syncookies_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if let Some(rec) = syn_backlog_recommendation(
         read_sysctl_u64(path),
-        read_sysctl_u64("/proc/sys/net/ipv4/tcp_syncookies"),
+        read_sysctl_i64(syncookies_path),
         info.has_listen_sockets(),
     ) {
         recs.push(rec);
@@ -904,9 +929,13 @@ fn eval_tcp_max_syn_backlog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 /// writing it. A host that turned syncookies off still reads it — including a
 /// kernel built without CONFIG_SYN_COOKIES, where the file is absent and the
 /// read falls back to 0 — so only the enabled case is skipped.
+///
+/// `syncookies` is i64 because the sysctl held a signed int through v5.10
+/// (plain `proc_dointvec`, no min/max) and -1 means enabled there: the check
+/// is the kernel's own truthiness (`if (!syncookies …)`), not an equality.
 fn syn_backlog_recommendation(
     current: u64,
-    syncookies: u64,
+    syncookies: i64,
     has_listen_sockets: bool,
 ) -> Option<Recommendation> {
     if !has_listen_sockets || syncookies != 0 || current >= 8192 {
@@ -1083,13 +1112,29 @@ fn eval_tcp_wmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_tcp_slow_start_after_idle(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_slow_start_after_idle";
+    eval_tcp_slow_start_after_idle_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_slow_start_after_idle",
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_slow_start_after_idle`] (the `eval_*_at`
+/// idiom) so the value and the congestion control both come from test files
+/// instead of the live /proc.
+fn eval_tcp_slow_start_after_idle_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    congestion_control_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if let Some(rec) = slow_start_after_idle_recommendation(
-        read_sysctl_u64(path),
-        &read_sysctl_string("/proc/sys/net/ipv4/tcp_congestion_control"),
+        read_sysctl_i64(path),
+        &read_sysctl_string(congestion_control_path),
         info.has_listen_sockets(),
     ) {
         recs.push(rec);
@@ -1111,17 +1156,29 @@ fn eval_tcp_slow_start_after_idle(info: &SystemInfo, recs: &mut Vec<Recommendati
 /// on a BBR host the write cannot change any cwnd behavior and the reason's
 /// promise ("禁用后保持已探测的拥塞窗口") already describes what BBR does by
 /// design: it never restarts slow start after an idle period.
+///
+/// `current` is i64 because the knob is a truthiness flag, not an enum: it is
+/// consumed as `if (READ_ONCE(...sysctl_tcp_slow_start_after_idle) && ...)` in
+/// net/ipv4/tcp_output.c, and through v5.10 it was registered as a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), where -1
+/// is a legal, enabled value; since v5.14 the u8 registration
+/// (`proc_dou8vec_minmax`, no extra1/extra2) accepts any 0-255 value, and
+/// every nonzero one is enabled. The old `!= 1` gate missed both shapes — a
+/// -1 host read as the fallback 0, and a u8 host holding 2 was skipped
+/// outright — so the gate is now the kernel's own truthiness: any nonzero
+/// value restarts slow start after idle and is worth disabling for long-lived
+/// connections.
 fn slow_start_after_idle_recommendation(
-    current: u64,
+    current: i64,
     congestion_control: &str,
     has_listen_sockets: bool,
 ) -> Option<Recommendation> {
-    if !has_listen_sockets || congestion_control == "bbr" || current != 1 {
+    if !has_listen_sockets || congestion_control == "bbr" || current == 0 {
         return None;
     }
     Some(Recommendation {
         param: "net.ipv4.tcp_slow_start_after_idle".to_string(),
-        current_value: "1".to_string(),
+        current_value: current.to_string(),
         recommended_value: "0".to_string(),
         reason: "长连接空闲后重新慢启动会造成突发延迟，禁用后保持已探测的拥塞窗口".to_string(),
         confidence: Confidence::Medium,
@@ -1465,11 +1522,32 @@ fn eval_tcp_keepalive_probes(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 }
 
 fn eval_tcp_no_metrics_save(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_no_metrics_save";
+    eval_tcp_no_metrics_save_at(info, recs, "/proc/sys/net/ipv4/tcp_no_metrics_save")
+}
+
+/// Path-injectable form of [`eval_tcp_no_metrics_save`] (the `eval_*_at`
+/// idiom) so the signed read is unit-testable against a temp file.
+///
+/// Through v5.10 net/ipv4/sysctl_net_ipv4.c registered tcp_no_metrics_save as
+/// a plain `proc_dointvec` int with no min/max, so -1 is a legal value there,
+/// and its only consumer is a truthiness test (net/ipv4/tcp_metrics.c:
+/// `if (READ_ONCE(net->ipv4.sysctl_tcp_nometrics_save) || !dst) return;`) —
+/// -1 means "do not save metrics", i.e. the recommended state. The unsigned
+/// reader parsed "-1" to Err and fell back to 0 — the *saving* value — so
+/// the `== 0` gate invented a finding on a host that already discards
+/// cached metrics. Since v5.14 the knob is u8 (`proc_dou8vec_minmax`), where
+/// negatives are rejected at write time; the signed reader keeps the
+/// truthiness contract correct on both registrations.
+fn eval_tcp_no_metrics_save_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value disables metrics saving, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_no_metrics_save".to_string(),
@@ -1884,14 +1962,33 @@ fn eval_sched_migration_cost_at(
 // ─── Additional Security Rules ───────────────────────────────────────────────
 
 fn eval_tcp_syncookies(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_syncookies";
+    eval_tcp_syncookies_at(info, recs, "/proc/sys/net/ipv4/tcp_syncookies")
+}
+
+/// Path-injectable form of [`eval_tcp_syncookies`] (the `eval_*_at` idiom) so
+/// the signed read is unit-testable against a temp file.
+///
+/// Through v5.10 net/ipv4/sysctl_net_ipv4.c registered tcp_syncookies as a
+/// plain `proc_dointvec` int with no min/max, so -1 is a legal value there,
+/// and every consumer is a truthiness test (net/ipv4/tcp_input.c:
+/// `if (syncookies)` arms the cookie path, `if (!syncookies && ...)` guards
+/// the last-quarter reservation, and `syncookies == 2` selects the documented
+/// always-cookie mode) — so -1 means enabled, exactly what this rule asks
+/// for. The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the `== 0` gate invented a SYN-flood finding on a
+/// host that already answers floods with cookies. Since v5.14 the knob is
+/// u8 (`proc_dou8vec_minmax`, no extra1/extra2), where negatives are
+/// rejected at write time; the signed reader keeps the truthiness contract
+/// correct on both registrations.
+fn eval_tcp_syncookies_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value arms the cookie path, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_syncookies".to_string(),
@@ -1940,6 +2037,14 @@ fn eval_send_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 /// after its own plan the write cannot change anything there. An unreadable
 /// conf tree counts as "no forwarding", so the rule stays quiet when it cannot
 /// verify that a redirect could ever be sent.
+///
+/// The value is read SIGNED: `devinet_conf_proc` (net/ipv4/devinet.c) routes
+/// every `conf/<iface>/…` entry through a plain `proc_dointvec` on an int
+/// slot of `struct ipv4_devconf` with no min/max, so -1 is a legal value, and
+/// `IN_DEV_TX_REDIRECTS` (include/linux/inetdevice.h) consumes it through
+/// `IN_DEV_ORCONF` — a truthiness test. The old `== 1` gate skipped the rule
+/// on a host whose redirects are enabled with -1, while the unsigned reader
+/// parsed "-1" to Err and fell back to 0, the *disabled* value.
 fn eval_send_redirects_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -1952,11 +2057,12 @@ fn eval_send_redirects_at(
     if !any_interface_forwards(conf_root) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.send_redirects".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "服务器不应发送 ICMP 重定向，避免被利用进行网络拓扑探测或路由劫持".to_string(),
             confidence: Confidence::High,
@@ -2259,22 +2365,51 @@ fn dir_has_bond(dir: &std::path::Path) -> bool {
 }
 
 fn eval_ip_forward(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/ip_forward";
+    eval_ip_forward_at(info, recs, "/proc/sys/net/ipv4/ip_forward")
+}
+
+/// Path-injectable form of [`eval_ip_forward`] (the `eval_*_at` idiom) so the
+/// signed read is unit-testable against a temp file.
+///
+/// `ctl_forward_entry` (net/ipv4/devinet.c) routes net.ipv4.ip_forward
+/// through `devinet_sysctl_forward`, which calls a plain `proc_dointvec` on
+/// the int FORWARDING slot — its `extra1`/`extra2` are the devconf and net
+/// context, not min/max bounds — so any int is accepted, -1 included. The
+/// consumers read it as a truthiness flag (`IN_DEV_FORWARD` in
+/// include/linux/inetdevice.h; `if (*valp)` in the handler's own fan-out),
+/// so -1 means forwarding is on, exactly the state this rule asks a
+/// non-router host to turn off. The unsigned reader parsed "-1" to Err and
+/// fell back to 0, and the old `== 1` gate then skipped the rule on the
+/// host that most looks like a jumpbox.
+fn eval_ip_forward_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 && !host_needs_ip_forward(info) {
-        recs.push(Recommendation {
-            param: "net.ipv4.ip_forward".to_string(),
-            current_value: "1".to_string(),
-            recommended_value: "0".to_string(),
-            reason: "未检测到容器/虚拟化/VPN/路由用途，关闭 IP 转发可防止被用作中间人或跳板（若本机需转发请忽略）".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Security, writable: true,
-        });
+    if let Some(rec) = ip_forward_recommendation(read_sysctl_i64(path), host_needs_ip_forward(info))
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the ip_forward rule (the `*_recommendation` idiom):
+/// the value and the router verdict are parameters, so the truthiness gate
+/// is assertable on any host — `host_needs_ip_forward` reads the live
+/// process list and `/sys/class/net`, which a unit test cannot control.
+/// Any nonzero value forwards (see [`eval_ip_forward_at`] for the
+/// registration and consumers), so -1 and 2 are as on as 1.
+fn ip_forward_recommendation(current: i64, host_needs_forwarding: bool) -> Option<Recommendation> {
+    if current == 0 || host_needs_forwarding {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.ip_forward".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "0".to_string(),
+        reason: "未检测到容器/虚拟化/VPN/路由用途，关闭 IP 转发可防止被用作中间人或跳板（若本机需转发请忽略）".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Security, writable: true,
+    })
 }
 
 fn eval_unprivileged_bpf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -4618,7 +4753,10 @@ fn eval_default_send_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>
 /// redirect can still only be sent by an interface that forwards — see
 /// [`eval_send_redirects_at`] for the kernel path and the documentation line.
 /// The `default` forwarding template counts as forwarding here, so a host that
-/// arms future interfaces keeps the recommendation.
+/// arms future interfaces keeps the recommendation. Like every
+/// `devinet_conf_proc` entry the slot is a plain `proc_dointvec` int with no
+/// min/max, so the value is read SIGNED and the gate is the consumer's own
+/// truthiness (`IN_DEV_TX_REDIRECTS`): -1 is enabled and must be flagged.
 fn eval_default_send_redirects_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
@@ -4631,11 +4769,12 @@ fn eval_default_send_redirects_at(
     if !any_interface_forwards(conf_root) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.send_redirects".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "新建网络接口默认发送 ICMP 重定向，非路由器应禁用以防网络拓扑探测".to_string(),
             confidence: Confidence::High,
@@ -8391,6 +8530,83 @@ mod tests {
     }
 
     #[test]
+    fn test_tcp_syncookies_reads_truthiness_signed() {
+        // tcp_syncookies was a plain proc_dointvec int with no min/max
+        // through v5.10 (net/ipv4/sysctl_net_ipv4.c), and every consumer is a
+        // truthiness test (net/ipv4/tcp_input.c: `if (syncookies)` arms the
+        // cookie path, `if (!syncookies && ...)` guards the last-quarter
+        // reservation, `syncookies == 2` selects the documented always-cookie
+        // mode), so -1 is a legal, already-enabled value. The unsigned reader
+        // parsed "-1" to Err and fell back to 0 — the *disabled* value — so
+        // the `== 0` gate invented a SYN-flood finding on a host that already
+        // answers floods with cookies.
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP; bind one so
+        // the gate is exercised on any machine (the network_identity suite
+        // uses the same trick).
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_syncookies_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_syncookies_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 leaves SYN cookies off"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_syncookies");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn syn_backlog_skips_when_syncookies_hold_minus_one() {
+        // The syn-backlog rule reads tcp_syncookies as its gate, and that
+        // knob was a plain proc_dointvec int through v5.10, so "-1" is a
+        // legal, enabled value. The unsigned reader turned it into the
+        // fallback 0 — disabled — and the rule sized the backlog on exactly
+        // the hosts where the kernel skips the knob's only reader.
+        let info = make_test_info();
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_syn_backlog_signed_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let backlog = dir.join("tcp_max_syn_backlog");
+        let syncookies = dir.join("tcp_syncookies");
+        std::fs::write(&backlog, "1024\n").unwrap();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+            std::fs::write(&syncookies, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_max_syn_backlog_at(
+                &info,
+                &mut recs,
+                backlog.to_str().unwrap(),
+                syncookies.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "syncookies {value}: any nonzero value skips the knob's only reader"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn slow_start_after_idle_is_not_read_by_bbr() {
         // Both readers of the knob skip congestion controls that define
         // `cong_control`: tcp_output.c's starvation branch ends
@@ -8424,6 +8640,146 @@ mod tests {
         assert_eq!(rec.param, "net.ipv4.tcp_slow_start_after_idle");
         assert_eq!(rec.current_value, "1");
         assert_eq!(rec.recommended_value, "0");
+    }
+
+    #[test]
+    fn slow_start_after_idle_treats_every_nonzero_value_as_enabled() {
+        // tcp_slow_start_after_idle is a truthiness flag, not an enum:
+        // tcp_output.c consumes it as
+        // `if (READ_ONCE(...sysctl_tcp_slow_start_after_idle) && ...)`.
+        // Through v5.10 it was a plain proc_dointvec int with no min/max
+        // (net/ipv4/sysctl_net_ipv4.c), so -1 is a legal, enabled value; since
+        // v5.14 the u8 registration (proc_dou8vec_minmax, no extra1/extra2)
+        // accepts any 0-255 value, and every nonzero one is enabled. The old
+        // `!= 1` gate missed both shapes: a -1 host read as the fallback 0,
+        // and a u8 host holding 2 was skipped outright.
+        for (value, expects_rec) in [(-1, true), (0, false), (1, true), (2, true)] {
+            let rec = slow_start_after_idle_recommendation(value, "cubic", true);
+            assert_eq!(
+                rec.is_some(),
+                expects_rec,
+                "value {value}: any nonzero value restarts slow start after idle"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value,
+                    value.to_string(),
+                    "the reported original is the value the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+    }
+
+    #[test]
+    fn slow_start_after_idle_reads_the_live_value_signed() {
+        // The reader itself must parse "-1" out of the file: the slot held a
+        // signed int through v5.10, and the reported current has to be the
+        // value the kernel actually holds, not the fallback of a failed
+        // unsigned parse.
+        let info = make_test_info();
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_slow_start_signed_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let value = dir.join("tcp_slow_start_after_idle");
+        let cc = dir.join("tcp_congestion_control");
+        std::fs::write(&cc, "cubic\n").unwrap();
+        for (raw, expects_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&value, format!("{raw}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_slow_start_after_idle_at(
+                &info,
+                &mut recs,
+                value.to_str().unwrap(),
+                cc.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "raw {raw}: any nonzero value restarts slow start after idle"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_slow_start_after_idle");
+                assert_eq!(recs[0].current_value, raw);
+                assert_eq!(recs[0].recommended_value, "0");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_tcp_no_metrics_save_reads_truthiness_signed() {
+        // tcp_no_metrics_save was a plain proc_dointvec int with no min/max
+        // through v5.10 (net/ipv4/sysctl_net_ipv4.c), and tcp_metrics.c
+        // consumes it as
+        // `if (READ_ONCE(net->ipv4.sysctl_tcp_nometrics_save) || !dst) return;`
+        // — a truthiness test — so -1 is a legal value that already stops
+        // metric caching. The unsigned reader parsed "-1" to Err and fell
+        // back to 0, the *saving* value, so the `== 0` gate invented a
+        // finding on a host that already discards stale metrics.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_no_metrics_save_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_no_metrics_save_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 keeps caching TCP metrics"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_no_metrics_save");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn ip_forward_treats_every_nonzero_value_as_enabled() {
+        // net.ipv4.ip_forward is a plain proc_dointvec int behind
+        // devinet_sysctl_forward (net/ipv4/devinet.c) — the handler's
+        // extra1/extra2 are the devconf and net context, not min/max — and
+        // IN_DEV_FORWARD (include/linux/inetdevice.h) is a truthiness test,
+        // so -1 is a legal value that means forwarding is on. The unsigned
+        // reader turned "-1" into the fallback 0 and the old `== 1` gate
+        // skipped the rule on exactly that host.
+        for (value, host_needs, expects_rec) in [
+            (-1, false, true),
+            (0, false, false),
+            (1, false, true),
+            (2, false, true),
+            (-1, true, false),
+            (1, true, false),
+        ] {
+            let rec = ip_forward_recommendation(value, host_needs);
+            assert_eq!(
+                rec.is_some(),
+                expects_rec,
+                "value {value}, host_needs {host_needs}"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(rec.param, "net.ipv4.ip_forward");
+                assert_eq!(
+                    rec.current_value,
+                    value.to_string(),
+                    "the reported original is the value the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
     }
 
     #[test]
@@ -9460,6 +9816,52 @@ mod tests {
         eval_default_send_redirects_at(&info, &mut recs, off.to_str().unwrap(), &dir);
         assert!(recs.is_empty(), "an already-disabled knob is satisfied");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn send_redirects_rules_read_truthiness_signed() {
+        // conf/*/send_redirects is a devinet_conf_proc plain proc_dointvec int
+        // slot with no min/max (net/ipv4/devinet.c) — the same registration
+        // the five signed-read fixes already covered — and
+        // IN_DEV_TX_REDIRECTS (include/linux/inetdevice.h) consumes it
+        // through IN_DEV_ORCONF, a truthiness test. The old `== 1` gate
+        // skipped a host whose redirects are enabled with -1, while the
+        // unsigned reader parsed "-1" to Err and fell back to 0, the
+        // *disabled* value.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_send_redirects_signed_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("all")).unwrap();
+        std::fs::create_dir_all(dir.join("default")).unwrap();
+        let all = dir.join("all/send_redirects");
+        let default = dir.join("default/send_redirects");
+        // One forwarding interface makes the redirect path reachable.
+        std::fs::create_dir_all(dir.join("eth0")).unwrap();
+        std::fs::write(dir.join("eth0/forwarding"), "1\n").unwrap();
+
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, true), (0, false), (1, true)] {
+            std::fs::write(&all, format!("{value}\n")).unwrap();
+            std::fs::write(&default, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_send_redirects_at(&info, &mut recs, all.to_str().unwrap(), &dir);
+            eval_default_send_redirects_at(&info, &mut recs, default.to_str().unwrap(), &dir);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec) * 2,
+                "value {value}: both templates track the same value"
+            );
+            if expects_rec {
+                for rec in &recs {
+                    assert_eq!(rec.current_value, value.to_string());
+                    assert_eq!(rec.recommended_value, "0");
+                }
+            }
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
