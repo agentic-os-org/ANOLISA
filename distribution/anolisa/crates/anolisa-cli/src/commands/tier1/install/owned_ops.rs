@@ -46,7 +46,10 @@ use super::io_util::{
     service_cleanup_suffix, write_installed_component_manifest,
 };
 use super::provision::{retained_packages_note, run_provision};
-use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
+use super::raw::{
+    InstallHooks, prepare_raw_execution, resolve_install_hooks,
+    strict_unrunnable_hook_phase_reason, unrunnable_hook_phase_warnings,
+};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
@@ -324,8 +327,26 @@ impl OwnedOps for RawReplayOps<'_> {
             if let Some(reason) = component_conflict(&manifest, self.store) {
                 return Err(OwnedOpError(reason));
             }
-            warnings = super::provision::run_runtime_preflight(&manifest, &self.env, "update")
-                .map_err(|err| OwnedOpError(err.reason()))?;
+            // The same hook-phase contract a fresh install enforces
+            // (`validate_owned_install`): a strict declaration of a phase
+            // no command runs is an authoring defect the update path must
+            // refuse rather than place — failing in download-verify keeps
+            // the host untouched (no backup, no placement, no record
+            // write). A non-strict declaration proceeds with a warning
+            // naming the phase: a hook the current CLI will not execute is
+            // a capability limitation to surface, not a reason to block
+            // the whole upgrade. Replay (repair) skips the preflight and
+            // this check with it: it re-places the recorded manifest and
+            // must not turn a legacy dead-phase declaration into a
+            // recovery blocker.
+            if let Some(reason) = strict_unrunnable_hook_phase_reason(&manifest, &self.component) {
+                return Err(OwnedOpError(reason));
+            }
+            let mut preflight_warnings =
+                super::provision::run_runtime_preflight(&manifest, &self.env, "update")
+                    .map_err(|err| OwnedOpError(err.reason()))?;
+            preflight_warnings.extend(unrunnable_hook_phase_warnings(&manifest, &self.component));
+            warnings = preflight_warnings;
         }
         self.prepared = Some(prepared);
         self.prepared_files = Some(prepared_files);
@@ -1374,7 +1395,7 @@ pub(crate) fn validate_owned_install(
     command: &str,
 ) -> Result<ValidatedInstall, CliError> {
     let component = resolution.component.clone();
-    let prepared = prepare_raw_execution(ctx, layout, resolution)?;
+    let mut prepared = prepare_raw_execution(ctx, layout, resolution)?;
     let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
@@ -1382,6 +1403,13 @@ pub(crate) fn validate_owned_install(
         })?;
     validate_component_conflict(&manifest, store, &HashSet::new(), command)?;
     let hooks = resolve_install_hooks(&manifest, layout, &component)?;
+    // Non-strict declarations of phases no command runs ride the
+    // resolution's warning channel so the install output names exactly
+    // which declared hook this CLI will not execute.
+    prepared
+        .resolution
+        .warnings
+        .extend(unrunnable_hook_phase_warnings(&manifest, &component));
     let prepared_files = InstallRunner::new(layout)
         .prepare_files(
             artifact_type_wire(&prepared.resolution.entry.artifact_type),
