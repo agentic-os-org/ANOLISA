@@ -876,6 +876,50 @@ class TestMainMonkeypatch:
         )
         assert "--trace-context" in captured["args"]
 
+    def test_cli_argv_contract(self, monkeypatch, capsys, tmp_path):
+        """Pin the skill-ledger check argv after the trace-context pair.
+
+        The suite previously asserted only that --trace-context appears in
+        argv; renaming the skill-ledger subcommand or the check verb, or
+        checking the skill name instead of the resolved directory, kept
+        every test green while the real CLI invocation broke (non-zero
+        exit -> fail-open -> integrity check silently disabled).
+        """
+        codex_home = tmp_path / ".codex"
+        skills_dir = codex_home / "skills"
+        skill_dir = _make_skill_dir(skills_dir, "test-skill")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"status": "pass"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
+        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+
+        self._run_main(
+            monkeypatch,
+            capsys,
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "$test-skill do it",
+                "cwd": str(tmp_path),
+                "trace_id": "t1",
+                "session_id": "s1",
+            },
+        )
+        args = captured["args"]
+        assert args[0] == "agent-sec-cli"
+        ctx_end = args.index("--trace-context") + 2
+        assert args[ctx_end:] == ["skill-ledger", "check", skill_dir]
+
     def test_multiple_skills_checked(self, monkeypatch, capsys, tmp_path):
         codex_home = tmp_path / ".codex"
         skills_dir = codex_home / "skills"
