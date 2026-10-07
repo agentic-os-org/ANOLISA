@@ -188,7 +188,7 @@ Multiple distinct sources automatically enable read-only mounting. A single
 source remains writable unless `--read-only` is supplied. This configuration
 always uses the flat output layout, retaining the existing flat and categorized
 source scanning depth. Only the first source's `skillfs-views.toml` is used;
-read-only configuration mounts do not update that file. Skills absent from every
+mounts do not update that file. Skills absent from every
 view are included in the effective default view in memory; explicitly assigned
 secondary skills keep their grouping. No source config merge,
 automatic source discovery, or hot reload is performed. Remount after changing
@@ -257,8 +257,9 @@ The default view appears directly in the mounted skill view. Secondary views
 are listed by the virtual `skill-discover` skill, whose `SKILL.md` includes the
 skill names and source paths.
 
-Skills not assigned to any view are added to the default view on the next
-mount.
+Skills not assigned to any view are included in the effective default view
+in memory. Mounting does not rewrite `skillfs-views.toml`; edit it explicitly
+to persist assignments and remount to apply changed view configuration.
 
 ## Read and Write Semantics
 

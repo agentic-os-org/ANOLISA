@@ -115,16 +115,17 @@ flowchart TD
 
   Q -->|name in default view| R[Visible in primary view readdir]
   Q -->|name in secondary view| S[Visible in skill-discover]
-  Q -->|name in no configured view| T[Exists in store but hidden from configured views]
+  Q -->|name in no configured view| R
 ```
 
 这张图对应当前实现的几个关键语义：
 
 - 写操作先修改物理文件系统，再决定是否同步 store。
 - 只有 `SKILL.md` 和 skill 目录结构变化会影响 store；普通透传文件不会改变视图。
-- store 更新后不会自动修改 `skillfs-views.toml`，只会和挂载时加载的 views 配置做一次“名字交集”。
-- 主视图是否可见，取决于该目录名是否在 default view 里。
-- secondary view 是否可见，取决于该目录名是否在 secondary views 里；它通过 `skill-discover` 展示，而不是单独目录。
+- store 更新后不会自动修改或热重载 `skillfs-views.toml`；运行时仍使用挂载时加载的配置快照。
+- 主视图成员由 `effective_default_skills` 在内存中计算：store 中仍存在的显式 default 成员，加上没有分配到任何 view 的成员。未分配成员可在 `/skills` 中看到，不会因此写入 TOML。
+- 仅分配到 secondary views 的成员不进入主视图；`skill-discover` 按 secondary 名单与当前 store 的交集展示，而不是创建独立视图目录。
+- 同时列入 default 和 secondary 的成员可以在两处展示；不能把“未分配”与“仅分配到 secondary”合称为隐藏成员。
 - rename 后即使 frontmatter `name:` 仍是旧值，store 也只认目录名，不会把旧 key 写回。
 
 ---
@@ -171,7 +172,7 @@ flowchart TD
 
 ### 6.2 视图配置一致性
 
-- 挂载期 FUSE 回调不会写入或重写 `skillfs-views.toml`。
+- 挂载启动和挂载期 FUSE 回调均不会重写 `skillfs-views.toml`；未分配技能的默认成员关系在内存中计算。
 - 因此可能出现「views 名单与真实目录状态漂移」（例如重命名或删除后，toml 仍保留旧 skill 名）。
 - 该漂移不会破坏 toml 文件格式。
 
@@ -246,28 +247,40 @@ FUSE 写回调只会把可解析为技能路径的请求映射到底层 source�
 3. normal 下绕过挂载点改目录结构：常见「新目录已存在但列表未出现」或「旧目录已删但列表短时仍可见」。
 4. 修改 views 文件：运行中不重载，重挂载后按新配置展示。
 
-### 7.2 视图内/视图外对比
+### 7.2 显式默认、次级分配与未分配对比
 
-「视图内」表示 skill 在 default view；「视图外」表示不在 default view（可能属于 secondary 或未分配）。
+以下按挂载时的配置快照和当前 store 区分三类目录名：
 
-| 变更类型 | 目标是否在 default view | 物理文件系统 | store | `/skills` | `skill-discover` | `skillfs-views.toml` |
-|----------|--------------------------|--------------|-------|-----------|------------------|----------------------|
-| 修改 `SKILL.md` 内容 | 视图内 | 更新 | reparse 后更新 | 继续可见 | 无变化 | 不变 |
-| 修改 `SKILL.md` 内容 | 视图外 | 更新 | reparse 后更新 | 默认仍不可见 | 可在 secondary 展示 | 不变 |
-| `mkdir` skill 目录（无 `SKILL.md`） | N/A | 创建 | 插入 placeholder | 有 views 时通常不进 default | 取决于 views 分配 | 不变 |
-| 创建/写入新 `SKILL.md` | N/A | 创建并更新 | reparse 后入库 | 取决于 default view 列表 | 取决于 secondary 列表 | 不变 |
-| `unlink SKILL.md` | 视图内 | 删除 | 立即 remove | 从 `/skills` 消失 | 对应条目消失 | 不变（可能陈旧） |
-| `unlink SKILL.md` | 视图外 | 删除 | 立即 remove | 默认通常无变化 | 对应条目消失 | 不变（可能陈旧） |
-| `rmdir` skill 目录 | 视图内 | 删除 | 立即 remove | 从 `/skills` 消失 | 对应条目消失 | 不变（可能陈旧） |
-| `rmdir` skill 目录 | 视图外 | 删除 | 立即 remove | 默认通常无变化 | 对应条目消失 | 不变（可能陈旧） |
-| `rename` skill 目录 | 视图内 | 改名 | key 切换到新目录名 | 旧名消失；新名取决于 default 列表 | 取决于 views 列表 | 不变（旧名仍在） |
-| `rename` skill 目录 | 视图外 | 改名 | key 切换到新目录名 | 默认通常无变化 | 取决于 views 列表 | 不变（旧名仍在） |
+- **显式默认**：配置的 default view 包含该名称；仅 store 中仍存在的成员可见。
+- **仅次级分配**：至少一个 secondary view 包含该名称，default view 不包含；通过 `skill-discover` 展示，不进入 `/skills` 主列表。
+- **未分配**：任何 view 都不包含该名称；只要在 store 中，就由 `effective_default_skills` 纳入主视图，不需要持久化自动分配。
 
-说明：7.2 表描述「视图归属维度」的行为；若变更入口绕过挂载点，需同时参考 7.1 的挂载模式差异。
+| 变更类型 | 名称的配置归属 | 物理文件系统 | store | `/skills` 主列表 | secondary `skill-discover` | `skillfs-views.toml` |
+|----------|----------------|--------------|-------|------------------|---------------------------|----------------------|
+| 修改 `SKILL.md` 内容 | 显式默认 | 更新 | reparse 后更新 | 继续可见 | 如同时分配到 secondary，则同步展示新元数据 | 不变 |
+| 修改 `SKILL.md` 内容 | 仅次级分配 | 更新 | reparse 后更新 | 不可见 | 展示新元数据 | 不变 |
+| 修改 `SKILL.md` 内容 | 未分配 | 更新 | reparse 后更新 | 继续可见 | 不加入 secondary 名单 | 不变 |
+| `mkdir` skill 目录 / 创建新 `SKILL.md` | 显式默认 | 创建或更新 | placeholder / reparse 后入库 | 入库后可见 | 如同时分配到 secondary，则可展示 | 不变 |
+| `mkdir` skill 目录 / 创建新 `SKILL.md` | 仅次级分配 | 创建或更新 | placeholder / reparse 后入库 | 不可见 | 入库后可展示 | 不变 |
+| `mkdir` skill 目录 / 创建新 `SKILL.md` | 未分配 | 创建或更新 | placeholder / reparse 后入库 | 入库后可见 | 不加入 secondary 名单 | 不变 |
+| `unlink SKILL.md` / `rmdir` skill 目录 | 显式默认 | 删除 | 立即 remove | 旧成员消失 | 对应条目消失（若原先有次级分配） | 不变，可能保留旧名 |
+| `unlink SKILL.md` / `rmdir` skill 目录 | 仅次级分配 | 删除 | 立即 remove | 不新增成员 | 对应条目消失 | 不变，可能保留旧名 |
+| `unlink SKILL.md` / `rmdir` skill 目录 | 未分配 | 删除 | 立即 remove | 旧成员消失 | 无对应次级条目 | 不变 |
+| `rename` skill 目录 | 新名称为显式默认 | 改名 | 删除旧 key，以新目录名入库 | 旧名消失；新名可见 | 按新名称的 secondary 分配展示 | 不变，可能保留旧名 |
+| `rename` skill 目录 | 新名称仅次级分配 | 改名 | 删除旧 key，以新目录名入库 | 旧名消失；新名不进入主列表 | 按新名称的 secondary 分配展示 | 不变，可能保留旧名 |
+| `rename` skill 目录 | 新名称未分配 | 改名 | 删除旧 key，以新目录名入库 | 旧名消失；新名在内存中进入主视图 | 不加入 secondary 名单 | 不变，可能保留旧名 |
+
+`rename` 后按**新目录名**重新计算归属，旧目录名的配置分配不会自动迁移。例如仅次级分配的 skill 改为一个未分配名称后，新成员会在主视图可见，但 TOML 仍保留旧分配。
+
+本表的 discover 列针对存在 secondary views 的配置。没有 secondary views 时，`skill-discover` 回退为 store 的简单列表；无配置时主视图展示全部 store 成员。若变更入口绕过挂载点，仍需同时参考 7.1 的挂载模式差异。
 
 ---
 
 ## 8. Test Coverage
+
+`scripts/test.sh` 的挂载 smoke 同时配置显式默认的 `primary-skill`、仅次级分配的 `secondary-skill` / `tertiary-skill`，以及没有持久化分配的 `unassigned-skill`。它验证 `unassigned-skill` 在 `/skills` 可见、次级成员不在主列表，并对比挂载前后 `skillfs-views.toml` 的字节完全相同。
+
+`crates/skillfs-core/src/views.rs` 的 `effective_default_includes_unassigned_without_changing_views` 回归还验证内存默认成员计算不会改变配置对象，包括没有显式 default view 的场景。
 
 当前关键验证集中在 `crates/skillfs-fuse/tests/write_guard_tests.rs`：
 

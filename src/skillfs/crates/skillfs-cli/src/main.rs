@@ -1770,29 +1770,8 @@ async fn cmd_mount(
 
     info!(count = store.len(), "skills loaded");
 
-    // Auto-assign any skills that are not yet in any view to the default view.
-    if let Some(mut views) = ViewsConfig::load(runtime_roots.physical_source_root())
-        .filter(|_| !(sources.is_some() && read_only))
-    {
-        let assigned = views.all_assigned_skills();
-        let new_skills: Vec<String> = store
-            .list()
-            .iter()
-            .filter(|name| !assigned.contains(**name))
-            .map(|s| s.to_string())
-            .collect();
-        if !new_skills.is_empty() {
-            info!(
-                count = new_skills.len(),
-                "auto-assigning new skills to default view"
-            );
-            if let Err(e) =
-                views.assign_to_default(runtime_roots.physical_source_root(), &new_skills)
-            {
-                warn!(error = %e, "failed to save updated views config");
-            }
-        }
-    }
+    // Default membership is resolved from the store in memory. Rewriting a
+    // loaded views snapshot here would overwrite concurrent operator edits.
 
     let shared_store: SharedSkillStore = Arc::new(parking_lot::RwLock::new(store));
 
@@ -3024,7 +3003,7 @@ async fn cmd_classify(
             .filter(|n| !assigned.contains(*n))
             .collect();
         if !unassigned.is_empty() {
-            println!("Unassigned skills (will be added to default view on next mount):");
+            println!("Unassigned skills (included in the default view in memory on mount):");
             for s in &unassigned {
                 println!("  - {}", escape_ctl_stderr(s));
             }

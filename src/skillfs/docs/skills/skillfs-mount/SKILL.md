@@ -110,7 +110,7 @@ sleep 1
 ls ~/.openclaw/skills/    # 应只显示主视图 skill + skill-discover
 ```
 
-挂载时自动将未出现在 views.toml 中的新 skill 追加到默认视图。
+挂载时将未分配到任何视图的新 skill 纳入内存中的默认视图，不改写 `skillfs-views.toml`。需要持久化分配时显式编辑配置，修改后重挂载生效。
 
 需要长期保持挂载时改用 managed 模式：它启动一个 detached supervisor，worker 意外退出后
 会自动重挂，不需要自己管理 pid file。

@@ -184,7 +184,8 @@ skills = ["apple-notes", "blogwatcher"]
 
 挂载后：
 
-- `/skills` 显示 default view 中的 skills。
+- `/skills` 显示 default view 中的 skills，以及尚未分配到任何 view 的 skills。
+- 挂载不改写 `skillfs-views.toml`；需持久化分配时显式编辑配置，修改视图配置后重挂载生效。
 - `skill-discover/SKILL.md` 列出 secondary views 中的 skills 及其
   可读 `source_path`。
 

@@ -176,7 +176,7 @@ skillfs mount --config /path/to/skillfs-mount.toml
 
 多个不同源自动启用只读挂载；单源仍可写，除非指定 `--read-only`。
 该入口固定使用 flat 输出布局，保留现有 flat/category 源目录扫描深度。
-只使用第一个源的 `skillfs-views.toml`；只读配置挂载不更新此文件。
+只使用第一个源的 `skillfs-views.toml`；挂载不更新此文件。
 未分配到任何 view 的 skill 会在内存中加入有效默认视图；显式分配到 secondary
 view 的 skill 保持原有分组。
 不合并源配置，不自动发现源，也不热加载。修改配置或新增、删除 skill 后需重新挂载；
@@ -240,7 +240,8 @@ skills = ["apple-notes", "blogwatcher"]
 default view 会直接出现在挂载后的 skill 视图中。Secondary views 由虚拟
 `skill-discover` skill 列出，其 `SKILL.md` 包含 skill 名称和 source path。
 
-未分配到任何 view 的 skill 会在下次 mount 时加入 default view。
+未分配到任何 view 的 skill 会纳入内存中的有效 default view。挂载不改写
+`skillfs-views.toml`；需要持久化分配时显式编辑配置，修改视图配置后重挂载生效。
 
 ## 读写语义
 

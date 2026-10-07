@@ -164,7 +164,7 @@ impl ViewsConfig {
 
     /// Return existing default-view skills plus skills not assigned to any view.
     ///
-    /// Resolve automatic membership in memory so read-only mounts need not
+    /// Resolve automatic membership in memory so mounts need not
     /// rewrite the source configuration. Explicit secondary assignments remain
     /// excluded, including when the file has no default view.
     pub fn effective_default_skills(&self, store: &crate::store::SkillStore) -> Vec<String> {
@@ -190,8 +190,8 @@ impl ViewsConfig {
 
     /// Append `new_skills` to the default view's skills list and save.
     ///
-    /// Used for auto-assigning newly installed skills that are not yet in
-    /// any view.
+    /// Persist an explicit addition; mounts resolve automatic membership in
+    /// memory without updating the source configuration.
     pub fn assign_to_default(
         &mut self,
         source_dir: &Path,
