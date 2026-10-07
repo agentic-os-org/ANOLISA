@@ -1071,6 +1071,14 @@ function renderAtifPage() {
       new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
       return mod.exports;
     })(),
+    '../utils/trajectoryTextFilter': (() => {
+      // The page imports the real filter so a query matches the same rounds the
+      // browser does; it has no runtime imports of its own.
+      const out = transpile('src/utils/trajectoryTextFilter.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': panelStub,
     '../utils/trajectoryTree': {
