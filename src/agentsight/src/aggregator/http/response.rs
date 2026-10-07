@@ -256,6 +256,12 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                     || part
                         .get("functionCall")
                         .is_some_and(|call| non_empty_string(call.get("name")))
+                    || part
+                        .get("inlineData")
+                        .is_some_and(|data| non_empty_string(data.get("data")))
+                    || part
+                        .get("executableCode")
+                        .is_some_and(|code| non_empty_string(code.get("code")))
             })
         });
     }
@@ -634,5 +640,85 @@ mod latency_tests {
         ]);
 
         assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    /// Gemini image generation streams its answer as `inlineData` parts and
+    /// code execution as `executableCode` parts — neither carries `text`, so
+    /// the candidates arm above never dated them and those calls had no TTFT.
+    #[test]
+    fn recognizes_gemini_multimodal_output_parts() {
+        let image = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                "role": "model"}, "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let code = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_image = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": ""}}],
+                "role": "model"}, "finishReason": "STOP", "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
+        });
+        // The sandbox's execution result is not model output: it follows the
+        // model-authored executableCode part, so it must not date the stream
+        // on its own.
+        let execution_result = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                "role": "model"}, "index": 0}]
+        });
+
+        assert!(event_has_meaningful_output(Some(&image)));
+        assert!(event_has_meaningful_output(Some(&code)));
+        assert!(!event_has_meaningful_output(Some(&empty_image)));
+        assert!(!event_has_meaningful_output(Some(&execution_result)));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_image_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                    "role": "model"},"index":0}]}"#,
+                200,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_code_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}],
+                    "usageMetadata": {"promptTokenCount": 10}}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                    "role": "model"},"index":0}]}"#,
+                250,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                    "role": "model"},"index":0}]}"#,
+                400,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(250));
     }
 }
