@@ -587,6 +587,9 @@ pub(crate) struct RawTeardownOps<'a> {
     /// Pre/post-uninstall hooks resolved from the installed manifest
     /// snapshot (best-effort: a missing snapshot means no hooks).
     hooks: ResolvedLifecycleHooks,
+    /// Copies of payload-shipped post-uninstall scripts staged before the
+    /// owned files are removed (see [`Self::stage_post_uninstall_hooks`]).
+    staged_post_uninstall: Vec<PathBuf>,
     store: &'a mut StateStore,
     state_path: &'a Path,
 }
@@ -614,6 +617,7 @@ impl<'a> RawTeardownOps<'a> {
             log: CentralLog::open(layout.central_log.clone()),
             prior,
             hooks,
+            staged_post_uninstall: Vec::new(),
             store,
             state_path,
         }
@@ -632,6 +636,100 @@ impl<'a> RawTeardownOps<'a> {
         Err(OwnedOpError(format!(
             "{what} is not wired for owned teardown yet"
         )))
+    }
+
+    /// Stage payload-shipped `post_uninstall` scripts before the owned
+    /// files are removed.
+    ///
+    /// The plan runs `RunHook(PostUninstall)` after `RemoveOwnedFiles`,
+    /// and hook scripts ship in the component payload as owned layout
+    /// files (the contract's canonical placement), so the removal step
+    /// deletes them before the post phase resolves - without staging,
+    /// every payload-shipped post_uninstall hook would be silently
+    /// skipped as `Missing`. Each surviving script is copied into an
+    /// owned staging directory under `state_dir` (`validate_owned_path`
+    /// accepts it, and `fs::copy` preserves the executable mode) and the
+    /// spec is pointed at the copy. A script that is already missing or
+    /// unreadable stays untouched so the run reports `Missing` exactly as
+    /// before; a staging failure falls back to the original path rather
+    /// than failing the uninstall. A source that fails the owned-roots
+    /// boundary check - outside the roots, or a symlink under them
+    /// pointing out - is likewise left untouched, so `run_hook` rejects
+    /// the path exactly as it would without staging.
+    fn stage_post_uninstall_hooks(&mut self) {
+        if self.hooks.post_uninstall.is_empty() {
+            return;
+        }
+        let staging_root = self
+            .layout
+            .state_dir
+            .join("uninstall-hooks")
+            .join(&self.component);
+        for (index, spec) in self.hooks.post_uninstall.iter_mut().enumerate() {
+            let source = spec.script.clone();
+            // Boundary before any stat or copy: the spec came from the
+            // persisted contract, so a source outside the owned roots -
+            // or a symlink under them pointing out - must not be copied
+            // into the state directory, trusted territory `run_hook`
+            // executes from without further questions. Leaving the spec
+            // untouched keeps the pre-staging behavior: `run_hook`
+            // rejects the path itself instead of running a smuggled
+            // script.
+            if validate_owned_path(self.layout, &source).is_err() {
+                continue;
+            }
+            if !source.is_file() {
+                continue;
+            }
+            let Some(name) = source.file_name() else {
+                continue;
+            };
+            let staged = staging_root.join(format!("{index}-{}", name.to_string_lossy()));
+            if validate_owned_path(self.layout, &staged).is_err() {
+                continue;
+            }
+            if fs::create_dir_all(&staging_root).is_err() || fs::copy(&source, &staged).is_err() {
+                continue;
+            }
+            self.staged_post_uninstall.push(staged.clone());
+            spec.script = staged;
+        }
+    }
+
+    /// Remove the staged post-uninstall copies (best effort) once the post
+    /// phase has run. `remove_dir` only succeeds when empty, so leftovers
+    /// from another uninstall are never destroyed.
+    fn cleanup_staged_post_uninstall_hooks(&mut self) {
+        let staged = std::mem::take(&mut self.staged_post_uninstall);
+        remove_staged_hook_copies(&staged);
+    }
+}
+
+impl Drop for RawTeardownOps<'_> {
+    /// The teardown can abort between staging the post-uninstall copies
+    /// (`remove_owned_files`) and the post phase that consumes them - for
+    /// instance when a later owned-file removal fails. The executor then
+    /// returns without running `RunHook(PostUninstall)`, and if the hook's
+    /// own payload file was already deleted, a retry finds no source and
+    /// never re-stages, so an executable copy would sit in the state
+    /// directory forever. Dropping purges whatever the success path
+    /// ([`RawTeardownOps::cleanup_staged_post_uninstall_hooks`] empties
+    /// the list first) did not consume.
+    fn drop(&mut self) {
+        remove_staged_hook_copies(&self.staged_post_uninstall);
+    }
+}
+
+/// Delete a staged-copy list and its now-empty directories, best effort.
+fn remove_staged_hook_copies(staged: &[PathBuf]) {
+    for path in staged {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(component_dir) = staged.first().and_then(|path| path.parent()) {
+        let _ = fs::remove_dir(component_dir);
+        if let Some(root) = component_dir.parent() {
+            let _ = fs::remove_dir(root);
+        }
     }
 }
 
@@ -658,6 +756,9 @@ impl OwnedOps for RawTeardownOps<'_> {
             "cli",
             &self.install_mode,
         );
+        if matches!(kind, HookKind::PostUninstall) {
+            self.cleanup_staged_post_uninstall_hooks();
+        }
         self.hook_step(run)
     }
 
@@ -728,6 +829,10 @@ impl OwnedOps for RawTeardownOps<'_> {
     /// arbitrary-delete primitive, and skipping keeps the operation moving
     /// on the legitimate files.
     fn remove_owned_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
+        // The post-uninstall phase runs after this step and its scripts
+        // ship in the payload as owned files, so they are about to be
+        // deleted by the loop below - stage surviving copies first.
+        self.stage_post_uninstall_hooks();
         let mut warnings = Vec::new();
         let mut removed_parents: Vec<PathBuf> = Vec::new();
         for file in &self.prior.files {
