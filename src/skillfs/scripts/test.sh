@@ -26,11 +26,21 @@ PID_FILE="$TMP_ROOT/skillfs.pid"
 LOG_FILE="$TMP_ROOT/skillfs.log"
 MOUNT_PID=""
 MANAGED_MOUNT_DIR=""
+CONC_XDG=""
+CONC_MOUNT_DIR=""
 FAIL_XDG=""
 FAIL_MOUNT_DIR=""
 
 info() {
 	echo "[skillfs-e2e] $1"
+}
+
+# Managed pid files hold the bare pid; the process identity captured at
+# fork time lives in the "<pidfile>.identity" sidecar (see
+# crates/skillfs-cli/src/managed.rs). Tooling here only ever needs the pid,
+# which is the whole (first) field.
+managed_pid_of() {
+	awk '{print $1}' "$1" 2>/dev/null || echo
 }
 
 pass() {
@@ -61,6 +71,10 @@ cleanup() {
 	if [[ -n "$MANAGED_MOUNT_DIR" ]]; then
 		"$BIN" stop "$MANAGED_MOUNT_DIR" >/dev/null 2>&1 || true
 		force_unmount "$MANAGED_MOUNT_DIR" || true
+	fi
+	if [[ -n "$CONC_MOUNT_DIR" ]]; then
+		XDG_RUNTIME_DIR="$CONC_XDG" "$BIN" stop "$CONC_MOUNT_DIR" >/dev/null 2>&1 || true
+		force_unmount "$CONC_MOUNT_DIR" || true
 	fi
 	force_unmount "$MOUNT_DIR" || true
 	cleanup_mounts_under_tmp
@@ -306,8 +320,8 @@ WORKER_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.worker.pid 2>/dev/null | head -n1)"
 SUP_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.supervisor.pid 2>/dev/null | head -n1)"
 [[ -n "$WORKER_PID_FILE" ]] || fail "找不到 worker pid 文件"
 [[ -n "$SUP_PID_FILE" ]] || fail "找不到 supervisor pid 文件"
-OLD_WORKER_PID="$(cat "$WORKER_PID_FILE")"
-SUP_PID="$(cat "$SUP_PID_FILE")"
+OLD_WORKER_PID="$(managed_pid_of "$WORKER_PID_FILE")"
+SUP_PID="$(managed_pid_of "$SUP_PID_FILE")"
 
 info "强杀 worker (pid=$OLD_WORKER_PID)，保留 supervisor (pid=$SUP_PID)"
 kill -KILL "$OLD_WORKER_PID" 2>/dev/null || true
@@ -331,7 +345,7 @@ done
 restored=false
 for _ in $(seq 1 150); do
 	if grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
-		NEW_WORKER_PID="$(cat "$WORKER_PID_FILE" 2>/dev/null || echo)"
+		NEW_WORKER_PID="$(managed_pid_of "$WORKER_PID_FILE")"
 		if [[ -n "$NEW_WORKER_PID" && "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ]] \
 			&& kill -0 "$NEW_WORKER_PID" 2>/dev/null \
 			&& ls "$MANAGED_MOUNT_DIR" >/dev/null 2>&1; then
@@ -350,7 +364,7 @@ if ! ls "$MANAGED_MOUNT_DIR/skills" >/dev/null 2>&1; then
 fi
 pass "恢复后 ls <mountpoint>/skills 成功"
 
-ORPHAN_WORKER_PID="$(cat "$WORKER_PID_FILE")"
+ORPHAN_WORKER_PID="$(managed_pid_of "$WORKER_PID_FILE")"
 info "强杀 supervisor (pid=$SUP_PID)，保留孤儿 worker (pid=$ORPHAN_WORKER_PID)"
 kill -KILL "$SUP_PID" 2>/dev/null || true
 for _ in $(seq 1 50); do
@@ -375,8 +389,8 @@ SUP_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.supervisor.pid 2>/dev/null | head -n1)
 WORKER_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.worker.pid 2>/dev/null | head -n1)"
 [[ -n "$SUP_PID_FILE" ]] || fail "恢复后找不到 supervisor pid 文件"
 [[ -n "$WORKER_PID_FILE" ]] || fail "恢复后找不到 worker pid 文件"
-SUP_PID="$(cat "$SUP_PID_FILE")"
-NEW_WORKER_PID="$(cat "$WORKER_PID_FILE")"
+SUP_PID="$(managed_pid_of "$SUP_PID_FILE")"
+NEW_WORKER_PID="$(managed_pid_of "$WORKER_PID_FILE")"
 if [[ "$NEW_WORKER_PID" == "$ORPHAN_WORKER_PID" ]]; then
 	fail "重新 managed mount 后仍复用孤儿 worker"
 fi
@@ -424,7 +438,7 @@ for _ in $(seq 1 100); do
 	live=false
 	for pf in "$FAIL_STATE_DIR"/*.supervisor.pid "$FAIL_STATE_DIR"/*.worker.pid; do
 		[[ -e "$pf" ]] || continue
-		p="$(cat "$pf" 2>/dev/null || echo)"
+		p="$(managed_pid_of "$pf")"
 		if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
 			live=true
 		fi
@@ -485,5 +499,78 @@ if [[ -f "$WORKER_PID_FILE" || -f "$SUP_PID_FILE" ]]; then
 fi
 pass "stop 清理 managed 挂载与进程"
 MANAGED_MOUNT_DIR=""
+
+# ---------------------------------------------------------------------------
+# Concurrent managed mounts: exactly one supervisor (round-5 review barrier)
+# ---------------------------------------------------------------------------
+
+info "测试两个并发 managed mount 只产生一个 supervisor"
+
+# Two real `mount --managed` clients race for the same instance. Whoever
+# takes the instance lock first publishes the supervisor and its pid identity
+# inside the critical section; the other must observe that record and report
+# the mount already active instead of starting a second supervisor. Before
+# the identity was published inside the lock, the second client could pass
+# the gate against a not-yet-visible record and start a second supervisor,
+# either of whose finish paths would delete the other generation's records.
+CONC_XDG="$TMP_ROOT/xdg-concurrent"
+mkdir -p "$CONC_XDG"
+CONC_MOUNT_DIR="$TMP_ROOT/managed-concurrent-mount"
+mkdir -p "$CONC_MOUNT_DIR"
+
+XDG_RUNTIME_DIR="$CONC_XDG" "$BIN" mount "$SOURCE_DIR" "$CONC_MOUNT_DIR" --managed \
+	--log-file "$TMP_ROOT/managed-concurrent-a.log" >/dev/null 2>&1 &
+CONC_A_PID=$!
+XDG_RUNTIME_DIR="$CONC_XDG" "$BIN" mount "$SOURCE_DIR" "$CONC_MOUNT_DIR" --managed \
+	--log-file "$TMP_ROOT/managed-concurrent-b.log" >/dev/null 2>&1 &
+CONC_B_PID=$!
+
+CONC_A_RC=0
+CONC_B_RC=0
+wait "$CONC_A_PID" || CONC_A_RC=$?
+wait "$CONC_B_PID" || CONC_B_RC=$?
+
+assert_equals "$CONC_A_RC" "0" "并发 managed mount 客户端 A 返回成功"
+assert_equals "$CONC_B_RC" "0" "并发 managed mount 客户端 B 返回成功"
+
+CONC_SUP_PID_FILE="$(ls "$CONC_XDG/skillfs"/*.supervisor.pid 2>/dev/null | head -n1)"
+[[ -n "$CONC_SUP_PID_FILE" ]] || fail "并发场景下找不到 supervisor pid 文件"
+# The instance id is the pid file's own name; the supervisor count below must
+# only ever cover THIS instance, because a shared host may legally run other
+# SkillFS instances whose supervisors would inflate a host-wide count.
+CONC_INSTANCE_ID="$(basename "$CONC_SUP_PID_FILE" .supervisor.pid)"
+CONC_SUP_PID="$(managed_pid_of "$CONC_SUP_PID_FILE")"
+if ! kill -0 "$CONC_SUP_PID" 2>/dev/null; then
+	fail "并发场景下 supervisor 未运行"
+fi
+pass "并发 managed mount 后 supervisor 存活"
+
+# Exactly one supervisor process may exist for the instance: the loser of the
+# gate must have seen the published identity, not started its own. The match
+# is anchored to this instance's id, so supervisors of unrelated instances on
+# the same host cannot fail the count.
+if command -v pgrep >/dev/null 2>&1; then
+	CONC_SUPERVISORS="$(pgrep -fc "supervise --instance ${CONC_INSTANCE_ID}\$" || true)"
+	assert_equals "$CONC_SUPERVISORS" "1" "并发 managed mount 只启动一个 supervisor"
+else
+	info "pgrep 不存在，跳过 supervisor 计数"
+fi
+
+CONC_WORKER_PID_FILE="$(ls "$CONC_XDG/skillfs"/*.worker.pid 2>/dev/null | head -n1)"
+[[ -n "$CONC_WORKER_PID_FILE" ]] || fail "并发场景下找不到 worker pid 文件"
+CONC_WORKER_PID="$(managed_pid_of "$CONC_WORKER_PID_FILE")"
+if ! kill -0 "$CONC_WORKER_PID" 2>/dev/null; then
+	fail "并发场景下 worker 未运行"
+fi
+if ! ls "$CONC_MOUNT_DIR/skills" >/dev/null 2>&1; then
+	fail "并发场景下 mountpoint 不可访问"
+fi
+pass "并发 managed mount 挂载可用"
+
+info "停止并发场景实例"
+if ! XDG_RUNTIME_DIR="$CONC_XDG" "$BIN" stop "$CONC_MOUNT_DIR" >/dev/null 2>&1; then
+	fail "并发场景 stop 返回非零"
+fi
+CONC_MOUNT_DIR=""
 
 info "端到端测试完成"
