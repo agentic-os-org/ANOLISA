@@ -17,7 +17,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+import pytest
 
 from swe_runner.common.models import AgentResult, InstanceResult, Prediction, SWEInstance
 from swe_runner.run.io.output_store import RunOutputStore
@@ -67,6 +70,64 @@ def test_load_attempted_instance_ids_ignores_invalid_result_files(tmp_path: Path
     (results_dir / "invalid.json").write_text("{not-json", encoding="utf-8")
 
     assert RunOutputStore(tmp_path).load_attempted_instance_ids() == {"inst-1"}
+
+
+def test_load_attempted_instance_ids_skips_undecodable_result_files(tmp_path: Path) -> None:
+    """A result file with invalid UTF-8 must not abort batch resume.
+
+    The strict UTF-8 read raises UnicodeDecodeError, which the per-file
+    skip-and-warn guard must cover like it already covers malformed JSON —
+    otherwise one damaged results/*.json file aborts run_batch() before
+    prepare_batch() or any instance runs.
+    """
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "healthy.json").write_text('{"instance_id": "inst-1"}', encoding="utf-8")
+    damaged = b'{"instance_id": "inst-2", "raw_output": "\xff"}'
+    (results_dir / "damaged.json").write_bytes(damaged)
+
+    assert RunOutputStore(tmp_path).load_attempted_instance_ids() == {"inst-1"}
+    # The damaged file keeps its bytes: no replacement decode, no rewrite.
+    assert (results_dir / "damaged.json").read_bytes() == damaged
+
+
+def test_load_attempted_instance_ids_skips_truncated_multibyte_result_files(tmp_path: Path) -> None:
+    """A truncated multibyte sequence is not decodable either and must be skipped."""
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "healthy.json").write_text('{"instance_id": "inst-1"}', encoding="utf-8")
+    # "\u4e2d" is U+4E2D (E4 B8 AD); keeping only E4 B8 truncates the sequence.
+    (results_dir / "truncated.json").write_bytes(b'{"instance_id": "inst-2", "note": "\xe4\xb8"}')
+
+    assert RunOutputStore(tmp_path).load_attempted_instance_ids() == {"inst-1"}
+
+
+def test_load_attempted_instance_ids_skips_utf16_result_files(tmp_path: Path) -> None:
+    """A UTF-16 result file decodes as garbage bytes under strict UTF-8; skip it."""
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "healthy.json").write_text('{"instance_id": "inst-1"}', encoding="utf-8")
+    (results_dir / "utf16.json").write_bytes('{"instance_id": "inst-2"}'.encode("utf-16"))
+
+    assert RunOutputStore(tmp_path).load_attempted_instance_ids() == {"inst-1"}
+
+
+def test_load_attempted_instance_ids_warns_on_undecodable_result_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The skip must go through the existing warning so operators see which file was skipped."""
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "healthy.json").write_text('{"instance_id": "inst-1"}', encoding="utf-8")
+    (results_dir / "damaged.json").write_bytes(b'{"instance_id": "inst-2", "raw_output": "\xff"}')
+
+    with caplog.at_level(logging.WARNING, logger="swe_runner.run.io.output_store"):
+        assert RunOutputStore(tmp_path).load_attempted_instance_ids() == {"inst-1"}
+
+    skip_records = [r for r in caplog.records if r.getMessage().startswith("OUTPUT_LOAD_ATTEMPTED_IDS_SKIP")]
+    assert len(skip_records) == 1
+    assert "damaged.json" in skip_records[0].getMessage()
+    assert "healthy.json" not in skip_records[0].getMessage()
 
 
 def test_write_run_metadata_merges_existing_payload(tmp_path: Path) -> None:
