@@ -4176,7 +4176,10 @@ fn eval_tcp_challenge_ack_limit(_info: &SystemInfo, recs: &mut Vec<Recommendatio
 /// used to warn about a default of 100, which no kernel sets; the
 /// recommendation was 999999999, which still installs the limiter.
 fn challenge_ack_limit_recommendation(current: u64) -> Option<Recommendation> {
-    if current > 100 {
+    // `INT_MAX` is the only value that takes the kernel's unlimited path, so
+    // it is the only value that is not a finding. The 101..INT_MAX-1 window
+    // used to be reported as optimal while the limiter was still installed.
+    if current >= i32::MAX as u64 {
         return None;
     }
     Some(Recommendation {
@@ -12264,8 +12267,15 @@ mod tests {
         );
         // The kernel default is already the recommendation.
         assert!(challenge_ack_limit_recommendation(2147483647).is_none());
-        // The boundary itself is unchanged.
-        assert!(challenge_ack_limit_recommendation(101).is_none());
+        // Every other value installs the limiter, so every other value is a
+        // finding: `> 100` left the whole 101..INT_MAX-1 window reported as
+        // optimal while the kernel was still running the per-second budget —
+        // including the 999999999 this engine itself recommended before, which
+        // hosts tuned by an older ktuner still carry.
+        assert!(challenge_ack_limit_recommendation(101).is_some());
+        assert!(challenge_ack_limit_recommendation(1000).is_some());
+        assert!(challenge_ack_limit_recommendation(999999999).is_some());
+        assert!(challenge_ack_limit_recommendation(2147483646).is_some());
         assert!(challenge_ack_limit_recommendation(0).is_some());
     }
 
