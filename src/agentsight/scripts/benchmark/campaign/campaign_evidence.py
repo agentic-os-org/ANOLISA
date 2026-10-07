@@ -38,6 +38,16 @@ REQUIRED_REGRESSION_TOOLS = {
 }
 
 
+def usable_regression_check(check: Any) -> bool:
+    """Require the same command/exit-code contract in every regression report."""
+    return (
+        isinstance(check, dict)
+        and isinstance(check.get("command"), str)
+        and isinstance(check.get("exit_code"), int)
+        and not isinstance(check.get("exit_code"), bool)
+    )
+
+
 def nested(value: dict[str, Any], *keys: str) -> float | bool | None:
     """Read a numeric or boolean value from nested dictionaries."""
     current: Any = value
@@ -544,8 +554,14 @@ def audit_campaign(
             issues.append(f"{version} fault run did not pass")
 
     checks = regression.get("checks", [])
-    commands = "\n".join(str(check.get("command", "")) for check in checks)
-    if not checks or any(check.get("exit_code") != 0 for check in checks):
+    checks = checks if isinstance(checks, list) else []
+    usable_checks = [check for check in checks if usable_regression_check(check)]
+    commands = "\n".join(check["command"] for check in usable_checks)
+    if (
+        not checks
+        or len(usable_checks) != len(checks)
+        or any(check["exit_code"] != 0 for check in usable_checks)
+    ):
         issues.append("regression checks are missing or failed")
     if not regression.get("full"):
         issues.append("full Rust regression gates were not recorded")

@@ -490,15 +490,11 @@ def write_regression(results: Path) -> dict[str, Any]:
         # A check that is not an object of a string command and an integer
         # exit code is unusable evidence: render a placeholder row instead
         # of raising and losing every other check in the report.
-        command = check.get("command") if isinstance(check, dict) else None
-        exit_code = check.get("exit_code") if isinstance(check, dict) else None
-        if (
-            not isinstance(command, str)
-            or not isinstance(exit_code, int)
-            or isinstance(exit_code, bool)
-        ):
+        if not campaign_evidence.usable_regression_check(check):
             lines.append("| — | — | — |")
             continue
+        command = check["command"]
+        exit_code = check["exit_code"]
         lines.append(
             f"| `{command}` | {exit_code} | "
             f"{'PASS' if exit_code == 0 else 'FAIL'} |"
@@ -790,10 +786,11 @@ def write_final(
             f"`{frozen.get('config_sha256') or '—'}` |"
         )
     regression_checks = regression.get("checks", [])
+    regression_checks = regression_checks if isinstance(regression_checks, list) else []
     regression_passed = sum(
-        check.get("exit_code") == 0
+        check["exit_code"] == 0
         for check in regression_checks
-        if isinstance(check, dict)
+        if campaign_evidence.usable_regression_check(check)
     )
     lines = [
         (

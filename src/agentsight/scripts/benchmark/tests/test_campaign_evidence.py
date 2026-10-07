@@ -10,6 +10,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,7 @@ BENCHMARK_DIR = Path(__file__).parents[1]
 sys.path.insert(0, str(BENCHMARK_DIR / "campaign"))
 sys.path.insert(0, str(BENCHMARK_DIR / "single_run"))
 
+import aggregate_report
 import campaign
 import campaign_evidence
 import h2load_stats
@@ -1001,10 +1003,7 @@ def test_campaign_audit_rejects_partial_evidence() -> None:
     assert "full Rust regression gates were not recorded" in issues
 
 
-@pytest.mark.parametrize("repetitions", [1, 3])
-def test_campaign_audit_accepts_only_complete_formal_evidence(
-    repetitions: int,
-) -> None:
+def complete_formal_evidence(repetitions: int) -> tuple[Any, ...]:
     campaign_data = {
         "capacity": {"qps_resolution": 50, "confirm_repetitions": repetitions},
         "matrix": {
@@ -1123,9 +1122,89 @@ def test_campaign_audit_accepts_only_complete_formal_evidence(
             )
         ],
     }
+    return campaign_data, items, capacities, recovery, faults, regression
+
+
+@pytest.mark.parametrize("repetitions", [1, 3])
+def test_campaign_audit_accepts_only_complete_formal_evidence(
+    repetitions: int,
+) -> None:
     assert (
-        campaign_evidence.audit_campaign(
-            campaign_data, items, capacities, recovery, faults, regression
-        )
-        == []
+        campaign_evidence.audit_campaign(*complete_formal_evidence(repetitions)) == []
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_checks",
+    [
+        None,
+        {"command": "cargo test", "exit_code": 0},
+        "cargo test",
+        [],
+        ["cargo test"],
+        [{"command": "cargo test", "exit_code": False}],
+        [{"command": "cargo test", "exit_code": 0.0}],
+        [{"command": ["cargo test"], "exit_code": 0}],
+        [{"command": "cargo test"}],
+        [{"command": "cargo test", "exit_code": 1}],
+    ],
+)
+def test_invalid_regression_evidence_writes_inconclusive_reports(
+    tmp_path: Path,
+    invalid_checks: Any,
+) -> None:
+    campaign_data, items, capacities, recovery, faults, regression = (
+        complete_formal_evidence(3)
+    )
+    campaign_data["versions"] = {version: {} for version in campaign_evidence.VERSIONS}
+    # Keep three valid tools: invalid records must not supply the missing cargo test gate.
+    valid_checks = regression["checks"][:-1]
+    regression["checks"] = (
+        valid_checks + invalid_checks
+        if isinstance(invalid_checks, list)
+        else invalid_checks
+    )
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "regression.json").write_text(json.dumps(regression), encoding="utf-8")
+    detail = aggregate_report.write_regression(tmp_path)
+    final = aggregate_report.write_final(
+        tmp_path, campaign_data, [], capacities, items, recovery, faults, detail
+    )
+    assert final["verdict"] == "INCONCLUSIVE"
+    assert (
+        "regression checks are missing or failed" in final["issues"]
+        or invalid_checks == []
+    )
+    if not (
+        isinstance(invalid_checks, list)
+        and invalid_checks
+        and isinstance(invalid_checks[0], dict)
+        and invalid_checks[0].get("exit_code") == 1
+    ):
+        assert "regression evidence is missing cargo test" in final["issues"]
+    expected_count = len(valid_checks) if isinstance(invalid_checks, list) else 0
+    total = len(regression["checks"]) if isinstance(regression["checks"], list) else 0
+    report = (tmp_path / "final-report.md").read_text(encoding="utf-8")
+    assert f"| 通过命令 | {expected_count}/{total} |" in report
+    assert (
+        json.loads((tmp_path / "final-summary.json").read_text())["verdict"]
+        == "INCONCLUSIVE"
+    )
+
+
+def test_valid_regression_evidence_writes_pass_reports(tmp_path: Path) -> None:
+    campaign_data, items, capacities, recovery, faults, regression = (
+        complete_formal_evidence(3)
+    )
+    campaign_data["versions"] = {version: {} for version in campaign_evidence.VERSIONS}
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "regression.json").write_text(json.dumps(regression), encoding="utf-8")
+    detail = aggregate_report.write_regression(tmp_path)
+    final = aggregate_report.write_final(
+        tmp_path, campaign_data, [], capacities, items, recovery, faults, detail
+    )
+    assert final["verdict"] == "PASS"
+    assert final["issues"] == []
+    assert "| 通过命令 | 4/4 |" in (tmp_path / "final-report.md").read_text(
+        encoding="utf-8"
     )
