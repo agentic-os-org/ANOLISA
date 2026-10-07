@@ -989,6 +989,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn successful_log_read_remains_numeric_grounding_evidence() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        // The Read succeeds; the traceback describes an archived application
+        // failure. Its number must still support the assistant's next claim.
+        for (flag, expected) in [
+            (Some(false), CallStatus::Ok),
+            (Some(true), CallStatus::Failed),
+            (None, CallStatus::Failed),
+        ] {
+            let content = "Traceback (most recent call last):\nRuntimeError: archived failure\nArchived entry count: 242391";
+            let response = match flag {
+                Some(is_error) => serde_json::json!({"content": content, "is_error": is_error}),
+                None => serde_json::json!(content),
+            };
+            let output = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("read-log".into()),
+                    name: "Read".into(),
+                    arguments: Some(serde_json::json!({"file_path": "/synthetic/archive.log"})),
+                }],
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }];
+            let input = vec![InputMessage {
+                role: "user".into(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("read-log".into()),
+                    response,
+                }],
+                name: None,
+            }];
+            let claim = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::Text {
+                    content: "The archived entry count is 242391.".into(),
+                }],
+                name: None,
+                finish_reason: Some("stop".into()),
+            }];
+            let doc = convert_trace_to_atif(
+                "synthetic-read-log",
+                vec![
+                    call_event(1, 1_000_000_000, Some(output), None, Some("read the log")),
+                    call_event(2, 3_000_000_000, Some(claim), Some(input), None),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                doc.steps[2].observation.as_ref().unwrap().results[0].is_error(),
+                flag
+            );
+            let index = build_index(&doc, 0..doc.steps.len());
+            assert_eq!(index.call_verdicts[0].verdict.status, expected);
+            assert!(!index.claims.is_empty());
+            assert_eq!(
+                index.unresolved_count(),
+                usize::from(expected == CallStatus::Failed)
+            );
+            assert_eq!(
+                index.has_deterministic_finding(),
+                expected == CallStatus::Failed
+            );
+        }
+    }
+
+    #[test]
     fn tool_failure_flag_survives_as_structured_signal() {
         let agent_turn = vec![OutputMessage {
             role: "assistant".into(),

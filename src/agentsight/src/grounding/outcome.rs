@@ -134,16 +134,27 @@ pub fn classify_call(call: &ToolCall, result: Option<&ObservationResult>) -> Cal
         );
     }
 
-    // R1 — the provider's own flag. Note that an explicit `false` is *not*
-    // treated as proof of success: the flag is only ever `true` or absent in
-    // the measured corpus, so a `false` would be an untested code path. Letting
-    // it fall through can only add evidence, never excuse a real failure.
+    // R1 — the provider's flag describes this invocation, unlike error text
+    // in a successfully read log. Stops still outrank it, and an empty or
+    // pending payload cannot provide success evidence.
     if result.is_error() == Some(true) {
         return with_nested(
             verdict(
                 CallStatus::Failed,
                 Confidence::High,
                 "R1",
+                quote_from(&text, 0),
+            ),
+            nested,
+        );
+    }
+
+    if result.is_error() == Some(false) && !is_placeholder_or_empty(&text) {
+        return with_nested(
+            verdict(
+                CallStatus::Ok,
+                Confidence::High,
+                "R1(success)",
                 quote_from(&text, 0),
             ),
             nested,

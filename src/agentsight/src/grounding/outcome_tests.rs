@@ -412,3 +412,64 @@ fn grep_reporting_binary_matches_is_success() {
     );
     assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
 }
+
+#[test]
+fn explicit_success_outranks_error_text_and_quoted_exit_codes() {
+    for text in [
+        "Traceback (most recent call last):\nRuntimeError: archived failure",
+        "Error: archived failure",
+        "No such file or directory",
+        "Archived shell output\nExit code 1",
+    ] {
+        let mut successful = flagged_result(text);
+        successful
+            .extra
+            .as_mut()
+            .unwrap()
+            .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+        let v = classify_call(&plain_call(), Some(&successful));
+        assert_eq!(v.status, CallStatus::Ok, "{text}");
+        assert_eq!(v.confidence, Confidence::High);
+        assert_eq!(v.matched_rule, "R1(success)");
+        assert_eq!(
+            classify_call(&plain_call(), Some(&flagged_result(text))).status,
+            CallStatus::Failed
+        );
+        assert_eq!(classify(&plain_call(), text).status, CallStatus::Failed);
+    }
+}
+
+#[test]
+fn explicit_success_preserves_blocked_unknown_and_nested_evidence() {
+    for (text, status) in [
+        ("User denied permission", CallStatus::Blocked),
+        ("", CallStatus::Unknown),
+        ("  ", CallStatus::Unknown),
+        ("[dws-bash:pending-post-tool-use]", CallStatus::Unknown),
+    ] {
+        let mut successful = flagged_result(text);
+        successful
+            .extra
+            .as_mut()
+            .unwrap()
+            .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+        assert_eq!(
+            classify_call(&plain_call(), Some(&successful)).status,
+            status
+        );
+    }
+    let mut successful =
+        flagged_result("tool method invocation failed, java.lang.NullPointerException at Foo.bar");
+    successful
+        .extra
+        .as_mut()
+        .unwrap()
+        .insert(EXTRA_IS_ERROR.into(), serde_json::json!(false));
+    let v = classify_call(&plain_call(), Some(&successful));
+    assert_eq!(v.status, CallStatus::Ok);
+    assert!(
+        v.nested_error
+            .as_deref()
+            .is_some_and(|text| text.contains("NullPointerException"))
+    );
+}
