@@ -283,6 +283,20 @@ def test_main_redacts_then_records_and_returns_noop(monkeypatch, capsys):
         "session_id": "session-123",
         "run_id": "turn-123",
     }
+    # The redaction call must keep its full argv contract: renaming the
+    # scan-pii subcommand or dropping --redact-output previously kept the
+    # suite green while the real CLI stopped redacting (fail-open path
+    # drops the raw value only when the CLI errors, not when it silently
+    # succeeds without redaction).
+    assert pii_command[trace_context_index + 1 :] == [
+        "scan-pii",
+        "--stdin",
+        "--format",
+        "json",
+        "--redact-output",
+        "--source",
+        "observability",
+    ]
     command, kwargs = calls[-1]
     assert command == [
         "agent-sec-cli",
