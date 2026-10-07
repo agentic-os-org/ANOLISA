@@ -184,13 +184,31 @@ fn apply_locked(
     })
 }
 
+/// One applied single-parameter fix: what the rollback ledger recorded, plus
+/// the write itself.
+pub struct AppliedFix {
+    /// The pre-write original captured under the transaction lock — the value
+    /// the ledger records as `previous` and `ktuner rollback` restores.
+    /// Recommendations are gathered before locking, so `rec.current_value`
+    /// can be stale (the knob moved between gather and apply); callers
+    /// reporting the original must report this, or their output contradicts
+    /// the ledger and `rollback --list`. `None` for a write-only tunable (no
+    /// original could be read): nothing is recorded and nothing is
+    /// restorable.
+    pub recorded_previous: Option<String>,
+    /// The write outcome: the value the kernel actually took and whether it
+    /// clamped the request.
+    pub outcome: WriteOutcome,
+}
+
 /// Apply a single recommendation with rollback recording and persistence, but
 /// without apply()'s progress output — used by `ktuner fix` so a single fix is
-/// just as reversible (and survives reboot) as `tune`. Returns the write
-/// outcome so `fix` can report the value the kernel actually took. A param
-/// whose original cannot be read (write-only tunable) applies without a
-/// rollback record, mirroring apply_import.
-pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
+/// just as reversible (and survives reboot) as `tune`. Returns the recorded
+/// original (read under the lock, so it is what a rollback restores) and the
+/// write outcome so `fix` can report both without re-reading the ledger. A
+/// param whose original cannot be read (write-only tunable) applies without a
+/// rollback record, mirroring apply_import, and reports no original.
+pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?;
     // Snapshot the ratio sibling before the write: a *_bytes knob clears it
@@ -198,21 +216,24 @@ pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
     // back on rollback.
     let sibling = cleared_sibling_entry(&rec.param);
     let (previous, outcome) = apply_recordable(rec)?;
-    let mut recorded = Vec::new();
-    if let Some(previous) = previous {
+    let mut batch = Vec::new();
+    if let Some(recorded) = &previous {
         let mut applied = rec_with_effective(rec, &outcome);
-        applied.current_value = previous;
-        recorded.push(applied);
+        applied.current_value = recorded.clone();
+        batch.push(applied);
     }
     // The cleared sibling is a live change of the pair even when the knob
     // itself was unrecordable (no readable pristine value), so it extends
     // the batch regardless.
-    recorded.extend(sibling.map(sibling_rec));
-    if !recorded.is_empty() {
-        save_rollback(&guard, &recorded)?;
+    batch.extend(sibling.map(sibling_rec));
+    if !batch.is_empty() {
+        save_rollback(&guard, &batch)?;
         persist_from_rollback(&guard)?;
     }
-    Ok(outcome)
+    Ok(AppliedFix {
+        recorded_previous: previous,
+        outcome,
+    })
 }
 
 // Recommendations are gathered before locking and may describe an older
