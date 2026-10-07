@@ -708,8 +708,7 @@ fn collect_tool_responses(
     // Pass 1 — an id that names a call is authoritative: the response it rides
     // on belongs to that call whatever order the two arrived in, tolerating the
     // separator differences some agents introduce when echoing a call id back.
-    let mut consumed = vec![false; pending.len()];
-    for (i, (id, content_str, extra)) in pending.iter().enumerate() {
+    for (id, content_str, extra) in &pending {
         let Some(tc_id) = id else { continue };
         let found = tc_ids
             .iter()
@@ -720,7 +719,6 @@ fn collect_tool_responses(
             continue;
         }
         matched[idx] = true;
-        consumed[i] = true;
         results.push(ObservationResult {
             source_call_id: Some(tc_id.to_string()),
             content: Some(serde_json::Value::String(content_str.clone())),
@@ -729,12 +727,12 @@ fn collect_tool_responses(
         });
     }
 
-    // Pass 2 — positional fallback for everything the ids could not place:
-    // responses without an id, ids no call echoes, and duplicates of an id
-    // already served.
+    // Pass 2 — only id-less responses can use positional fallback. Foreign
+    // and duplicate ids cannot describe an unmatched current call; consuming
+    // a slot for them would discard that call's genuine id-less response.
     let mut positional_idx: usize = 0;
-    for (i, (id, content_str, extra)) in pending.iter().enumerate() {
-        if consumed[i] {
+    for (id, content_str, extra) in &pending {
+        if id.is_some() {
             continue;
         }
         while positional_idx < matched.len() && matched[positional_idx] {
@@ -744,11 +742,9 @@ fn collect_tool_responses(
             // No unmatched call is left; the response cannot be attributed.
             break;
         }
-        let source_call_id = id.map(str::to_string).or_else(|| {
-            tc_ids
-                .iter()
-                .find_map(|(known, idx)| (*idx == positional_idx).then(|| (*known).to_string()))
-        });
+        let source_call_id = tc_ids
+            .iter()
+            .find_map(|(known, idx)| (*idx == positional_idx).then(|| (*known).to_string()));
         matched[positional_idx] = true;
         results.push(ObservationResult {
             source_call_id,
@@ -1394,6 +1390,95 @@ pub(crate) mod tests {
             by_id("tc-b").content.as_ref().and_then(|c| c.as_str()),
             Some("output of b"),
         );
+    }
+
+    #[test]
+    fn current_results_survive_foreign_and_duplicate_ids() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        // Exercise typed replay -> ATIF -> grounding, including genuinely
+        // missing results and legacy replay with no IDs at all.
+        for (replay, expected_b) in [
+            (
+                vec![(Some("old-call"), "old"), (Some("tc-a"), "A"), (None, "B")],
+                Some("B"),
+            ),
+            (
+                vec![
+                    (Some("tc-a"), "A"),
+                    (Some("tc-a"), "duplicate"),
+                    (None, "B"),
+                ],
+                Some("B"),
+            ),
+            (vec![(None, "B"), (Some("tc-a"), "A")], Some("B")),
+            (vec![(None, "A"), (None, "B")], Some("B")),
+            (vec![(Some("old-call"), "old"), (Some("tc-a"), "A")], None),
+            (vec![(Some("tc-a"), "A"), (Some("tc-a"), "duplicate")], None),
+            (
+                vec![
+                    (Some("old-call"), "old"),
+                    (Some("tc-b"), "B"),
+                    (Some("tc-a"), "A"),
+                ],
+                Some("B"),
+            ),
+        ] {
+            let output = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: ["tc-a", "tc-b"]
+                    .into_iter()
+                    .map(|id| MessagePart::ToolCall {
+                        id: Some(id.into()),
+                        name: "Read".into(),
+                        arguments: Some(serde_json::json!({"file_path": "/synthetic/log"})),
+                    })
+                    .collect(),
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }];
+            let input = vec![InputMessage {
+                role: "tool".into(),
+                parts: replay
+                    .into_iter()
+                    .map(|(id, content)| MessagePart::ToolCallResponse {
+                        id: id.map(str::to_string),
+                        response: serde_json::json!(content),
+                    })
+                    .collect(),
+                name: None,
+            }];
+            let doc = convert_trace_to_atif(
+                "synthetic-replay",
+                vec![
+                    call_event(1, 1_000_000_000, Some(output), None, Some("read both")),
+                    call_event(2, 3_000_000_000, None, Some(input), None),
+                ],
+            )
+            .unwrap();
+            let results = &doc.steps[2].observation.as_ref().unwrap().results;
+            assert_eq!(results.len(), if expected_b.is_some() { 2 } else { 1 });
+            let content = |id| {
+                results
+                    .iter()
+                    .find(|r| r.source_call_id.as_deref() == Some(id))
+                    .and_then(|r| r.content.as_ref())
+                    .and_then(|v| v.as_str())
+            };
+            assert_eq!(content("tc-a"), Some("A"));
+            assert_eq!(content("tc-b"), expected_b);
+            let index = build_index(&doc, 0..doc.steps.len());
+            assert_eq!(index.call_verdicts.len(), 2);
+            assert_eq!(index.call_verdicts[0].verdict.status, CallStatus::Ok);
+            assert_eq!(
+                index.call_verdicts[1].verdict.status,
+                if expected_b.is_some() {
+                    CallStatus::Ok
+                } else {
+                    CallStatus::Unknown
+                }
+            );
+        }
     }
 
     #[test]
