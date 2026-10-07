@@ -408,6 +408,7 @@ mod tests {
             args: None,
             stdout_data: Some(data.to_string()),
             fd: Some(1),
+            filename: None,
         }
     }
 
