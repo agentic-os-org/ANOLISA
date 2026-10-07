@@ -54,6 +54,11 @@ function viewer({ readFailure = false } = {}) {
         fetchAtifBySession: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
         fetchSessionSavings: async () => ({ items: [], total_compounded_saved: 0 }),
       };
+      // The savings card reads its rate through this helper; the search tests do
+      // not assert the card, so the pure baseline formula stands in here.
+      if (name === '../utils/savings') return {
+        compoundedSavingsRate: (saved, baseline) => (baseline > 0 ? (saved / baseline) * 100 : 0),
+      };
       if (name === '../utils/trajectoryTree') return require(process.env.AGENTSIGHT_TRAJECTORY_TREE_BUILD);
       if (name === '../utils/trajectoryTextFilter') return require(process.env.AGENTSIGHT_TRAJECTORY_FILTER_BUILD);
       if (name === '../utils/roundModel') return require(process.env.AGENTSIGHT_ROUND_MODEL_BUILD);
