@@ -88,6 +88,12 @@ fn apply_locked(
     let mut failed: Vec<ApplyFailure> = Vec::new();
     let mut clamped: Vec<ClampNote> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
+        // A *_bytes knob clears its ratio sibling as a side effect; snapshot
+        // the sibling before the write or the original ratio is unrecorded
+        // and no rollback can ever bring it back. (The `applied` counter
+        // below already counts writes, not ledger records, so the sibling
+        // record leaves the batch's progress and exit code unchanged.)
+        let sibling = cleared_sibling_entry(&rec.param);
         match apply_recordable(rec) {
             Ok((previous, outcome)) => {
                 if !quiet {
@@ -129,6 +135,14 @@ fn apply_locked(
                     applied_rec.current_value = previous;
                     applied_recs.push(applied_rec);
                 }
+                // A *_bytes write cleared the ratio sibling as a kernel side
+                // effect: record what was live before the write (the snapshot
+                // above), or no rollback can ever bring that original back.
+                // The sibling is a live change of the pair even when the knob
+                // itself was unrecordable, so it lands outside the branch.
+                if let Some(entry) = sibling {
+                    applied_recs.push(sibling_rec(entry));
+                }
             }
             Err(e) => {
                 failed.push(ApplyFailure {
@@ -154,10 +168,10 @@ fn apply_locked(
         persist_from_rollback(guard)?;
         if !quiet {
             println!();
-            println!(
-                "  {} 项配置已应用并持久化（重启后自动生效）",
-                applied_recs.len()
-            );
+            // Count writes, not ledger records: a *_bytes knob also records
+            // the ratio sibling the kernel clears for it, and the batch's
+            // progress and exit-code semantics stay per-write.
+            println!("  {} 项配置已应用并持久化（重启后自动生效）", applied);
         }
     } else if applied == 0 && !quiet {
         println!();
@@ -179,11 +193,23 @@ fn apply_locked(
 pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?;
+    // Snapshot the ratio sibling before the write: a *_bytes knob clears it
+    // as a kernel side effect, and only the ledger can bring the original
+    // back on rollback.
+    let sibling = cleared_sibling_entry(&rec.param);
     let (previous, outcome) = apply_recordable(rec)?;
+    let mut recorded = Vec::new();
     if let Some(previous) = previous {
         let mut applied = rec_with_effective(rec, &outcome);
         applied.current_value = previous;
-        save_rollback(&guard, std::slice::from_ref(&applied))?;
+        recorded.push(applied);
+    }
+    // The cleared sibling is a live change of the pair even when the knob
+    // itself was unrecordable (no readable pristine value), so it extends
+    // the batch regardless.
+    recorded.extend(sibling.map(sibling_rec));
+    if !recorded.is_empty() {
+        save_rollback(&guard, &recorded)?;
         persist_from_rollback(&guard)?;
     }
     Ok(outcome)
@@ -216,6 +242,56 @@ fn apply_recordable(rec: &Recommendation) -> Result<(Option<String>, WriteOutcom
     let previous = read_previous(&rec.param).ok();
     let outcome = write_and_verify(&rec.param, &rec.recommended_value)?;
     Ok((previous, outcome))
+}
+
+/// The ratio knob the kernel clears as a side effect of writing `param`.
+/// `vm.dirty_bytes` and `vm.dirty_background_bytes` are mutually exclusive
+/// with their ratio twins — writing one zeroes the other (mm/page-writeback.c
+/// clears the sibling whenever the value changes; the rules state the same
+/// invariant when they cap the percentage advice to <64GB hosts) — so
+/// applying a bytes knob is a live change to TWO knobs while the batch
+/// records one.
+fn cleared_sibling(param: &str) -> Option<&'static str> {
+    match param {
+        "vm.dirty_bytes" => Some("vm.dirty_ratio"),
+        "vm.dirty_background_bytes" => Some("vm.dirty_background_ratio"),
+        _ => None,
+    }
+}
+
+/// Ledger tuple for the ratio knob a `*_bytes` write is about to clear:
+/// `(sibling, live value, "0")`, read BEFORE the write lands — after it the
+/// kernel has already zeroed the sibling and the original is gone forever.
+/// None when `param` clears nothing, the sibling is unreadable, or it holds
+/// no configured value. The recorded `applied` is "0" because that is the
+/// value the kernel puts live, exactly like a clamped read-back (#4160): the
+/// ledger must describe live reality for both knobs of the pair, or a
+/// rollback restores `dirty_bytes = 0` and leaves the host with a zeroed
+/// `dirty_ratio` — writeback throttling silently disabled.
+fn cleared_sibling_entry(param: &str) -> Option<(String, String, String)> {
+    let sibling = cleared_sibling(param)?;
+    let live = read_previous(sibling).ok()?;
+    sibling_cleared_record(sibling, &live)
+}
+
+/// Pure decision core of [`cleared_sibling_entry`]: whether a `*_bytes` write
+/// that sees `live` on the ratio sibling must record it. A sibling that is
+/// already 0 (or unreadably empty) loses nothing, so nothing is recorded.
+fn sibling_cleared_record(sibling: &str, live: &str) -> Option<(String, String, String)> {
+    (!live.is_empty() && live != "0")
+        .then(|| (sibling.to_string(), live.to_string(), "0".to_string()))
+}
+
+/// A synthetic ledger record from a [`cleared_sibling_entry`] tuple. It
+/// documents a side effect the kernel performs, not a write ktuner made, so
+/// every field beyond the ledger triple is default.
+fn sibling_rec(entry: (String, String, String)) -> Recommendation {
+    Recommendation {
+        param: entry.0,
+        current_value: entry.1,
+        recommended_value: entry.2,
+        ..Default::default()
+    }
 }
 
 /// The result of a verified write: the value now live in the kernel.
@@ -891,12 +967,16 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         Err(error) if current.is_some() => return Err(error),
         Err(_) => None,
     };
+    // A bytes knob clears its ratio sibling as a kernel side effect; snapshot
+    // it before the write so the imported change records both knobs of the
+    // pair and stays reversible.
+    let sibling = cleared_sibling_entry(param);
     let outcome = write_and_verify(param, value)?;
     if let Some(previous) = previous {
         merge_rollback_locked(
             &guard,
             ROLLBACK_PATH,
-            std::iter::once((param.to_string(), previous, outcome.effective)),
+            std::iter::once((param.to_string(), previous, outcome.effective)).chain(sibling),
         )?;
         persist_from_rollback(&guard)?;
     }
@@ -930,6 +1010,18 @@ fn render_persistence(
             ));
             has_nonsysctl = true;
         } else if param.contains('.') || param.contains('/') {
+            // The kernel re-clears the ratio sibling when the bytes line is
+            // applied at boot, and a later "ratio = 0" line would zero the
+            // bytes value right back — so the side-effect record of a cleared
+            // ratio is never persisted while its clearer is in the ledger:
+            // the bytes line alone reproduces the live pair state (bytes set,
+            // ratio cleared).
+            let clearer_recorded = entries
+                .keys()
+                .any(|k| cleared_sibling(k) == Some(param.as_str()));
+            if clearer_recorded && entry.applied == "0" {
+                continue;
+            }
             // A slash as the first separator makes sysctl.d preserve literal
             // dots. Derive dotted-interface keys from the recorded proc path,
             // or systemd would interpret Br0.100 as two directories.
@@ -1521,6 +1613,125 @@ mod tests {
                 assert!(script.is_none());
             }
         }
+    }
+
+    #[test]
+    fn render_persistence_omits_a_cleared_ratio_while_its_clearer_is_recorded() {
+        // The ledger after a dirty_bytes tune on a ratio-mode host: the kernel
+        // cleared vm.dirty_ratio as a side effect, so the record carries
+        // applied = 0. Persisting that line would make systemd apply
+        // "vm.dirty_ratio = 0" AFTER the bytes line at boot and zero the bytes
+        // value right back — the tuning would silently vanish across reboots.
+        // The bytes line alone reproduces the live pair state (kernel clears
+        // the ratio itself), so the cleared-ratio record must be skipped.
+        let entries = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1073741824".into(),
+                    path: "/proc/sys/vm/dirty_bytes".into(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "0".into(),
+                    path: "/proc/sys/vm/dirty_ratio".into(),
+                },
+            ),
+        ]);
+        let (config, _) = render_persistence(&entries);
+        let config = config.unwrap();
+        assert!(config.contains("vm.dirty_bytes = 1073741824"));
+        assert!(
+            !config.contains("dirty_ratio"),
+            "the cleared-ratio record must not be persisted: {config}"
+        );
+        // A ratio the host really uses (no clearer recorded, or a nonzero
+        // applied from a genuine ratio write) still persists its line.
+        let ratio_only = BTreeMap::from([(
+            "vm.dirty_ratio".to_string(),
+            RollbackEntry {
+                previous: "20".into(),
+                applied: "5".into(),
+                path: "/proc/sys/vm/dirty_ratio".into(),
+            },
+        )]);
+        let (config, _) = render_persistence(&ratio_only);
+        assert!(config.unwrap().contains("vm.dirty_ratio = 5"));
+        // Both knobs recorded with the ratio genuinely tuned (applied != 0):
+        // the pair is live ratio-mode, so both lines persist as before.
+        let both_live = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1073741824".into(),
+                    path: "/proc/sys/vm/dirty_bytes".into(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "5".into(),
+                    path: "/proc/sys/vm/dirty_ratio".into(),
+                },
+            ),
+        ]);
+        let (config, _) = render_persistence(&both_live);
+        let config = config.unwrap();
+        assert!(config.contains("vm.dirty_bytes = 1073741824"));
+        assert!(config.contains("vm.dirty_ratio = 5"));
+    }
+
+    #[test]
+    fn restore_entries_restores_the_ratio_after_the_bytes() {
+        // The dirty pair is mutually exclusive: writing either knob clears
+        // the other. The restore must therefore write the bytes knob FIRST
+        // (BTreeMap order guarantees "vm.dirty_bytes" < "vm.dirty_ratio") and
+        // the ratio last, or the ratio write would clear the restored bytes
+        // value on a live kernel. Guard test for the pair's ledger shape.
+        let dir = AtomicTestDir::new("dirty_pair_restore");
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio = dir.0.join("dirty_ratio");
+        fs::write(&bytes, "1073741824").unwrap();
+        fs::write(&ratio, "0").unwrap();
+        let entries = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1073741824".into(),
+                    path: bytes.to_str().unwrap().into(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "0".into(),
+                    path: ratio.to_str().unwrap().into(),
+                },
+            ),
+        ]);
+        let outcome = restore_entries(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+        );
+        assert_eq!(outcome.restored, 2);
+        assert_eq!(fs::read_to_string(&bytes).unwrap(), "0");
+        assert_eq!(
+            fs::read_to_string(&ratio).unwrap(),
+            "20",
+            "the cleared ratio must come back with the rollback"
+        );
+        assert!(rollback_should_finalize(outcome.failed, outcome.skipped));
     }
 
     use super::*;
