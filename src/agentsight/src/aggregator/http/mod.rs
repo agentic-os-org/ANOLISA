@@ -5,6 +5,7 @@
 mod aggregator;
 mod pair;
 mod response;
+mod sse_prefix;
 
 // Re-export main types
 pub use aggregator::{ConnectionId, HttpConnectionAggregator};

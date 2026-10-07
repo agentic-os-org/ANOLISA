@@ -620,3 +620,137 @@ fn test_dashscope_native_multimodal_image_tokens_pipeline() {
         "native responses carry no model, so it must be backfilled from the request"
     );
 }
+
+fn collect_bom_stream(chunks: Vec<Vec<u8>>, inline: bool) -> agentsight::aggregator::HttpPair {
+    let parser = Parser::new();
+    let mut aggregator = Aggregator::new();
+    let mut reads = vec![common::make_anthropic_request_bytes("bom-fixture", "hello")];
+    let mut headers = common::make_openai_sse_response_headers();
+    let mut chunks = chunks.into_iter();
+    if inline {
+        headers.extend(chunks.next().expect("first body"));
+    }
+    reads.push(headers);
+    reads.extend(chunks);
+    let mut completed = Vec::new();
+    for (index, buf) in reads.into_iter().enumerate() {
+        let ssl = common::make_ssl_event(5301, 0xE201, i32::from(index == 0), buf, "claude");
+        completed.extend(aggregator.process_result(parser.parse_event(Event::Ssl(ssl))));
+    }
+    assert_eq!(completed.len(), 1, "stream must complete exactly once");
+    match completed.remove(0) {
+        agentsight::aggregator::AggregatedResult::SseComplete(pair) => pair,
+        other => panic!("expected completed SSE, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_sse_initial_bom_keeps_usage_across_reads() {
+    let start = r#"{"type":"message_start","message":{"id":"msg_bom_fixture","model":"bom-fixture","usage":{"input_tokens":120,"output_tokens":0,"cache_creation_input_tokens":30,"cache_read_input_tokens":40}}}"#;
+    let first = format!("data: {start}\n\n").into_bytes();
+    let delta =
+        b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":240}}\n\n".to_vec();
+    let stop = b"data: {\"type\":\"message_stop\"}\n\n".to_vec();
+    let bom = vec![0xef, 0xbb, 0xbf];
+    let mut marked = bom.clone();
+    marked.extend(&first);
+    let mut named = bom.clone();
+    named.extend(format!("event: message_start\ndata: {start}\n\n").as_bytes());
+    let cases = vec![
+        ("plain", vec![first.clone()], false),
+        ("named", vec![named], false),
+        ("first-data", vec![marked.clone()], false),
+        ("inline", vec![marked], true),
+        (
+            "split-bom",
+            vec![vec![0xef], vec![0xbb], [vec![0xbf], first.clone()].concat()],
+            false,
+        ),
+        (
+            "split-field",
+            vec![[bom.clone(), b"da".to_vec()].concat(), first[2..].to_vec()],
+            true,
+        ),
+    ];
+    for (name, mut chunks, inline) in cases {
+        chunks.extend([delta.clone(), stop.clone()]);
+        let pair = collect_bom_stream(chunks, inline);
+        assert_eq!(pair.response.sse_events[0].body_str(), start, "{name}");
+        let analysis = Analyzer::new()
+            .analyze_aggregated(&agentsight::aggregator::AggregatedResult::SseComplete(pair));
+        let record = expect_token_record(&analysis);
+        assert_eq!(record.input_tokens, 120, "{name}");
+        assert_eq!(record.output_tokens, 240, "{name}");
+        assert_eq!(record.cache_creation_tokens, Some(30), "{name}");
+        assert_eq!(record.cache_read_tokens, Some(40), "{name}");
+        assert_eq!(record.total_tokens(), 430, "{name}");
+        let (semantic, _) = GenAIBuilder::new().build_with_pending(
+            &analysis,
+            &ResponseSessionMapper::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            expect_llm_call(&semantic.events)
+                .token_usage
+                .as_ref()
+                .unwrap()
+                .total_tokens,
+            430,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn test_sse_bom_prefix_keeps_identical_later_events() {
+    let first =
+        b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n"
+            .to_vec();
+    let pair = collect_bom_stream(
+        vec![
+            [vec![0xef, 0xbb, 0xbf], first.clone(), first].concat(),
+            common::make_sse_done(),
+        ],
+        false,
+    );
+    assert_eq!(pair.response.sse_events.len(), 3);
+    assert_eq!(
+        pair.response.sse_events[0].data(),
+        pair.response.sse_events[1].data()
+    );
+    assert!(pair.response.sse_events[2].is_done());
+}
+
+#[test]
+fn test_sse_fragmented_bom_done_completes_from_raw_data() {
+    let pair = collect_bom_stream(
+        vec![vec![0xef], vec![0xbb], b"\xbfdata: [DONE]\n\n".to_vec()],
+        false,
+    );
+    assert_eq!(pair.response.sse_events.len(), 1);
+    assert!(pair.response.sse_events[0].is_done());
+}
+
+#[test]
+fn test_compressed_sse_initial_bom() {
+    use std::io::Write;
+    let payload = b"\xef\xbb\xbfdata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(payload).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    response.extend(format!("{:x}\r\n", compressed.len()).as_bytes());
+    response.extend(compressed);
+    response.extend(b"\r\n0\r\n\r\n");
+    let analysis = run_analysis(vec![
+        (
+            5302,
+            0xE202,
+            1,
+            common::make_anthropic_request_bytes("bom-fixture", "hello"),
+            "claude",
+        ),
+        (5302, 0xE202, 0, response, "claude"),
+    ]);
+    assert_eq!(expect_token_record(&analysis).input_tokens, 7);
+}

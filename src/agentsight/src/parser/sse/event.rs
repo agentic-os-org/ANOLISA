@@ -184,6 +184,10 @@ impl ParsedSseEvent {
         self.data_len
     }
 
+    pub(crate) fn data_offset(&self) -> usize {
+        self.data_offset
+    }
+
     /// Get reference to source SslEvent
     pub fn source_event(&self) -> &SslEvent {
         &self.source_event

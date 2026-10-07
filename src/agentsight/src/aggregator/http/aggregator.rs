@@ -8,6 +8,7 @@ use super::pair::HttpPair;
 #[path = "pending_response.rs"]
 mod pending_response;
 use super::response::AggregatedResponse;
+use super::sse_prefix::{SseReadState, repair_prefix};
 use crate::config::DEFAULT_CONNECTION_CAPACITY;
 use crate::parser::http::{HttpParser, ParsedHttpMessage, ParsedRequest, ParsedResponse};
 use crate::parser::sse::{ParsedSseEvent, SseParser};
@@ -178,10 +179,9 @@ pub struct HttpConnectionAggregator {
     /// a split event's fragment is dropped and the reconstructed content is
     /// silently corrupted.
     sse_continuation_buffers: LruCache<ConnectionId, Vec<u8>>,
-    /// Last `source_event` pointer appended into the continuation buffer per
-    /// connection. Used to dedup when a single SSL_read produces multiple
-    /// ParsedSseEvents that share the same source SslEvent buffer.
-    last_appended_src_ptr: LruCache<ConnectionId, usize>,
+    /// Bounded source-pointer dedup and one-time stream-prefix state.
+    /// Shares the existing connection cleanup and eviction lifecycle.
+    sse_read_state: LruCache<ConnectionId, SseReadState>,
     /// Last activity timestamp per connection, used for idle timeout eviction.
     last_activity: LruCache<ConnectionId, Instant>,
     /// Connections already snapshotted after idle timeout.
@@ -226,7 +226,7 @@ impl HttpConnectionAggregator {
         HttpConnectionAggregator {
             connections: LruCache::new(cap),
             sse_continuation_buffers: LruCache::new(cap),
-            last_appended_src_ptr: LruCache::new(cap),
+            sse_read_state: LruCache::new(cap),
             last_activity: LruCache::new(cap),
             idle_snapshotted: LruCache::new(cap),
             max_body_bytes: max_body_bytes.max(1024),
@@ -248,7 +248,7 @@ impl HttpConnectionAggregator {
             if evicted_key != key {
                 self.eviction_count = self.eviction_count.saturating_add(1);
                 self.sse_continuation_buffers.pop(&evicted_key);
-                self.last_appended_src_ptr.pop(&evicted_key);
+                self.sse_read_state.pop(&evicted_key);
                 // `idle_snapshotted` is a one-shot marker ("this connection's
                 // in-flight call already has a pending row") and a kernel-reused
                 // `(pid, ssl_ptr)` key would inherit it, so the next call on that
@@ -316,7 +316,7 @@ impl HttpConnectionAggregator {
                 }
                 self.connections.pop(key);
                 self.sse_continuation_buffers.pop(key);
-                self.last_appended_src_ptr.pop(key);
+                self.sse_read_state.pop(key);
                 self.last_activity.pop(key);
                 self.idle_snapshotted.pop(key);
                 evicted_idle += 1;
@@ -353,7 +353,7 @@ impl HttpConnectionAggregator {
         for key in &oversized {
             self.connections.pop(key);
             self.sse_continuation_buffers.pop(key);
-            self.last_appended_src_ptr.pop(key);
+            self.sse_read_state.pop(key);
             self.last_activity.pop(key);
             self.idle_snapshotted.pop(key);
         }
@@ -456,7 +456,7 @@ impl HttpConnectionAggregator {
             ssl_ptr: response.source_event.ssl_ptr,
         });
 
-        SseParser::new().parse(synthetic_event)
+        SseParser::new().parse_at_stream_start(synthetic_event)
     }
 
     /// Decide the initial SSE state from response headers.
@@ -596,7 +596,7 @@ impl HttpConnectionAggregator {
             is_handshake: src.is_handshake,
             ssl_ptr: src.ssl_ptr,
         });
-        SseParser::new().parse(synthetic)
+        SseParser::new().parse_at_stream_start(synthetic)
     }
 
     /// Whether a response declares chunked transfer-encoding.
@@ -623,7 +623,7 @@ impl HttpConnectionAggregator {
         let mut response = AggregatedResponse::from_parsed(response_headers);
         response.set_sse_events(sse_events);
         response.sse_continuation_bytes = self.sse_continuation_buffers.pop(&connection_id);
-        self.last_appended_src_ptr.pop(&connection_id);
+        self.sse_read_state.pop(&connection_id);
 
         if let Some(req) = request {
             let parsed = response.parsed.clone();
@@ -1126,7 +1126,8 @@ impl HttpConnectionAggregator {
                     None
                 }
             }
-            other => {
+            mut other => {
+                let mut prefix_done = false;
                 // Not in RequestBodyPending / compressed-SSE state. On any
                 // uncompressed SseActive stream, buffer RawData bytes as a
                 // continuation of the last SSE event: a TLS record can split
@@ -1137,18 +1138,40 @@ impl HttpConnectionAggregator {
                 // and any usage it carries.
                 if let ConnectionState::SseActive {
                     compressed_buffer: None,
+                    sse_events,
                     ..
-                } = &other
+                } = &mut other
                 {
                     const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
                     let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
                     let buf = self
                         .sse_continuation_buffers
                         .get_or_insert_mut(connection_id, Vec::new);
+                    let read_state = self
+                        .sse_read_state
+                        .get_or_insert_mut(connection_id, SseReadState::default);
+                    read_state.last_chunk_start = buf.len();
                     let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
                     let take = data.len().min(remaining);
                     if take > 0 {
                         buf.extend_from_slice(&data[..take]);
+                    }
+                    prefix_done = repair_prefix(buf, sse_events, ssl_event, read_state);
+                }
+                if prefix_done {
+                    if let ConnectionState::SseActive {
+                        request,
+                        response_headers,
+                        sse_events,
+                        ..
+                    } = other
+                    {
+                        return Some(self.finish_sse(
+                            connection_id,
+                            request,
+                            response_headers,
+                            sse_events,
+                        ));
                     }
                 }
                 self.insert(connection_id, other);
@@ -1228,7 +1251,10 @@ impl HttpConnectionAggregator {
                 let src = sse_event.source_event();
                 let src_ptr = src as *const _ as usize;
                 let src_buf_len = src.buf_size() as usize;
-                let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
+                let read_state = self
+                    .sse_read_state
+                    .get_or_insert_mut(*connection_id, SseReadState::default);
+                let last_ptr = read_state.last_source_ptr;
                 let should_append = is_done
                     || (last_ptr != Some(src_ptr)
                         && src_buf_len > 0
@@ -1237,18 +1263,31 @@ impl HttpConnectionAggregator {
                     let buf = self
                         .sse_continuation_buffers
                         .get_or_insert_mut(*connection_id, Vec::new);
+                    read_state.last_chunk_start = buf.len();
                     let remaining = MAX_CONTINUATION_BYTES.saturating_sub(buf.len());
                     let take = src_buf_len.min(remaining);
                     if take > 0 {
                         buf.extend_from_slice(&src.buf[..take]);
                     }
-                    self.last_appended_src_ptr.put(*connection_id, src_ptr);
+                    read_state.last_source_ptr = Some(src_ptr);
                 }
 
-                // Add SSE event to the list
+                let prefix_source = (!read_state.bom_checked).then(|| sse_event.clone());
                 sse_events.push(sse_event);
+                let recovered_done = prefix_source.is_some_and(|source| {
+                    self.sse_continuation_buffers
+                        .peek(connection_id)
+                        .is_some_and(|prefix| {
+                            repair_prefix(
+                                prefix,
+                                &mut sse_events,
+                                source.source_event(),
+                                read_state,
+                            )
+                        })
+                });
 
-                if is_done {
+                if is_done || recovered_done {
                     log::trace!(
                         "[HttpAggregator] State transition: SseActive -> Complete | conn={connection_id:?}",
                     );
@@ -1338,7 +1377,7 @@ impl HttpConnectionAggregator {
     pub fn clear(&mut self) {
         self.connections.clear();
         self.sse_continuation_buffers.clear();
-        self.last_appended_src_ptr.clear();
+        self.sse_read_state.clear();
         self.last_activity.clear();
         self.idle_snapshotted.clear();
     }
@@ -1386,7 +1425,7 @@ impl HttpConnectionAggregator {
         for key in keys {
             if let Some(state) = self.connections.pop(&key) {
                 self.sse_continuation_buffers.pop(&key);
-                self.last_appended_src_ptr.pop(&key);
+                self.sse_read_state.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
                 match state {
@@ -1450,7 +1489,7 @@ impl HttpConnectionAggregator {
         for key in dead_keys {
             if let Some(state) = self.connections.pop(&key) {
                 self.sse_continuation_buffers.pop(&key);
-                self.last_appended_src_ptr.pop(&key);
+                self.sse_read_state.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
                 match state {
@@ -3532,14 +3571,20 @@ mod tests {
         agg.last_activity.push(conn_id, Instant::now());
         agg.sse_continuation_buffers
             .push(conn_id, b"stale".to_vec());
-        agg.last_appended_src_ptr.push(conn_id, 42);
+        agg.sse_read_state.push(
+            conn_id,
+            SseReadState {
+                last_source_ptr: Some(42),
+                ..SseReadState::default()
+            },
+        );
 
         agg.evict_idle_and_oversized();
 
         assert!(agg.connections.peek(&conn_id).is_none());
         assert!(agg.last_activity.peek(&conn_id).is_none());
         assert!(agg.sse_continuation_buffers.peek(&conn_id).is_none());
-        assert!(agg.last_appended_src_ptr.peek(&conn_id).is_none());
+        assert!(agg.sse_read_state.peek(&conn_id).is_none());
         let metrics = agg.metrics();
         assert_eq!(metrics.pending_connection_count, 0);
         assert_eq!(metrics.pending_connection_bytes, 0);
@@ -3581,7 +3626,13 @@ mod tests {
         agg.last_activity.push(conn_id, Instant::now());
         agg.sse_continuation_buffers
             .push(conn_id, b"stale".to_vec());
-        agg.last_appended_src_ptr.push(conn_id, 42);
+        agg.sse_read_state.push(
+            conn_id,
+            SseReadState {
+                last_source_ptr: Some(42),
+                ..SseReadState::default()
+            },
+        );
 
         agg.drain_connections_for_pid(conn_id.pid);
 
@@ -3591,7 +3642,7 @@ mod tests {
             "the crash drain must not leave the continuation buffer behind"
         );
         assert!(
-            agg.last_appended_src_ptr.peek(&conn_id).is_none(),
+            agg.sse_read_state.peek(&conn_id).is_none(),
             "the crash drain must not leave the append cursor behind"
         );
     }
@@ -3666,7 +3717,13 @@ mod tests {
 
         agg.insert(conn_a, ConnectionState::Idle);
         agg.sse_continuation_buffers.push(conn_a, vec![0u8; 1024]);
-        agg.last_appended_src_ptr.push(conn_a, 7);
+        agg.sse_read_state.push(
+            conn_a,
+            SseReadState {
+                last_source_ptr: Some(7),
+                ..SseReadState::default()
+            },
+        );
 
         // A second connection evicts the first by capacity.
         agg.insert(conn_b, ConnectionState::Idle);
@@ -3676,7 +3733,7 @@ mod tests {
             agg.sse_continuation_buffers.peek(&conn_a).is_none(),
             "the evicted connection's continuation buffer must be released with it"
         );
-        assert!(agg.last_appended_src_ptr.peek(&conn_a).is_none());
+        assert!(agg.sse_read_state.peek(&conn_a).is_none());
     }
 
     /// The capacity eviction above covered the continuation caches but left
