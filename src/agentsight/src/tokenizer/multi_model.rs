@@ -11,9 +11,31 @@ use hf_hub::api::sync::{Api, ApiBuilder};
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 static GLOBAL_TOKENIZER: OnceCell<Mutex<MultiModelTokenizer>> = OnceCell::new();
+
+/// LRU capacity requested from configuration before the global manager is
+/// first used. `GLOBAL_TOKENIZER` is created lazily, so its constructor reads
+/// this value; `configure_global_tokenizer` also resizes an existing manager.
+static GLOBAL_TOKENIZER_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_TOKENIZER_CACHE_SIZE);
+
+/// Apply `features.tokenizer.cache_size` to the global tokenizer manager.
+///
+/// Before the first lookup this sizes the lazily created manager; afterwards
+/// it resizes the live LRU cache (evicting least-recently-used entries when
+/// shrinking), so a runtime config reload takes effect without a restart.
+pub fn configure_global_tokenizer(cache_size: usize) {
+    let cap = NonZeroUsize::new(cache_size.max(1)).unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
+    GLOBAL_TOKENIZER_CAPACITY.store(cap.get(), Ordering::SeqCst);
+    if let Some(manager) = GLOBAL_TOKENIZER.get() {
+        let mut guard = manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.set_capacity(cap);
+    }
+}
 
 fn get_global_manager() -> MutexGuard<'static, MultiModelTokenizer> {
     // The guard is held across HuggingFace Hub client construction and tokenizer
@@ -22,13 +44,29 @@ fn get_global_manager() -> MutexGuard<'static, MultiModelTokenizer> {
     // panicking: `.expect` here killed every later token count for the rest of
     // the process, including for models that are already cached.
     GLOBAL_TOKENIZER
-        .get_or_init(|| Mutex::new(MultiModelTokenizer::new()))
+        .get_or_init(|| Mutex::new(MultiModelTokenizer::configured()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn get_global_tokenizer(model_id: &str) -> Result<Arc<LlmTokenizer>> {
+    #[cfg(test)]
+    GLOBAL_TOKENIZER_LOOKUPS.with(|count| count.set(count.get() + 1));
     get_global_manager().get_for_model(model_id)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Global tokenizer lookups performed on this thread. Thread-local so a
+    /// test asserting that a disabled feature performs no lookup cannot race
+    /// with lookups made by other tests running in parallel threads.
+    static GLOBAL_TOKENIZER_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of global tokenizer lookups performed on the calling thread.
+#[cfg(test)]
+pub(crate) fn global_tokenizer_lookup_count() -> usize {
+    GLOBAL_TOKENIZER_LOOKUPS.with(std::cell::Cell::get)
 }
 
 /// Tokenizer entry containing the tokenizer instance and its metadata
@@ -86,6 +124,25 @@ impl MultiModelTokenizer {
             tokenizers: LruCache::new(cap),
             hf_api: None,
         }
+    }
+
+    /// Create a manager sized from the configured cache size.
+    ///
+    /// Used for the lazily created global manager so
+    /// `features.tokenizer.cache_size` is honoured instead of always using
+    /// [`DEFAULT_TOKENIZER_CACHE_SIZE`].
+    fn configured() -> Self {
+        Self::with_capacity(GLOBAL_TOKENIZER_CAPACITY.load(Ordering::SeqCst))
+    }
+
+    /// Maximum number of tokenizer models kept in the LRU cache.
+    pub fn capacity(&self) -> usize {
+        self.tokenizers.cap().get()
+    }
+
+    /// Resize the LRU cache, evicting least-recently-used entries as needed.
+    fn set_capacity(&mut self, capacity: NonZeroUsize) {
+        self.tokenizers.resize(capacity);
     }
 
     /// Get or create the HuggingFace Hub API client
@@ -281,5 +338,115 @@ mod tests {
         let mut t = MultiModelTokenizer::with_capacity(4);
         t.clear();
         assert!(t.is_empty());
+    }
+
+    /// Minimal ChatML tokenizer (WordLevel + Whitespace) so capacity tests can
+    /// build real `LlmTokenizer` values without the network or the real Qwen
+    /// tokenizer, which is not vendored in the repository.
+    const FIXTURE_TOKENIZER_JSON: &str = r#"{
+      "version": "1.0",
+      "truncation": null,
+      "padding": null,
+      "added_tokens": [
+        {"id": 0, "content": "<|im_start|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 1, "content": "<|im_end|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 2, "content": "[UNK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+      ],
+      "normalizer": null,
+      "pre_tokenizer": {"type": "Whitespace"},
+      "post_processor": null,
+      "decoder": null,
+      "model": {
+        "type": "WordLevel",
+        "vocab": {"<|im_start|>": 0, "<|im_end|>": 1, "[UNK]": 2, "hello": 3},
+        "unk_token": "[UNK]"
+      }
+    }"#;
+
+    const FIXTURE_TOKENIZER_CONFIG_JSON: &str = r#"{
+      "tokenizer_class": "PreTrainedTokenizerFast",
+      "chat_template": "{% for message in messages %}{{ message['role'] + ': ' + message['content'] + '\n' }}{% endfor %}",
+      "bos_token": "<|im_start|>",
+      "eos_token": "<|im_end|>",
+      "unk_token": "[UNK]",
+      "model_max_length": 32768
+    }"#;
+
+    fn fixture_tokenizer() -> LlmTokenizer {
+        let dir = std::env::temp_dir().join(format!("agentsight-mm-tok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let tokenizer_path = dir.join("tokenizer.json");
+        let config_path = dir.join("tokenizer_config.json");
+        std::fs::write(&tokenizer_path, FIXTURE_TOKENIZER_JSON).expect("write tokenizer.json");
+        std::fs::write(&config_path, FIXTURE_TOKENIZER_CONFIG_JSON).expect("write config");
+        LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+    }
+
+    /// `features.tokenizer.cache_size` must reach the constructed manager: a
+    /// capacity of 2 with 3 models has to evict the least-recently-used one
+    /// instead of always using `DEFAULT_TOKENIZER_CACHE_SIZE`.
+    #[test]
+    fn configured_cache_size_governs_manager_capacity() {
+        configure_global_tokenizer(2);
+        let mut manager = MultiModelTokenizer::configured();
+        assert_eq!(manager.capacity(), 2, "configured cache_size must be used");
+
+        let tokenizer = fixture_tokenizer();
+        for id in ["model-a", "model-b", "model-c"] {
+            manager.register(id, tokenizer.clone());
+        }
+        assert_eq!(manager.len(), 2, "capacity must bound the LRU cache");
+        assert!(
+            manager.get("model-a").is_none(),
+            "oldest entry must be evicted"
+        );
+        assert!(manager.get("model-c").is_some());
+        assert_eq!(manager.capacity(), 2, "eviction must not change capacity");
+
+        // Restore the default for the rest of the process.
+        configure_global_tokenizer(DEFAULT_TOKENIZER_CACHE_SIZE);
+        assert_eq!(
+            MultiModelTokenizer::configured().capacity(),
+            DEFAULT_TOKENIZER_CACHE_SIZE
+        );
+    }
+
+    /// With `features.tokenizer.enabled = false` the drain fallback must not
+    /// reach the global manager at all, otherwise a disabled feature still
+    /// constructs/downloads a tokenizer.
+    #[test]
+    fn disabled_tokenizer_feature_skips_global_lookup() {
+        use crate::config::FeatureFlags;
+
+        const MODEL: &str = "drain-fixture-model";
+        // A registered model that a lookup would find, so the disabled branch
+        // cannot pass merely because the lookup failed.
+        get_global_manager().register(MODEL, fixture_tokenizer());
+
+        let disabled = FeatureFlags {
+            tokenizer_enabled: false,
+            ..Default::default()
+        };
+        let enabled = FeatureFlags {
+            tokenizer_enabled: true,
+            ..Default::default()
+        };
+
+        let before = global_tokenizer_lookup_count();
+        assert!(
+            crate::unified::drain_fallback_tokenizer(&disabled, MODEL).is_none(),
+            "disabled tokenizer feature must not resolve a tokenizer"
+        );
+        assert_eq!(
+            global_tokenizer_lookup_count(),
+            before,
+            "disabled tokenizer feature must not even attempt a global lookup"
+        );
+
+        assert!(
+            crate::unified::drain_fallback_tokenizer(&enabled, MODEL).is_some(),
+            "enabled tokenizer feature must resolve the registered model"
+        );
+        assert_eq!(global_tokenizer_lookup_count(), before + 1);
     }
 }

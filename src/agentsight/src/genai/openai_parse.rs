@@ -400,6 +400,13 @@ impl GenAIBuilder {
             }
         }
 
+        // Refusal text: the answer when the model declines instead of replying.
+        if let Some(ref r) = m.refusal {
+            if !r.is_empty() {
+                parts.push(MessagePart::Text { content: r.clone() });
+            }
+        }
+
         // Tool calls
         if let Some(ref tcs) = m.tool_calls {
             for tc in tcs {
@@ -516,6 +523,7 @@ impl GenAIBuilder {
         }
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
+        let mut refusal_buf = String::new();
         let mut finish_reason: Option<String> = None;
         // tool_call delta merging: index -> (id, name, arguments_accumulated)
         let mut tc_map: HashMap<u32, (String, String, String)> = HashMap::new();
@@ -540,6 +548,11 @@ impl GenAIBuilder {
                 // Reasoning
                 if let Some(r) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
                     reasoning_buf.push_str(r);
+                }
+                // Refusal: OpenAI's safety refusal arrives in its own delta
+                // field, with no content delta alongside it.
+                if let Some(r) = delta.get("refusal").and_then(|v| v.as_str()) {
+                    refusal_buf.push_str(r);
                 }
                 // Tool call deltas — merge by index
                 if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
@@ -599,6 +612,12 @@ impl GenAIBuilder {
         if !content_buf.is_empty() {
             parts.push(MessagePart::Text {
                 content: content_buf,
+            });
+        }
+        // Refusal text: the model's answer when it declines a request.
+        if !refusal_buf.is_empty() {
+            parts.push(MessagePart::Text {
+                content: refusal_buf,
             });
         }
         // Merged tool calls
@@ -801,6 +820,7 @@ impl GenAIBuilder {
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         let mut text_buf = String::new();
+        let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
         // Done payloads the item router cannot attribute: the router matches a
@@ -848,6 +868,21 @@ impl GenAIBuilder {
                                 .unwrap_or("")
                                 .to_string(),
                         ));
+                    }
+                }
+                "response.refusal.delta" => {
+                    saw_responses_event = true;
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        refusal_buf.push_str(delta);
+                    }
+                }
+                "response.refusal.done" => {
+                    // The done event carries the finalized text; the deltas
+                    // may be missing when capture started mid-stream.
+                    saw_responses_event = true;
+                    if let Some(refusal) = chunk.get("refusal").and_then(|r| r.as_str()) {
+                        refusal_buf.clear();
+                        refusal_buf.push_str(refusal);
                     }
                 }
                 "response.function_call_arguments.done" => {
@@ -907,6 +942,11 @@ impl GenAIBuilder {
         let mut parts = Vec::new();
         if !text_buf.is_empty() {
             parts.push(MessagePart::Text { content: text_buf });
+        }
+        if !refusal_buf.is_empty() {
+            parts.push(MessagePart::Text {
+                content: refusal_buf,
+            });
         }
         parts.extend(tool_parts);
 
@@ -1429,6 +1469,22 @@ mod tests {
         assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
     }
 
+    /// OpenAI reports a safety refusal in a dedicated `delta.refusal` field
+    /// (no content delta arrives), so a refusal-only stream produced no parts
+    /// at all: both the live path and the drain enrichment persisted the call
+    /// with `output_messages = None`.
+    #[test]
+    fn test_extract_parts_from_sse_body_refusal() {
+        let body = r#"[{"choices":[{"delta":{"refusal":"I can't help with that."}}]},{"choices":[{"delta":{},"finish_reason":"stop"}]}]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a refusal must still yield output");
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that.")
+        );
+        assert_eq!(finish, Some("stop".to_string()));
+    }
+
     /// Anthropic SSE bodies carry no `choices` array, so the merger must
     /// aggregate `content_block_start`/`content_block_delta` events instead of
     /// yielding no parts at all. This is the same merger the dead-pid drain
@@ -1481,6 +1537,26 @@ mod tests {
         let (parts, finish) = GenAIBuilder::merge_sse_chunks(&chunks);
         assert!(parts.is_empty(), "no content blocks means no parts");
         assert_eq!(finish.as_deref(), Some("end_turn"));
+    }
+
+    /// The Responses protocol reports a refusal through its own streaming
+    /// events (`response.refusal.delta`/`done`), which the merger ignored the
+    /// same way the chat-completions path ignored `delta.refusal`.
+    #[test]
+    fn test_extract_parts_from_sse_body_responses_refusal() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_r1","model":"gpt-5"}},
+            {"type":"response.refusal.delta","delta":"I can't help"},
+            {"type":"response.refusal.delta","delta":" with that."},
+            {"type":"response.refusal.done","refusal":"I can't help with that."},
+            {"type":"response.completed","response":{"id":"resp_r1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a refusal must still yield output");
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that.")
+        );
     }
 
     /// Responses-API SSE bodies (codex 0.137+ via /v1/responses) carry no
@@ -1831,5 +1907,29 @@ mod tests {
             matches!(&output.parts[0], MessagePart::Reasoning { content } if content == "thinking")
         );
         assert!(matches!(&output.parts[1], MessagePart::Text { content } if content == "Response"));
+    }
+
+    /// The non-streaming body carries the refusal in `message.refusal`; the
+    /// conversion read only content/reasoning/tool_calls, so the refusal text
+    /// was dropped from the recorded output.
+    #[test]
+    fn test_openai_msg_to_output_refusal() {
+        let msg = OpenAIChatMessage {
+            role: crate::analyzer::message::types::MessageRole::Assistant,
+            content: None,
+            reasoning_content: None,
+            refusal: Some("I can't help with that.".to_string()),
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            annotations: None,
+            audio: None,
+        };
+        let output = GenAIBuilder::openai_msg_to_output(&msg, Some("stop"));
+        assert_eq!(output.parts.len(), 1);
+        assert!(
+            matches!(&output.parts[0], MessagePart::Text { content } if content == "I can't help with that.")
+        );
     }
 }

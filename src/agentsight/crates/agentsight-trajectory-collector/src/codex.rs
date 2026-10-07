@@ -113,6 +113,7 @@ pub fn convert_codex_events(
     let mut current_effort: Option<serde_json::Value> = None;
     // Cumulative usage from the last token_count event (authoritative totals).
     let mut last_total_usage: Option<(u64, u64, u64)> = None;
+    let mut previous_total_usage: Option<(u64, u64, u64)> = None;
 
     let flush = |turn: &mut Option<AgentTurn>, steps: &mut Vec<Step>, step_id: &mut usize| {
         if let Some(t) = turn.take() {
@@ -169,10 +170,16 @@ pub fn convert_codex_events(
                 }
                 "token_count" => {
                     if let Some(info) = payload.get("info") {
-                        if let Some(total) = usage_triple(info.get("total_token_usage")) {
+                        let total = usage_triple(info.get("total_token_usage"));
+                        let last = usage_triple(info.get("last_token_usage"));
+                        let incremental = incremental_usage(total, previous_total_usage, last);
+                        // Missing totals use last-call accounting, so a later total
+                        // must not include that already-counted gap in its delta.
+                        previous_total_usage = total;
+                        if let Some(total) = total {
                             last_total_usage = Some(total);
                         }
-                        if let Some((pt, ct, cache)) = usage_triple(info.get("last_token_usage")) {
+                        if let Some((pt, ct, cache)) = incremental {
                             let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
                             let m = t.metrics.get_or_insert_with(zero_metrics);
                             *m.prompt_tokens.get_or_insert(0) += pt;
@@ -442,6 +449,29 @@ fn usage_triple(usage: Option<&serde_json::Value>) -> Option<(u64, u64, u64)> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     Some((pt.unwrap_or(0), ct.unwrap_or(0), cache))
+}
+
+// Rate-limit updates can repeat the current usage snapshot. Only cumulative
+// advances belong to this turn; the first snapshot or a reset needs the
+// reported last-call usage so earlier history is not charged to this turn.
+fn incremental_usage(
+    total: Option<(u64, u64, u64)>,
+    previous: Option<(u64, u64, u64)>,
+    last: Option<(u64, u64, u64)>,
+) -> Option<(u64, u64, u64)> {
+    let delta = match (total, previous) {
+        (Some(t), Some(p)) => {
+            t.0.checked_sub(p.0)
+                .zip(t.1.checked_sub(p.1))
+                .zip(t.2.checked_sub(p.2))
+                .map(|((input, output), cached)| (input, output, cached))
+        }
+        _ => None,
+    };
+    // An unchanged snapshot is known zero usage, not a missing delta.
+    delta
+        .or(last)
+        .filter(|&(input, output, cached)| input != 0 || output != 0 || cached != 0)
 }
 
 fn sum_step_usage(steps: &[Step]) -> Option<(u64, u64, u64)> {

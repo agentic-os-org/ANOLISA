@@ -95,7 +95,17 @@ impl Parser {
             let buf = &ssl_event.buf[..buf_size];
             const TERMINATOR: &[u8] = b"0\r\n\r\n";
 
-            let terminator_pos = if buf.len() >= TERMINATOR.len() && buf.ends_with(TERMINATOR) {
+            // The terminator belongs to the read direction only. A chunked
+            // *request* body's final write also ends with `0\r\n\r\n`; cutting
+            // it here and synthesizing a done event made the aggregator (still
+            // in RequestBodyPending, which drops SSE events) lose those bytes,
+            // so the request body was captured truncated and
+            // `chunked_stream_complete` never fired. Write-direction buffers
+            // must flow through as RawData so the framing completes.
+            let terminator_pos = if ssl_event.rw == 0
+                && buf.len() >= TERMINATOR.len()
+                && buf.ends_with(TERMINATOR)
+            {
                 Some(buf.len() - TERMINATOR.len())
             } else {
                 None
@@ -227,7 +237,7 @@ impl Parser {
 mod tests {
     use super::*;
 
-    fn make_ssl_event(data: Vec<u8>) -> Rc<SslEvent> {
+    fn make_ssl_event_with_rw(data: Vec<u8>, rw: i32) -> Rc<SslEvent> {
         let len = data.len();
         Rc::new(SslEvent {
             source: 0,
@@ -237,12 +247,16 @@ mod tests {
             tid: 1,
             uid: 0,
             len: len as u32,
-            rw: 0,
+            rw,
             comm: String::new(),
             buf: data,
             is_handshake: false,
             ssl_ptr: 0x1000,
         })
+    }
+
+    fn make_ssl_event(data: Vec<u8>) -> Rc<SslEvent> {
+        make_ssl_event_with_rw(data, 0)
     }
 
     #[test]
@@ -286,5 +300,30 @@ mod tests {
             result.messages[0],
             ParsedMessage::SseEvent(ref e) if !e.is_done()
         ));
+    }
+
+    /// `0\r\n\r\n` is a chunked-SSE terminator only on the read direction. On
+    /// the write direction it is the final zero-size chunk of a chunked
+    /// request body: cutting it here and synthesizing a done marker made the
+    /// aggregator (in RequestBodyPending, where SSE events are dropped) lose
+    /// those bytes, so the request body was captured truncated and
+    /// `chunked_stream_complete` never fired.
+    #[test]
+    fn test_write_direction_terminator_stays_raw_data() {
+        let parser = Parser::new();
+        let data = b"a\r\n{\"x\":1}\r\n0\r\n\r\n".to_vec();
+        // rw == 1 is the write direction (see `parse_ssl_event` step 3).
+        let event = make_ssl_event_with_rw(data.clone(), 1);
+        let result = parser.parse_ssl_event(event);
+
+        assert_eq!(result.messages.len(), 1);
+        match &result.messages[0] {
+            ParsedMessage::RawData(raw) => assert_eq!(
+                &raw.buf[..raw.buf_size() as usize],
+                data.as_slice(),
+                "write-direction buffer must reach the aggregator intact"
+            ),
+            other => panic!("write-direction buffer must be emitted as RawData, got {other:?}"),
+        }
     }
 }

@@ -1470,7 +1470,12 @@ fn probe_atif_column(
             };
             for value in values {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value) {
-                    if session_matches(&parsed, session_id) {
+                    // `scoped`: the SQL above filtered by the session column,
+                    // so a document without a session_id field is still known
+                    // to belong to the requested session. In the unscoped
+                    // branch the whole table was scanned, and a row without
+                    // session_id must not be attributed to every caller.
+                    if session_matches(&parsed, session_id, session_column.is_some()) {
                         return Ok(Some(value));
                     }
                 }
@@ -1499,14 +1504,17 @@ fn find_session_column(conn: &rusqlite::Connection, table: &str) -> Result<Optio
         .find(|n| n == "session_id" || n.to_lowercase().contains("session_id")))
 }
 
-/// Best-effort check that a parsed ATIF document carries the requested session
-/// id — used when the hosting table has no dedicated session_id column.
-fn session_matches(doc: &serde_json::Value, session_id: &str) -> bool {
+/// Best-effort check that a parsed ATIF document belongs to the requested
+/// session.
+///
+/// `scoped` says whether the SQL query that produced the document already
+/// filtered on a session column. A document without a top-level `session_id`
+/// is only acceptable in that case: during an unscoped full-table scan
+/// accepting it would return an arbitrary row for any requested session.
+fn session_matches(doc: &serde_json::Value, session_id: &str, scoped: bool) -> bool {
     match doc.get("session_id").and_then(|v| v.as_str()) {
         Some(s) => s == session_id,
-        // No session_id field on the document → accept; the caller has
-        // already scoped the query to a specific session row.
-        None => true,
+        None => scoped,
     }
 }
 

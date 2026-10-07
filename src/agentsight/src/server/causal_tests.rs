@@ -624,6 +624,46 @@ fn schema_probe_does_not_create_a_missing_database() {
     assert!(!path.exists());
 }
 
+#[test]
+fn probe_requires_a_session_match_in_an_unscoped_table() {
+    // The sibling table has no session_id column, so the probe scans it
+    // unscoped. A row whose document has no top-level session_id must not be
+    // attributed to whatever session id the caller asked for — that would run
+    // the paid LLM analysis against an unrelated trajectory.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should follow Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "agentsight-causal-unscoped-{}-{nonce}.db",
+        std::process::id()
+    ));
+    {
+        let conn = rusqlite::Connection::open(&path).expect("create sibling database");
+        conn.execute_batch("CREATE TABLE t(payload TEXT)")
+            .expect("create table");
+        let insert = "INSERT INTO t(payload) VALUES (?1)";
+        conn.execute(insert, [r#"{"steps": []}"#])
+            .expect("insert session-less ATIF doc");
+        conn.execute(insert, [r#"{"session_id": "sess-atif", "steps": []}"#])
+            .expect("insert scoped ATIF doc");
+    }
+
+    assert_eq!(
+        probe_atif_column(&path, "different-session").unwrap(),
+        None,
+        "an unscoped row without session_id must not match another session"
+    );
+    // Positive guard: a document that does carry the requested session_id is
+    // still found through the same unscoped scan.
+    assert!(
+        probe_atif_column(&path, "sess-atif").unwrap().is_some(),
+        "a document naming the requested session must still be returned"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // ---------------------------------------------------------------------------
 // id_kind gate
 // ---------------------------------------------------------------------------

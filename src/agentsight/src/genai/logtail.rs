@@ -190,10 +190,14 @@ pub struct LogtailExporter {
 }
 
 impl LogtailExporter {
-    /// 创建新的 Logtail 导出器
+    /// Create a Logtail exporter for the currently active path.
     ///
-    /// 从环境变量 `SLS_LOGTAIL_FILE` 读取路径，自动创建父目录。
-    /// 如果环境变量未设置，返回 `None`。
+    /// `SLS_LOGTAIL_FILE` wins and pins the exporter to that path for the
+    /// process lifetime (static env mode). When only the dynamic
+    /// `runtime.sls_logtail_path` provides the path, the exporter stays
+    /// dynamic: every `export()` re-reads `logtail_path()`, so clearing the
+    /// config path pauses uploads and changing it redirects them without a
+    /// restart. Returns `None` when no path is configured.
     ///
     /// `encryption_pem`：可选 RSA 公钥 PEM（通常来自 agentsight.json
     /// 的 `encryption.public_key`）。有值且解析成功则启用加密；
@@ -216,11 +220,17 @@ impl LogtailExporter {
                 "Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded"
             );
         }
+        // `SLS_LOGTAIL_FILE` is fixed for the process lifetime, so env mode
+        // stays static. A path that came only from `runtime.sls_logtail_path`
+        // must re-read `logtail_path()` on every export: the documented
+        // reversibility contract (clearing the path pauses uploads, changing
+        // it redirects them) cannot hold against a path frozen here.
+        let dynamic = std::env::var(LOGTAIL_ENV_VAR).is_err();
         Some(LogtailExporter {
             path,
             encryptor,
             trace_enabled,
-            dynamic: false,
+            dynamic,
             require_path_exists: false,
         })
     }
@@ -1250,6 +1260,47 @@ pub mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.is_empty());
         assert!(content.contains("\"gen_ai.operation.name\""));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
+    /// The startup exporter must honor a later change of the config path.
+    ///
+    /// When `SLS_LOGTAIL_FILE` is absent, `runtime.sls_logtail_path` is the
+    /// active path and its documented contract is reversible: clearing it
+    /// pauses uploads, changing it redirects them. Building the startup
+    /// exporter in static env mode froze the path, so a redirect kept
+    /// appending to the old file.
+    #[test]
+    fn test_startup_exporter_redirects_when_dynamic_path_changes() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_logtail_state();
+
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_startup_dynamic_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let p1 = tmp.join("p1.jsonl");
+        let p2 = tmp.join("p2.jsonl");
+
+        set_dynamic_logtail_path(p1.to_str().unwrap());
+        // Exactly how unified.rs builds the startup exporter for the enabled
+        // path (env var unset → the path came from runtime config).
+        let exporter = LogtailExporter::new(None, true).expect("enabled dynamic path");
+
+        // The config path changes before the next batch is exported.
+        set_dynamic_logtail_path(p2.to_str().unwrap());
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        exporter.export(&[event]);
+
+        assert!(
+            !p1.exists(),
+            "the exporter must not stay pinned to the path it was built with"
+        );
+        assert!(
+            p2.exists(),
+            "the exporter must follow the current dynamic path"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
         reset_logtail_state();

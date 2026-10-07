@@ -669,6 +669,11 @@ impl AgentSight {
             }
         }
 
+        // Apply the configured tokenizer cache size before any token count can
+        // create the global manager; the `tokenizer_enabled` flag itself gates
+        // the drain fallback at its call site.
+        crate::tokenizer::configure_global_tokenizer(config.features.tokenizer_cache_size);
+
         // Create analyzer with tokenizer if configured
         let analyzer = if let Some(ref tokenizer_path) = config.tokenizer_path {
             if Path::new(tokenizer_path).exists() {
@@ -1561,12 +1566,24 @@ impl AgentSight {
     /// Check and drain the pending_logtail mailbox.
     /// If the config watcher deposited a new LogtailExporter, register it.
     fn check_pending_logtail(&mut self) {
-        if let Some(exporter) = crate::background::take_pending_logtail(&self.pending_logtail) {
+        Self::register_pending_logtail(&mut self.genai_exporters, &self.pending_logtail);
+    }
+
+    /// Drain the pending_logtail mailbox into `exporters`.
+    ///
+    /// Split out of [`Self::check_pending_logtail`] so the registration rule —
+    /// a re-activated dynamic exporter replaces its predecessor instead of
+    /// being registered next to it — is testable without a running monitor.
+    fn register_pending_logtail(
+        exporters: &mut Vec<Box<dyn GenAIExporter>>,
+        pending_logtail: &Mutex<Option<Box<dyn GenAIExporter>>>,
+    ) {
+        if let Some(exporter) = crate::background::take_pending_logtail(pending_logtail) {
             log::info!(
                 "Registering dynamically-activated LogtailExporter: '{}'",
                 exporter.name()
             );
-            self.genai_exporters.push(exporter);
+            install_exporter(exporters, exporter);
         }
     }
 
@@ -1627,6 +1644,7 @@ impl AgentSight {
     /// column on the corresponding `genai_events` row when SQLite is in use.
     fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref istore) = self.interruption_store {
+            let genai = self.genai_sqlite_store.as_deref();
             // Build a call_id → (session_id, conversation_id) lookup from
             // LLMCall events in this batch, so ToolUse events can inherit
             // the conversation context of their parent call.
@@ -1652,83 +1670,7 @@ impl AgentSight {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
                     for ie in &interruptions {
-                        // Deduplicate: skip if same (conversation_id, type, error_msg)
-                        // already recorded.  Same error retried N times produces only
-                        // 1 interruption; different errors each get 1.
-                        // NOTE: RetryStorm detection only fires when conversation_id is Some.
-                        // When None, each error inserts a separate row (no dedup, no storm detect).
-                        if let Some(ref cid) = ie.conversation_id {
-                            let error_msg = llm_call.error.as_deref();
-                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
-                            {
-                                log::debug!(
-                                    "Skipping duplicate {:?} for conversation_id={} error={:?}",
-                                    ie.interruption_type,
-                                    cid,
-                                    error_msg
-                                );
-                                // Still stamp the genai_events row so the call is marked
-                                if let Some(ref sqlite) = self.genai_sqlite_store {
-                                    let _ = sqlite.update_interruption_type(
-                                        &llm_call.call_id,
-                                        ie.interruption_type.as_str(),
-                                    );
-                                    // RetryStorm: if >= 5 total calls with same error type in
-                                    // this conversation, emit critical alert
-                                    let count = sqlite.count_interruption_type_for_conversation(
-                                        cid,
-                                        ie.interruption_type.as_str(),
-                                    );
-                                    if count >= 5
-                                        && ie.interruption_type
-                                            != crate::interruption::InterruptionType::RetryStorm
-                                    {
-                                        let storm_event =
-                                            crate::interruption::InterruptionEvent::new(
-                                                crate::interruption::InterruptionType::RetryStorm,
-                                                ie.session_id.clone(),
-                                                ie.trace_id.clone(),
-                                                ie.conversation_id.clone(),
-                                                ie.call_id.clone(),
-                                                ie.pid,
-                                                ie.agent_name.clone(),
-                                                llm_call.end_timestamp_ns as i64,
-                                                Some(serde_json::json!({
-                                                    "repeated_type": ie.interruption_type.as_str(),
-                                                    "count": count,
-                                                })),
-                                            );
-                                        if !istore.exists_for_conversation(
-                                            cid,
-                                            &crate::interruption::InterruptionType::RetryStorm,
-                                            None,
-                                        ) {
-                                            let _ = istore.insert(&storm_event);
-                                            log::warn!(
-                                                "RetryStorm detected: {} × {:?} in conversation {}",
-                                                count,
-                                                ie.interruption_type,
-                                                cid
-                                            );
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                        if let Err(e) = istore.insert(ie) {
-                            log::warn!("Failed to store interruption event: {e}");
-                        }
-                        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
-                        // so the SLS index keeps interruption records co-located with LLM calls.
-                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
-                        // Also stamp genai_events row with interruption_type
-                        if let Some(ref sqlite) = self.genai_sqlite_store {
-                            let _ = sqlite.update_interruption_type(
-                                &llm_call.call_id,
-                                ie.interruption_type.as_str(),
-                            );
-                        }
+                        store_interruption(ie, llm_call, istore, genai);
                     }
 
                     // ── Cross-call DeadLoop detection ──────────────────────────────
@@ -2024,6 +1966,10 @@ impl AgentSight {
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
                             &response_headers,
                         );
+                    // A dead connection retains no completing read, so the
+                    // header event is the only provenance left for the
+                    // synthetic events; these feed pending-row usage
+                    // extraction only, not duration accounting.
                     crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
                         &buf,
                         content_encoding.as_deref(),
@@ -2093,8 +2039,8 @@ impl AgentSight {
                                     .as_deref()
                                     .or(pending.model.as_deref())
                                     .unwrap_or("unknown");
-                                if let Ok(tokenizer) =
-                                    crate::tokenizer::get_global_tokenizer(model_name)
+                                if let Some(tokenizer) =
+                                    drain_fallback_tokenizer(&self.features, model_name)
                                 {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
@@ -2151,11 +2097,6 @@ impl AgentSight {
                                             enrichment.output_tokens = Some(total as i64);
                                         }
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
-                                        enrichment.model.as_deref().or(pending.model.as_deref())
-                                    );
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
@@ -2190,16 +2131,21 @@ impl AgentSight {
                     .unwrap_or(0);
 
                 let mut checked_pids: HashSet<u32> = HashSet::new();
-                for (pid, _call_id, session_id, agent_name, conversation_id) in &persisted_pending {
+                for (pid, ..) in &persisted_pending {
                     if !checked_pids.insert(*pid) {
                         continue; // already checked this PID
                     }
-                    if was_pid_oom_killed(*pid as i32) {
-                        let call_ids: Vec<&str> = persisted_pending
-                            .iter()
-                            .filter(|(p, _, _, _, _)| *p == *pid)
-                            .map(|(_, c, _, _, _)| c.as_str())
-                            .collect();
+                    if !was_pid_oom_killed(*pid as i32) {
+                        continue;
+                    }
+                    // One event per conversation: writing only the first
+                    // tuple's session/conversation while marking every call
+                    // interrupted left the other conversations without a
+                    // parent agent_crash event (OpenClaw = one pid, many
+                    // sessions).
+                    for (agent_name, session_id, conversation_id, call_ids) in
+                        oom_crash_groups_for_pid(*pid, &persisted_pending)
+                    {
                         log::info!(
                             "[DrainCheck] PID {} was OOM-killed (confirmed via dmesg), agent={}, calls={:?}",
                             pid,
@@ -2208,16 +2154,16 @@ impl AgentSight {
                         );
                         let detail = serde_json::json!({
                             "pid": pid,
-                            "agent_name": agent_name,
+                            "agent_name": agent_name.clone(),
                             "call_ids": call_ids,
                             "oom": true,
                             "source": "drain+dmesg",
                         });
                         let event = InterruptionEvent::new(
                             InterruptionType::AgentCrash,
-                            session_id.clone(),
+                            session_id,
                             None,
-                            conversation_id.clone(),
+                            conversation_id,
                             None,
                             Some(*pid as i32),
                             agent_name.clone(),
@@ -2231,15 +2177,15 @@ impl AgentSight {
                         } else {
                             log::info!("[DrainCheck] Recorded OOM agent_crash for pid={pid}");
                         }
-                        // Mark all pending calls for this PID as interrupted
-                        if let Some(ref store) = self.genai_sqlite_store {
-                            if let Err(e) =
-                                store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
-                            {
-                                log::warn!(
-                                    "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
-                                );
-                            }
+                    }
+                    // Mark all pending calls for this PID as interrupted
+                    if let Some(ref store) = self.genai_sqlite_store {
+                        if let Err(e) =
+                            store.mark_pending_interrupted_for_pid(*pid as i32, "oom_crash")
+                        {
+                            log::warn!(
+                                "[DrainCheck] Failed to mark pending interrupted for pid={pid}: {e}"
+                            );
                         }
                     }
                 }
@@ -2373,7 +2319,9 @@ impl AgentSight {
     /// Add a custom GenAI exporter at runtime
     pub fn add_genai_exporter(&mut self, exporter: Box<dyn GenAIExporter>) {
         log::info!("Registered GenAI exporter: '{}'", exporter.name());
-        self.genai_exporters.push(exporter);
+        // Same identity rule as the mailbox path: a same-named exporter is
+        // replaced, otherwise every registration would write the batch again.
+        install_exporter(&mut self.genai_exporters, exporter);
     }
 
     /// Get reference to agent scanner
@@ -2544,6 +2492,27 @@ fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
             GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
             _ => false,
         })
+}
+
+/// Register `exporter`, replacing a registered exporter that has the same
+/// name.
+///
+/// `GenAIExporter::name` is the exporter's identity, which is why the Logtail
+/// exporter answers `logtail-file-dynamic` for a dynamically activated one:
+/// "so the runtime can replace an existing dynamic exporter instead of
+/// accumulating duplicates when the SLS path is deactivated and re-activated
+/// repeatedly". The mailbox registration pushed unconditionally, so every
+/// deactivate/reactivate cycle of `runtime.sls_logtail_path` added another
+/// dynamic exporter; each of them re-reads the process-global path and writes
+/// the same batch, so a record was written once per cycle.
+fn install_exporter(exporters: &mut Vec<Box<dyn GenAIExporter>>, exporter: Box<dyn GenAIExporter>) {
+    let name = exporter.name().to_string();
+    if let Some(existing) = exporters.iter_mut().find(|e| e.name() == name) {
+        log::info!("Replacing the registered '{name}' GenAI exporter");
+        *existing = exporter;
+        return;
+    }
+    exporters.push(exporter);
 }
 
 fn complete_deferred_genai(
@@ -2740,6 +2709,172 @@ fn apply_retro_session_fixup(
     }
 }
 
+/// Group LLM calls by `(session_id, conversation_id)`.
+///
+/// Returns groups in first-seen order, each carrying only the call ids that
+/// belong to its conversation. A single agent process can serve several
+/// conversations (OpenClaw is one gateway pid with many sessions); attributing
+/// a crash to only the first tuple leaves every other conversation's
+/// interrupted calls without a parent `agent_crash` event.
+fn group_calls_by_conversation<'a>(
+    calls: impl Iterator<Item = (&'a str, Option<&'a str>, Option<&'a str>)>,
+) -> Vec<(Option<String>, Option<String>, Vec<String>)> {
+    let mut groups: Vec<((Option<String>, Option<String>), Vec<String>)> = Vec::new();
+    for (call_id, session_id, conversation_id) in calls {
+        let key = (
+            session_id.map(str::to_owned),
+            conversation_id.map(str::to_owned),
+        );
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, call_ids)) => call_ids.push(call_id.to_owned()),
+            None => groups.push((key, vec![call_id.to_owned()])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((session_id, conversation_id), call_ids)| (session_id, conversation_id, call_ids))
+        .collect()
+}
+
+/// Per-conversation OOM crash groups for one dead pid.
+///
+/// `persisted_pending` rows are `(pid, call_id, session_id, agent_name,
+/// conversation_id)`; agent name is a property of the pid, so the first row
+/// of that pid is representative. Returned tuples are `(agent_name,
+/// session_id, conversation_id, call_ids)` — one per conversation, so the
+/// drain path can write one event each instead of only the first tuple's.
+fn oom_crash_groups_for_pid(
+    pid: u32,
+    persisted_pending: &[(u32, String, Option<String>, Option<String>, Option<String>)],
+) -> Vec<(Option<String>, Option<String>, Option<String>, Vec<String>)> {
+    let agent_name = persisted_pending
+        .iter()
+        .find(|(p, ..)| *p == pid)
+        .and_then(|(_, _, _, name, _)| name.clone());
+    group_calls_by_conversation(persisted_pending.iter().filter(|(p, ..)| *p == pid).map(
+        |(_, call_id, session_id, _, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ))
+    .into_iter()
+    .map(|(session_id, conversation_id, call_ids)| {
+        (agent_name.clone(), session_id, conversation_id, call_ids)
+    })
+    .collect()
+}
+
+/// Store one detected interruption: message-matched dedup, the insert, the
+/// logtail export, the per-call `genai_events` stamp, and the RetryStorm
+/// threshold.
+///
+/// Extracted from `detect_and_store_interruptions` so the dedup / stamp /
+/// storm path is unit-testable without constructing a full `AgentSight`.
+fn store_interruption(
+    ie: &crate::interruption::InterruptionEvent,
+    call: &crate::genai::LLMCall,
+    istore: &InterruptionStore,
+    genai_store: Option<&GenAISqliteStore>,
+) {
+    // Deduplicate: skip if same (conversation_id, type, error_msg)
+    // already recorded.  Same error retried N times produces only
+    // 1 interruption; different errors each get 1.
+    // NOTE: RetryStorm detection only fires when conversation_id is Some.
+    // When None, each error inserts a separate row (no dedup, no storm detect).
+    let error = call.error.as_deref();
+    let duplicate = ie
+        .conversation_id
+        .as_deref()
+        .is_some_and(|cid| istore.exists_for_conversation(cid, &ie.interruption_type, error));
+    if duplicate {
+        log::debug!(
+            "Skipping duplicate {:?} for conversation_id={:?} error={:?}",
+            ie.interruption_type,
+            ie.conversation_id,
+            error
+        );
+    } else {
+        if let Err(e) = istore.insert(ie) {
+            log::warn!("Failed to store interruption event: {e}");
+        }
+        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
+        // so the SLS index keeps interruption records co-located with LLM calls.
+        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
+    }
+    // Stamp the genai_events row, then run the type-counted RetryStorm check
+    // on both paths: the dedup above matches one *message*, while the storm
+    // threshold counts one *type*.
+    if let Some(sqlite) = genai_store {
+        let _ = sqlite.update_interruption_type(&call.call_id, ie.interruption_type.as_str());
+        if let Some(ref cid) = ie.conversation_id {
+            maybe_record_retry_storm(cid, ie, call.end_timestamp_ns as i64, istore, sqlite);
+        }
+    }
+}
+
+/// Write one unresolved `RetryStorm` for a conversation once the same
+/// interruption type reaches the retry threshold.
+///
+/// `RetryStorm`'s contract counts one *type* ("the same error type repeats at
+/// least 5 times within one conversation"), which is what
+/// `count_interruption_type_for_conversation` measures, so the check must not
+/// live inside the message-matched dedup branch: five same-type errors whose
+/// texts differ all take the insert path and never reached it.
+///
+/// Extracted as a free function so the decision is unit-testable without
+/// constructing a full `AgentSight` instance.
+fn maybe_record_retry_storm(
+    cid: &str,
+    ie: &crate::interruption::InterruptionEvent,
+    occurred_at_ns: i64,
+    istore: &InterruptionStore,
+    genai_store: &GenAISqliteStore,
+) {
+    use crate::interruption::{InterruptionEvent, InterruptionType};
+
+    if ie.interruption_type == InterruptionType::RetryStorm {
+        return;
+    }
+
+    // >= 5 calls with the same error type in this conversation: the agent is
+    // stuck retrying.
+    let count =
+        genai_store.count_interruption_type_for_conversation(cid, ie.interruption_type.as_str());
+    if count < 5 {
+        return;
+    }
+
+    // At most one unresolved storm per conversation.
+    if istore.exists_for_conversation(cid, &InterruptionType::RetryStorm, None) {
+        return;
+    }
+
+    let storm_event = InterruptionEvent::new(
+        InterruptionType::RetryStorm,
+        ie.session_id.clone(),
+        ie.trace_id.clone(),
+        ie.conversation_id.clone(),
+        ie.call_id.clone(),
+        ie.pid,
+        ie.agent_name.clone(),
+        occurred_at_ns,
+        Some(serde_json::json!({
+            "repeated_type": ie.interruption_type.as_str(),
+            "count": count,
+        })),
+    );
+    let _ = istore.insert(&storm_event);
+    log::warn!(
+        "RetryStorm detected: {} × {:?} in conversation {}",
+        count,
+        ie.interruption_type,
+        cid
+    );
+}
+
 /// Record `agent_crash` interruption events for the pending calls of an
 /// exited agent process, and mark those calls as interrupted.
 ///
@@ -2789,20 +2924,21 @@ fn record_agent_crash_interruptions(
     let is_oom = was_pid_oom_killed(pid as i32);
 
     // Group by (session_id, conversation_id) to produce one event per conversation
-    let mut by_conv: std::collections::HashMap<(Option<String>, Option<String>), Vec<String>> =
-        std::collections::HashMap::new();
-    for (call_id, session_id, _trace_id, conversation_id) in pending_calls {
-        by_conv
-            .entry((session_id.clone(), conversation_id.clone()))
-            .or_default()
-            .push(call_id.clone());
-    }
+    let groups = group_calls_by_conversation(pending_calls.iter().map(
+        |(call_id, session_id, _trace_id, conversation_id)| {
+            (
+                call_id.as_str(),
+                session_id.as_deref(),
+                conversation_id.as_deref(),
+            )
+        },
+    ));
 
-    for ((session_id, conversation_id), call_ids) in &by_conv {
+    for (session_id, conversation_id, call_ids) in groups {
         let mut detail = serde_json::json!({
             "pid": pid,
             "agent_name": agent_name,
-            "call_ids": call_ids,
+            "call_ids": call_ids.clone(),
             "source": "trace_procmon_exit",
             "exit_code": exit_status.code,
             "signal": exit_status.signal,
@@ -2849,6 +2985,36 @@ fn record_agent_crash_interruptions(
     }
 }
 
+/// Resolve the tokenizer used by the dead-PID drain fallback.
+///
+/// Returns `None` when `features.tokenizer.enabled` is off: a disabled feature
+/// must not be instantiated at all, so the global manager is never touched and
+/// no tokenizer is constructed or downloaded. Also `None` when the lookup or
+/// download fails for an enabled feature.
+///
+/// Extracted as a free function so the feature gate is unit-testable without
+/// constructing a full `AgentSight` instance.
+pub(crate) fn drain_fallback_tokenizer(
+    features: &crate::config::FeatureFlags,
+    model_name: &str,
+) -> Option<Arc<LlmTokenizer>> {
+    if !features.tokenizer_enabled {
+        log::debug!(
+            "[DrainCheck] tokenizer feature disabled, skipping token computation for {model_name:?}"
+        );
+        return None;
+    }
+    match crate::tokenizer::get_global_tokenizer(model_name) {
+        Ok(tokenizer) => Some(tokenizer),
+        Err(e) => {
+            log::warn!(
+                "[DrainCheck] tokenizer unavailable for model {model_name:?}, skipping token computation: {e}"
+            );
+            None
+        }
+    }
+}
+
 /// Count the input tokens of a drained request from its captured body.
 ///
 /// The drain fallback runs for streams that ended before the terminal usage
@@ -2881,8 +3047,13 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
             }
         }
     }
+    // DashScope/Bailian native requests nest their tool definitions under
+    // "parameters" (the OpenAI-compatible spelling is top level), the same
+    // fallback `GenAIBuilder::parse_request_body` reads them through. Without
+    // this the drained call is estimated without tools the template renders.
     let tools_json: Option<Vec<serde_json::Value>> = body
         .get("tools")
+        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
         .and_then(|t| t.as_array())
         .map(|a| a.to_vec());
     let count =
@@ -3060,6 +3231,137 @@ mod tests {
         info.pid = pid;
         genai_store.insert_pending(&info).expect("insert_pending");
         (dir, genai_store, istore)
+    }
+
+    #[test]
+    fn retry_storm_counts_one_type_not_one_message() {
+        // `RetryStorm` is documented as "the same error type repeats at least
+        // 5 times within one conversation". `exists_for_conversation` matches
+        // on the error message, so five same-type failures whose texts differ
+        // are never duplicates — and while the storm check sat inside the
+        // duplicate branch, none of them ever reached it.
+        let dir = unique_tmp_dir("retry-storm-same-type");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .expect("genai store");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+
+        for i in 0..5 {
+            let call_id = format!("storm-call-{i}");
+            let mut info = make_test_pending_info(&call_id);
+            info.conversation_id = Some("conv-storm".to_string());
+            genai_store.insert_pending(&info).expect("insert_pending");
+            genai_store
+                .update_interruption_type(&call_id, "context_overflow")
+                .expect("stamp");
+            let ie = crate::interruption::InterruptionEvent::new(
+                crate::interruption::InterruptionType::ContextOverflow,
+                Some("sess-storm".to_string()),
+                Some("trace-storm".to_string()),
+                Some("conv-storm".to_string()),
+                Some(call_id.clone()),
+                Some(7),
+                Some("test-agent".to_string()),
+                i as i64,
+                Some(serde_json::json!({
+                    "error": format!(
+                        "prompt is too long: {} tokens > 200000 maximum",
+                        210_000 + i * 10_000
+                    ),
+                })),
+            );
+            // Each failure carries a different message, so none of them is a
+            // duplicate of a recorded interruption.
+            let seen = istore.exists_for_conversation("conv-storm", &ie.interruption_type, None);
+            assert!(
+                !seen,
+                "precondition: failure {i} must not match a recorded interruption"
+            );
+            maybe_record_retry_storm("conv-storm", &ie, i as i64, &istore, &genai_store);
+        }
+
+        let storm = crate::interruption::InterruptionType::RetryStorm;
+        assert!(istore.exists_for_conversation("conv-storm", &storm, None));
+
+        // A RetryStorm-typed event must return before the threshold check, so
+        // the guard never records a storm of storms.
+        let storm_typed = crate::interruption::InterruptionEvent::new(
+            storm.clone(),
+            Some("sess-storm".to_string()),
+            Some("trace-storm".to_string()),
+            Some("conv-storm".to_string()),
+            Some("storm-call-4".to_string()),
+            Some(7),
+            Some("test-agent".to_string()),
+            5,
+            None,
+        );
+        maybe_record_retry_storm("conv-storm", &storm_typed, 5, &istore, &genai_store);
+        assert_eq!(istore.count_for_conversation("conv-storm", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drive the extracted store path end to end: the same message twice is a
+    /// duplicate, a different message inserts, and the storm threshold counts
+    /// one *type* across messages whose texts differ — the shape the dedup
+    /// branch used to hide (this is the placement the PR changes).
+    #[test]
+    fn store_interruption_dedups_by_message_and_storms_by_type() {
+        let dir = unique_tmp_dir("store-interruption");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .expect("genai store");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+        let rate_limit = crate::interruption::InterruptionType::RateLimit;
+
+        let mut call = make_test_llm_call("store-call-0");
+        let mut last = None;
+        for i in 0..5 {
+            call.call_id = format!("store-call-{i}");
+            call.error = Some(format!("rate limit exceeded, retry after {}s", 30 + i));
+            let mut info = make_test_pending_info(&call.call_id);
+            info.conversation_id = Some("conv-store".to_string());
+            genai_store.insert_pending(&info).expect("insert_pending");
+            genai_store
+                .update_interruption_type(&call.call_id, "rate_limit")
+                .expect("stamp");
+            let ie = crate::interruption::InterruptionEvent::new(
+                rate_limit.clone(),
+                Some("sess-store".to_string()),
+                Some("trace-store".to_string()),
+                Some("conv-store".to_string()),
+                Some(call.call_id.clone()),
+                Some(8),
+                Some("test-agent".to_string()),
+                i as i64,
+                Some(serde_json::json!({ "error": call.error.clone() })),
+            );
+            store_interruption(&ie, &call, &istore, Some(&genai_store));
+            assert_eq!(
+                istore.count_for_conversation("conv-store", &rate_limit),
+                i + 1
+            );
+            last = Some(ie);
+        }
+
+        // Same error *type*, five different messages: the count is what the
+        // storm threshold measures, so the storm must exist.
+        let storm = crate::interruption::InterruptionType::RetryStorm;
+        assert!(istore.exists_for_conversation("conv-store", &storm, None));
+
+        // Replaying the last failure verbatim is a message duplicate: no new
+        // row, and the "at most one storm" guard keeps the count at one.
+        let replay = last.expect("last event");
+        store_interruption(&replay, &call, &istore, Some(&genai_store));
+        assert_eq!(istore.count_for_conversation("conv-store", &rate_limit), 5);
+        assert_eq!(istore.count_for_conversation("conv-store", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn list_crash_events(
@@ -3274,6 +3576,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The drain path checks each dead pid once but must still attribute its
+    /// OOM crash to every conversation it served: two pending tuples with the
+    /// same pid and different conversations must yield two groups, each with
+    /// its own call ids, not one event for the first tuple only.
+    #[test]
+    fn oom_crash_groups_cover_every_conversation_of_a_dead_pid() {
+        let pending: Vec<(u32, String, Option<String>, Option<String>, Option<String>)> = vec![
+            (
+                42,
+                "call-a".to_string(),
+                Some("sess-a".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-a".to_string()),
+            ),
+            (
+                42,
+                "call-b".to_string(),
+                Some("sess-b".to_string()),
+                Some("OpenClaw".to_string()),
+                Some("conv-b".to_string()),
+            ),
+        ];
+
+        let groups = oom_crash_groups_for_pid(42, &pending);
+
+        assert_eq!(groups.len(), 2, "one group per conversation");
+        let by_conv: std::collections::HashMap<Option<String>, Vec<String>> = groups
+            .iter()
+            .map(|(_, _, conversation_id, call_ids)| (conversation_id.clone(), call_ids.clone()))
+            .collect();
+        assert_eq!(by_conv[&Some("conv-a".to_string())], vec!["call-a"]);
+        assert_eq!(by_conv[&Some("conv-b".to_string())], vec!["call-b"]);
+        assert!(
+            groups
+                .iter()
+                .all(|(agent, ..)| agent.as_deref() == Some("OpenClaw")),
+            "every group must keep the pid's agent attribution"
+        );
+    }
+
     // ── Tests for conn_scan_agent_name (agent identity, never a domain) ──
 
     #[test]
@@ -3329,6 +3671,53 @@ mod tests {
         fn export(&self, events: &[GenAISemanticEvent]) {
             self.events.lock().unwrap().extend_from_slice(events);
         }
+    }
+
+    /// A re-activated dynamic Logtail exporter must replace its predecessor.
+    /// The mailbox registration pushed unconditionally, so every deactivate /
+    /// reactivate cycle of `runtime.sls_logtail_path` left one more exporter
+    /// registered, and every one of them writes the same batch to the same
+    /// file — a record was duplicated once per cycle.
+    #[test]
+    fn pending_logtail_registration_replaces_a_reactivated_exporter() {
+        let mailbox: Mutex<Option<Box<dyn GenAIExporter>>> = Mutex::new(None);
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+
+        // Two activation cycles deposit a fresh dynamic exporter each time.
+        for _ in 0..2 {
+            *mailbox.lock().unwrap() =
+                Some(Box::new(RecordingExporter::new("logtail-file-dynamic")));
+            AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        }
+        assert_eq!(
+            exporters.len(),
+            1,
+            "the re-activated exporter must replace its predecessor, not accumulate"
+        );
+
+        // A different exporter is still registered alongside it.
+        *mailbox.lock().unwrap() = Some(Box::new(RecordingExporter::new("logtail-file")));
+        AgentSight::register_pending_logtail(&mut exporters, &mailbox);
+        assert_eq!(exporters.len(), 2);
+    }
+
+    /// `install_exporter` resolves an exporter by `name()`, the identity the
+    /// Logtail exporter documents ("so the runtime can replace an existing
+    /// dynamic exporter instead of accumulating duplicates").
+    #[test]
+    fn install_exporter_replaces_an_exporter_of_the_same_name() {
+        let mut exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters[0].name(), "logtail-file-dynamic");
+
+        install_exporter(
+            &mut exporters,
+            Box::new(RecordingExporter::new("logtail-file-dynamic")),
+        );
+        assert_eq!(exporters.len(), 1, "same name → replace");
     }
 
     fn make_test_llm_call(call_id: &str) -> crate::genai::LLMCall {

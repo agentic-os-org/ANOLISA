@@ -39,6 +39,9 @@ pub(super) async fn summary(
     if let Some(response) = reject_unrepresentable_window(&query) {
         return response;
     }
+    if let Some(response) = reject_unknown_filter_tokens(&query) {
+        return response;
+    }
     let filter = event_filter(&query);
     let summary = match data.audit_service.summary(&filter) {
         Ok(summary) => summary,
@@ -93,6 +96,9 @@ pub(super) async fn events(
     if let Some(response) = reject_unrepresentable_window(&query) {
         return response;
     }
+    if let Some(response) = reject_unknown_filter_tokens(&query) {
+        return response;
+    }
     match data.audit_service.events(&event_filter(&query)) {
         Ok(page) => {
             let state = if page.items.is_empty() { "empty" } else { "ok" };
@@ -120,6 +126,9 @@ pub(super) async fn sessions(
     query: web::Query<AuditQuery>,
 ) -> HttpResponse {
     if let Some(response) = reject_unrepresentable_window(&query) {
+        return response;
+    }
+    if let Some(response) = reject_unknown_filter_tokens(&query) {
         return response;
     }
     let page = match data.audit_service.sessions(&event_filter(&query)) {
@@ -164,6 +173,9 @@ pub(super) async fn cases(
     data: web::Data<AppState>,
     query: web::Query<AuditQuery>,
 ) -> HttpResponse {
+    if let Some(response) = reject_unknown_filter_tokens(&query) {
+        return response;
+    }
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = query.offset.unwrap_or(0).max(0);
     let agent_id = query.agent_id.as_deref();
@@ -242,6 +254,47 @@ pub(super) async fn review_case(
         ),
         Err(error) => store_error(error),
     }
+}
+
+/// Closed sets the read filters compare literally, mirrored from the writers.
+///
+/// `status` is written by `risk_status`, and `event_type` / `result` by
+/// `EventMetadata::from_event`, so an unknown token can never match a stored
+/// row. Accepting one and answering an empty 200 makes a typo
+/// indistinguishable from a genuinely empty result — the write endpoint here
+/// and the trajectory label filters already reject that with 400 — while the
+/// open-ended identifiers (`policy_id`, `agent_id`, `session_id`,
+/// `binding_id`) stay unchecked on purpose: a valid value may simply have no
+/// rows yet.
+const CASE_STATUS_TOKENS: [&str; 5] = [
+    "open",
+    "confirmed",
+    "false_positive",
+    "accepted_risk",
+    "resolved",
+];
+const EVENT_TYPE_TOKENS: [&str; 5] = [
+    "file_action",
+    "taint_transition",
+    "network_action",
+    "policy_decision",
+    "enforcement_state",
+];
+const EVENT_RESULT_TOKENS: [&str; 6] = [
+    "allowed", "failed", "changed", "blocked", "ready", "degraded",
+];
+
+/// Reject a closed-set filter token that names no row the store can hold.
+fn reject_unknown_filter_tokens(query: &AuditQuery) -> Option<HttpResponse> {
+    let unknown = |value: Option<&String>, allowed: &[&str], name: &str| {
+        value
+            .filter(|value| !allowed.contains(&value.as_str()))
+            .map(|value| format!("{name} '{value}' is not one of {}", allowed.join(", ")))
+    };
+    let message = unknown(query.status.as_ref(), &CASE_STATUS_TOKENS, "status")
+        .or_else(|| unknown(query.event_type.as_ref(), &EVENT_TYPE_TOKENS, "event_type"))
+        .or_else(|| unknown(query.result.as_ref(), &EVENT_RESULT_TOKENS, "result"))?;
+    Some(bad_request(&message))
 }
 
 /// Rejects a window the store cannot represent, and one that runs backwards.

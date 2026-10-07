@@ -227,7 +227,15 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // fails it on its prefix and would then break at the thousands
         // separator, inventing a "244" no evidence supports. A comma doing real
         // structural work, as between two JSON fields, is left to separate.
-        if !word_stands_alone && !word.starts_with("http") && word.contains(STRUCTURAL_SEPARATORS) {
+        // The sparing guard matches `classify_word`'s URL check exactly:
+        // a bare `http`-prefixed word that is not a URL (`http_code=242391`,
+        // curl -w style) is a key=value fact token, and sparing it hid its
+        // value from the grounding check entirely.
+        if !word_stands_alone
+            && !word.starts_with("http://")
+            && !word.starts_with("https://")
+            && word.contains(STRUCTURAL_SEPARATORS)
+        {
             let degrouped = splice_digit_groups(word);
             for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
                 if let Some(claim) = classify_word(segment) {
@@ -302,17 +310,44 @@ fn as_version(word: &str) -> Option<Claim> {
 }
 
 fn as_path(word: &str) -> Option<Claim> {
-    let looks_like_path = (word.starts_with('/') || word.starts_with("./") || word.contains('/'))
-        && word.len() > 2
-        && !word.contains("://");
-    if looks_like_path {
-        return Some(Claim {
-            text: word.to_string(),
-            class: ClaimClass::Path,
-            value: None,
-        });
+    if !looks_like_path(word) {
+        return None;
     }
-    None
+    Some(Claim {
+        text: word.to_string(),
+        class: ClaimClass::Path,
+        value: None,
+    })
+}
+
+/// Whether a token names a file rather than merely containing a slash.
+///
+/// A bare `contains('/')` made prose like `CI/CD`, `3/4` or `MB/s` a `Path`,
+/// which is a hard class: it can anchor a finding, so an answer that merely
+/// mentions one could be reported as fabricated. A single separator only
+/// counts when the tail looks like a file name, and two separators mean a
+/// nested relative path on their own.
+fn looks_like_path(word: &str) -> bool {
+    if word.len() <= 2 || word.contains("://") {
+        return false;
+    }
+    if word.starts_with('/') || word.starts_with("./") || word.starts_with("~/") {
+        return true;
+    }
+    let separators = word.matches('/').count();
+    let tail = word.rsplit('/').next().unwrap_or(word);
+    separators >= 2 || (separators == 1 && has_extension(tail))
+}
+
+/// Whether a path segment ends in a short alphanumeric extension.
+fn has_extension(segment: &str) -> bool {
+    let Some((stem, extension)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 6
+        && extension.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn as_number(word: &str) -> Option<Claim> {

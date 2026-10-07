@@ -38,6 +38,9 @@ pub struct SavingsSessionSummary {
 pub struct ToolCallTurnInfo {
     pub turn_index: usize,
     pub session_id: String,
+    /// Start of the parent LLM call. Callers that query a sub-window of the
+    /// session need it to restrict turn indices to that window.
+    pub start_timestamp_ns: i64,
 }
 
 /// Summary of a single conversation (user query) within a session
@@ -287,8 +290,8 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Build a mapping from `tool_call_id` to the turn index and session of
-    /// the LLM call that issued it.
+    /// Build a mapping from `tool_call_id` to the turn index, session and
+    /// start timestamp of the LLM call that issued it.
     ///
     /// Reads the `tool_call_ids` JSON array column from `genai_events` and
     /// expands it so that each individual tool_call_id maps to its parent LLM
@@ -302,7 +305,7 @@ impl GenAISqliteStore {
         let mut result = std::collections::HashMap::new();
 
         for sid in session_ids {
-            let sql = "SELECT call_id, tool_call_ids FROM genai_events \
+            let sql = "SELECT call_id, tool_call_ids, start_timestamp_ns FROM genai_events \
                        WHERE event_type = 'llm_call' AND session_id = ?1 \
                        ORDER BY start_timestamp_ns ASC";
             let mut stmt = conn.prepare(sql)?;
@@ -311,11 +314,12 @@ impl GenAISqliteStore {
                 // by a foreign writer) must not error the whole map.
                 let call_id: Option<String> = row.get(0)?;
                 let tool_call_ids: Option<String> = row.get(1)?;
-                Ok((call_id, tool_call_ids))
+                let start_timestamp_ns: i64 = row.get(2)?;
+                Ok((call_id, tool_call_ids, start_timestamp_ns))
             })?;
 
             for (idx, row) in rows.enumerate() {
-                let (call_id, tool_call_ids_json) = row?;
+                let (call_id, tool_call_ids_json, start_timestamp_ns) = row?;
                 // A malformed row with a NULL call_id has no key to map, so
                 // skip it instead of failing every session's turn lookup.
                 let Some(call_id) = call_id else { continue };
@@ -329,6 +333,7 @@ impl GenAISqliteStore {
                     ToolCallTurnInfo {
                         turn_index: turn,
                         session_id: session_id.clone(),
+                        start_timestamp_ns,
                     },
                 );
 
@@ -341,6 +346,7 @@ impl GenAISqliteStore {
                                 ToolCallTurnInfo {
                                     turn_index: turn,
                                     session_id: session_id.clone(),
+                                    start_timestamp_ns,
                                 },
                             );
                         }

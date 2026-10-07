@@ -390,6 +390,10 @@ impl GenAISqliteStore {
                 );
 
                 if let Some(match_key) = call.metadata.get("pending_match_key") {
+                    // A completion whose parsed request carries no messages
+                    // must not erase the evidence the idle snapshot captured:
+                    // the snapshot is then the only record of what the caller
+                    // sent. The call-id branch above carries the same guard.
                     let updated = conn.execute(
                         "UPDATE genai_events SET
                             status = 'complete',
@@ -414,8 +418,8 @@ impl GenAISqliteStore {
                             total_tokens        = ?19,
                             cache_creation_tokens = ?20,
                             cache_read_tokens   = ?21,
-                            system_instructions = ?22,
-                            input_messages      = ?23,
+                            system_instructions = COALESCE(?22, system_instructions),
+                            input_messages      = COALESCE(?23, input_messages),
                             output_messages     = ?24,
                             status_code         = ?25,
                             sse_event_count     = ?26,

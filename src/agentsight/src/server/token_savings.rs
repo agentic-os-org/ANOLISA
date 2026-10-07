@@ -533,15 +533,19 @@ pub async fn get_token_savings(
         let total_tokens = session.total_input_tokens + session.total_output_tokens;
         let request_count = session.request_count;
         // `request_count` counts only the calls inside the queried window,
-        // while `turn_indices` numbers every call of the session. The
-        // compounding comment below defines M as the SESSION's total turns
-        // (the per-session endpoint already pairs those two), so derive M
-        // from the same session-global map instead of mixing scopes — a tool
-        // invoked at turn 1 of 3 used to compound for (2-1)=1 turn when only
-        // the last two calls were in the window.
+        // while `turn_indices` numbers every call of the session. M must be
+        // the last turn INSIDE the window: a call after `end_ns` cannot carry
+        // the shortened output, so letting its global turn index extend the
+        // horizon inflated the reported savings whenever the window was
+        // narrowed. When no in-window call is mapped (e.g. a NULL call_id from
+        // a foreign writer), the windowed count is the best bound available.
         let session_total_turns = turn_indices
             .values()
-            .filter(|info| info.session_id == session.session_id)
+            .filter(|info| {
+                info.session_id == session.session_id
+                    && info.start_timestamp_ns >= start_ns
+                    && info.start_timestamp_ns <= end_ns
+            })
             .map(|info| info.turn_index as i64)
             .max()
             .unwrap_or(request_count);
@@ -564,7 +568,8 @@ pub async fn get_token_savings(
                 // Compounding: the shortened tool output appears in the
                 // context of all LLM calls AFTER the one that triggered the
                 // tool use. If the tool was invoked at turn N (1-based) out
-                // of M total turns, the savings persist for (M - N) turns.
+                // of M turns in the queried window, the savings persist for
+                // (M - N) turns.
                 let turn_index = turn_indices
                     .get(&row.tool_use_id)
                     .map(|info| info.turn_index)
@@ -1067,6 +1072,20 @@ mod tests {
         );
         let body: serde_json::Value = actix_test::read_body_json(resp).await;
         assert_eq!(body["error"], "start_ns must not exceed end_ns");
+
+        // Same guard when only `start_ns` is supplied: the end defaults to
+        // now, so a future start is inverted and used to answer an empty 200.
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=9223372036854775807")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "a start beyond the defaulted end must be rejected"
+        );
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1167,6 +1186,71 @@ mod tests {
             "turn 1 of a 3-turn session compounds over turns 2 and 3"
         );
         assert_eq!(tc1["compounded_saved"], 3000);
+
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn savings_compounding_stops_at_the_window_end() {
+        // The session has a third call at t=300M outside this window. Its
+        // turn index must not extend the compounding horizon past the
+        // queried end: tc-1 was invoked on the window's first call (of two),
+        // so it compounds over a single turn, not two. Using the
+        // session-global max inflated `compounded_savings_rate` above the
+        // documented [0, 1] range.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_window_end_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        add_third_call(&db_path);
+        let _stats_path = setup_stats_db(&tmp);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=100000000&end_ns=200000000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+
+        let items = body["sessions"][0]["optimization_items"]
+            .as_array()
+            .expect("optimization items");
+        let tc1 = items
+            .iter()
+            .find(|item| item["id"] == "tc-1")
+            .expect("tc-1 item");
+        assert_eq!(tc1["saved_tokens"], 1500);
+        assert_eq!(
+            tc1["compounding_turns"], 1,
+            "turn 1 of a 2-turn window compounds over the window's second turn only"
+        );
+        assert_eq!(tc1["compounded_saved"], 1500);
+
+        let compounded_rate = body["summary"]["compounded_savings_rate"]
+            .as_f64()
+            .expect("compounded savings rate");
+        assert!(
+            compounded_rate <= 1.0,
+            "the compounded rate is documented as a fraction in [0, 1], got {compounded_rate}"
+        );
 
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },

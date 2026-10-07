@@ -1372,6 +1372,45 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn audit_read_filters_reject_unknown_closed_set_tokens() {
+        // `status` / `event_type` / `result` each have a closed set of writers
+        // (`risk_status`, `EventMetadata::from_event`), so a typo can never
+        // match a row: answering an empty 200 made it indistinguishable from a
+        // genuinely empty result.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/cases?status=oepn",
+            "/api/audit/events?event_type=file_actions",
+            "/api/audit/events?result=bloked",
+            "/api/audit/summary?event_type=file_actions",
+            "/api/audit/sessions?result=bloked",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Valid tokens still filter; the in-memory store is simply empty.
+        for uri in [
+            "/api/audit/cases?status=open",
+            "/api/audit/events?event_type=file_action",
+            "/api/audit/events?result=blocked",
+            "/api/audit/summary?event_type=file_action",
+            "/api/audit/sessions?result=blocked",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
     async fn api_docs_lists_routes_and_not_found_points_to_it() {
         let app = awtest::init_service(
             App::new()

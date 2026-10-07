@@ -117,10 +117,8 @@ pub fn count_request_tokens(
     let template_messages: Vec<serde_json::Value> = messages.to_vec();
 
     // Extract tools JSON array for passing to template
-    let tools_json: Option<Vec<serde_json::Value>> = request_json
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .map(|arr| arr.to_vec());
+    let tools_json: Option<Vec<serde_json::Value>> =
+        crate::parser::llm::extract_tools_view(request_json);
 
     // Count tool definitions separately (for informational breakdown). The
     // count is also folded into the first tool-role message below so the
@@ -909,10 +907,8 @@ impl Analyzer {
                 }
 
                 // Extract tools JSON array for passing to template
-                let tools_json: Option<Vec<serde_json::Value>> = request_json_ref
-                    .get("tools")
-                    .and_then(|t| t.as_array())
-                    .map(|arr| arr.to_vec());
+                let tools_json: Option<Vec<serde_json::Value>> =
+                    crate::parser::llm::extract_tools_view(request_json_ref);
                 let tools_slice = tools_json.as_deref();
 
                 // Apply chat template with tools to get the actual prompt sent to LLM
@@ -2225,5 +2221,91 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         assert_eq!(messages[1]["content"], "b");
 
         assert!(request_messages(&serde_json::json!({"model": "x"})).is_none());
+    }
+
+    /// Minimal word-level tokenizer so the manual counters run without the
+    /// network or the real Qwen tokenizer, which is not vendored here.
+    fn fixture_word_level_tokenizer(suffix: &str) -> LlmTokenizer {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_analyzer_fixture_{suffix}_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let tokenizer_path = dir.join("tokenizer.json");
+        let config_path = dir.join("tokenizer_config.json");
+        std::fs::write(
+            &tokenizer_path,
+            r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {"type": "Whitespace"},
+  "post_processor": null,
+  "decoder": null,
+  "model": {"type": "WordLevel", "vocab": {"[UNK]": 0}, "unk_token": "[UNK]"}
+}"#,
+        )
+        .expect("write tokenizer.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "chat_template": "{% for message in messages %}{{ message['role'] + '\n' + message['content'] + '\n' }}{% endfor %}",
+  "bos_token": null,
+  "eos_token": null,
+  "unk_token": "[UNK]",
+  "model_max_length": 32768
+}"#,
+        )
+        .expect("write tokenizer config");
+        LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+    }
+
+    /// A Responses turn whose output is a function call must be counted: the
+    /// extractor recognised none of the protocol's function-call events, so
+    /// `by_type["tool_calls"]` stayed absent and a tool-only turn counted as
+    /// producing nothing. `count_response_tokens` is the consumer that fixes
+    /// the `name: arguments` shape the fragments must reconstruct.
+    #[test]
+    fn count_response_tokens_counts_responses_function_calls() {
+        let tokenizer = fixture_word_level_tokenizer("responses_fc");
+        let response_jsons = vec![
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                },
+            }),
+            serde_json::json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 0,
+                "delta": "{\"path\":",
+            }),
+            serde_json::json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 0,
+                "delta": "\"/tmp/a.md\"}",
+            }),
+        ];
+
+        let count = count_response_tokens(&response_jsons, &tokenizer).expect("count");
+
+        assert!(
+            count.by_type.get("tool_calls").copied().unwrap_or(0) > 0,
+            "the Responses function call must be counted, got {:?}",
+            count.by_type
+        );
+        assert!(
+            count.total_tokens > 0,
+            "a tool-only Responses turn must not count as zero output tokens"
+        );
     }
 }

@@ -169,7 +169,8 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
             "response.output_text.delta"
             | "response.reasoning_text.delta"
             | "response.reasoning_summary_text.delta"
-            | "response.function_call_arguments.delta" => {
+            | "response.function_call_arguments.delta"
+            | "response.refusal.delta" => {
                 return non_empty_string(value.get("delta"));
             }
             "content_block_delta" => {
@@ -232,6 +233,33 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
         }
     }
 
+    // Gemini streamGenerateContent: the payload rides under
+    // `candidates[].content.parts[]` — text as `{"text": ...}` parts, tool
+    // calls as `{"functionCall": {"name": ...}}` parts — and usage under
+    // `usageMetadata`. None of the shapes above match it, so a Gemini
+    // stream's first answer token never dated the stream and its TTFT
+    // stayed empty.
+    if let Some(candidates) = value
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+    {
+        return candidates.iter().any(|candidate| {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            parts.iter().any(|part| {
+                non_empty_string(part.get("text"))
+                    || part
+                        .get("functionCall")
+                        .is_some_and(|call| non_empty_string(call.get("name")))
+            })
+        });
+    }
+
     value
         .get("choices")
         .and_then(serde_json::Value::as_array)
@@ -246,6 +274,7 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                     || non_empty_string(message.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
+                    || non_empty_string(delta.and_then(|item| item.get("refusal")))
                     || delta
                         .and_then(|item| item.get("tool_calls"))
                         .and_then(serde_json::Value::as_array)
@@ -415,9 +444,14 @@ mod latency_tests {
             "type": "response.output_text.delta",
             "delta": "hello"
         });
+        let refusal = serde_json::json!({
+            "type": "response.refusal.delta",
+            "delta": "I can't help with that."
+        });
         assert!(!event_has_meaningful_output(Some(&created)));
         assert!(!event_has_meaningful_output(Some(&empty)));
         assert!(event_has_meaningful_output(Some(&output)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
     }
 
     #[test]
@@ -429,8 +463,14 @@ mod latency_tests {
         let chat = serde_json::json!({
             "choices": [{"delta": {"content": "hello"}}]
         });
+        // A refusal-only stream still carries the model's answer, so its first
+        // delta is a first-output timestamp like any other.
+        let refusal = serde_json::json!({
+            "choices": [{"delta": {"refusal": "I can't help with that."}}]
+        });
         assert!(event_has_meaningful_output(Some(&anthropic)));
         assert!(event_has_meaningful_output(Some(&chat)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
     }
 
     /// The DashScope/Bailian native envelope nests its payload under `output`
@@ -545,5 +585,54 @@ mod latency_tests {
         ]);
 
         assert_eq!(response.first_output_timestamp_ns(), None);
+    }
+
+    /// Gemini streamGenerateContent streams its answer as
+    /// `candidates[].content.parts[]` — text as `{"text": ...}` parts, tool
+    /// calls as `{"functionCall": ...}` parts — so none of the shapes above
+    /// matched it: the stream never dated its first output and its TTFT
+    /// stayed empty.
+    #[test]
+    fn recognizes_gemini_candidates_output() {
+        let text = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "Hel"}], "role": "model"},
+                            "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let tool_call = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "X"}}}],
+                "role": "model"}}]
+        });
+        let usage_only = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": ""}], "role": "model"},
+                            "finishReason": "STOP", "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
+        });
+
+        assert!(event_has_meaningful_output(Some(&text)));
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+        assert!(!event_has_meaningful_output(Some(&usage_only)));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_text_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"},"index":0}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"index":0}],
+                    "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
     }
 }

@@ -237,7 +237,15 @@ impl OptimizeState {
     }
 
     pub(crate) fn snapshot(&self) -> OptLlmConfig {
-        self.config.read().map(|c| c.clone()).unwrap_or_default()
+        // Recover a poisoned guard instead of answering with an empty
+        // config: the writer (update_optimize_config) reports the poisoned
+        // state explicitly, so a reader that silently downgraded to
+        // defaults would show "not configured" while the sealed config on
+        // disk is fine, and the dashboard could not repair itself.
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub(super) fn build_client(&self) -> Result<LlmClient, HttpResponse> {
@@ -682,9 +690,12 @@ pub async fn run_optimization(
         Err(resp) => return resp,
     };
     let Some(dimension) = parse_dimension(&dimension_raw) else {
+        // Derived from ALL_DIMENSIONS so the message cannot fall behind
+        // `parse_dimension` again: it is the only place this API names the
+        // accepted values, and it had dropped `summary`.
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "unknown dimension",
-            "message": "expected one of: perf, perf-issues, cost, cost-waste, accuracy",
+            "message": format!("expected one of: {}", ALL_DIMENSIONS.join(", ")),
         }));
     };
 
@@ -922,6 +933,20 @@ pub async fn list_optimization_history(
     if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
+    // Resolve the window before consulting the optimizer's state: an
+    // explicit future start (end defaults to now) is as inverted as a
+    // supplied pair, and a default start that is not representable must be
+    // rejected instead of `saturating_sub` clamping it to `i64::MIN`, which
+    // silently answered an empty 200.
+    let end_ns = query.end_ns.unwrap_or_else(now_ns);
+    let start_ns = match super::handlers::start_or_default(
+        query.start_ns,
+        end_ns,
+        HISTORY_DEFAULT_WINDOW_NS,
+    ) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let state = match optimize_state(&data) {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -932,10 +957,6 @@ pub async fn list_optimization_history(
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
 
-    let end_ns = query.end_ns.unwrap_or_else(now_ns);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns.saturating_sub(HISTORY_DEFAULT_WINDOW_NS));
     let limit = query.limit.unwrap_or(100).clamp(1, HISTORY_MAX_LIMIT);
 
     match store.list(start_ns, end_ns, limit) {
@@ -1099,6 +1120,43 @@ mod tests {
         })
     }
 
+    /// The rejection message is the only place this API names the accepted
+    /// dimensions (`/api/docs` lists the route without its values), and it
+    /// named five of the six `parse_dimension` accepts: a client reading the
+    /// error cannot discover `summary`, a dimension the endpoint serves.
+    #[actix_web::test]
+    async fn unknown_dimension_lists_every_accepted_dimension() {
+        use actix_web::{App, test as awtest};
+
+        let dir = tmp_dir("unknown-dimension");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(run_optimization),
+        )
+        .await;
+        let request = awtest::TestRequest::post()
+            .uri("/optimize/sessions/s1/not-a-dimension")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an unknown dimension must be rejected before the session is read"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        let message = body["message"]
+            .as_str()
+            .expect("the rejection names the accepted dimensions");
+        for dimension in ALL_DIMENSIONS {
+            assert!(
+                message.contains(dimension),
+                "the rejection must name every accepted dimension, {dimension} is missing: {message}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[actix_web::test]
     async fn history_rejects_an_inverted_window() {
         use actix_web::{App, test as awtest};
@@ -1124,6 +1182,50 @@ mod tests {
         );
         let body: serde_json::Value = awtest::read_body_json(response).await;
         assert_eq!(body["error"], "start_ns must not exceed end_ns");
+
+        // One-sided form: `end_ns` is absent, so it defaults to now and a
+        // future start is just as inverted.
+        let request = awtest::TestRequest::get()
+            .uri("/optimize/results?start_ns=9223372036854775807")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "a start beyond the defaulted end must be rejected"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+    }
+
+    #[actix_web::test]
+    async fn history_rejects_an_unrepresentable_default_window() {
+        use actix_web::{App, test as awtest};
+
+        // `end_ns` near `i64::MIN` used to make `saturating_sub` clamp the
+        // default start to `i64::MIN` and answer 200 `[]` — indistinguishable
+        // from "no history in range". It is rejected like every sibling
+        // endpoint rejects an unrepresentable default window.
+        let dir = tmp_dir("unrepresentable-window");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(list_optimization_history),
+        )
+        .await;
+        let request = awtest::TestRequest::get()
+            .uri("/optimize/results?end_ns=-9223372036854775808")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an unrepresentable default window must be rejected, not clamped"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "default time range is out of bounds");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[actix_web::test]
@@ -1156,6 +1258,55 @@ mod tests {
         .await;
         let body: serde_json::Value = awtest::read_body_json(response).await;
         assert_eq!(body["search_timeout_secs"], 30);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn config_endpoint_survives_a_poisoned_config_lock() {
+        use actix_web::{App, test as awtest};
+
+        // A panic in a thread holding the config lock poisons it. `snapshot`
+        // used to answer with an empty default from then on — `configured:
+        // false` and the default model — while the writer refuses with
+        // "config lock poisoned": the dashboard showed no credentials and
+        // could not fix itself short of a restart, with the sealed config
+        // still intact on disk. Recover the guard instead, so the seeded
+        // config stays visible.
+        let dir = tmp_dir("config-poison");
+        let state = config_test_state(&dir);
+        {
+            let optimize = state.optimize.as_ref().expect("optimize state");
+            let mut config = optimize.config.write().unwrap();
+            config.model = Some("test-model".to_string());
+            config.api_key = Some("sk-test-poison-0001".to_string());
+        }
+        let optimize = Arc::clone(state.optimize.as_ref().expect("optimize state"));
+        let _ = std::thread::spawn(move || {
+            let _guard = optimize.config.write().unwrap();
+            panic!("poison the optimize config lock");
+        })
+        .join();
+
+        let app =
+            awtest::init_service(App::new().app_data(state).service(get_optimize_config)).await;
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/optimize/config")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(
+            body["model"], "test-model",
+            "a poisoned lock must not replace the configured model with the default"
+        );
+        assert_eq!(
+            body["configured"], true,
+            "the seeded key must stay visible through a poisoned lock"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

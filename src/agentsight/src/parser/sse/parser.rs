@@ -87,6 +87,14 @@ impl SseParser {
     /// Parse SslEvent and extract SSE events
     /// Returns Vec of ParsedSseEvent
     ///
+    /// Only newline-terminated lines are parsed. A trailing line without a
+    /// newline is a torn line from an SSL_read split and produces no event
+    /// (the legacy parser returns the same tail in `remaining`); bytes after
+    /// the last complete line are not returned, so a caller that needs them
+    /// has to retain the raw buffer. An event whose fields are complete but
+    /// lacks the terminating blank line is still emitted, matching the
+    /// legacy parser's end-of-buffer handling.
+    ///
     /// Note: For multi-line data fields, data is concatenated with '\n' separators.
     /// The data_offset points to the first data line, data_len covers all data content
     /// including internal newlines.
@@ -102,6 +110,9 @@ impl SseParser {
         let mut data_start: Option<usize> = None;
 
         let mut byte_offset = 0;
+        // Set when the buffer's last segment has no terminating newline: the
+        // event is still in flight and must not be flushed at end-of-buffer.
+        let mut trailing_line_torn = false;
 
         // Iterate the ORIGINAL bytes, not a lossy UTF-8 conversion: the
         // zero-copy offsets below index into event.buf, so they must stay
@@ -115,15 +126,24 @@ impl SseParser {
             let line_with_end_len = line_with_end.len();
             let line_start = byte_offset;
 
-            // Remove trailing \r\n or \n for parsing, but keep track of original length
-            let mut end = line_with_end_len;
-            if end > 0 && line_with_end[end - 1] == b'\n' {
+            // A final segment without '\n' is not a complete line: it is the
+            // torn prefix of a line split across SSL_read buffers (possibly
+            // partial JSON carrying a delta or usage). Emitting it would
+            // dispatch a bogus event whose remainder cannot be recognized in
+            // the next buffer; the legacy parser returns such a tail in
+            // `remaining` instead.
+            let Some(line_with_cr) = line_with_end.strip_suffix(b"\n") else {
+                trailing_line_torn = true;
+                break;
+            };
+
+            // Strip a trailing \r for parsing, but keep the original length
+            // for the raw-buffer offsets computed from line_start.
+            let mut end = line_with_cr.len();
+            while end > 0 && line_with_cr[end - 1] == b'\r' {
                 end -= 1;
-                while end > 0 && line_with_end[end - 1] == b'\r' {
-                    end -= 1;
-                }
             }
-            let line_bytes = &line_with_end[..end];
+            let line_bytes = &line_with_cr[..end];
             let line = String::from_utf8_lossy(line_bytes);
 
             if line.is_empty() {
@@ -217,11 +237,14 @@ impl SseParser {
             byte_offset += line_with_end_len;
         }
 
-        // Handle event at end without double newline
-        if current_id.is_some()
-            || current_event.is_some()
-            || current_retry.is_some()
-            || !data_parts.is_empty()
+        // Handle event at end without double newline. Suppressed when the
+        // buffer ended on a torn line: the event is incomplete, so flushing
+        // it here would publish a partial event and drop its remainder.
+        if !trailing_line_torn
+            && (current_id.is_some()
+                || current_event.is_some()
+                || current_retry.is_some()
+                || !data_parts.is_empty())
         {
             let (data_offset, data_len) = if !data_parts.is_empty() {
                 // Only use first data line for zero-copy access
@@ -441,6 +464,38 @@ mod tests {
         // Should still emit the event at end
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data(), b"incomplete");
+    }
+
+    #[test]
+    fn test_parse_torn_trailing_line_no_event() {
+        // One SSL_read can split the stream mid-line. A final segment without
+        // a terminating newline is a torn prefix of a line (e.g. partial
+        // JSON), not a complete event: dispatching it loses the remainder,
+        // which arrives in the next buffer as an unrecognizable fragment.
+        // The legacy SSEParser returns such a tail in `remaining` instead.
+        let parser = SseParser::new();
+        let data = b"data: {\"a\":1".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert!(
+            events.is_empty(),
+            "torn trailing line must not be emitted as an event, got {} event(s)",
+            events.len()
+        );
+    }
+
+    #[test]
+    fn test_parse_complete_event_then_torn_tail() {
+        // Only the blank-line-terminated event is complete; the torn tail
+        // must not become a second partial event.
+        let parser = SseParser::new();
+        let data = b"data: complete\n\ndata: {\"a\":1".to_vec();
+        let event = create_test_event(data);
+
+        let events = parser.parse(event);
+        assert_eq!(events.len(), 1, "only the complete event may be emitted");
+        assert_eq!(events[0].data(), b"complete");
     }
 
     #[test]

@@ -99,6 +99,24 @@ fn runtime_env_from(root: &Path) -> RuntimeEnv {
     if root.join(".dockerenv").exists() || root.join("run/.containerenv").exists() {
         return RuntimeEnv::Container;
     }
+    // systemd's container interface: when systemd runs as PID 1 inside a
+    // container it records the manager's name here, taken from the
+    // `container=` variable the manager puts in its environment. In a cgroup
+    // v2 container this is the only signal that is left — /proc/1/cgroup is
+    // then the namespace root `0::/` and PID 1 is a known init, so both checks
+    // below report a bare host.
+    //
+    // `wsl` is the one value that is not a container here: WSL2's own init
+    // exports it (systemd documents WSL as "categorized as a container for
+    // practical purposes"), but /proc/sys in WSL2 is the WSL kernel the
+    // workload itself runs on — not a host kernel shared with other machines —
+    // so the bare-host verdict the scope already gets must not change.
+    if let Some(manager) = read_text_lossy(&root.join("run/systemd/container")) {
+        let manager = manager.trim();
+        if !manager.is_empty() && manager != "wsl" {
+            return RuntimeEnv::Container;
+        }
+    }
     // Both files are read lossily: cgroup paths and PID 1's comm (the first
     // token of /proc/1/sched) may hold non-UTF-8 bytes, which made
     // `read_to_string` skip the check and report a container as `BareHost`.
@@ -159,7 +177,40 @@ pub fn is_param_writable(path: &str) -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
-    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+    // Every ktuner write path runs as root (tune/fix/rollback refuse
+    // otherwise), so `writable` describes the ROOT run, not the invoking
+    // user. An unprivileged `check`/`why`/`tune --dry-run` — all documented
+    // as root-free — used to evaluate access(W_OK) as the caller, so a
+    // non-root preview reported EVERY recommendation unwritable and answered
+    // "blocked" on a host where `sudo ktuner tune` applies them all. For a
+    // non-root caller decide from the facts that bound root instead: the
+    // file's write bits (root owns proc sysctls) and the mount's read-only
+    // flag, which statvfs reports to anyone.
+    if unsafe { libc::geteuid() } == 0 {
+        return unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 };
+    }
+    root_run_can_write(path)
+}
+
+/// Whether ROOT can write `path`, judged without being root: the file grants
+/// a write bit (a proc sysctl is root-owned 0644, so the owner bit covers it;
+/// a write-only 0200 knob also passes) and the mount is not read-only (the
+/// container case, which a root access(W_OK) also reports as unwritable).
+fn root_run_can_write(path: &str) -> bool {
+    let mode = match fs::metadata(path) {
+        Ok(metadata) => std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()),
+        Err(_) => return false,
+    };
+    if mode & 0o222 == 0 {
+        return false;
+    }
+    let c_path = match std::ffi::CString::new(path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    // f_flag is unsigned long on Linux; ST_RDONLY is the low bit.
+    unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) == 0 && buf.f_flag & libc::ST_RDONLY == 0 }
 }
 
 pub fn gather_system_info() -> Result<SystemInfo> {
@@ -168,7 +219,10 @@ pub fn gather_system_info() -> Result<SystemInfo> {
         kernel_version: read_kernel_version()?,
         os_distro: read_os_distro(),
         cpu_model,
-        cpu_cores,
+        // The same scaling input memory_total_gb already is: inside a cgroup
+        // CPU limit, every cpu-scaled rule would size its recommendation for
+        // processors the workload can never run on.
+        cpu_cores: effective_cpu_cores(cpu_cores, read_cgroup_cpu_limit_cores()),
         numa_nodes: read_numa_nodes(),
         memory_total_gb: read_memory_total_gb()?,
         disks: read_disk_info()?,
@@ -343,6 +397,71 @@ fn cgroup_v1_limit_kb(bytes: u64) -> u64 {
         bytes / 1024
     } else {
         0
+    }
+}
+
+fn read_cgroup_cpu_limit_cores() -> u64 {
+    // cgroup v2: cpu.max holds "<quota> <period>", quota "max" = no limit.
+    if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        return cgroup_v2_cpu_max_cores(&s);
+    }
+    // cgroup v1: the quota and the period live in two files.
+    let quota = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us");
+    let period = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us");
+    if let (Ok(quota), Ok(period)) = (quota, period) {
+        return cgroup_v1_cfs_cores(&quota, &period);
+    }
+    0
+}
+
+/// cgroup v2 cpu.max content → whole cores, 0 for the "max" (no-limit)
+/// sentinel or unparseable content. A fractional quota rounds up: a
+/// 150000/100000 limit is one and a half CPUs, and scaling by 1 would
+/// under-size rules relative to what the workload can actually run.
+fn cgroup_v2_cpu_max_cores(raw: &str) -> u64 {
+    let mut fields = raw.split_whitespace();
+    let quota: u64 = match fields.next() {
+        Some(q) if q != "max" => match q.parse() {
+            Ok(quota) => quota,
+            Err(_) => return 0,
+        },
+        _ => return 0,
+    };
+    let period: u64 = fields.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    cores_from_quota_period(quota, period)
+}
+
+/// cgroup v1 cfs quota/period pair → whole cores, 0 when the quota is the -1
+/// "unlimited" sentinel or either value is unparseable.
+fn cgroup_v1_cfs_cores(quota_raw: &str, period_raw: &str) -> u64 {
+    let quota: i64 = quota_raw.trim().parse().unwrap_or(-1);
+    if quota < 0 {
+        return 0;
+    }
+    let period: u64 = period_raw.trim().parse().unwrap_or(0);
+    cores_from_quota_period(quota as u64, period)
+}
+
+/// Quota per period → whole cores (ceiling), 0 when there is no real limit.
+fn cores_from_quota_period(quota: u64, period: u64) -> u64 {
+    if quota == 0 || period == 0 {
+        return 0;
+    }
+    quota.div_ceil(period)
+}
+
+/// Effective CPU cores: the cgroup limit only when it is a real limit below
+/// the host count; never 0 (a 0 here would mis-scale every cpu-scaled rule,
+/// which is why every cpu-scaled rule consumes this one number). Mirrors
+/// [`effective_memory_gb`]: /proc/cpuinfo counts the host's processors, and a
+/// container with a cpu.max / cfs_quota limit can only run a fraction of
+/// them, so rules scaled by `cpu_cores` sized recommendations for processors
+/// the workload can never run on.
+fn effective_cpu_cores(host_cores: usize, cgroup_cores: u64) -> usize {
+    if cgroup_cores > 0 && (cgroup_cores as usize) < host_cores {
+        cgroup_cores as usize
+    } else {
+        host_cores
     }
 }
 
@@ -618,6 +737,13 @@ fn read_processes() -> Result<Vec<ProcessInfo>> {
                     if is_monitoring_helper(&fname) {
                         continue;
                     }
+                    // A client tool names the service it talks to, not the
+                    // service: `clickhouse-client` and `kafka-topics.sh` are
+                    // not a database or a broker, and only the host that runs
+                    // the daemon should get the daemon's rules.
+                    if is_service_tool(&fname) {
+                        continue;
+                    }
                     // For a JVM the name is just "java" (likewise
                     // "python"/"node"/"beam.smp"), so the actual service is
                     // invisible. Recover it from cmdline.
@@ -675,26 +801,115 @@ pub(crate) fn is_monitoring_helper(pid: &str) -> bool {
 }
 
 /// Whether a command line names a metrics collector. Only the program being
-/// run decides — argv[0], or the payload of a `sh -c` wrapper — because a
-/// bare `exporter` token in a later argument (a config path, say) does not
-/// make the process a collector.
-fn cmdline_names_helper<'a>(mut args: impl Iterator<Item = &'a str>) -> bool {
-    let program = args.next().unwrap_or_default();
+/// run decides — argv[0], the payload of a `sh -c` wrapper, or the jar a JVM
+/// runs — because a bare `exporter` token in a later argument (a config
+/// path, say) does not make the process a collector.
+fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
+    let args: Vec<&str> = args.collect();
+    let Some(&program) = args.first() else {
+        return false;
+    };
     if is_monitoring_helper_name(program) {
         return true;
     }
-    // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
-    // the payload, not as argv[0]; the payload's first word is its command.
-    let is_shell = matches!(
+    if is_shell_program(program) {
+        // `sh -c "node_exporter --web.listen-address=..."` runs the collector as
+        // the payload, not as argv[0]; the payload's first word is its command.
+        return args.get(1) == Some(&"-c")
+            && args
+                .get(2)
+                .and_then(|&payload| payload.split_whitespace().next())
+                .is_some_and(is_monitoring_helper_name);
+    }
+    if program.rsplit('/').next().unwrap_or_default() == "java" {
+        // A JVM names its program in the jar after `-jar`; argv[0] is only the
+        // launcher. `java -jar jmx_prometheus_httpserver-1.2.1.jar 5556
+        // config.yaml` is the Prometheus JMX exporter's documented standalone
+        // form — a collector whose jar carries no "exporter" token, which is
+        // how a metrics-only host kept being detected as a Java workload.
+        return args
+            .iter()
+            .position(|a| *a == "-jar")
+            .and_then(|i| args.get(i + 1))
+            .is_some_and(|&jar| jvm_jar_names_helper(jar));
+    }
+    false
+}
+
+/// Whether `program` (an argv[0]) is a shell that a script file is run under.
+fn is_shell_program(program: &str) -> bool {
+    matches!(
         program.rsplit('/').next().unwrap_or_default(),
         "sh" | "bash" | "dash" | "zsh" | "ksh"
-    );
-    is_shell
-        && args.next() == Some("-c")
-        && args
-            .next()
-            .and_then(|payload| payload.split_whitespace().next())
-            .is_some_and(is_monitoring_helper_name)
+    )
+}
+
+/// ClickHouse's client-side entry points. The vendor's `clickhouse-client`
+/// package ships every one of them as a symlink to the single multi-call
+/// `clickhouse` binary, so the kernel truncates the client's comm to a prefix
+/// the server binary's own name shares (`clickhouse-clie` / `clickhouse-serv`)
+/// and the name alone cannot tell the two apart. The program name can.
+const CLICKHOUSE_CLIENT_TOOLS: &[&str] = &[
+    "clickhouse-benchmark",
+    "clickhouse-client",
+    "clickhouse-compressor",
+    "clickhouse-format",
+    "clickhouse-local",
+    "clickhouse-obfuscator",
+];
+
+/// Whether the program `program` is a *tool* of a service rather than the
+/// service itself.
+///
+/// A service ktuner identifies through its runtime — the JVM/Erlang daemons in
+/// [`RUNTIME_SERVICE_MARKERS`] — is never the process named after it: the
+/// daemon runs as `java` (or the Erlang VM) and is decided from the runtime's
+/// own command line, so an executable called `kafka-topics.sh`, `spark-submit`
+/// or `elasticsearch-keystore` can only be one of its tools. ClickHouse has the
+/// same shape through its multi-call binary. Both share the service's name
+/// prefix with a `-` boundary, which is what `has_process` matches, so a host
+/// that only talks to a service running elsewhere used to get that service's
+/// rules and workload classification.
+fn program_names_service_tool(program: &str) -> bool {
+    let basename = program.rsplit('/').next().unwrap_or(program);
+    if CLICKHOUSE_CLIENT_TOOLS.contains(&basename) {
+        return true;
+    }
+    RUNTIME_SERVICE_MARKERS.iter().any(|(_, service)| {
+        basename
+            .strip_prefix(service)
+            .is_some_and(|rest| rest.starts_with('-'))
+    })
+}
+
+/// Whether `pid` runs a service tool instead of the workload.
+///
+/// Like [`is_monitoring_helper`], the program decides: argv[0] for a binary
+/// (a multi-call tool is started under its own name), and — because the kernel
+/// runs a script under its interpreter — the script path in the argument after
+/// argv[0] when that is a shell. `/proc/<pid>/comm` keeps the script's own
+/// name, which is exactly the name that must not satisfy a service match.
+fn is_service_tool(pid: &str) -> bool {
+    let Some(cmdline) = read_cmdline_from(&format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let mut args = cmdline.split('\0').filter(|arg| !arg.is_empty());
+    let Some(program) = args.next() else {
+        return false;
+    };
+    if program_names_service_tool(program) {
+        return true;
+    }
+    is_shell_program(program) && args.next().is_some_and(program_names_service_tool)
+}
+
+/// Whether the jar a JVM runs names a metrics collector. The Prometheus JMX
+/// exporter's standalone jars are `jmx_prometheus_httpserver-<v>.jar` (the
+/// name carries no "exporter" token), while other JVM collectors carry it
+/// (`cassandra_exporter-<v>.jar`).
+fn jvm_jar_names_helper(jar: &str) -> bool {
+    let basename = jar.rsplit('/').next().unwrap_or(jar);
+    is_monitoring_helper_name(basename) || basename.starts_with("jmx_prometheus")
 }
 
 fn is_generic_runtime(comm: &str) -> bool {
@@ -718,6 +933,11 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
     ("elasticsearch", "elasticsearch"),
     ("org.opensearch", "opensearch"),
     ("opensearch", "opensearch"),
+    // Kafka's daemon main classes all live under the connect package (the
+    // Connect workers and MirrorMaker 2); the bare org.apache.kafka root is
+    // deliberately NOT mapped — clients and tools (org.apache.kafka.clients,
+    // .tools) are consumers of the service, not the service itself.
+    ("org.apache.kafka.connect", "kafka"),
     ("kafka.kafka", "kafka"),
     ("kafka", "kafka"),
     ("org.apache.zookeeper", "zookeeper"),
@@ -1069,6 +1289,43 @@ mod tests {
     }
 
     #[test]
+    fn effective_cpu_cores_clamps_to_the_cgroup_limit() {
+        // A 2-CPU quota on a 128-core host scales by 2, not 128.
+        assert_eq!(effective_cpu_cores(128, 2), 2);
+        // A single-core quota never floors to 0 — every cpu-scaled rule
+        // consumes this number, and a 0 would mis-scale all of them.
+        assert_eq!(effective_cpu_cores(128, 1), 1);
+        // No limit (0) and a limit at/above the host count keep the host.
+        assert_eq!(effective_cpu_cores(8, 0), 8);
+        assert_eq!(effective_cpu_cores(2, 64), 2);
+    }
+
+    #[test]
+    fn cgroup_v2_cpu_max_handles_max_sentinel_and_ceil() {
+        // "max" is the no-limit sentinel, not a value.
+        assert_eq!(cgroup_v2_cpu_max_cores("max 100000\n"), 0);
+        // 200000 per 100000 period is exactly 2 CPUs.
+        assert_eq!(cgroup_v2_cpu_max_cores("200000 100000\n"), 2);
+        // 150000 per 100000 is one and a half CPUs, rounded up to 2.
+        assert_eq!(cgroup_v2_cpu_max_cores("150000 100000\n"), 2);
+        // A missing period is not a parseable limit.
+        assert_eq!(cgroup_v2_cpu_max_cores("200000\n"), 0);
+        assert_eq!(cgroup_v2_cpu_max_cores("garbage"), 0);
+        assert_eq!(cgroup_v2_cpu_max_cores(""), 0);
+    }
+
+    #[test]
+    fn cgroup_v1_cfs_cores_rejects_unlimited_sentinel() {
+        // -1 is v1's no-limit sentinel for the quota.
+        assert_eq!(cgroup_v1_cfs_cores("-1\n", "100000\n"), 0);
+        // A real 200000/100000 quota converts to 2 cores.
+        assert_eq!(cgroup_v1_cfs_cores("200000\n", "100000\n"), 2);
+        // Garbage on either side is not a limit.
+        assert_eq!(cgroup_v1_cfs_cores("garbage", "100000\n"), 0);
+        assert_eq!(cgroup_v1_cfs_cores("200000\n", "garbage"), 0);
+    }
+
+    #[test]
     fn active_option_finds_bracketed_token_anywhere() {
         // The active option is the bracketed token, wherever it appears.
         assert_eq!(
@@ -1157,6 +1414,103 @@ mod tests {
         assert_eq!(sanitize_speed_mbps(1000), 1000);
         assert_eq!(sanitize_speed_mbps(10000), 10000);
         assert_eq!(sanitize_speed_mbps(25000), 25000);
+    }
+
+    #[test]
+    fn root_run_can_write_follows_the_mode_bits() {
+        // The unprivileged branch's judgement is caller-independent: a file
+        // with a write bit on a read-write mount is writable by root (proc
+        // sysctls are root-owned 0644, write-only knobs 0200), a file with
+        // no write bit is not, and a missing file never is.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_root_write_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        for (name, mode) in [
+            ("writable", 0o644),
+            ("write_only", 0o200),
+            ("sealed", 0o444),
+        ] {
+            let file = dir.join(name);
+            fs::write(&file, b"0").unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert!(root_run_can_write(dir.join("writable").to_str().unwrap()));
+        assert!(root_run_can_write(dir.join("write_only").to_str().unwrap()));
+        assert!(!root_run_can_write(dir.join("sealed").to_str().unwrap()));
+        assert!(!root_run_can_write(dir.join("missing").to_str().unwrap()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `writable` describes the root run, not the invoking user: every write
+    /// path requires root, so an unprivileged `check` / `why` /
+    /// `tune --dry-run` (all documented root-free) must not report a
+    /// root-owned writable knob as unwritable — the preview would answer
+    /// "blocked" on a host where `sudo ktuner tune` applies everything.
+    /// The parent (root) prepares root-owned fixtures; the assertions run in
+    /// an unprivileged child so the caller-relative access(W_OK) is what
+    /// breaks, not the fixtures.
+    #[test]
+    #[ignore = "requires root to prepare root-owned fixtures; only fixture files are written"]
+    fn writability_describes_the_root_run_for_an_unprivileged_caller() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "KTUNER_WRITABILITY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            assert_eq!(unsafe { libc::geteuid() }, 0, "requires root");
+            let dir = std::env::temp_dir().join(format!(
+                "ktuner_writable_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            fs::remove_dir_all(&dir).ok();
+            fs::create_dir_all(&dir).unwrap();
+            for (name, mode) in [("writable", 0o644), ("sealed", 0o444)] {
+                let file = dir.join(name);
+                fs::write(&file, b"0").unwrap();
+                fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let output = std::process::Command::new("setpriv")
+                .args(["--reuid=65534", "--regid=65534", "--clear-groups"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "detect::tests::writability_describes_the_root_run_for_an_unprivileged_caller",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("KTUNER_WRITABILITY_DIR", &dir)
+                .output()
+                .unwrap();
+            fs::remove_dir_all(&dir).ok();
+            assert!(
+                output.status.success(),
+                "unprivileged child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("KTUNER_WRITABILITY_DIR").expect("fixture dir"),
+        );
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            65534,
+            "child must run unprivileged"
+        );
+        // A root-owned 0644 knob (the shape of every proc sysctl): the value
+        // an unprivileged caller sees must match what the root run can do.
+        assert!(
+            is_param_writable(dir.join("writable").to_str().unwrap()),
+            "the preview describes the root run, not the invoking user"
+        );
+        // No write bit at all: unwritable for the root run too.
+        assert!(!is_param_writable(dir.join("sealed").to_str().unwrap()));
     }
 
     #[test]
@@ -1345,6 +1699,49 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// systemd's container interface: when systemd runs as PID 1 inside a
+    /// container it records the manager's name in `/run/systemd/container`
+    /// (from the `container=` variable the manager puts in its environment).
+    /// In a cgroup-v2 container that is the only signal left — `/proc/1/cgroup`
+    /// is the namespace root `0::/` and PID 1 is a known init, so every other
+    /// check reports a bare host.
+    #[test]
+    fn runtime_env_reads_the_systemd_container_marker() {
+        let root =
+            std::env::temp_dir().join(format!("ktuner_container_marker_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let proc1 = root.join("proc/1");
+        fs::create_dir_all(&proc1).expect("create temp proc dir");
+        // An LXC container with systemd as PID 1 and a private cgroup namespace.
+        fs::write(proc1.join("cgroup"), b"0::/\n").expect("write cgroup");
+        fs::write(proc1.join("sched"), b"systemd (1, #threads: 1)\n").expect("write sched");
+        let marker = root.join("run/systemd/container");
+        fs::create_dir_all(marker.parent().expect("marker parent")).expect("create run/systemd");
+
+        fs::write(&marker, b"lxc\n").expect("write container marker");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::Container);
+
+        // A manager systemd does not know is still a container.
+        fs::write(&marker, b"some-unknown-manager\n").expect("write container marker");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::Container);
+
+        // `wsl` is not a container manager here: WSL2's init exports it, but
+        // /proc/sys in WSL2 is the WSL kernel the workload runs on, so the
+        // bare-host verdict it already reports must not change.
+        fs::write(&marker, b"wsl\n").expect("write container marker");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::BareHost);
+
+        // An empty marker file names no manager.
+        fs::write(&marker, b"\n").expect("write container marker");
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::BareHost);
+
+        // Guard: no marker file at all is still a bare host.
+        fs::remove_file(&marker).ok();
+        assert_eq!(runtime_env_from(&root), RuntimeEnv::BareHost);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// Wait until a freshly spawned child's `/proc/<pid>/cmdline` carries
     /// `needle`.
     ///
@@ -1432,6 +1829,142 @@ mod tests {
         );
     }
 
+    /// A client tool of a service names the service it talks to, not the
+    /// service: `has_process("clickhouse")` was satisfied by
+    /// `clickhouse-client` (ClickHouse ships its client as another name of the
+    /// same multi-call binary, and /proc/<pid>/comm truncates both the client
+    /// and the server to `clickhouse-clie` / `clickhouse-serv`, so the name
+    /// cannot separate them) — the same false-positive class #4100 removed for
+    /// the collectors and `etcdctl`, one step further.
+    #[test]
+    fn service_client_tool_is_not_the_service() {
+        let root = std::env::temp_dir().join(format!("ktuner_client_tool_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).expect("create temp dir");
+        let client_path = root.join("clickhouse-client");
+        fs::copy("/bin/sleep", &client_path).expect("copy sleep to the client's name");
+
+        let mut client = std::process::Command::new(&client_path)
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a client-named process");
+        let pid = client.id().to_string();
+        wait_for_cmdline(&pid, b"clickhouse-client");
+
+        // The kernel gives it the truncated server prefix as comm...
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+            .expect("client comm")
+            .trim()
+            .to_string();
+        assert_eq!(comm, "clickhouse-clie");
+        // The process list must decide from the program, not that prefix.
+        let info = gather_system_info().expect("gather system info");
+        let listed_as_clickhouse = info.has_process("clickhouse");
+
+        client.kill().ok();
+        client.wait().ok();
+        fs::remove_dir_all(&root).ok();
+
+        assert!(
+            !listed_as_clickhouse,
+            "a host running only the ClickHouse client must not look like a database host"
+        );
+    }
+
+    /// The same for a script: the kernel keeps the script's name in
+    /// /proc/<pid>/comm (`kafka-topics.sh`) while argv[0] is the interpreter
+    /// that runs it, so a tool script satisfied `has_process("kafka")` — and a
+    /// host that only administers a broker elsewhere then ran the streaming
+    /// rules and classified as a broker.
+    #[test]
+    fn service_tool_script_is_not_the_service() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ktuner_tool_script_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).expect("create temp dir");
+        // A Kafka client tool: the daemon itself runs as a JVM, so an
+        // executable named after the service is a tool of it.
+        let script = root.join("kafka-topics.sh");
+        fs::write(&script, b"#!/bin/sh\nsleep 30\n").expect("write tool script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("make it runnable");
+
+        let mut tool = std::process::Command::new(&script)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a tool-named script");
+        let pid = tool.id().to_string();
+        wait_for_cmdline(&pid, b"kafka-topics.sh");
+
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+            .expect("tool comm")
+            .trim()
+            .to_string();
+        let info = gather_system_info().expect("gather system info");
+        let listed_as_kafka = info.has_process("kafka");
+
+        tool.kill().ok();
+        tool.wait().ok();
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(comm, "kafka-topics.sh");
+        assert!(
+            !listed_as_kafka,
+            "kafka-topics.sh is a client tool, not the broker"
+        );
+    }
+
+    /// The program names the tool filter must catch and the daemon names it
+    /// must keep. ClickHouse is the case a name can never decide: its client,
+    /// server and the multi-call binary all share the `clickhouse` prefix, so
+    /// the filter is a list of the client-side names — the server name and the
+    /// bare multi-call binary (which runs the server) stay services.
+    #[test]
+    fn service_tool_names_exclude_the_daemons() {
+        for tool in [
+            // The vendor's clickhouse-client package ships each of these as a
+            // symlink to the multi-call binary.
+            "clickhouse-benchmark",
+            "clickhouse-client",
+            "clickhouse-compressor",
+            "clickhouse-format",
+            "clickhouse-local",
+            "clickhouse-obfuscator",
+            "/usr/bin/clickhouse-client",
+            // Scripts of a JVM-hosted service: the daemon itself is the JVM.
+            "kafka-topics.sh",
+            "kafka-server-start.sh",
+            "/opt/kafka/bin/kafka-consumer-groups.sh",
+            "spark-submit",
+            "hadoop-daemon.sh",
+            "elasticsearch-keystore",
+        ] {
+            assert!(
+                program_names_service_tool(tool),
+                "{tool} is a tool, not the service"
+            );
+        }
+        for daemon in [
+            "clickhouse",
+            "clickhouse-server",
+            "/usr/bin/clickhouse",
+            "kafka",
+            "spark",
+            "hadoop",
+            "elasticsearch",
+            "java",
+            "postgres",
+            "mysqld",
+            "memcached",
+            "nginx",
+        ] {
+            assert!(
+                !program_names_service_tool(daemon),
+                "{daemon} is the service, not a tool"
+            );
+        }
+    }
+
     #[test]
     fn test_runtime_service_ignores_option_values_and_directories() {
         // A JVM option's value (a config path) merely mentions a service; the
@@ -1476,6 +2009,52 @@ mod tests {
         // Kafka's own broker class still decides, through its class name.
         let cmdline = "java\u{0}kafka.Kafka";
         assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+    }
+
+    #[test]
+    fn test_runtime_service_matches_kafka_daemon_main_classes() {
+        // Kafka Connect workers and MirrorMaker 2 are daemons whose main
+        // class lives under the org.apache.kafka.connect package: the
+        // package run owns the program from the root, exactly like
+        // org.apache.zookeeper for QuorumPeerMain. With no kafka root
+        // mapped, the boundary rules left every one of them unclassified
+        // even though the pre-boundary scan reported Some("kafka").
+        for class in [
+            "org.apache.kafka.connect.runtime.ConnectDistributed",
+            "org.apache.kafka.connect.cli.ConnectStandalone",
+            "org.apache.kafka.connect.mirror.MirrorMaker",
+        ] {
+            let cmdline = format!("java\u{0}-Xmx1g\u{0}{class}");
+            assert_eq!(
+                runtime_service_from_cmdline(&cmdline),
+                Some("kafka"),
+                "{class}"
+            );
+        }
+
+        // Client and tool packages under org.apache.kafka are consumers of
+        // the service, not the service itself — the same contract that keeps
+        // com.example.kafka.ConsumerApp unclassified.
+        for class in [
+            "org.apache.kafka.clients.consumer.KafkaConsumer",
+            "org.apache.kafka.tools.consumer.ConsoleConsumer",
+            "org.apache.kafka.tools.ProducerPerformance",
+        ] {
+            let cmdline = format!("java\u{0}{class}");
+            assert_eq!(runtime_service_from_cmdline(&cmdline), None, "{class}");
+        }
+
+        // The legacy MirrorMaker main class and the broker still decide via
+        // their own names, and neighbouring services are untouched.
+        let cmdline = "java\0kafka.tools.MirrorMaker";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        let cmdline = "java\0org.apache.zookeeper.server.quorum.QuorumPeerMain";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("zookeeper"));
+        let cmdline = "java\0org.apache.catalina.startup.Bootstrap\0start";
+        assert_eq!(runtime_service_from_cmdline(cmdline), Some("tomcat"));
+        let cmdline =
+            "java\u{0}-cp\u{0}/opt/kafka/libs/kafka_2.13-3.7.0.jar\u{0}com.example.kafka.ConsumerApp";
+        assert_eq!(runtime_service_from_cmdline(cmdline), None);
     }
 
     #[test]
@@ -1621,5 +2200,47 @@ mod tests {
             "sh\0-c\0cat /etc/exporter.conf".split('\0')
         ));
         assert!(!cmdline_names_helper("".split('\0')));
+    }
+
+    #[test]
+    fn cmdline_names_helper_recognizes_a_jvm_collector() {
+        // The Prometheus JMX exporter's documented standalone form: the jar
+        // after -jar names the program, and its name carries no "exporter"
+        // token. Before the JVM form was known, argv[0] "java" hid the
+        // collector and a metrics-only host was detected as a Java workload.
+        assert!(cmdline_names_helper(
+            "java\0-jar\0jmx_prometheus_httpserver-1.2.1.jar\x005556\0config.yaml".split('\0')
+        ));
+        // A path to the jar resolves by its basename.
+        assert!(cmdline_names_helper(
+            "/usr/bin/java\0-jar\0/opt/exporters/jmx_prometheus_httpserver.jar".split('\0')
+        ));
+        // Other JVM collectors carry the token.
+        assert!(cmdline_names_helper(
+            "java\0-jar\0/opt/cassandra_exporter-2.3.8.jar".split('\0')
+        ));
+    }
+
+    #[test]
+    fn cmdline_names_helper_keeps_jvm_workloads_visible() {
+        // The -javaagent form attaches the exporter TO the monitored
+        // application: that process is the workload, and only the -jar value
+        // may decide.
+        assert!(!cmdline_names_helper(
+            "java\0-javaagent:jmx_prometheus_javaagent-1.2.1.jar\0-jar\0cassandra.jar".split('\0')
+        ));
+        // A workload jar with no collector token stays a workload...
+        assert!(!cmdline_names_helper(
+            "java\0-jar\0/opt/cassandra/apache-cassandra-4.1.0.jar".split('\0')
+        ));
+        // ...and the arguments around -jar never decide.
+        assert!(!cmdline_names_helper(
+            "java\0-jar\0app.jar\0--config=/etc/exporter.conf".split('\0')
+        ));
+        assert!(!cmdline_names_helper(
+            "java\0-Xmx1g\0com.example.Main".split('\0')
+        ));
+        // A dangling -jar decides nothing.
+        assert!(!cmdline_names_helper("java\0-jar".split('\0')));
     }
 }

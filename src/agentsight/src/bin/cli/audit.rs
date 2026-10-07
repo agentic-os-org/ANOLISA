@@ -98,6 +98,13 @@ impl AuditCommand {
     /// exit, the same way the open and `--type` failures above do.
     fn run(&self, store: &AuditStore, event_type: Option<AuditEventType>) -> anyhow::Result<()> {
         if self.summary {
+            if self.pid.is_some() {
+                // The summary aggregates the whole window and has no pid
+                // filter; saying so beats returning unfiltered totals that
+                // look like they came from `--pid`. Mirrors the `--exclude`
+                // note below.
+                eprintln!("Note: --pid is not applied to --summary.");
+            }
             if !self.exclude.is_empty() {
                 eprintln!(
                     "Note: --exclude is not applied to --summary (summary always reflects the full dataset)."
@@ -136,13 +143,28 @@ impl AuditCommand {
         pid: u32,
         event_type: Option<AuditEventType>,
     ) -> anyhow::Result<()> {
-        match store.query_by_pid(pid, event_type) {
-            Ok(records) => {
-                self.output_records(&records, &format!("PID {pid}"));
-                Ok(())
-            }
-            Err(e) => Err(e).context("Query failed"),
-        }
+        let records = self
+            .query_pid_records(store, pid, event_type)
+            .context("Query failed")?;
+        let hours = self.last.unwrap_or(24);
+        self.output_records(&records, &format!("PID {pid}, last {hours} hours"));
+        Ok(())
+    }
+
+    /// Resolve the `--last` window and fetch the pid's records.
+    ///
+    /// Split out of [`Self::query_by_pid`] so tests can assert on the rows the
+    /// command would print: the pid path used to drop `--last` entirely and
+    /// return every row ever recorded for the pid.
+    fn query_pid_records(
+        &self,
+        store: &AuditStore,
+        pid: u32,
+        event_type: Option<AuditEventType>,
+    ) -> anyhow::Result<Vec<agentsight::AuditRecord>> {
+        let hours = self.last.unwrap_or(24);
+        let since_ns = super::hours_ago_ns(hours);
+        store.query_by_pid(pid, since_ns, event_type)
     }
 
     fn is_excluded(&self, record: &agentsight::AuditRecord) -> bool {
@@ -364,6 +386,82 @@ mod tests {
                 "{raw:?}: error must list the valid values: {error}"
             );
         }
+    }
+
+    /// A read-only store whose `audit_events` table holds two `llm_call` rows
+    /// for pid 4242: one a minute old and one 30 days old. Returns the recent
+    /// timestamp so tests can assert which row survived the window.
+    fn pid_window_store(name: &str) -> (AuditStore, std::path::PathBuf, u64) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos() as u64;
+        let recent_ns = now_ns - 60 * 1_000_000_000;
+        let old_ns = now_ns - 30 * 24 * 3_600_000_000_000;
+
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_audit_pid_window_{name}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    timestamp_ns INTEGER NOT NULL,
+                    pid INTEGER NOT NULL,
+                    ppid INTEGER,
+                    comm TEXT NOT NULL,
+                    duration_ns INTEGER DEFAULT 0,
+                    extra TEXT,
+                    session_id TEXT
+                );",
+            )
+            .unwrap();
+            let extra = serde_json::json!({
+                "provider": "openai",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "is_sse": true,
+            })
+            .to_string();
+            for timestamp_ns in [recent_ns, old_ns] {
+                conn.execute(
+                    "INSERT INTO audit_events
+                     (event_type, timestamp_ns, pid, comm, duration_ns, extra)
+                     VALUES ('llm_call', ?1, 4242, 'agent', 0, ?2)",
+                    rusqlite::params![timestamp_ns as i64, extra],
+                )
+                .unwrap();
+            }
+        }
+        let store = AuditStore::open_read_only_existing(&path, "audit_events").unwrap();
+        (store, path, recent_ns)
+    }
+
+    #[test]
+    fn pid_query_honours_last_window() {
+        let (store, path, recent_ns) = pid_window_store("window");
+        // The CLI dropped `self.last` on the pid path and the store query had
+        // no timestamp bound, so `--pid 4242 --last 1` returned the 30-day-old
+        // row too.
+        let mut c = cmd(vec![], false);
+        c.pid = Some(4242);
+        c.last = Some(1);
+        let records = c.query_pid_records(&store, 4242, None).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            records.len(),
+            1,
+            "--pid must only return rows inside the --last window"
+        );
+        assert_eq!(records[0].timestamp_ns, recent_ns);
     }
 
     /// An `audit_events` table that exists but lacks the columns the queries

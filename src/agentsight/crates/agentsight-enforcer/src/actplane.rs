@@ -670,31 +670,7 @@ fn spawn_poller(
         if let Err(error) = engine.run(&stop, move |raw| {
             let active = callback_state.bindings().get(&raw.domain_id).cloned();
             if let Some(active) = active {
-                callback_state
-                    .events
-                    .publish(convert_violation(raw.clone(), &active));
-                if raw.op == 3
-                    && raw.provenance.is_some()
-                    && let Some(policy) = active.credential_policy.as_ref()
-                {
-                    let label = active
-                        .label_names
-                        .get(&raw.matched_label)
-                        .cloned()
-                        .unwrap_or_else(|| format!("label-0x{:x}", raw.matched_label));
-                    match convert_security_events(raw, &active, policy, &label) {
-                        Ok(events) => {
-                            for event in events {
-                                callback_state.security_events.publish(event);
-                            }
-                        }
-                        Err(error) => {
-                            let message = format!("normalize ActPlane evidence: {error}");
-                            log::error!("{message}");
-                            *callback_state.runtime_error() = Some(message);
-                        }
-                    }
-                }
+                publish_raw_violation(raw, &active, &callback_state);
             }
         }) {
             let message = format!("violation poller stopped: {error}");
@@ -702,6 +678,40 @@ fn spawn_poller(
             *state.runtime_error() = Some(message);
         }
     })
+}
+
+/// Publishes one kernel event on both streams under a single identity.
+///
+/// `/api/enforcement/violations` resolves a violation's case through the
+/// evidence ids stored in `risk_evidence_links`, so the raw violation and its
+/// normalized sink evidence must carry the same `event_id`.
+fn publish_raw_violation(raw: Violation, active: &ActiveBinding, state: &RuntimeState) {
+    let event_id = Uuid::new_v4();
+    state
+        .events
+        .publish(convert_violation(raw.clone(), active, event_id));
+    if raw.op == 3
+        && raw.provenance.is_some()
+        && let Some(policy) = active.credential_policy.as_ref()
+    {
+        let label = active
+            .label_names
+            .get(&raw.matched_label)
+            .cloned()
+            .unwrap_or_else(|| format!("label-0x{:x}", raw.matched_label));
+        match convert_security_events(raw, active, policy, &label, event_id) {
+            Ok(events) => {
+                for event in events {
+                    state.security_events.publish(event);
+                }
+            }
+            Err(error) => {
+                let message = format!("normalize ActPlane evidence: {error}");
+                log::error!("{message}");
+                *state.runtime_error() = Some(message);
+            }
+        }
+    }
 }
 
 fn domain_id(binding_id: Uuid) -> u32 {
@@ -920,6 +930,7 @@ fn convert_security_events(
     active: &ActiveBinding,
     policy: &CredentialExfiltrationPolicy,
     taint_label: &str,
+    sink_event_id: Uuid,
 ) -> Result<Vec<SecurityEvent>, BackendError> {
     convert_security_events_at(
         raw,
@@ -928,6 +939,7 @@ fn convert_security_events(
         taint_label,
         now_ns(),
         monotonic_now_ns(),
+        sink_event_id,
     )
 }
 
@@ -938,6 +950,7 @@ fn convert_security_events_at(
     taint_label: &str,
     observed_at_ns: u64,
     monotonic_now_ns: Option<u64>,
+    sink_event_id: Uuid,
 ) -> Result<Vec<SecurityEvent>, BackendError> {
     let provenance = raw.provenance.as_ref().ok_or_else(|| {
         BackendError::KernelFailure("ActPlane connect violation lacks source provenance".into())
@@ -998,7 +1011,6 @@ fn convert_security_events_at(
     let sink_identity = event_identity(active, raw.pid, Some(raw.ppid), target_start);
     let source_event_id = Uuid::new_v4();
     let taint_event_id = Uuid::new_v4();
-    let sink_event_id = Uuid::new_v4();
     let decision_event_id = Uuid::new_v4();
     let policy_id = active.binding.request.policy_id.clone();
     let source_path = redact_home_path(&provenance.target);
@@ -1129,10 +1141,10 @@ fn classify_destination(destination: &str) -> DestinationClass {
     classify_public_ipv4_destination(destination)
 }
 
-fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
+fn convert_violation(raw: Violation, active: &ActiveBinding, event_id: Uuid) -> ViolationEvent {
     let monotonic_now_ns = monotonic_now_ns();
     let observed_at_ns = now_ns();
-    convert_violation_at(raw, active, observed_at_ns, monotonic_now_ns)
+    convert_violation_at(raw, active, observed_at_ns, monotonic_now_ns, event_id)
 }
 
 fn convert_violation_at(
@@ -1140,6 +1152,7 @@ fn convert_violation_at(
     active: &ActiveBinding,
     observed_at_ns: u64,
     monotonic_now_ns: Option<u64>,
+    event_id: Uuid,
 ) -> ViolationEvent {
     let rule_index = raw.rule_id as usize;
     let occurred_at_ns = monotonic_now_ns
@@ -1148,7 +1161,7 @@ fn convert_violation_at(
         })
         .unwrap_or(observed_at_ns);
     ViolationEvent {
-        event_id: Uuid::new_v4(),
+        event_id,
         binding_id: active.binding.request.binding_id,
         agent_id: active.binding.request.agent_id.clone(),
         session_id: active.binding.request.session_id.clone(),
@@ -1633,6 +1646,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("fixture violation should convert");
 
@@ -1685,6 +1699,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("audit violation should convert");
 
@@ -1729,6 +1744,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("observe violation should convert");
 
@@ -1768,6 +1784,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("expired taint should normalize safely");
 
@@ -1821,6 +1838,7 @@ mod tests {
                 "CREDENTIAL",
                 1_784_000_000_000_000_000,
                 Some(271_000_000_000),
+                Uuid::new_v4(),
             )
             .expect("out-of-scope destination should normalize safely");
 
@@ -1829,6 +1847,43 @@ mod tests {
                 "{destination} must not be a product sink"
             );
         }
+    }
+
+    #[test]
+    fn one_raw_violation_keeps_one_identity_across_both_streams() {
+        // The production getters read the live monotonic clock, so the taint
+        // must be fresh relative to it for the evidence chain to be emitted.
+        let now = monotonic_now_ns().expect("monotonic clock should be readable");
+        let mut raw = raw_violation(now);
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: now - 1_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.ssh/id_rsa".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let state = RuntimeState::new();
+        let violations = state
+            .events
+            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+        let evidence = state.security_events.subscribe();
+
+        publish_raw_violation(raw, &active, &state);
+
+        let violation = violations
+            .try_recv()
+            .expect("the raw violation must be published");
+        let sink = evidence
+            .try_iter()
+            .find(|event| matches!(event.kind, SecurityEventKind::NetworkAction(_)))
+            .expect("the evidence chain must contain the sink event");
+        assert_eq!(
+            violation.event_id, sink.event_id,
+            "the raw violation and its normalized sink evidence describe one kernel event; \
+             /api/enforcement/violations resolves case_id through the evidence id"
+        );
     }
 
     #[test]
@@ -1942,6 +1997,7 @@ mod tests {
             &active,
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         );
         assert_eq!(event.binding_id, active.binding.request.binding_id);
         assert_eq!(event.agent_id, "agent-1");
@@ -1975,6 +2031,7 @@ mod tests {
             &active,
             observed_at_ns,
             None,
+            Uuid::new_v4(),
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
@@ -1989,6 +2046,7 @@ mod tests {
             &active_binding(),
             observed_at_ns,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
@@ -2002,6 +2060,7 @@ mod tests {
             &active_binding(),
             observed_at_ns,
             Some(20),
+            Uuid::new_v4(),
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);

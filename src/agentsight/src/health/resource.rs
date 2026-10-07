@@ -1,6 +1,7 @@
 //! Periodic CPU and resident-memory sampling for discovered Agent processes.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -16,6 +17,16 @@ struct CpuBaseline {
     process_start_ticks: u64,
     cpu_ticks: u64,
     sampled_at: Instant,
+}
+
+/// Open `<root>/<pid>` through a possibly bind-mounted procfs root.
+///
+/// `Process::new` hardcodes `/proc`, which in an observer container resolves
+/// its own pid namespace and would sample an unrelated process that happens to
+/// share the pid, or miss the agent entirely. `root` is a parameter so the
+/// lookup can be tested against a fixture procfs.
+fn open_process(root: &Path, pid: u32) -> Result<Process, procfs::ProcError> {
+    Process::new_with_root(root.join(pid.to_string()))
 }
 
 struct ResourceSampler {
@@ -53,7 +64,7 @@ impl ResourceSampler {
         pid: u32,
         agent_name: &str,
     ) -> Result<Option<ResourceSample>, procfs::ProcError> {
-        let process = Process::new(pid as i32)?;
+        let process = open_process(crate::utils::procfs::proc_root(), pid)?;
         let stat = process.stat()?;
         let now = Instant::now();
         let current = CpuBaseline {
@@ -153,8 +164,54 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
-    use super::{CpuBaseline, ResourceSampler, compute_cpu_percent, start_resource_sampler};
+    use super::{
+        CpuBaseline, ResourceSampler, compute_cpu_percent, open_process, start_resource_sampler,
+    };
     use crate::storage::sqlite::GenAISqliteStore;
+
+    /// Above the kernel's `PID_MAX_LIMIT` (2^22), so the real procfs can never
+    /// hold this pid and a successful read proves the fixture root was used.
+    const FIXTURE_PID: u32 = 2_000_000_000;
+
+    #[test]
+    fn fixture_process_stats_are_read_from_the_configured_root() {
+        let root = std::env::temp_dir().join(format!(
+            "agentsight-resource-root-{}-{FIXTURE_PID}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let pid_dir = root.join(FIXTURE_PID.to_string());
+        std::fs::create_dir_all(&pid_dir).expect("create fixture pid dir");
+        // Same synthetic stat shape as enforcement::target tests: fields 14/15
+        // are utime/stime, field 22 starttime and field 24 rss.
+        std::fs::write(
+            pid_dir.join("stat"),
+            "4242 (fixture) S 1 4242 4242 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 12345 1000 100 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+        )
+        .expect("write fixture stat");
+        std::fs::write(
+            pid_dir.join("status"),
+            "Name:\tfixture\nState:\tS (sleeping)\nTgid:\t4242\nPid:\t4242\nPPid:\t1\n\
+             TracerPid:\t0\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t64\nGroups:\t0\n\
+             VmRSS:\t2048 kB\nThreads:\t1\nSigQ:\t0/1000\nSigPnd:\t0000000000000000\n\
+             ShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\n\
+             SigCgt:\t0000000000000000\nCapInh:\t0000000000000000\n\
+             CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n",
+        )
+        .expect("write fixture status");
+
+        assert!(procfs::process::Process::new(FIXTURE_PID as i32).is_err());
+
+        let process = open_process(&root, FIXTURE_PID).expect("open fixture process");
+        let stat = process.stat().expect("parse fixture stat");
+        let status = process.status().expect("parse fixture status");
+        assert_eq!(stat.starttime, 12_345);
+        assert_eq!(stat.utime.saturating_add(stat.stime), 15);
+        assert_eq!(stat.rss, 100);
+        assert_eq!(status.vmrss, Some(2048));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn cpu_percent_uses_process_time_delta() {

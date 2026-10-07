@@ -30,9 +30,9 @@ pub fn extract_token_data(
         }
 
         // Extract tools
-        if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
+        if let Some(tools) = crate::parser::llm::extract_tools_view(req) {
             for tool in tools {
-                if let Ok(tool_str) = serde_json::to_string(tool) {
+                if let Ok(tool_str) = serde_json::to_string(&tool) {
                     token_data.tools.push(tool_str);
                     has_content = true;
                 }
@@ -210,6 +210,36 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // A Responses function call is announced by
+            // `response.output_item.added` (which carries the name) and then
+            // streamed as `response.function_call_arguments.delta` fragments.
+            // The chat-completions and Anthropic arms already produce the
+            // `name: arguments` text the manual counters tokenize, so these
+            // two events keep that convention: the announcement contributes
+            // `name: `, each fragment its raw partial JSON. Without them a
+            // truncated stream that only made a tool call counted zero output
+            // tokens. `response.function_call_arguments.done` and the
+            // function-call `response.output_item.done` repeat the full
+            // arguments and are deliberately not read here: the deltas already
+            // delivered them, and counting both would double the call.
+            "response.output_item.added" => {
+                if let Some(item) = resp.get("item") {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                            if !name.is_empty() {
+                                return Some((String::new(), None, vec![format!("{name}: ")]));
+                            }
+                        }
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let Some(delta) = resp.get("delta").and_then(|d| d.as_str()) {
+                    if !delta.is_empty() {
+                        return Some((String::new(), None, vec![delta.to_string()]));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -324,6 +354,33 @@ mod tests {
         assert_eq!(data.tools.len(), 1);
     }
 
+    /// DashScope/Bailian native requests carry their tool definitions under
+    /// the top-level `parameters` object, so a top-level-only read reports no
+    /// tools at all for that protocol.
+    #[test]
+    fn test_extract_native_parameters_tools() {
+        let request = serde_json::json!({
+            "model": "qwen3-max",
+            "input": {"messages": [{"role": "user", "content": "What's the weather?"}]},
+            "parameters": {
+                "temperature": 0.5,
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather info"
+                    }
+                }]
+            }
+        });
+
+        let token_data = extract_token_data(Some(&request), None);
+        assert!(token_data.is_some());
+
+        let data = token_data.unwrap();
+        assert_eq!(data.tools.len(), 1, "native parameters.tools must be read");
+    }
+
     #[test]
     fn test_extract_reasoning_content() {
         let response = serde_json::json!({
@@ -424,6 +481,73 @@ mod tests {
             "response": {"id": "abc"},
         });
         assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    /// Responses streams a function call as `response.output_item.added`
+    /// (carrying the name) followed by `response.function_call_arguments.delta`
+    /// fragments. The chat-completions and Anthropic arms already produce the
+    /// `name: arguments` text the manual counters tokenize; the Responses arm
+    /// recognised neither event, so a tool-only turn counted zero output
+    /// tokens.
+    #[test]
+    fn test_responses_api_function_call_events_yield_tool_call_fragments() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "read_file",
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&added)).expect("the call's name must be extracted");
+        assert_eq!(content, "");
+        assert!(reasoning.is_none());
+        assert_eq!(tool_calls, vec!["read_file: ".to_string()]);
+
+        let first = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": "{\"path\":",
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&first)).expect("delta fragments must be extracted");
+        assert_eq!(tool_calls, vec!["{\"path\":".to_string()]);
+
+        let second = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": "\"/tmp/a.md\"}",
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&second)).expect("delta fragments must be extracted");
+        assert_eq!(tool_calls, vec!["\"/tmp/a.md\"}".to_string()]);
+
+        // The consumers join the fragments and split on the first ": " to
+        // recover `name` and `arguments`; the pieces above must reconstruct the
+        // exact string they expect.
+        let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
+        assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// A message item that arrives after the call is announced must keep
+    /// counting as text: the new arm only claims function-call items.
+    #[test]
+    fn test_responses_api_output_item_added_message_is_not_a_tool_call() {
+        let chunk = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        });
+        let extracted = extract_response_content(Some(&chunk));
+        assert!(
+            extracted.is_none_or(|(_, _, calls)| calls.is_empty()),
+            "a message item must not be reported as a tool call"
+        );
     }
 
     /// Anthropic streams content as `content_block_delta` events; the drained

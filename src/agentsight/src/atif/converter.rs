@@ -651,13 +651,26 @@ fn build_observation(
 /// gating on role dropped all of them and left every observation empty. The part
 /// type is the reliable discriminator — `ToolCallResponse` is the only variant
 /// carrying a result, and assistant turns only ever carry `ToolCall`.
+///
+/// Matching runs in two passes: every response that names a call through its id
+/// claims that call first, and only the responses the ids could not place are
+/// matched positionally. A single in-order pass lets an id-less response steal
+/// the slot of a call whose id-bearing response has not been seen yet — parallel
+/// tools complete out of call order, so the replayed round cannot be assumed to
+/// follow it — swapping the two results while both still claim the stolen id.
 fn collect_tool_responses(
     messages: &[InputMessage],
     tc_ids: &HashMap<&str, usize>,
     results: &mut Vec<ObservationResult>,
     matched: &mut [bool],
 ) {
-    let mut positional_idx: usize = 0;
+    // Flatten the responses in message order once; both passes work over the
+    // same list.
+    let mut pending: Vec<(
+        Option<&str>,
+        String,
+        Option<HashMap<String, serde_json::Value>>,
+    )> = Vec::new();
     for msg in messages {
         for part in &msg.parts {
             if let MessagePart::ToolCallResponse { id, response } = part {
@@ -687,49 +700,63 @@ fn collect_tool_responses(
                     serde_json::Value::String(s) => s.clone(),
                     other => serde_json::to_string(other).unwrap_or_default(),
                 };
-
-                // Match by ID first, tolerating the separator differences some
-                // agents introduce when echoing a call id back.
-                if let Some(tc_id) = id {
-                    let found = tc_ids
-                        .iter()
-                        .find(|(known, _)| same_call_id(known, tc_id))
-                        .map(|(_, idx)| *idx);
-                    if let Some(idx) = found {
-                        if !matched[idx] {
-                            matched[idx] = true;
-                            results.push(ObservationResult {
-                                source_call_id: Some(tc_id.clone()),
-                                content: Some(serde_json::Value::String(content_str)),
-                                subagent_trajectory_ref: None,
-                                extra: extra.clone(),
-                            });
-                            continue;
-                        }
-                    }
-                }
-
-                // Fallback: positional matching
-                while positional_idx < matched.len() && matched[positional_idx] {
-                    positional_idx += 1;
-                }
-                if positional_idx < matched.len() {
-                    let source_call_id = id.clone().or_else(|| {
-                        tc_ids.iter().find_map(|(known, idx)| {
-                            (*idx == positional_idx).then(|| (*known).to_string())
-                        })
-                    });
-                    matched[positional_idx] = true;
-                    results.push(ObservationResult {
-                        source_call_id,
-                        content: Some(serde_json::Value::String(content_str)),
-                        subagent_trajectory_ref: None,
-                        extra: extra.clone(),
-                    });
-                    positional_idx += 1;
-                }
+                pending.push((id.as_deref(), content_str, extra));
             }
         }
+    }
+
+    // Pass 1 — an id that names a call is authoritative: the response it rides
+    // on belongs to that call whatever order the two arrived in, tolerating the
+    // separator differences some agents introduce when echoing a call id back.
+    let mut consumed = vec![false; pending.len()];
+    for (i, (id, content_str, extra)) in pending.iter().enumerate() {
+        let Some(tc_id) = id else { continue };
+        let found = tc_ids
+            .iter()
+            .find(|(known, _)| same_call_id(known, tc_id))
+            .map(|(_, idx)| *idx);
+        let Some(idx) = found else { continue };
+        if matched[idx] {
+            continue;
+        }
+        matched[idx] = true;
+        consumed[i] = true;
+        results.push(ObservationResult {
+            source_call_id: Some(tc_id.to_string()),
+            content: Some(serde_json::Value::String(content_str.clone())),
+            subagent_trajectory_ref: None,
+            extra: extra.clone(),
+        });
+    }
+
+    // Pass 2 — positional fallback for everything the ids could not place:
+    // responses without an id, ids no call echoes, and duplicates of an id
+    // already served.
+    let mut positional_idx: usize = 0;
+    for (i, (id, content_str, extra)) in pending.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        while positional_idx < matched.len() && matched[positional_idx] {
+            positional_idx += 1;
+        }
+        if positional_idx >= matched.len() {
+            // No unmatched call is left; the response cannot be attributed.
+            break;
+        }
+        let source_call_id = id.map(str::to_string).or_else(|| {
+            tc_ids
+                .iter()
+                .find_map(|(known, idx)| (*idx == positional_idx).then(|| (*known).to_string()))
+        });
+        matched[positional_idx] = true;
+        results.push(ObservationResult {
+            source_call_id,
+            content: Some(serde_json::Value::String(content_str.clone())),
+            subagent_trajectory_ref: None,
+            extra: extra.clone(),
+        });
+        positional_idx += 1;
     }
 }
 
@@ -1301,6 +1328,72 @@ pub(crate) mod tests {
                 .as_deref();
             assert_eq!(result_id, Some(call_id.as_str()));
         }
+    }
+
+    #[test]
+    fn id_bearing_response_outranks_the_positional_fallback() {
+        // Two tool calls in one step, replayed with the results arriving out
+        // of call order — parallel tools complete in completion order, not
+        // request order — and only the later response carrying an id. The id
+        // is the authoritative link, so it must attach its response to the
+        // call it names; the id-less response takes the other slot, not the
+        // other way around.
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![
+                MessagePart::ToolCall {
+                    id: Some("tc-a".into()),
+                    name: "Read".into(),
+                    arguments: Some(serde_json::json!({"file_path": "/tmp/a"})),
+                },
+                MessagePart::ToolCall {
+                    id: Some("tc-b".into()),
+                    name: "Read".into(),
+                    arguments: Some(serde_json::json!({"file_path": "/tmp/b"})),
+                },
+            ],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let replayed = vec![InputMessage {
+            role: "tool".into(),
+            parts: vec![
+                MessagePart::ToolCallResponse {
+                    id: None,
+                    response: serde_json::json!("output of b"),
+                },
+                MessagePart::ToolCallResponse {
+                    id: Some("tc-a".into()),
+                    response: serde_json::json!("output of a"),
+                },
+            ],
+            name: None,
+        }];
+        let events = vec![
+            call_event(1, 1_000_000_000, Some(agent_turn), None, Some("read both")),
+            call_event(2, 3_000_000_000, None, Some(replayed), None),
+        ];
+
+        let doc = convert_trace_to_atif("trace-swap", events).unwrap();
+        let step = &doc.steps[2];
+        assert_eq!(step.tool_calls.as_ref().unwrap().len(), 2);
+
+        let results = &step.observation.as_ref().unwrap().results;
+        assert_eq!(results.len(), 2);
+        let by_id = |id: &str| {
+            results
+                .iter()
+                .find(|r| r.source_call_id.as_deref() == Some(id))
+                .unwrap_or_else(|| panic!("no result carries id {id}: {results:?}"))
+        };
+        assert_eq!(
+            by_id("tc-a").content.as_ref().and_then(|c| c.as_str()),
+            Some("output of a"),
+        );
+        assert_eq!(
+            by_id("tc-b").content.as_ref().and_then(|c| c.as_str()),
+            Some("output of b"),
+        );
     }
 
     #[test]

@@ -150,10 +150,15 @@ impl AuditStore {
         Ok(records)
     }
 
-    /// Query audit events by PID
+    /// Query audit events by PID within a time window.
+    ///
+    /// `since_ns` is explicit so the CLI's `--pid` path honours the same
+    /// `--last` window as [`Self::query_since`]; without a bound the pid query
+    /// returned every row ever recorded for the pid regardless of `--last`.
     pub fn query_by_pid(
         &self,
         pid: u32,
+        since_ns: u64,
         event_type: Option<AuditEventType>,
     ) -> Result<Vec<AuditRecord>> {
         let (sql, type_str);
@@ -163,19 +168,23 @@ impl AuditStore {
             type_str = et.to_string();
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
-                 FROM {} WHERE pid = ?1 AND event_type = ?2
+                 FROM {} WHERE pid = ?1 AND timestamp_ns >= ?2 AND event_type = ?3
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(pid), Box::new(type_str.clone())];
+            query_params = vec![
+                Box::new(pid),
+                Box::new(since_ns as i64),
+                Box::new(type_str.clone()),
+            ];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
-                 FROM {} WHERE pid = ?1
+                 FROM {} WHERE pid = ?1 AND timestamp_ns >= ?2
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(pid)];
+            query_params = vec![Box::new(pid), Box::new(since_ns as i64)];
         }
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -308,10 +317,31 @@ impl AuditStore {
 
             for row in rows.flatten() {
                 if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&row) {
-                    total_input_tokens += extra
+                    // Billed input mirrors `TokenRecord::billed_input_tokens`
+                    // and the `billed_input_col!` SQL rule used by the
+                    // token/metrics views: Anthropic reports cache creation
+                    // and cache read outside `input_tokens`, so they add up;
+                    // other providers already count cached tokens inside the
+                    // reported input, so adding them would inflate the total.
+                    let reported_input = extra
                         .get("input_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
+                    let provider = extra.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                    let billed_input = if provider.eq_ignore_ascii_case("anthropic") {
+                        reported_input
+                            + extra
+                                .get("cache_creation_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                            + extra
+                                .get("cache_read_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                    } else {
+                        reported_input
+                    };
+                    total_input_tokens += billed_input;
                     total_output_tokens += extra
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
@@ -460,6 +490,38 @@ pub type SqliteStore = AuditStore;
 mod tests {
     use super::*;
 
+    fn llm_record(
+        provider: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        timestamp_ns: u64,
+    ) -> AuditRecord {
+        AuditRecord {
+            id: None,
+            event_type: AuditEventType::LlmCall,
+            timestamp_ns,
+            pid: 77,
+            ppid: None,
+            comm: "agent".to_string(),
+            duration_ns: 0,
+            extra: AuditExtra::LlmCall {
+                provider: Some(provider.to_string()),
+                model: None,
+                request_method: None,
+                request_path: None,
+                response_status: None,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                is_sse: true,
+            },
+            session_id: None,
+        }
+    }
+
     #[test]
     fn test_session_id_round_trip() {
         // Use an in-memory Connection to avoid tempfile dependency, then manually
@@ -551,7 +613,7 @@ mod tests {
         };
         store.insert(&record).unwrap();
 
-        let results = store.query_by_pid(43, None).unwrap();
+        let results = store.query_by_pid(43, 0, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, None);
     }
@@ -655,5 +717,50 @@ mod tests {
             names, expected,
             "count ties must be broken by name, not by map order"
         );
+    }
+
+    #[test]
+    fn test_summary_counts_anthropic_cache_tokens_as_billed_input() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        let store = AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        };
+
+        // Anthropic reports cache creation/read outside `input_tokens`, so
+        // both are billed input — the same rule as
+        // `TokenRecord::billed_input_tokens` and the `billed_input_col!` SQL
+        // mirror in genai/mod.rs.
+        store
+            .insert(&llm_record("anthropic", 100, 10, 1_000, 500, 1))
+            .unwrap();
+        // OpenAI-compatible providers already include cached tokens inside
+        // `input_tokens`; adding their cache columns again inflates the total,
+        // so only the raw input may count.
+        store
+            .insert(&llm_record("openai", 200, 20, 3_000, 4_000, 2))
+            .unwrap();
+
+        let summary = store.summary(0).unwrap();
+        assert_eq!(summary.total_llm_calls, 2);
+        assert_eq!(
+            summary.total_input_tokens, 1_800,
+            "billed input = anthropic raw + cache, openai raw only"
+        );
+        assert_eq!(summary.total_output_tokens, 30);
     }
 }

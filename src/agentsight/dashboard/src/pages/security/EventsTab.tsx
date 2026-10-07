@@ -6,12 +6,15 @@ import type {
   SecurityPaginated,
 } from '../../utils/apiClient';
 import { EventTable } from './EventTable';
-import { EMPTY_EVENT_FILTERS, type SecurityEventFilters } from './types';
+import type { SecurityEventFilters } from './types';
 
 export const EventsTab: React.FC<{
   eventFilters: SecurityEventFilters;
   setEventFilters: React.Dispatch<React.SetStateAction<SecurityEventFilters>>;
-  setAppliedEventFilters: React.Dispatch<React.SetStateAction<SecurityEventFilters>>;
+  // Applies the draft filters and always re-issues the list request, even when
+  // the draft object is unchanged (see SecurityObservabilityPage.queryEvents).
+  onQuery: () => void;
+  onClear: () => void;
   categoryFilterOptions: string[];
   resultFilterOptions: string[];
   verdictFilterOptions: string[];
@@ -24,7 +27,8 @@ export const EventsTab: React.FC<{
 }> = ({
   eventFilters,
   setEventFilters,
-  setAppliedEventFilters,
+  onQuery,
+  onClear,
   categoryFilterOptions,
   resultFilterOptions,
   verdictFilterOptions,
@@ -106,19 +110,14 @@ export const EventsTab: React.FC<{
         ))}
         <div className="flex items-end gap-2">
           <button
-            onClick={() => {
-              setAppliedEventFilters(eventFilters);
-            }}
+            onClick={onQuery}
             disabled={eventsLoading}
             className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
             {t('common.query')}
           </button>
           <button
-            onClick={() => {
-              setEventFilters(EMPTY_EVENT_FILTERS);
-              setAppliedEventFilters(EMPTY_EVENT_FILTERS);
-            }}
+            onClick={onClear}
             className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
             {t('sec.clear')}

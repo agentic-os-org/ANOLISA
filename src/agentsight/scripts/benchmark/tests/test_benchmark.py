@@ -1145,6 +1145,9 @@ def test_runner_shell_contract_is_valid() -> None:
     assert 'gzip -1 <"$K6_PIPE"' in runner_text
     assert 'BENCHMARK_MAX_VUS="$MAX_K6_VUS"' in runner_text
     assert '--safety-output "$OUTPUT_DIR/safety-stop.json"' in runner_text
+    marker_cleanup = runner_text.index('rm -f "$OUTPUT_DIR/safety-stop.json"')
+    assert marker_cleanup < runner_text.index("collect_metrics.py")
+    assert marker_cleanup < runner_text.index('wait "$LOAD_PID"')
     assert runner_text.index("VALIDATOR_PID=$!") < runner_text.index("k6 run")
     assert 'if [[ "$EXTERNAL_SERVER" -eq 0 ]]' in runner_text
     assert "`bench-${runId}-${__VU}-${__ITER}-${Date.now()}`" in load_text
@@ -1154,6 +1157,46 @@ def test_runner_shell_contract_is_valid() -> None:
     assert "tags:" not in load_text
     assert "requestCount.add(1," not in load_text
     assert "requestLatency.add(response.timings.duration," not in load_text
+
+
+def test_runner_ignores_a_stale_safety_marker(tmp_path: Path) -> None:
+    """Reusing an output dir must not resurrect a previous run's safety stop.
+
+    k6, curl, and python3 are PATH shims, so this exercises the runner's own
+    control flow rather than a real load run.
+    """
+    runner = SINGLE_RUN_DIR / "run.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for tool in ("k6", "curl", "python3"):
+        shim = fake_bin / tool
+        shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+    output = tmp_path / "reused"
+    output.mkdir()
+    marker = output / "safety-stop.json"
+    marker.write_text('{"reason": "stale"}\n', encoding="utf-8")
+    result = subprocess.run(
+        [
+            "bash",
+            str(runner),
+            "--external-server",
+            "--output-dir",
+            str(output),
+            "--duration",
+            "1",
+            "--qps",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "safety guard stopped" not in result.stderr
+    assert not marker.exists()
 
 
 def test_every_bpf_ring_reservation_failure_is_counted() -> None:

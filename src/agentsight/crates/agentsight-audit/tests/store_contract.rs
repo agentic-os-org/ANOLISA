@@ -441,6 +441,71 @@ fn maintenance_enforces_size_for_unreferenced_events() {
 }
 
 #[test]
+fn maintenance_keeps_a_case_graph_with_recent_action_activity() {
+    // A failed attach/detach updates only `containment_actions`, never the case
+    // row. The size path must count that action activity as graph activity, or
+    // this graph sorts first on its stale case timestamp and its failure record
+    // is deleted in the first round.
+    let path = security_db_path("maintenance-action-activity");
+    let store = SecurityStore::open(&path).expect("fixture store should open");
+
+    let protected_case = Uuid::new_v4();
+    let mut protected = fixture_case(protected_case, RiskCaseStatus::Resolved);
+    protected.updated_at_ns = 1;
+    store
+        .upsert_case(&protected, &[])
+        .expect("protected case should persist");
+    let mut action = containment_action(ContainmentLifecycle::Failed);
+    action.case_id = protected_case;
+    action.created_at_ns = 2;
+    action.updated_at_ns = 1_800_000_000_000_000_000;
+    store
+        .insert_containment_action(&action)
+        .expect("failed action should persist");
+
+    // Older candidate graphs so the protected graph is the natural first
+    // victim of an oldest-first prune without the fix.
+    for index in 0..1_000_u64 {
+        let mut case = fixture_case(Uuid::new_v4(), RiskCaseStatus::Resolved);
+        case.updated_at_ns = index + 10;
+        store
+            .upsert_case(&case, &[])
+            .expect("filler case should persist");
+    }
+
+    // Bulk unreferenced events push the file past the 1 MiB limit so size
+    // maintenance runs and can converge from the events alone.
+    for index in 0..20 {
+        let event = fixture_file_action(&"x".repeat(256 * 1024), index + 1);
+        store
+            .insert_event(&event)
+            .expect("bulk event should insert");
+    }
+
+    let report = store
+        .maintain(AuditMaintenancePolicy {
+            retention_days: 0,
+            max_db_size_mb: 1,
+        })
+        .expect("size maintenance should succeed");
+
+    assert!(
+        report.size.deleted_rows > 0,
+        "size maintenance must prune something"
+    );
+    assert_eq!(
+        store
+            .containment_action(action.action_id)
+            .expect("action query should work"),
+        Some(action),
+        "the graph with the newest action activity must be pruned last"
+    );
+
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
 fn case_detail_rejects_a_dangling_evidence_link() {
     let path = security_db_path("dangling-evidence");
     let case_id = Uuid::new_v4();

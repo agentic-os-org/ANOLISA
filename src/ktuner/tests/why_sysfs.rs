@@ -57,9 +57,17 @@ fn why_reads_available_sysfs_parameters_without_recommendations() {
         );
         assert!(result.stderr.is_empty());
         let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        // The parameter files here are option lists ("always [madvise]
+        // never"): the reported current value is the bracketed active
+        // option, not the whole rendering.
+        let raw = current.trim();
+        let active = raw
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+            .unwrap_or(raw);
         assert_eq!(
             output,
-            serde_json::json!({ "param": param, "current": current.trim(), "status": "optimal" })
+            serde_json::json!({ "param": param, "current": active, "status": "optimal" })
         );
         checked += 1;
     }

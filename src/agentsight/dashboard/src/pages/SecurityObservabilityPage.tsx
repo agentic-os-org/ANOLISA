@@ -112,6 +112,7 @@ export const SecurityObservabilityPage: React.FC = () => {
   // race, and if A's response resolves last the drawer shows B's header with
   // A's body. Only the newest click may write the detail state.
   const eventDetailRequestIdRef = useRef(0);
+  const statusRequestIdRef = useRef(0);
 
   const isAvailable = isSecurityAvailableState(status?.state);
   const rangeParams: SecurityTimeRangeParams = useMemo(() => ({
@@ -124,18 +125,21 @@ export const SecurityObservabilityPage: React.FC = () => {
   );
 
   const loadStatus = useCallback(async () => {
+    const requestId = ++statusRequestIdRef.current;
     setStatusLoading(true);
     setStatusError(null);
     try {
       const nextStatus = await fetchSecurityStatus();
+      if (requestId !== statusRequestIdRef.current) return null;
       setStatus(nextStatus);
       return nextStatus;
     } catch (error) {
+      if (requestId !== statusRequestIdRef.current) return null;
       setStatus(null);
       setStatusError(errorMessage(error, t));
       return null;
     } finally {
-      setStatusLoading(false);
+      if (requestId === statusRequestIdRef.current) setStatusLoading(false);
     }
   }, [t]);
 
@@ -280,8 +284,29 @@ export const SecurityObservabilityPage: React.FC = () => {
     }
   }, [t]);
 
+  // The Query button must always re-issue the request. Applying the draft
+  // filters alone is not enough: when the draft object is the same reference
+  // as the applied one, React bails out of the state write, `loadEvents` keeps
+  // its identity and the dep-driven effect above never re-fires — so after a
+  // failed fetch the button could not retry anything.
+  const queryEvents = useCallback(() => {
+    const filtersUnchanged = eventFilters === appliedEventFilters;
+    setAppliedEventFilters(eventFilters);
+    if (filtersUnchanged) {
+      loadEvents(0, eventFilters);
+    }
+  }, [appliedEventFilters, eventFilters, loadEvents]);
+
+  const clearEventFilters = useCallback(() => {
+    setEventFilters(EMPTY_EVENT_FILTERS);
+    setAppliedEventFilters(EMPTY_EVENT_FILTERS);
+  }, []);
+
   useEffect(() => {
     loadStatus();
+    return () => {
+      ++statusRequestIdRef.current;
+    };
   }, [loadStatus]);
 
   useEffect(() => {
@@ -529,7 +554,8 @@ export const SecurityObservabilityPage: React.FC = () => {
             <EventsTab
               eventFilters={eventFilters}
               setEventFilters={setEventFilters}
-              setAppliedEventFilters={setAppliedEventFilters}
+              onQuery={queryEvents}
+              onClear={clearEventFilters}
               categoryFilterOptions={categoryFilterOptions}
               resultFilterOptions={resultFilterOptions}
               verdictFilterOptions={verdictFilterOptions}

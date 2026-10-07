@@ -1309,11 +1309,17 @@ impl AgentsightConfig {
 
         // 加载加密公钥：优先 public_key（内联 PEM），其次 public_key_path（文件路径）
         if let Some(enc) = parsed.encryption.take() {
-            if let Some(pem) = enc.public_key {
-                let trimmed = pem.trim();
-                if !trimmed.is_empty() {
-                    self.encryption_public_key = Some(trimmed.to_string());
-                }
+            // A blank inline key counts as absent: the shipped default config
+            // contains `"public_key": ""`, and an operator adding
+            // `public_key_path` on top of it would otherwise lose the file
+            // fallback and silently upload conversation content in plaintext.
+            let inline_key = enc
+                .public_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|pem| !pem.is_empty());
+            if let Some(pem) = inline_key {
+                self.encryption_public_key = Some(pem.to_string());
             } else if let Some(path) = enc.public_key_path {
                 let trimmed = path.trim();
                 if !trimmed.is_empty() {
@@ -1416,11 +1422,17 @@ impl AgentsightConfig {
                     .as_ref()
                     .and_then(|f| f.enabled)
                     .unwrap_or(false),
+                // `sleep_or_stop(0)` returns immediately, so a zero interval
+                // turns the collector into a hot rescan loop (privileged
+                // daemon spinning on CPU/disk). Clamp at parse: other
+                // zero-valued knobs have explicit "disabled" semantics, this
+                // one has none.
                 trajectory_scan_interval_secs: features
                     .trajectory_collection
                     .as_ref()
                     .and_then(|f| f.scan_interval_secs)
-                    .unwrap_or(DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS),
+                    .unwrap_or(DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS)
+                    .max(1),
                 trajectory_scan_dirs: features
                     .trajectory_collection
                     .as_ref()
@@ -1430,6 +1442,20 @@ impl AgentsightConfig {
 
         // Parse runtime limits
         if let Some(limits) = parsed.runtime_limits.take() {
+            // A MiB budget becomes a byte budget with `* 1024 * 1024`. Do it
+            // checked: with overflow checks off (the workspace disables dev
+            // debug assertions) the multiply wraps silently in the shipped
+            // profile, and a wrapped 0 is read by ChannelBudget as "unlimited",
+            // which disables the memory guard instead of bounding it. Reject
+            // the config like the storage section does rather than running
+            // with a bogus budget.
+            let bytes_from_mb = |field: &str, mb: Option<usize>| -> Result<Option<usize>, String> {
+                mb.map(|mb| {
+                    mb.checked_mul(1024 * 1024)
+                        .ok_or_else(|| format!("runtime_limits.{field} is too large"))
+                })
+                .transpose()
+            };
             self.runtime_limits = RuntimeLimits {
                 event_channel_capacity: limits
                     .event_channel_capacity
@@ -1439,22 +1465,25 @@ impl AgentsightConfig {
                     .as_deref()
                     .map(ChannelPolicy::from)
                     .unwrap_or_default(),
-                event_channel_max_bytes: limits
-                    .event_channel_max_bytes_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
+                event_channel_max_bytes: bytes_from_mb(
+                    "event_channel_max_bytes_mb",
+                    limits.event_channel_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
                 pending_genai_max_count: limits
                     .pending_genai_max_count
                     .unwrap_or(DEFAULT_PENDING_GENAI_MAX_COUNT),
-                pending_genai_max_bytes: limits
-                    .pending_genai_max_bytes_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
+                pending_genai_max_bytes: bytes_from_mb(
+                    "pending_genai_max_bytes_mb",
+                    limits.pending_genai_max_bytes_mb,
+                )?
+                .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
                 pid_cache_size: limits.pid_cache_size.unwrap_or(DEFAULT_PID_CACHE_SIZE),
-                max_connection_body_bytes: limits
-                    .max_connection_body_mb
-                    .map(|mb| mb * 1024 * 1024)
-                    .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
+                max_connection_body_bytes: bytes_from_mb(
+                    "max_connection_body_mb",
+                    limits.max_connection_body_mb,
+                )?
+                .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
                 connection_idle_timeout_secs: limits
                     .connection_idle_timeout_secs
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
@@ -2240,6 +2269,34 @@ mod tests {
     }
 
     #[test]
+    fn runtime_limits_reject_byte_budgets_that_overflow() {
+        // A MiB budget is converted with an unchecked multiply. With overflow
+        // checks disabled (the shipped profile) the wrap is silent: 2^44 MiB
+        // wraps to exactly 0, which ChannelBudget reads as "unlimited" and
+        // silently disables the memory guard, while u64::MAX wraps to a
+        // 1 KiB-class budget that drops everything. Both must be rejected at
+        // load time, like the storage size limits already are.
+        for field in [
+            "event_channel_max_bytes_mb",
+            "pending_genai_max_bytes_mb",
+            "max_connection_body_mb",
+        ] {
+            for mb in [u64::MAX, 1u64 << 44] {
+                let json = format!(r#"{{"runtime_limits": {{"{field}": {mb}}}}}"#);
+                let mut config = AgentsightConfig::new();
+                let result = config.load_from_json(&json);
+                let err = result.expect_err(&format!(
+                    "{field}={mb} overflows the byte budget and must be rejected"
+                ));
+                assert!(
+                    err.contains(field),
+                    "error for {field} must name the offending field: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_load_from_json_features() {
         let json = r#"{
             "features": {
@@ -2309,6 +2366,55 @@ mod tests {
         assert_eq!(
             config.features.trajectory_scan_interval_secs,
             DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS
+        );
+    }
+
+    /// The shipped default config contains `"public_key": ""`. An operator who
+    /// adds `public_key_path` on top of it must still get the file-based key;
+    /// otherwise the exporter silently uploads conversation content in
+    /// plaintext.
+    #[test]
+    fn encryption_blank_inline_key_falls_back_to_public_key_path() {
+        let dir = unique_temp_dir();
+        let pem_path = dir.join("public_key.pem");
+        let pem = "-----BEGIN PUBLIC KEY-----\nMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAK\n-----END PUBLIC KEY-----\n";
+        std::fs::write(&pem_path, pem).expect("write pem");
+
+        for blank in ["", "   \n"] {
+            let json = serde_json::json!({
+                "encryption": {
+                    "public_key": blank,
+                    "public_key_path": pem_path.to_string_lossy(),
+                }
+            })
+            .to_string();
+            let mut config = AgentsightConfig::new();
+            config.load_from_json(&json).unwrap();
+            assert_eq!(
+                config.encryption_public_key.as_deref(),
+                Some(pem),
+                "blank inline key {blank:?} must fall back to public_key_path"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `sleep_or_stop(0)` returns immediately, so a zero scan interval turns
+    /// the trajectory collector into a hot rescan loop. The parse step must
+    /// clamp it to at least one second.
+    #[test]
+    fn trajectory_scan_interval_zero_is_clamped() {
+        let json = r#"{
+            "features": {
+                "trajectory_collection": { "enabled": true, "scan_interval_secs": 0 }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(
+            config.features.trajectory_scan_interval_secs >= 1,
+            "zero interval would make the collector hot-loop, got {}",
+            config.features.trajectory_scan_interval_secs
         );
     }
 

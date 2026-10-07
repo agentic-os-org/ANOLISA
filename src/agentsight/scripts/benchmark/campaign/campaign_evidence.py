@@ -360,6 +360,9 @@ def audit_campaign(
     issues = []
     resolution = campaign_data["capacity"]["qps_resolution"]
     confirmations = campaign_data["capacity"]["confirm_repetitions"]
+    # A confirmation needs a majority of its repetitions; mirror campaign.py's
+    # rule so confirm_repetitions=1 does not demand two verdicts.
+    required_confirmations = confirmations // 2 + 1
     for version in VERSIONS:
         value = capacities.get(version, {})
         maximum = value.get("maximum_sustainable_qps")
@@ -371,9 +374,9 @@ def audit_campaign(
             issues.append(f"{version} capacity lacks an adjacent failed QPS")
             continue
         evidence = value.get("confirmation", {})
-        if evidence.get(str(maximum), []).count("PASS") < 2:
+        if evidence.get(str(maximum), []).count("PASS") < required_confirmations:
             issues.append(f"{version} capacity pass confirmation is incomplete")
-        if evidence.get(str(failure), []).count("FAIL") < 2:
+        if evidence.get(str(failure), []).count("FAIL") < required_confirmations:
             issues.append(f"{version} capacity fail confirmation is incomplete")
         if (
             len(evidence.get(str(maximum), [])) < confirmations

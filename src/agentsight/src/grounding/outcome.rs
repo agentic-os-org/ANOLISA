@@ -98,7 +98,10 @@ const FAILURE_SIGNATURES: &[&str] = &[
 
 /// Commands whose whole purpose is to ask whether something exists. A non-zero
 /// exit from these is the answer, not a fault (spec B3).
-const PROBE_COMMANDS: &[&str] = &["ls", "test", "which", "stat", "pgrep", "ping"];
+///
+/// `[` and `[[` are the POSIX and bash spellings of `test`, so they answer the
+/// same question and belong to the same list.
+const PROBE_COMMANDS: &[&str] = &["ls", "test", "[", "[[", "which", "stat", "pgrep", "ping"];
 
 /// Payload markers meaning the call never actually produced output (spec B8).
 const PLACEHOLDER_MARKERS: &[&str] = &["pending-post-tool-use"];
@@ -349,32 +352,63 @@ fn http_error_line(text: &str) -> Option<usize> {
 /// to the weak text heuristic and grading a certain failure as a guess.
 const EXIT_CODE_MARKERS: &[&str] = &["exit code ", "exited with code ", "exit status "];
 
+/// Wrapper a live capture puts in front of the marker, as in
+/// `(Command exited with code 1)`.
+const EXIT_CODE_WRAPPER: &str = "Command ";
+
 /// Last reported exit code in the payload plus its offset.
 ///
 /// The last occurrence wins because chained commands emit one per sub-command
 /// and only the final one describes the call as a whole.
+///
+/// Only a line that *reports* a code counts, the same anchoring `http_error_line`
+/// applies to `HTTP 4xx`. A payload that merely quotes the wording — a file the
+/// agent read, a log line, a comment — is describing something else entirely,
+/// and reading it as this call's exit status turned a successful call into a
+/// certain failure whose observation then left the evidence pool.
 fn last_exit_code(text: &str) -> Option<(i64, usize)> {
-    let lower = text.to_lowercase();
     let mut found: Option<(i64, usize)> = None;
-    for marker in EXIT_CODE_MARKERS {
-        let mut cursor = 0;
-        while let Some(rel) = lower[cursor..].find(marker) {
-            let marker_at = cursor + rel;
-            let digits: String = lower[marker_at + marker.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if let Ok(code) = digits.parse::<i64>() {
-                // Keep the latest position across all spellings, not just
-                // within one, so a mixed payload still reports its final code.
-                if found.is_none_or(|(_, at)| marker_at >= at) {
-                    found = Some((code, marker_at));
-                }
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some((code, marker_at)) = reported_exit_code(line, offset) {
+            // Keep the latest position across all spellings, not just within
+            // one, so a mixed payload still reports its final code.
+            if found.is_none_or(|(_, at)| marker_at >= at) {
+                found = Some((code, marker_at));
             }
-            cursor = marker_at + marker.len();
         }
+        offset += line.len();
     }
     found
+}
+
+/// The exit code one line reports, with the marker's absolute byte offset.
+///
+/// The marker has to open the line, optionally inside the parenthetical and
+/// `Command ` wrapper a live capture uses.
+fn reported_exit_code(line: &str, offset: usize) -> Option<(i64, usize)> {
+    let mut rest = line.trim_start();
+    let mut at = offset + (line.len() - rest.len());
+    if let Some(after_paren) = rest.strip_prefix('(') {
+        rest = after_paren;
+        at += 1;
+    }
+    if let Some(head) = rest.get(..EXIT_CODE_WRAPPER.len()) {
+        if head.eq_ignore_ascii_case(EXIT_CODE_WRAPPER) {
+            rest = &rest[EXIT_CODE_WRAPPER.len()..];
+            at += EXIT_CODE_WRAPPER.len();
+        }
+    }
+    let lower = rest.to_lowercase();
+    for marker in EXIT_CODE_MARKERS {
+        if let Some(tail) = lower.strip_prefix(marker) {
+            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(code) = digits.parse::<i64>() {
+                return Some((code, at));
+            }
+        }
+    }
+    None
 }
 
 /// Whether the call is an existence/availability probe.
@@ -416,7 +450,17 @@ fn command_of(call: &ToolCall) -> Option<&str> {
 }
 
 fn is_placeholder_or_empty(text: &str) -> bool {
-    text.trim().is_empty() || PLACEHOLDER_MARKERS.iter().any(|m| text.contains(m))
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // The placeholder IS the whole payload (spec B8), so the marker only
+    // counts in a payload made of that one line. The same anchoring
+    // `last_exit_code` applies to exit codes: a payload that merely quotes
+    // the marker — a file the agent read, a grep over this source — is
+    // describing something else, and reading it as "no output" turned a
+    // successful call into Unknown whose observation left the evidence pool.
+    trimmed.lines().count() == 1 && PLACEHOLDER_MARKERS.iter().any(|m| trimmed.contains(m))
 }
 
 /// Byte offset of a line inside the opening window that begins with an error

@@ -86,7 +86,8 @@ impl std::fmt::Debug for HpackConnectionState {
 ///
 /// A padded DATA frame carries a one-byte pad length followed by the body and
 /// that many padding bytes; both belong to the framing, not to the body. The
-/// HEADERS side already strips its framing (`strip_headers_framing`), and DATA
+/// HEADERS side already strips its framing (the frame exposes the
+/// header_block_fragment accessor), and DATA
 /// frames have no PRIORITY field, so only the padding applies here.
 fn strip_data_padding(payload: &[u8], flags: u8) -> &[u8] {
     if flags & 0x08 == 0 {
@@ -107,38 +108,6 @@ fn strip_data_padding(payload: &[u8], flags: u8) -> &[u8] {
 struct ContinuationBuffer {
     data: Vec<u8>,
     direction: StreamDirection,
-}
-
-/// Strip PADDED and PRIORITY framing from a HEADERS frame payload,
-/// returning the raw header block fragment.
-fn strip_headers_framing(payload: &[u8], flags: u8) -> &[u8] {
-    let mut offset = 0;
-    let mut end = payload.len();
-
-    // PADDED flag (0x08): first byte is pad_length, last pad_length bytes are padding
-    if flags & 0x08 != 0 {
-        if payload.is_empty() {
-            return &[];
-        }
-        let pad_length = payload[0] as usize;
-        offset += 1;
-        if end > pad_length {
-            end -= pad_length;
-        } else {
-            return &[];
-        }
-    }
-
-    // PRIORITY flag (0x20): 5 bytes (4-byte stream dependency + 1 byte weight)
-    if flags & 0x20 != 0 {
-        offset += 5;
-    }
-
-    if offset >= end {
-        return &[];
-    }
-
-    &payload[offset..end]
 }
 
 /// Stream identifier within an HTTP/2 connection
@@ -594,12 +563,17 @@ impl Http2Stream {
 
     /// Check if response content-type indicates SSE stream
     pub fn is_response_sse(&self) -> bool {
+        // RFC 9110 media types are case-insensitive, so the value must be
+        // matched case-insensitively — in lockstep with the HTTP/1 parser's
+        // `ParsedResponse::is_sse`, which lowercases the value first. A
+        // server spelling the header `Content-Type: Text/Event-Stream` must
+        // be classified as SSE on both stacks.
         if let Some(headers) = self.decoded_response_headers.as_ref() {
             if let Some((_, value)) = headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
             {
-                return value.contains("text/event-stream");
+                return value.to_ascii_lowercase().contains("text/event-stream");
             }
         }
         self.response_headers
@@ -610,7 +584,7 @@ impl Http2Stream {
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                     .and_then(|(_, value)| value.clone())
-                    .map(|ct| ct.contains("text/event-stream"))
+                    .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -875,11 +849,11 @@ impl Http2StreamAggregator {
             // Handle HEADERS frames: strip framing, possibly buffer for CONTINUATION
             if frame.is_headers() {
                 let decoded = if frame.has_end_headers() {
-                    let fragment = strip_headers_framing(frame.payload(), frame.flags);
+                    let fragment = frame.header_block_fragment();
                     self.decode_header_block(connection_id, direction, fragment)
                 } else {
                     // No END_HEADERS — start buffering for CONTINUATION
-                    let fragment = strip_headers_framing(frame.payload(), frame.flags);
+                    let fragment = frame.header_block_fragment();
                     if fragment.len() <= MAX_CONTINUATION_BUFFER {
                         self.continuation_buffers.insert(
                             stream_id,
@@ -2134,50 +2108,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_headers_framing_bare() {
-        let payload = b"\x82\x86\x84";
-        assert_eq!(strip_headers_framing(payload, 0x00), payload.as_slice());
-    }
-
-    #[test]
-    fn test_strip_headers_framing_padded() {
-        // PADDED flag = 0x08: first byte = pad_length, last N bytes = padding
-        let mut payload = vec![3]; // pad_length = 3
-        payload.extend_from_slice(b"\x82\x86\x84"); // header block fragment
-        payload.extend_from_slice(&[0, 0, 0]); // 3 bytes of padding
-        let result = strip_headers_framing(&payload, 0x08);
-        assert_eq!(result, b"\x82\x86\x84");
-    }
-
-    #[test]
-    fn test_strip_headers_framing_priority() {
-        // PRIORITY flag = 0x20: 5 bytes (4-byte dependency + 1 byte weight)
-        let mut payload = vec![0x80, 0x00, 0x00, 0x01, 0x10]; // priority data
-        payload.extend_from_slice(b"\x82\x86"); // header block fragment
-        let result = strip_headers_framing(&payload, 0x20);
-        assert_eq!(result, b"\x82\x86");
-    }
-
-    #[test]
-    fn test_strip_headers_framing_padded_and_priority() {
-        // Both PADDED (0x08) and PRIORITY (0x20) = 0x28
-        let mut payload = vec![2]; // pad_length = 2
-        payload.extend_from_slice(&[0x80, 0x00, 0x00, 0x01, 0x10]); // priority
-        payload.extend_from_slice(b"\x82"); // header block fragment
-        payload.extend_from_slice(&[0, 0]); // 2 bytes padding
-        let result = strip_headers_framing(&payload, 0x28);
-        assert_eq!(result, b"\x82");
-    }
-
-    #[test]
-    fn test_strip_headers_framing_empty_after_strip() {
-        // Only padding, no actual content
-        let payload = vec![5, 0, 0, 0, 0, 0]; // pad_length=5, then 5 bytes padding
-        let result = strip_headers_framing(&payload, 0x08);
-        assert_eq!(result, &[] as &[u8]);
-    }
-
-    #[test]
     fn test_stateful_hpack_decode_static_table() {
         // Use hpack::Encoder to produce valid HPACK blocks
         let mut encoder = Encoder::new();
@@ -2405,6 +2335,55 @@ mod tests {
             stream.response_headers_json().contains("content-encoding"),
             "headers JSON must not drop the dynamic-table header: {}",
             stream.response_headers_json()
+        );
+    }
+
+    #[test]
+    fn is_response_sse_matches_content_type_case_insensitively() {
+        // RFC 9110 media types are case-insensitive, and the HTTP/1 parser
+        // already lowercases the value before matching
+        // (`parser::http::response::ParsedResponse::is_sse`). The HTTP/2
+        // check must agree: a server spelling the header
+        // `Content-Type: Text/Event-Stream` on an HTTP/2 response must be
+        // classified as SSE exactly like the same bytes over HTTP/1.1.
+        let connection_id = ConnectionId { pid: 1, ssl_ptr: 1 };
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.decoded_response_headers = Some(vec![
+            (":status".to_string(), "200".to_string()),
+            ("content-type".to_string(), "Text/Event-Stream".to_string()),
+        ]);
+        assert!(
+            stream.is_response_sse(),
+            "a case-variant SSE media type must still mark the response as SSE"
+        );
+    }
+
+    #[test]
+    fn is_response_sse_matches_content_type_case_insensitively_stateless() {
+        // Same response, but only the raw HEADERS frame is available (no
+        // stateful decode): the stateless fallback branch of
+        // `is_response_sse` reads the literal value off the wire and must
+        // match it case-insensitively too.
+        //
+        // The header block is hand-encoded in the form real HTTP/2 servers
+        // emit for a content-type override: `:status: 200` as a static
+        // indexed field (0x88), then content-type (static name index 31)
+        // as a literal with incremental indexing (0x40 | 31 = 0x5f) whose
+        // value is a 32-byte plain literal.
+        let mut encoded = vec![0x88, 0x5f, 0x20];
+        encoded.extend_from_slice(b"Text/Event-Stream; charset=utf-8");
+        let event = create_test_event(1, 0x1000, 0, 1000);
+        let frame = create_test_frame(1, 0x01, 0x04, encoded, event);
+
+        let connection_id = ConnectionId {
+            pid: 1,
+            ssl_ptr: 0x1000,
+        };
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.response_headers = Some(frame);
+        assert!(
+            stream.is_response_sse(),
+            "the stateless fallback must classify a case-variant SSE media type as SSE"
         );
     }
 
