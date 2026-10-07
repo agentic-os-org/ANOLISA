@@ -575,6 +575,69 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     assert fault["failed"] == ["token_accuracy"]
 
 
+def test_recovery_evidence_rejects_malformed_references_and_summaries(
+    tmp_path: Path,
+) -> None:
+    """A boolean or non-finite recovery reference is missing evidence, not a
+    threshold; a phase artifact without a summary object is missing evidence,
+    not a crash."""
+
+    call = 0
+
+    def phases_with(stable_summary: object) -> dict[str, object]:
+        nonlocal call
+        call += 1
+        phases = {}
+        for label in campaign_evidence.RECOVERY_PHASES:
+            run_path = tmp_path / f"run{call}" / label / "run-result.json"
+            run = {
+                "summary": stable_summary if label == "stable" else summary(),
+                "evaluation": {"verdict": "FAIL" if label == "overload" else "PASS"},
+            }
+            phases[label] = (run_path, run)
+            if label == "recover":
+                write_recovery_artifacts(run_path)
+        return phases
+
+    settings = {"tolerance_ratio": 0.1, "recovery_window_seconds": 2}
+
+    # A boolean effective_qps reference is an int subclass: gating at
+    # float(True) == 1.0 QPS lets every real sample count as recovered and
+    # the run passes without any usable reference.
+    boolean_reference = summary()
+    boolean_reference["effective_qps"] = True
+    outcome = campaign_evidence.recovery_outcome(
+        phases_with(boolean_reference), settings, thresholds()
+    )
+    assert outcome["verdict"] == "INCONCLUSIVE"
+    assert "effective_qps" in outcome["missing"]
+
+    # A non-finite latency reference with lower-is-better compares every
+    # sample against an infinite threshold — equally unusable.
+    infinite_reference = summary()
+    infinite_reference["latency_ms"] = {"p99": float("inf")}
+    outcome = campaign_evidence.recovery_outcome(
+        phases_with(infinite_reference), settings, thresholds()
+    )
+    assert outcome["verdict"] == "INCONCLUSIVE"
+    assert "latency_p99_ms" in outcome["missing"]
+
+    # A stable artifact whose summary is absent carries no evidence for any
+    # specification; the gates must report missing instead of raising.
+    phases = phases_with(summary())
+    del phases["stable"][1]["summary"]  # type: ignore[index]
+    outcome = campaign_evidence.recovery_outcome(phases, settings, thresholds())
+    assert outcome["verdict"] == "INCONCLUSIVE"
+    for name in ("effective_qps", "latency_p99_ms", "rss_mb"):
+        assert name in outcome["missing"]
+
+    # Control: with healthy references the same evidence passes.
+    outcome = campaign_evidence.recovery_outcome(
+        phases_with(summary()), settings, thresholds()
+    )
+    assert outcome["verdict"] == "PASS"
+
+
 def test_fault_evidence_classifies_malformed_artifacts(tmp_path: Path) -> None:
     """Unusable fault artifact shapes and counters report missing evidence."""
 

@@ -170,6 +170,20 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
     }
 
 
+def summary_of_phase(
+    phases: dict[str, tuple[Path, dict[str, Any]]], label: str
+) -> dict[str, Any]:
+    """Read one phase's summary object from its run artifact.
+
+    A run artifact whose summary is absent or not an object carries no
+    evidence: the recovery gates must report it as missing instead of
+    raising KeyError/AttributeError on the collector's own output.
+    """
+    run = phases[label][1]
+    summary = run.get("summary") if isinstance(run, dict) else None
+    return summary if isinstance(summary, dict) else {}
+
+
 def recovery_outcome(
     phases: dict[str, tuple[Path, dict[str, Any]]],
     settings: dict[str, Any],
@@ -184,9 +198,9 @@ def recovery_outcome(
             "failed": [],
             "seconds": {},
         }
-    stable = phases["stable"][1]["summary"]
-    recover_path, recover_run = phases["recover"]
-    recover = recover_run["summary"]
+    stable = summary_of_phase(phases, "stable")
+    recover_path = phases["recover"][0]
+    recover = summary_of_phase(phases, "recover")
     tolerance = settings["tolerance_ratio"]
     window = settings["recovery_window_seconds"]
     load = load_samples(recover_path)
@@ -229,7 +243,12 @@ def recovery_outcome(
     seconds = {
         name: continuous_recovery(
             samples,
-            float(reference) if isinstance(reference, (int, float)) else None,
+            # A reference that is not a finite number is unusable evidence,
+            # not a threshold: a boolean is an int subclass (True would gate
+            # at 1.0) and a non-finite latency reference with
+            # lower-is-better passes every sample, so both must read as
+            # missing instead of silently gating the recovery.
+            finite_float(reference),
             tolerance,
             window,
             higher_is_better=higher_is_better,
