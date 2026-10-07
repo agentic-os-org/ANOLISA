@@ -810,9 +810,17 @@ fn trunc(s: &str, n: usize) -> String {
 /// `git stash show` only report what is stashed, so they stay out too, while
 /// the forms that change the working tree (`git stash`, `pop`, `drop`, …)
 /// remain backtracks.
+///
+/// `git switch` is git 2.23's spelling of `git checkout <branch>`; without
+/// this arm the same branch move goes uncounted when the agent spells it
+/// the modern way. Branch creation keeps the -b exemption by its modern
+/// spelling too.
 fn is_backtrack_cmd(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
     let checkout = c.contains("git checkout") && !c.contains("git checkout -b");
+    let switch = c.contains("git switch")
+        && !c.contains("git switch -c")
+        && !c.contains("git switch --create");
     let stash =
         c.contains("git stash") && !c.contains("git stash list") && !c.contains("git stash show");
     [
@@ -826,6 +834,7 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
     .iter()
     .any(|k| c.contains(k))
         || checkout
+        || switch
         || stash
 }
 
@@ -2353,5 +2362,58 @@ mod tests {
             backtracks(&build("Bash", r#"{"command":"git reset --hard HEAD~1"}"#));
         assert_eq!(rows, 1, "a real reversal must still flag its ledger row");
         assert!(facts_say_one, "a real reversal must still be counted");
+    }
+
+    /// `git switch` is git 2.23's spelling of `git checkout <branch>`, so the
+    /// same branch move must count the same way. Before this the modern
+    /// spelling was invisible to the heuristic: an agent abandoning a line of
+    /// work via `git switch` fed a false 0 回退 count into the detour prompt
+    /// and kept its tokens out of the prevention ceiling, while the legacy
+    /// `git checkout <branch>` counted.
+    #[test]
+    fn branch_moves_by_the_modern_spelling_are_backtracks() {
+        assert!(is_backtrack_cmd("git switch main"));
+        assert!(is_backtrack_cmd("cd /repo && git switch feature/opt"));
+        // Branch creation by its modern spelling discards nothing, exactly
+        // like `git checkout -b`.
+        assert!(!is_backtrack_cmd("git switch -c fix/parse"));
+        assert!(!is_backtrack_cmd("git switch -C fix/parse"));
+        assert!(!is_backtrack_cmd("git switch --create fix/parse"));
+        // The legacy spellings keep their #5532 behavior.
+        assert!(is_backtrack_cmd("git checkout main"));
+        assert!(!is_backtrack_cmd("git checkout -b feature/opt"));
+
+        // End to end: a branch move by its modern spelling must mark the
+        // ledger row BACKTRACK and count in the detour facts.
+        let mut steps = String::from(
+            r#"{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"start"}"#,
+        );
+        steps.push_str(
+            r#",{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+                "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"git switch main"}}],
+                "observation":{"results":[{"source_call_id":"c1","content":"Switched to branch 'main'"}]}}"#,
+        );
+        for id in 3..=6 {
+            steps.push_str(&format!(
+                r#",{{"step_id":{id},"source":"agent","timestamp":"2026-07-02T06:30:0{id}.000Z","message":"working"}}"#
+            ));
+        }
+        let t = traj(&format!("[{steps}]"));
+        let set = extract_waste_candidates(&t).unwrap();
+        let detour = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "detour")
+            .expect("detour fires on a 5-turn trajectory");
+        assert!(
+            detour.facts.contains("1 处回退"),
+            "a branch move by its modern spelling must count as a backtrack: {}",
+            detour.facts
+        );
+        assert!(
+            set.ledger.iter().any(|r| r.backtrack),
+            "the branch-move row must carry the BACKTRACK flag: {:?}",
+            set.ledger
+        );
     }
 }
