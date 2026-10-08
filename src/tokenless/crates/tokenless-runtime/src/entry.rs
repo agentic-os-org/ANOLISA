@@ -991,6 +991,16 @@ mod tests {
         }
     }
 
+    // A forked child holds every fd of the process until it execs, so a script
+    // still open for writing on another thread makes this thread's exec fail
+    // with ETXTBSY (`ExecutableFileBusy`). Tests that write and run scripts
+    // hold this lock across both steps.
+    fn serialize_rtk_scripts() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn write_executable(path: &Path, script: &str) {
         fs::write(path, script).unwrap();
         let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -1241,6 +1251,7 @@ mod tests {
 
     #[test]
     fn pre_tool_applies_rtk_exit_zero_and_anchors_path() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("fake rtk");
         write_executable(&rtk, "#!/bin/sh\nprintf 'rtk grep --count error log'\n");
@@ -1509,6 +1520,7 @@ mod tests {
 
     #[test]
     fn pre_tool_honors_rtk_exit_contract_and_preserves_arguments() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let request = PreToolRequest {
             tool_name: "Bash".into(),
@@ -1550,6 +1562,7 @@ mod tests {
 
     #[test]
     fn pre_tool_passes_attribution_and_rejects_unexpected_exit() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let request = PreToolRequest {
             tool_name: "Bash".into(),
@@ -1596,6 +1609,7 @@ mod tests {
 
     #[test]
     fn pre_tool_timeout_is_an_operation_error() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("rtk-slow");
         write_executable(&rtk, "#!/bin/sh\nsleep 1\n");
@@ -1624,6 +1638,7 @@ mod tests {
 
     #[test]
     fn pre_tool_deadline_includes_stdout_held_by_a_descendant() {
+        let _serial = serialize_rtk_scripts();
         for parent in ["exit 0", "wait"] {
             let directory = tempdir().unwrap();
             let rtk = directory.path().join("rtk-inherited-stdout");
@@ -1678,6 +1693,7 @@ mod tests {
 
     #[test]
     fn pre_tool_collects_descendant_output_before_the_deadline() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("rtk-delayed-output");
         write_executable(
@@ -1706,6 +1722,7 @@ mod tests {
 
     #[test]
     fn pre_tool_preserves_invalid_utf8_output_errors() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("rtk-invalid-utf8");
         write_executable(&rtk, "#!/bin/sh\nprintf '\\377'\n");
@@ -1719,14 +1736,18 @@ mod tests {
             },
         };
         let result = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path());
-        assert!(matches!(
-            result,
-            Err(RuntimeError::RtkOutput(error)) if error.kind() == std::io::ErrorKind::InvalidData
-        ));
+        assert!(
+            matches!(
+                &result,
+                Err(RuntimeError::RtkOutput(error)) if error.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "{result:?}"
+        );
     }
 
     #[test]
     fn pre_tool_drains_large_rtk_output_before_exit() {
+        let _serial = serialize_rtk_scripts();
         let directory = tempdir().unwrap();
         let rtk = directory.path().join("rtk-large-output");
         write_executable(
