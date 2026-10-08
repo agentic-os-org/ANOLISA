@@ -40,9 +40,14 @@ def merge(json_str, config_path):
         existing = {}
 
     # Merge
-    if "mcpServers" not in existing:
-        existing["mcpServers"] = {}
-    existing["mcpServers"].update(servers)
+    existing_servers = existing.get("mcpServers")
+    if not isinstance(existing_servers, dict):
+        if existing_servers is not None:
+            print(f"WARNING: replacing non-object mcpServers in {config_path}",
+                  file=sys.stderr)
+        existing_servers = {}
+    existing_servers.update(servers)
+    existing["mcpServers"] = existing_servers
 
     if "mcp" in new and isinstance(new["mcp"], dict):
         if "mcp" not in existing:
@@ -73,6 +78,10 @@ def check(config_path):
         sys.exit(1)
 
     servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        print(f"ERROR: mcpServers in {config_path} must be a JSON object",
+              file=sys.stderr)
+        sys.exit(1)
     if not servers:
         print(f"No mcpServers in {config_path}")
         return
