@@ -2849,7 +2849,21 @@ fn eval_netdev_budget(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/busy_poll";
+    eval_busy_poll_at(info, recs, "/proc/sys/net/core/busy_poll")
+}
+
+/// Path-injectable form of [`eval_busy_poll`] (the `eval_*_at` idiom) so the
+/// workload gate is assertable against a temp file on any host.
+///
+/// The gate lists every workload whose network round-trips sit on the
+/// request path: the caches (redis, memcached), the proxies (nginx), the
+/// OLTP databases (postgres, mysqld — MariaDB 10.4+ runs as mariadbd, the
+/// same OLTP shape — and mongod) and clickhouse. The OLTP databases appear
+/// in every sibling latency gate — eval_thp's `is_latency_sensitive`, the
+/// swappiness/dirty_ratio db lists, classify's IoLatency — but were missing
+/// here, so a database host never got the busy-polling advice its
+/// synchronous per-query round-trip profile asks for.
+fn eval_busy_poll_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -2857,6 +2871,11 @@ fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let is_latency_sensitive = info.has_process("redis-server")
         || info.has_process("memcached")
         || info.has_process("nginx")
+        || info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
+        || info.has_process("mongod")
         || info.has_process("clickhouse");
     if is_latency_sensitive && current == 0 {
         recs.push(Recommendation {
@@ -11857,6 +11876,64 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+    }
+
+    #[test]
+    fn busy_poll_advises_the_oltp_databases() {
+        // The gate forgot the OLTP databases that every sibling latency gate
+        // includes (eval_thp's is_latency_sensitive, the swappiness /
+        // dirty_ratio db lists, classify's IoLatency): a synchronous
+        // per-query network round-trip is the classic busy-polling shape.
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_busy_poll_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, "0\n").unwrap();
+        for name in [
+            "redis-server",
+            "postgres",
+            "mysqld",
+            "mariadbd",
+            "mongod",
+            "clickhouse",
+        ] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "net.core.busy_poll"),
+                "{name} is latency-sensitive and must get the busy_poll advice"
+            );
+        }
+        // A workload without a request-path network round-trip stays out.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "make".to_string(),
+        }];
+        let mut recs = Vec::new();
+        eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "net.core.busy_poll"),
+            "a build job is not latency-sensitive"
+        );
+        // An already-polled host is left alone.
+        std::fs::write(&path, "50\n").unwrap();
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "postgres".to_string(),
+        }];
+        let mut recs = Vec::new();
+        eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "net.core.busy_poll"),
+            "an already-polled knob needs no advice"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
