@@ -497,7 +497,9 @@ def test_oversize_request_never_spawns_worker(monkeypatch, tmp_path: Path):
 
     # A change whose serialized frame exceeds MAX_WORKER_FRAME_BYTES
     # (4 MiB): many distinct accumulated paths.
-    big_paths = {f"skills/pack{i:07d}/file{j}.md" for i in range(150000) for j in range(1)}
+    big_paths = {
+        f"skills/pack{i:07d}/file{j}.md" for i in range(150000) for j in range(1)
+    }
     change = SkillFsChange(
         canonical_skill_dir=tmp_path / "weather",
         event_kinds={"write"},
@@ -518,13 +520,17 @@ def test_oversize_request_never_spawns_worker(monkeypatch, tmp_path: Path):
 
     assert exc is not None, "oversized request must fail"
     assert "exceeds" in str(exc), f"expected frame-size error, got: {exc}"
-    assert not isinstance(exc, SkillLedgerWorkerTransportError), (
-        f"payload error misclassified as transport failure: {exc!r}"
-    )
-    assert len(calls) == 0, f"worker spawned {len(calls)} time(s) for an unsendable frame"
+    assert not isinstance(
+        exc, SkillLedgerWorkerTransportError
+    ), f"payload error misclassified as transport failure: {exc!r}"
+    assert (
+        len(calls) == 0
+    ), f"worker spawned {len(calls)} time(s) for an unsendable frame"
 
 
-def test_read_side_value_error_still_recovers_through_transport(monkeypatch, tmp_path: Path):
+def test_read_side_value_error_still_recovers_through_transport(
+    monkeypatch, tmp_path: Path
+):
     """A read-side ValueError keeps its transport classification.
 
     Request serialization now happens before the spawn, so nothing on the
@@ -567,7 +573,7 @@ def test_read_side_value_error_still_recovers_through_transport(monkeypatch, tmp
     assert outcome == "ok", f"recovery must complete on the second worker: {payload!r}"
     assert payload["status"] == "processed"
     assert payload["workerPid"] == 203
-    assert len(calls) == 2, (
-        f"expected kill-and-restart recovery to respawn once, got {len(calls)} spawns"
-    )
+    assert (
+        len(calls) == 2
+    ), f"expected kill-and-restart recovery to respawn once, got {len(calls)} spawns"
     assert broken.signals == ["terminate"], "the faulty worker must be terminated"
