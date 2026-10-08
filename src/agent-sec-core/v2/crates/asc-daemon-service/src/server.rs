@@ -387,7 +387,7 @@ async fn process_admitted_connection(
             .map_or(config.dispatch_timeout, |budget| {
                 budget.clamp(
                     std::time::Duration::from_millis(1),
-                    std::time::Duration::from_secs(120),
+                    config.max_dispatch_timeout,
                 )
             });
     let control = DispatchControl::new(std::time::Instant::now() + dispatch_timeout);

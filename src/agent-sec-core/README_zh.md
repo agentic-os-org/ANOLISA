@@ -330,12 +330,20 @@ export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 agent-sec-cli scan-code --code 'rm -rf /'
 agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
   scan-code --code 'import os; os.system("rm -rf /")' --language python
+
+# 本地模型引擎：在 daemon service 环境中设置 AGENT_SEC_OLLAMA_MODEL，
+# 重启 agent-sec-daemon 后再调用 CLI。
+agent-sec-cli scan-code --mode llm --code 'rm -rf /'
 ```
 
 verdict 枚举为 `pass` / `warn` / `deny` / `error`；内置规则当前只产出 `warn` 或
-`pass`。规则嵌入 V2 binary，不再从 Python 源码目录读取。`--mode llm` 为保持 CLI
-兼容而保留，但会返回 `LLM model not available`；V2 尚未支持 `--trace-context` 和
-code-scan telemetry，因此依赖它们的 hook 仍处于延期状态。
+`pass`。规则嵌入 V2 binary，不再从 Python 源码目录读取。`llm` 模式由 daemon 调用
+本地 Ollama 兼容模型服务；`AGENT_SEC_OLLAMA_MODEL` 默认值为 `warden`，backend、仅
+loopback 的 base URL 及单请求 timeout 使用共享的 `AGENT_SEC_MODEL_SERVICE_*` 配置。有效
+model-service timeout 为 1–300 秒，daemon 为可用性检查、chat 和一次 retry 预留
+`3 * timeout + 1` 秒。模型缺失、推理失败及不可解析的 verdict 返回可解析的 `error` 结果；
+`DENY` 返回成功的 `warn` 结果。V2 尚未支持 `--trace-context` 和 code-scan telemetry，
+因此依赖它们的 hook 仍处于延期状态。
 
 完整的 daemon endpoint、CLI 和宿主 hook 状态见
 [Code Scanner 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。

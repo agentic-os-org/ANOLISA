@@ -674,6 +674,7 @@ fn transport_config() -> ServiceConfig {
         rejection_encode_timeout: Duration::from_millis(250),
         request_read_timeout: Duration::from_secs(5),
         dispatch_timeout: Duration::from_secs(5),
+        max_dispatch_timeout: asc_model_client::MAX_CODE_SCAN_BUDGET,
         response_write_timeout: Duration::from_secs(5),
         drain_timeout: Duration::from_secs(5),
         accept_error_backoff: Duration::from_millis(10),

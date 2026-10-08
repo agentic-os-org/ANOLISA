@@ -37,6 +37,13 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 /// single scan hang far longer than any caller expects.
 const MAX_TIMEOUT_SECS: u64 = 300;
 
+/// Maximum transport budget for Code Scanner LLM mode.
+///
+/// The largest permitted model-service timeout is three hundred seconds. One
+/// availability check, one chat request, a retry, and a one-second margin need
+/// at most this duration.
+pub const MAX_CODE_SCAN_BUDGET: Duration = Duration::from_secs(MAX_TIMEOUT_SECS * 3 + 1);
+
 /// Upper bound for a Code Scanner LLM mode invocation.
 ///
 /// The V1 flow first checks model availability, then sends one chat request.

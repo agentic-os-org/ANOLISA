@@ -24,6 +24,8 @@ pub struct ServiceConfig {
     /// Expiration releases the connection permit and requests cooperative
     /// cancellation. It cannot forcibly stop an already running blocking call.
     pub dispatch_timeout: Duration,
+    /// Upper bound for a trusted method-specific dispatch budget.
+    pub max_dispatch_timeout: Duration,
     /// Whole-response write deadline.
     pub response_write_timeout: Duration,
     /// Maximum graceful wait for admitted connection tasks during shutdown.
@@ -58,6 +60,9 @@ impl ServiceConfig {
         }
         if self.dispatch_timeout.is_zero() {
             return Err(ConfigError::ZeroDispatchTimeout);
+        }
+        if self.max_dispatch_timeout < Duration::from_millis(1) {
+            return Err(ConfigError::MaxDispatchTimeoutTooSmall);
         }
         if self.response_write_timeout.is_zero() {
             return Err(ConfigError::ZeroWriteTimeout);
@@ -96,7 +101,10 @@ pub enum ConfigError {
     /// A zero dispatch deadline would reject every complete request.
     #[error("request dispatch timeout must be positive")]
     ZeroDispatchTimeout,
-    /// A zero write deadline would reject every response.
+    /// A method-specific dispatch deadline below one millisecond cannot cap an override.
+    #[error("maximum request dispatch timeout must be at least one millisecond")]
+    MaxDispatchTimeoutTooSmall,
+    /// A zero write deadline would never complete a response.
     #[error("response write timeout must be positive")]
     ZeroWriteTimeout,
     /// A zero drain deadline would never allow graceful completion.
@@ -120,6 +128,7 @@ mod tests {
             rejection_encode_timeout: Duration::from_millis(250),
             request_read_timeout: Duration::from_secs(1),
             dispatch_timeout: Duration::from_secs(1),
+            max_dispatch_timeout: Duration::from_secs(1),
             response_write_timeout: Duration::from_secs(1),
             drain_timeout: Duration::from_secs(1),
             accept_error_backoff: Duration::from_millis(10),
@@ -146,5 +155,12 @@ mod tests {
         config = valid_config();
         config.dispatch_timeout = Duration::ZERO;
         assert_eq!(config.validate(), Err(ConfigError::ZeroDispatchTimeout));
+
+        config = valid_config();
+        config.max_dispatch_timeout = Duration::from_nanos(1);
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::MaxDispatchTimeoutTooSmall)
+        );
     }
 }

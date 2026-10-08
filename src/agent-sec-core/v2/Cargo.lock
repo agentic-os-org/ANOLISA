@@ -250,6 +250,7 @@ dependencies = [
  "asc-daemon-service",
  "asc-event-sink",
  "asc-foundation-types",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
  "asc-pap-repository-memory",

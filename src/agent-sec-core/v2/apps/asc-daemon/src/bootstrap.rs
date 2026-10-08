@@ -50,6 +50,7 @@ pub const fn default_service_config() -> ServiceConfig {
         rejection_encode_timeout: DEFAULT_REJECTION_ENCODE_TIMEOUT,
         request_read_timeout: DEFAULT_REQUEST_READ_TIMEOUT,
         dispatch_timeout: DEFAULT_DISPATCH_TIMEOUT,
+        max_dispatch_timeout: asc_model_client::MAX_CODE_SCAN_BUDGET,
         response_write_timeout: DEFAULT_RESPONSE_WRITE_TIMEOUT,
         drain_timeout: DEFAULT_DRAIN_TIMEOUT,
         accept_error_backoff: DEFAULT_ACCEPT_ERROR_BACKOFF,

@@ -35,11 +35,24 @@ agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
   scan-code --code 'import os; os.system("rm -rf /")' --language python
 ```
 
-The V2 scanner currently supports the embedded regex rules only. `--mode llm`
-remains accepted for compatibility but returns the parseable error result
-`LLM model not available`; it does not contact Ollama. V2 does not yet accept
+The default V2 engine uses embedded regex rules. `--mode llm` sends the scan to
+the daemon's local Ollama-compatible model service. V2 does not yet accept
 `--trace-context` or write code-scan telemetry, so Agent hooks that depend on
 those features remain deferred until their migration is complete.
+
+## LLM Mode
+
+The daemon reads `AGENT_SEC_OLLAMA_MODEL` (default `warden`) and the shared
+`AGENT_SEC_MODEL_SERVICE_BACKEND`, `AGENT_SEC_MODEL_SERVICE_BASE_URL`, and
+`AGENT_SEC_MODEL_SERVICE_TIMEOUT` settings. The base URL must resolve to a
+loopback host. The per-request timeout accepts 1–300 seconds; the daemon
+reserves `3 * timeout + 1` seconds for model availability, chat, and one retry.
+The CLI waits for the maximum legal daemon budget by default, while an explicit
+`--timeout-ms` can intentionally shorten the client deadline.
+
+A missing model, inference failure, or unparsable output returns a parseable
+`error` result and nonzero CLI exit. A model `DENY` verdict returns a successful
+`warn` result with the `llm-judge` finding.
 
 ## Environment Variables
 
@@ -103,4 +116,4 @@ Hermes and OpenClaw retain their existing self-protect findings, which force blo
 
 ## Hook MODE vs Scanner Engine
 
-`CODE_SCANNER_MODE` controls the host hook response. It does not select the scanning engine. V2 currently runs embedded regex rules only; `--mode llm` is accepted for compatibility and returns `LLM model not available`.
+`CODE_SCANNER_MODE` controls the host hook response. It does not select the scanning engine. V2 uses embedded regex rules by default and the daemon-backed local model service when the caller selects `--mode llm`.
