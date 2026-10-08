@@ -446,6 +446,9 @@ fn eval_swappiness(
         || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse")
+        // Oracle is the OLTP database is_database_present and eval_thp
+        // already gate on; a swap-hostile database must not be skipped here.
+        || info.has_process("oracle")
         || info.has_process("redis-server");
 
     let (target, reason) = if is_db
@@ -526,7 +529,10 @@ fn eval_dirty_ratio(
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
         || info.has_process("mariadbd")
         || info.has_process("mongod")
-        || info.has_process("clickhouse");
+        || info.has_process("clickhouse")
+        // Oracle is the OLTP database is_database_present and eval_thp
+        // already gate on; its write-heavy OLTP profile belongs here too.
+        || info.has_process("oracle");
     let is_latency_sensitive = is_db || *workload == WorkloadType::IoLatency;
 
     // dirty_ratio and dirty_bytes are mutually exclusive in the kernel (setting
@@ -1710,6 +1716,10 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
     }
     let is_db_or_cache = info.has_process("postgres")
         || info.has_process("mysqld")
+        // Oracle is the OLTP database is_database_present and eval_thp
+        // already gate on; its dentry/inode churn matches this rule's
+        // cache-retention target.
+        || info.has_process("oracle")
         || info.has_process("clickhouse")
         || info.has_process("redis-server")
         || info.has_process("memcached")
@@ -1817,7 +1827,10 @@ fn eval_read_ahead_kb(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
         || info.has_process("mariadbd")
         || info.has_process("mongod")
-        || info.has_process("clickhouse");
+        || info.has_process("clickhouse")
+        // Oracle is the OLTP database is_database_present and eval_thp
+        // already gate on; the write-back twin must not skip it either.
+        || info.has_process("oracle");
 
     for disk in &info.disks {
         match disk.disk_type {
@@ -1914,7 +1927,10 @@ fn eval_numa_balancing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
         || info.has_process("mariadbd")
         || info.has_process("mongod")
-        || info.has_process("clickhouse");
+        || info.has_process("clickhouse")
+        // Oracle is the OLTP database is_database_present and eval_thp
+        // already gate on; NUMA balancing's scan faults hit it the same way.
+        || info.has_process("oracle");
     if !is_db {
         return 1;
     }
@@ -3192,7 +3208,10 @@ fn eval_dirty_background_ratio_at(
             // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
             || info.has_process("mariadbd")
             || info.has_process("mongod")
-            || info.has_process("clickhouse");
+            || info.has_process("clickhouse")
+            // Oracle is the OLTP database is_database_present and eval_thp
+            // already gate on; the write-back twin must not skip it either.
+            || info.has_process("oracle");
         if has_db || matches!(workload, WorkloadType::IoLatency) || current > 10 {
             recs.push(Recommendation {
                 param: "vm.dirty_background_ratio".to_string(),
@@ -7861,6 +7880,53 @@ mod tests {
             .find(|r| r.param.contains("hugepage"))
             .unwrap_or_else(|| panic!("oracle must get the THP recommendation"));
         assert_eq!(thp_rec.recommended_value, "madvise");
+    }
+
+    #[test]
+    fn test_oracle_counts_in_every_sibling_database_gate() {
+        // eval_thp got oracle in its own commit; the six sibling database
+        // gates (swappiness, dirty_ratio and its background twin, NUMA
+        // balancing, read-ahead, VFS cache pressure) still skipped it —
+        // an Oracle host got the THP advice but none of the write-back,
+        // cache, or scheduling advice the other OLTP members trigger.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "oracle".to_string(),
+        }];
+        // dirty_ratio's percentage arm caps at <64GB (the bytes rules take
+        // over at 64GB); the NVMe read-ahead arm needs >128KB to lower.
+        info.memory_total_gb = 32;
+        info.disks[0].read_ahead_kb = 256;
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter().any(|r| r.param.contains("swappiness")),
+            "oracle must get the swappiness recommendation"
+        );
+        assert!(
+            recs.iter().any(|r| r.param.contains("dirty_ratio")),
+            "oracle must get the dirty_ratio recommendation"
+        );
+        assert!(
+            recs.iter().any(|r| r.param.contains("read_ahead_kb")),
+            "oracle must get the read_ahead_kb recommendation"
+        );
+    }
+
+    #[test]
+    fn test_oracle_numa_balancing_gate() {
+        // The NUMA balancing gate shares the same database list; on a
+        // multi-NUMA host running oracle with balancing enabled, the
+        // recommendation must fire.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "oracle".to_string(),
+        }];
+        info.numa_nodes = 2;
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter().any(|r| r.param.contains("numa_balancing")),
+            "oracle must get the numa_balancing recommendation"
+        );
     }
 
     #[test]
