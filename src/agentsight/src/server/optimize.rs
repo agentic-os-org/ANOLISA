@@ -1013,7 +1013,44 @@ pub struct UpdateOptConfig {
     pub search_timeout_secs: Option<u64>,
 }
 
-fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
+/// Host portion of an absolute http(s) `base_url`, or `None` when the URL
+/// does not have that shape. A trailing `:port` (only digits) is stripped;
+/// bracketed IPv6 literals keep their brackets.
+fn base_url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// The stored `base_url` becomes the target of every optimization LLM
+/// request, so it must be an absolute http(s) URL naming a host — the
+/// sink only speaks http(s), and embedded credentials are never intended.
+fn validate_base_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| "base_url must be an absolute http(s) URL".to_string())?;
+    if base_url_host(url).is_none() {
+        return Err("base_url must name a host".to_string());
+    }
+    if rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .contains('@')
+    {
+        return Err("base_url must not embed credentials".to_string());
+    }
+    Ok(())
+}
+
+fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) -> Result<(), String> {
     if let Some(ref key) = update.api_key {
         if !key.is_empty() && !key.contains('•') {
             config.api_key = Some(key.clone());
@@ -1021,6 +1058,32 @@ fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
     }
     if let Some(ref url) = update.base_url {
         if !url.is_empty() {
+            validate_base_url(url)?;
+            // Retargeting the endpoint host silently forwards the stored
+            // API key (and the analyzed conversation content) to the new
+            // host on the next LLM call. A host change therefore requires
+            // the caller to prove knowledge of the key by re-entering it
+            // in the same update; same-host path adjustments stay free.
+            let host_changes = match (
+                base_url_host(url),
+                base_url_host(&config.effective_base_url()),
+            ) {
+                (Some(new), Some(current)) => !new.eq_ignore_ascii_case(current),
+                _ => true,
+            };
+            if host_changes {
+                let fresh_key = update
+                    .api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.is_empty() && !key.contains('•'));
+                if !fresh_key {
+                    return Err(
+                        "changing the LLM endpoint host requires re-entering the API key \
+                         in the same update"
+                            .to_string(),
+                    );
+                }
+            }
             config.base_url = Some(url.clone());
         }
     }
@@ -1034,6 +1097,7 @@ fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
             config.search_timeout_secs = Some(timeout_secs);
         }
     }
+    Ok(())
 }
 
 fn config_response(config: &OptLlmConfig) -> serde_json::Value {
@@ -1067,7 +1131,11 @@ pub async fn update_optimize_config(
                     .json(serde_json::json!({"error": "config lock poisoned"}));
             }
         };
-        apply_config_update(&mut config, &body);
+        if let Err(message) = apply_config_update(&mut config, &body) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": message,
+            }));
+        }
         config.clone()
     };
 
@@ -1376,6 +1444,127 @@ mod tests {
 
         assert_eq!(config.effective_api_key().as_deref(), Some("short"));
         assert_eq!(config.masked_api_key().as_deref(), Some("••••••"));
+    }
+
+    #[test]
+    fn validate_base_url_rejects_non_http_shapes() {
+        assert!(validate_base_url("https://api.example.com/v1").is_ok());
+        assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+        assert!(validate_base_url("https://host.example.com:8443/v1").is_ok());
+        for bad in [
+            "",
+            "api.example.com/v1",
+            "ftp://api.example.com",
+            "file:///etc/passwd",
+            "https://user:pass@example.com/v1",
+            "https:///path",
+        ] {
+            assert!(validate_base_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn host_change_without_a_fresh_key_is_refused() {
+        let mut config = OptLlmConfig {
+            api_key: Some("sk-1234567890abcd".into()),
+            base_url: Some("https://api.openai.com/v1".into()),
+            model: None,
+            search_timeout_secs: None,
+        };
+        // Retargeting the host without proving knowledge of the key is the
+        // exfiltration path: the stored key would be sent to the new host
+        // on the next LLM call. The update is refused and the stored
+        // endpoint stays untouched.
+        let refused = apply_config_update(
+            &mut config,
+            &UpdateOptConfig {
+                api_key: None,
+                base_url: Some("https://attacker.example/v1".into()),
+                model: None,
+                search_timeout_secs: None,
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        // Same-host path adjustments stay free.
+        let ok = apply_config_update(
+            &mut config,
+            &UpdateOptConfig {
+                api_key: None,
+                base_url: Some("https://api.openai.com/v1beta".into()),
+                model: None,
+                search_timeout_secs: None,
+            },
+        );
+        assert!(ok.is_ok());
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://api.openai.com/v1beta")
+        );
+        // A host change with the key re-entered in the same update applies.
+        let ok = apply_config_update(
+            &mut config,
+            &UpdateOptConfig {
+                api_key: Some("sk-1234567890abcd".into()),
+                base_url: Some("https://dashscope.example.com/compatible-mode/v1".into()),
+                model: None,
+                search_timeout_secs: None,
+            },
+        );
+        assert!(ok.is_ok());
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://dashscope.example.com/compatible-mode/v1")
+        );
+    }
+
+    #[actix_web::test]
+    async fn config_endpoint_refuses_a_host_change_without_the_key() {
+        use actix_web::{App, test as awtest};
+
+        let dir = tmp_dir("base-url-guard");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(get_optimize_config)
+                .service(update_optimize_config),
+        )
+        .await;
+        // Store a key and an endpoint first (a host change WITH the key).
+        let request = awtest::TestRequest::post()
+            .uri("/optimize/config")
+            .set_json(serde_json::json!({
+                "api_key": "sk-1234567890abcd",
+                "base_url": "https://api.openai.com/v1"
+            }))
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert!(response.status().is_success());
+
+        // Retargeting the host without the key: refused, config untouched.
+        let request = awtest::TestRequest::post()
+            .uri("/optimize/config")
+            .set_json(serde_json::json!({
+                "base_url": "https://attacker.example/v1"
+            }))
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(response.status().as_u16(), 400);
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/optimize/config")
+                .to_request(),
+        )
+        .await;
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["base_url"], "https://api.openai.com/v1");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The API key must reach disk sealed (issue: plaintext key protected
