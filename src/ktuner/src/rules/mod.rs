@@ -3579,12 +3579,34 @@ fn eval_rp_filter_all(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_busy_read(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/busy_read";
+    eval_busy_read_at(info, recs, "/proc/sys/net/core/busy_read")
+}
+
+/// Path-injectable form of [`eval_busy_read`] (the `eval_*_at` pattern) so
+/// tests can force both branches of the value read with a temp file instead
+/// of the live /proc.
+///
+/// busy_read is busy_poll's twin knob — the net.core busy-polling pair,
+/// both under CONFIG_NET_RX_BUSY_POLL and registered back to back in
+/// sysctl_net_core.c — and the twin rule gates on the latency-sensitive
+/// services whose socket reads are the ones worth polling for. The link
+/// gate alone fired on every 10 GbE host: a backup or file server got
+/// busy_read=50 and every blocking read on the host started spinning
+/// through a 50 us poll for a workload nobody tuned for. Require the same
+/// services as the twin, on top of the 10 GbE premise the reason states.
+fn eval_busy_read_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
+        return 1;
+    }
+    let is_latency_sensitive = info.has_process("redis-server")
+        || info.has_process("memcached")
+        || info.has_process("nginx")
+        || info.has_process("clickhouse");
+    if !is_latency_sensitive {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -9320,6 +9342,76 @@ mod tests {
         {
             assert_eq!(rec.recommended_value, "2");
         }
+    }
+
+    #[test]
+    fn busy_read_requires_a_latency_sensitive_service_like_its_twin() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_busy_read_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let knob = dir.join("busy_read");
+        std::fs::write(&knob, "0\n").unwrap();
+
+        let base = || {
+            let mut info = make_test_info();
+            info.network = vec![NetInfo {
+                name: "eth0".to_string(),
+                speed_mbps: 10000,
+            }];
+            info
+        };
+
+        // A 10 GbE host without a latency-sensitive service (a backup or
+        // file server) must not get busy_read: every blocking read on the
+        // host would start spinning through a 50 us poll nobody asked for.
+        let mut info = base();
+        info.processes = vec![ProcessInfo {
+            name: "rsync".to_string(),
+        }];
+        let mut recs = Vec::new();
+        eval_busy_read_at(&info, &mut recs, knob.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "net.core.busy_read"),
+            "a 10 GbE host without a latency-sensitive service must not get busy_read"
+        );
+
+        // The twin rule's services on a 10 GbE link are the case both gates
+        // exist for.
+        for name in ["redis-server", "memcached", "nginx", "clickhouse"] {
+            let mut info = base();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_busy_read_at(&info, &mut recs, knob.to_str().unwrap());
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.core.busy_read")
+                .unwrap_or_else(|| panic!("{name} on 10 GbE must still get busy_read"));
+            assert_eq!(rec.recommended_value, "50");
+        }
+
+        // The link half of the gate keeps working on its own.
+        let mut info = base();
+        info.network = vec![NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 1000,
+        }];
+        info.processes = vec![ProcessInfo {
+            name: "redis-server".to_string(),
+        }];
+        let mut recs = Vec::new();
+        eval_busy_read_at(&info, &mut recs, knob.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "net.core.busy_read"),
+            "a 1 GbE link is not the busy-read case even for redis"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
