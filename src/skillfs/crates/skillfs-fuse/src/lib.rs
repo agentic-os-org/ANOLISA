@@ -163,6 +163,21 @@ impl MountHandle {
     }
 
     /// Check if the mount is still active.
+    ///
+    /// On Linux this is authoritative: the mountpoint must currently appear
+    /// in `/proc/mounts`. `std::fs::metadata` succeeds for *any* existing
+    /// directory — and even for a dead FUSE endpoint — so it cannot
+    /// distinguish a live mount from the plain underlying directory.
+    #[cfg(target_os = "linux")]
+    pub fn is_mounted(&self) -> bool {
+        Self::path_is_mounted(&self.mountpoint)
+    }
+
+    /// Check if the mount is still active.
+    ///
+    /// Without `/proc/mounts` there is no authoritative mount-table probe,
+    /// so this keeps the historical metadata check.
+    #[cfg(not(target_os = "linux"))]
     pub fn is_mounted(&self) -> bool {
         std::fs::metadata(&self.mountpoint).is_ok()
     }
@@ -502,5 +517,24 @@ mod tests {
             session: None,
         };
         drop(handle);
+    }
+
+    /// `is_mounted` must consult the authoritative mount table: a plain
+    /// directory that was never a mountpoint reads as `false`. The metadata
+    /// probe it replaced returned `true` for any existing directory, so a
+    /// handle around a never-mounted (or already-unmounted) path lied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_mounted_is_false_for_a_directory_that_was_never_mounted() {
+        let dir = std::env::temp_dir().join("skillfs-is-mounted-plain-directory");
+        std::fs::create_dir_all(&dir).expect("create probe directory");
+        let handle = MountHandle {
+            mountpoint: dir,
+            session: None,
+        };
+        assert!(
+            !handle.is_mounted(),
+            "a plain directory that was never mounted must not read as mounted"
+        );
     }
 }

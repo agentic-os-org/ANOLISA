@@ -7,7 +7,7 @@
 //! functions are deprecated but remain for backward compatibility.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use skillfs_core::SharedSkillStore;
@@ -91,8 +91,129 @@ pub fn mount_configured(
     )
 }
 
-/// Mount the SkillFS FUSE filesystem in the background (non-blocking)
-/// with a unified configuration struct.
+/// Failure slot shared between a background mounting thread and the
+/// spawning thread. The background thread records the [`FuseError`]
+/// returned by [`mount_inner`]; the spawn-side wait reads it, so a mount
+/// that never came up is reported to the caller instead of only to a
+/// tracing subscriber the caller never installed.
+type BackgroundMountFailure = Arc<Mutex<Option<FuseError>>>;
+
+/// How long the background entry points wait for the mount to come live
+/// (or fail) before handing out the handle.
+///
+/// [`mount_inner`] constructs the [`SkillFs`] runtime — including the
+/// directive stage's environment-profile probe loop, which shells out to
+/// `which` for every whitelisted command — *before* creating the FUSE
+/// session, and on a loaded host that probing alone can take seconds. The
+/// budget only bounds this wait; the mount itself is never cancelled.
+#[cfg(target_os = "linux")]
+const BACKGROUND_MOUNT_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Interval between readiness polls of the mount table.
+#[cfg(target_os = "linux")]
+const BACKGROUND_MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn record_background_mount_failure(slot: &BackgroundMountFailure, error: FuseError) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+}
+
+fn take_background_mount_failure(slot: &BackgroundMountFailure) -> Option<FuseError> {
+    slot.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+/// Wait until the background mount is live or has failed.
+///
+/// Returns the session thread back on success so it can be stored in the
+/// [`MountHandle`]; on failure the thread has already exited and is joined
+/// here so nothing leaks.
+///
+/// * A failure recorded by the mounting thread is returned as `Err` — the
+///   original error, not a generic timeout.
+/// * A thread that exited without recording anything panicked inside
+///   [`mount_inner`] (its `Ok` is only reachable after an unmount); that is
+///   reported as `Err` as well.
+/// * Once the mountpoint appears in `/proc/mounts` the FUSE session is
+///   serving, so `Ok` means the mount is live — not "hopefully starting".
+///   `mount_inner` tears a stale mount on the same mountpoint down before
+///   creating the new session, so when one is present at spawn time,
+///   readiness additionally requires it to have gone away first; the new
+///   mount is what must show up, not the leftover.
+/// * If [`BACKGROUND_MOUNT_READINESS_TIMEOUT`] elapses with neither outcome
+///   (a pathologically slow environment probe), the historical optimistic
+///   success is preserved: the handle is handed out and the mount keeps
+///   coming up on its own thread.
+#[cfg(target_os = "linux")]
+fn wait_for_background_mount(
+    mountpoint: &Path,
+    session: std::thread::JoinHandle<()>,
+    failure: &BackgroundMountFailure,
+) -> Result<std::thread::JoinHandle<()>, FuseError> {
+    // Snapshot taken before the mounting thread could have torn anything
+    // down: mount_inner's stale-mount cleanup runs several process spawns
+    // deep inside the thread.
+    let stale_mount_present = MountHandle::path_is_mounted(mountpoint);
+    let mut stale_mount_gone = !stale_mount_present;
+    let deadline = std::time::Instant::now() + BACKGROUND_MOUNT_READINESS_TIMEOUT;
+    loop {
+        if let Some(error) = take_background_mount_failure(failure) {
+            // The mounting thread exits right after recording a failure,
+            // so joining it here cannot block.
+            let _ = session.join();
+            return Err(error);
+        }
+        if session.is_finished() {
+            // `mount_inner` returns `Ok` only after the session was
+            // unmounted, which cannot have happened yet; the thread
+            // panicked before recording a failure.
+            let _ = session.join();
+            return Err(FuseError::MountFailed(
+                "background mount thread exited without reporting a failure".to_string(),
+            ));
+        }
+        let mounted = MountHandle::path_is_mounted(mountpoint);
+        if stale_mount_gone && mounted {
+            return Ok(session);
+        }
+        if !mounted {
+            stale_mount_gone = true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(session);
+        }
+        std::thread::sleep(BACKGROUND_MOUNT_POLL_INTERVAL);
+    }
+}
+
+/// Non-Linux fallback: without `/proc/mounts` there is no authoritative
+/// readiness probe. Keep the historical brief grace period, but still
+/// check the failure slot afterwards so fast validation errors surface.
+#[cfg(not(target_os = "linux"))]
+fn wait_for_background_mount(
+    _mountpoint: &Path,
+    session: std::thread::JoinHandle<()>,
+    failure: &BackgroundMountFailure,
+) -> Result<std::thread::JoinHandle<()>, FuseError> {
+    std::thread::sleep(Duration::from_millis(100));
+    if let Some(error) = take_background_mount_failure(failure) {
+        let _ = session.join();
+        return Err(error);
+    }
+    Ok(session)
+}
+
+/// Mount the SkillFS FUSE filesystem in the background with a unified
+/// configuration struct.
+///
+/// "Background" refers to the FUSE event loop, which serves on its own
+/// thread — unlike [`mount_configured`], which blocks until the session
+/// is unmounted. This call still waits for a real outcome within the
+/// BACKGROUND_MOUNT_READINESS_TIMEOUT budget: a mount that fails
+/// before or while creating the FUSE session is returned as `Err` instead
+/// of a handle whose failure was only visible to a tracing subscriber,
+/// and `Ok` is only returned once the mountpoint is being served (or the
+/// budget ran out on a pathologically slow host).
 pub fn mount_background_configured(
     mountpoint: &Path,
     source: &Path,
@@ -104,7 +225,10 @@ pub fn mount_background_configured(
     let mountpoint_path = mountpoint.to_path_buf();
     let source_path = source.to_path_buf();
 
-    let handle = std::thread::spawn(move || {
+    let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
+    let record = Arc::clone(&failure);
+
+    let session = std::thread::spawn(move || {
         let mut opts = options;
         opts.foreground = true;
         if let Err(e) = mount_inner(
@@ -131,14 +255,15 @@ pub fn mount_background_configured(
             config.skill_discover_root,
         ) {
             error!(error = %e, "background mount failed");
+            record_background_mount_failure(&record, e);
         }
     });
 
-    std::thread::sleep(Duration::from_millis(100));
+    let session = wait_for_background_mount(mountpoint, session, &failure)?;
 
     Ok(MountHandle {
         mountpoint: mountpoint.to_path_buf(),
-        session: Some(handle),
+        session: Some(session),
     })
 }
 
@@ -673,7 +798,10 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
     let mountpoint_path = mountpoint.to_path_buf();
     let source_path = source.to_path_buf();
 
-    let handle = std::thread::spawn(move || {
+    let failure: BackgroundMountFailure = Arc::new(Mutex::new(None));
+    let record = Arc::clone(&failure);
+
+    let session = std::thread::spawn(move || {
         let mut opts = options;
         opts.foreground = true;
         if let Err(e) = mount_inner(
@@ -700,13 +828,14 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             None,
         ) {
             error!(error = %e, "background mount failed");
+            record_background_mount_failure(&record, e);
         }
     });
 
-    std::thread::sleep(Duration::from_millis(100));
+    let session = wait_for_background_mount(mountpoint, session, &failure)?;
 
     Ok(MountHandle {
         mountpoint: mountpoint.to_path_buf(),
-        session: Some(handle),
+        session: Some(session),
     })
 }
