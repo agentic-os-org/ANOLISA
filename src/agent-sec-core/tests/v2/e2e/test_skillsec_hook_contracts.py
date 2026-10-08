@@ -184,7 +184,10 @@ def _invoke(
         payload["tool_name"] = "unrelated"
     if host == "hermes":
         argv = [sys.executable, str(FIXTURES / "hermes_skillsec_hook.py")]
-        env["PYTHONPATH"] = str(_asset(host))
+        plugin_root = _asset(host)
+        env["PYTHONPATH"] = str(plugin_root)
+        if os.environ.get("SKILLSEC_HOOK_LAYOUT") == "raw":
+            env["SKILLSEC_TEST_HERMES_PLUGIN_ROOT"] = str(plugin_root)
         payload = {
             **trace,
             "tool_name": "skill_view" if matched else "unrelated",
