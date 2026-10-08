@@ -7,6 +7,20 @@ pub mod warden_gen;
 use std::collections::BTreeMap;
 
 use crate::error::ScannerError;
+use crate::models::qwen3_guard::{MODEL_QWEN3_GUARD, is_qwen3_guard_model};
+use crate::models::warden_gen::{MODEL_WARDEN_GEN, is_warden_gen_model};
+
+/// Default L2 model used when no model override is configured.
+pub const DEFAULT_L2_MODEL: &str = MODEL_QWEN3_GUARD;
+
+/// Model identifiers the L2 classifier factory accepts.
+pub const SUPPORTED_L2_MODELS: [&str; 2] = [MODEL_QWEN3_GUARD, MODEL_WARDEN_GEN];
+
+/// Returns whether `model_name` selects a supported L2 classifier.
+#[must_use]
+pub fn is_supported_l2_model(model_name: &str) -> bool {
+    is_qwen3_guard_model(model_name) || is_warden_gen_model(model_name)
+}
 
 /// Unified result returned by any L2 classifier wrapper.
 ///
@@ -59,4 +73,20 @@ pub trait Classifier: Send + Sync {
     ///
     /// Returns an error when inference fails (e.g. the service is unreachable).
     fn classify(&self, text: &str) -> Result<ClassifierResult, ScannerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_L2_MODEL, SUPPORTED_L2_MODELS, is_supported_l2_model};
+
+    #[test]
+    fn catalog_contains_the_default_and_accepts_each_model_case_insensitively() {
+        assert!(SUPPORTED_L2_MODELS.contains(&DEFAULT_L2_MODEL));
+        for model in SUPPORTED_L2_MODELS {
+            assert!(is_supported_l2_model(model));
+            assert!(is_supported_l2_model(&format!(" {model} ")));
+            assert!(is_supported_l2_model(&model.to_ascii_lowercase()));
+        }
+        assert!(!is_supported_l2_model("unsupported-model"));
+    }
 }

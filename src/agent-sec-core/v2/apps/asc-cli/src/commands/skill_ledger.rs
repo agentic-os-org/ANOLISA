@@ -2,6 +2,7 @@
 
 use crate::InputError;
 use asc_daemon_protocol::{DaemonRequest, method};
+use asc_foundation_types::is_valid_anolisa_data_home;
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -391,13 +392,7 @@ fn discover() -> Result<Vec<PathBuf>, InputError> {
 
 fn anolisa_skill_dir(home: Option<&Path>, data_home: Option<&Path>) -> Option<PathBuf> {
     // Match ANOLISA's installer before path normalization can discard dot segments.
-    match data_home.filter(|path| {
-        path.is_absolute()
-            && !path
-                .to_string_lossy()
-                .split('/')
-                .any(|segment| matches!(segment, "." | ".."))
-    }) {
+    match data_home.filter(|path| is_valid_anolisa_data_home(&path.to_string_lossy())) {
         Some(root) => Some(root.join("anolisa/skills")),
         None => home.map(|root| root.join(".local/share/anolisa/skills")),
     }

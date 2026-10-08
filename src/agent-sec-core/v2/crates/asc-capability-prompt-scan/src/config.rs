@@ -3,8 +3,8 @@
 use std::str::FromStr;
 
 use crate::error::ScannerError;
+use crate::models::DEFAULT_L2_MODEL;
 use crate::models::multi_turn_intent::DEFAULT_HARMFUL_THRESHOLD;
-use crate::models::qwen3_guard::MODEL_QWEN3_GUARD;
 
 /// Predefined detection mode presets.
 ///
@@ -69,7 +69,7 @@ impl Default for ScanConfig {
             layers: vec!["rule_engine".to_string(), "ml_classifier".to_string()],
             fast_fail: true,
             detect_encoding: true,
-            model_name: MODEL_QWEN3_GUARD.to_string(),
+            model_name: DEFAULT_L2_MODEL.to_string(),
             multi_turn_threshold: DEFAULT_HARMFUL_THRESHOLD,
         }
     }
@@ -140,9 +140,9 @@ mod tests {
     #[test]
     // Exact literal: the preset must keep the documented default.
     #[allow(clippy::float_cmp)]
-    fn defaults_target_qwen3guard_and_the_documented_threshold() {
+    fn defaults_target_the_catalog_default_and_the_documented_threshold() {
         let config = ScanConfig::default();
-        assert_eq!(config.model_name, MODEL_QWEN3_GUARD);
+        assert_eq!(config.model_name, DEFAULT_L2_MODEL);
         assert_eq!(config.multi_turn_threshold, 0.55);
         assert!(config.detect_encoding);
     }

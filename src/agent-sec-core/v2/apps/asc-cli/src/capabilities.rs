@@ -5,10 +5,8 @@
 //! files or home directories, and it never proves that a hook is loaded in a
 //! target Agent process. The daemon is not involved.
 //!
-//! Migration contract, the two gaps that a future capability migration must
-//! close (G1, G4) and the items that follow from V1's design, the rolling
-//! migration itself or an accepted trade-off (G2, G3, G5, G6, G7, G8) are
-//! recorded in `docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md`.
+//! Migration contract and accepted implementation trade-offs are recorded in
+//! `docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md`.
 
 pub(crate) mod manifest;
 pub(crate) mod render;

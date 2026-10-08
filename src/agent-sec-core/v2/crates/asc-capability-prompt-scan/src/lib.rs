@@ -38,6 +38,8 @@ pub use executor::{CachingScannerProvider, PromptScanExecutor, PromptScanWarmup,
 pub use models::multi_turn_intent::Turn;
 pub use models::qwen3_guard::MODEL_QWEN3_GUARD;
 pub use models::warden_gen::MODEL_WARDEN_GEN;
-pub use models::{Classifier, ClassifierResult};
+pub use models::{
+    Classifier, ClassifierResult, DEFAULT_L2_MODEL, SUPPORTED_L2_MODELS, is_supported_l2_model,
+};
 pub use result::{LayerResult, ScanResult, Severity, ThreatDetail, ThreatType, Verdict};
 pub use scanner::PromptScanner;

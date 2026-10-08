@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use crate::detectors::{DetectInput, DetectionLayer};
 use crate::error::ScannerError;
-use crate::models::qwen3_guard::{MODEL_QWEN3_GUARD, Qwen3GuardClassifier, is_qwen3_guard_model};
-use crate::models::warden_gen::{MODEL_WARDEN_GEN, WardenGenClassifier, is_warden_gen_model};
-use crate::models::{Classifier, ClassifierResult};
+use crate::models::qwen3_guard::{Qwen3GuardClassifier, is_qwen3_guard_model};
+use crate::models::warden_gen::WardenGenClassifier;
+use crate::models::{Classifier, ClassifierResult, SUPPORTED_L2_MODELS, is_supported_l2_model};
 use crate::result::{LayerResult, ThreatDetail};
 
 /// Max characters of the prompt kept as evidence.
@@ -33,15 +33,16 @@ const DEFAULT_THREAT_CATEGORY: &str = "unsafe";
 /// Returns [`ScannerError::Config`] for a model name no backend claims, so a
 /// typo fails fast instead of silently disabling L2.
 fn build_classifier(model_name: &str) -> Result<Box<dyn Classifier>, ScannerError> {
+    if !is_supported_l2_model(model_name) {
+        return Err(ScannerError::Config(format!(
+            "Unsupported L2 model: {model_name:?}. Supported: {}",
+            SUPPORTED_L2_MODELS.join(", ")
+        )));
+    }
     if is_qwen3_guard_model(model_name) {
         Ok(Box::new(Qwen3GuardClassifier::new(model_name)?))
-    } else if is_warden_gen_model(model_name) {
-        Ok(Box::new(WardenGenClassifier::new(model_name)?))
     } else {
-        Err(ScannerError::Config(format!(
-            "Unsupported L2 model: {model_name:?}. \
-             Supported: {MODEL_QWEN3_GUARD}, {MODEL_WARDEN_GEN}"
-        )))
+        Ok(Box::new(WardenGenClassifier::new(model_name)?))
     }
 }
 
@@ -163,7 +164,8 @@ fn finding_description(result: &ClassifierResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::qwen3_guard::Qwen3GuardClassifier;
+    use crate::models::qwen3_guard::{MODEL_QWEN3_GUARD, Qwen3GuardClassifier};
+    use crate::models::warden_gen::MODEL_WARDEN_GEN;
     use asc_model_client::{GenerateRequest, ModelClient, ModelOptions};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;

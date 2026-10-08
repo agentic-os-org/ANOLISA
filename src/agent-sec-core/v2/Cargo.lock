@@ -204,6 +204,7 @@ dependencies = [
  "asc-action-runtime",
  "asc-action-types",
  "asc-capability-pii-scan",
+ "asc-capability-prompt-scan",
  "asc-capability-skill-sec",
  "asc-daemon",
  "asc-daemon-client",

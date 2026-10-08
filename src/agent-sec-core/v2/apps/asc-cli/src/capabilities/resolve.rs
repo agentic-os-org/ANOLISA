@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use asc_capability_prompt_scan::{DEFAULT_L2_MODEL, is_supported_l2_model};
+use asc_foundation_types::is_valid_anolisa_data_home;
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 use super::manifest::{self, EnvKind, EnvSpec};
@@ -109,19 +111,7 @@ fn resolve_one(
             resolve_float_timeout(spec.name, raw, default, max, diagnostics),
             EnvValue::text(default),
         ),
-        // Gap G1: V2 has no prompt-scanner engine to query, so the default is
-        // empty and no backend is known. This is the same degraded path V1
-        // takes before its native extension is built: the configured value is
-        // still reported, but an unsupported backend cannot be flagged.
-        EnvKind::Identifier => (
-            raw.map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map_or_else(
-                    || EnvValue::text(""),
-                    |text| EnvValue::Text(safe_value(text)),
-                ),
-            EnvValue::text(""),
-        ),
+        EnvKind::Identifier => resolve_l2_model(spec.name, raw, diagnostics),
         EnvKind::DataHome { default } => (
             resolve_data_home(spec.name, raw, default, diagnostics),
             EnvValue::text(default),
@@ -245,6 +235,23 @@ fn resolve_float_timeout(
     EnvValue::Text(format_number(value))
 }
 
+fn resolve_l2_model(
+    name: &str,
+    raw: Option<&str>,
+    diagnostics: &mut Vec<String>,
+) -> (EnvValue, EnvValue) {
+    let default = EnvValue::text(DEFAULT_L2_MODEL);
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (default.clone(), default);
+    };
+    if !is_supported_l2_model(raw) {
+        diagnostics.push(format!(
+            "{name} is not a supported L2 backend; prompt scans will fail"
+        ));
+    }
+    (EnvValue::Text(safe_value(raw)), default)
+}
+
 fn resolve_data_home(
     name: &str,
     raw: Option<&str>,
@@ -254,25 +261,13 @@ fn resolve_data_home(
     let Some(raw) = raw else {
         return EnvValue::text(default);
     };
-    if valid_data_home(raw) {
+    if is_valid_anolisa_data_home(raw) {
         return EnvValue::text(raw);
     }
     if !raw.is_empty() {
         diagnostics.push(fallback(name, &EnvValue::text(default)));
     }
     EnvValue::text(default)
-}
-
-/// Matches ANOLISA's absolute data-root syntax without resolving the filesystem.
-///
-/// Gap G4: once skill-ledger migrates, V2 will hold two copies of this check;
-/// fold them into one implementation then.
-fn valid_data_home(value: &str) -> bool {
-    !value.is_empty()
-        && value.starts_with('/')
-        && !value
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
 }
 
 fn fallback(name: &str, default: &EnvValue) -> String {
@@ -640,7 +635,25 @@ mod tests {
     }
 
     #[test]
-    fn l2_backend_is_reported_without_a_default_or_support_check() {
+    fn l2_backend_uses_the_prompt_scanner_catalog() {
+        let (values, diagnostics) = resolve_pair("qoder", "prompt-scan", &[]);
+        let value =
+            find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+        assert_eq!(value.effective, EnvValue::text(DEFAULT_L2_MODEL));
+        assert_eq!(value.default, EnvValue::text(DEFAULT_L2_MODEL));
+        assert!(diagnostics.is_empty());
+
+        let warden = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF";
+        let (values, diagnostics) = resolve_pair(
+            "qoder",
+            "prompt-scan",
+            &[("PROMPT_SCANNER_L2_MODEL", warden)],
+        );
+        let value =
+            find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
+        assert_eq!(value.effective, EnvValue::text(warden));
+        assert!(diagnostics.is_empty());
+
         let (values, diagnostics) = resolve_pair(
             "qoder",
             "prompt-scan",
@@ -649,14 +662,17 @@ mod tests {
         let value =
             find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
         assert_eq!(value.effective, EnvValue::text("Unknown-Backend"));
-        assert_eq!(value.default, EnvValue::text(""));
-        assert!(diagnostics.is_empty());
+        assert_eq!(value.default, EnvValue::text(DEFAULT_L2_MODEL));
+        assert_eq!(
+            diagnostics,
+            vec!["PROMPT_SCANNER_L2_MODEL is not a supported L2 backend; prompt scans will fail"]
+        );
 
         let (values, _) =
             resolve_pair("qoder", "prompt-scan", &[("PROMPT_SCANNER_L2_MODEL", "  ")]);
         let value =
             find(&values, "PROMPT_SCANNER_L2_MODEL").expect("prompt-scan carries the L2 name");
-        assert_eq!(value.effective, EnvValue::text(""));
+        assert_eq!(value.effective, EnvValue::text(DEFAULT_L2_MODEL));
     }
 
     #[test]
