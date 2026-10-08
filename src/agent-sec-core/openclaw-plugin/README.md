@@ -41,7 +41,7 @@ openclaw-plugin/
 │   ├── capabilities/           # Security capability entry files
 │   │   ├── skill-ledger.ts     #   before_tool_call hook
 │   │   ├── code-scan.ts        #   before_tool_call hook
-│   │   ├── prompt-scan.ts      #   before_dispatch hook
+│   │   ├── prompt-scan.ts      #   model-entry gate hook (before_agent_run / before_dispatch)
 │   │   ├── pii-scan.ts         #   PII hooks
 │   │   └── observability.ts    #   observability hook registration
 │   └── helpers/                # Capability support code
@@ -323,7 +323,7 @@ run the same acceptance checks per supported host version.
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
 | `pii-scan-user-input` | `before_agent_run` or legacy `before_dispatch`; `before_tool_call`, `after_tool_call`, `llm_output` | 200 at input/tool entry | Scans host-provided text for PII/credentials; applies policy where the hook can enforce it |
-| `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
+| `prompt-scan`      | `before_agent_run` or legacy `before_dispatch` | 190      | Scans user input for prompt injection / jailbreak attacks   |
 | `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
 | `skill-ledger`     | `before_tool_call`    | 80       | Checks Skill Ledger exposure summary when SKILL.md is read; default policy asks on actionable messages |
 | `observability`    | selected typed hooks  | varies   | Sends observability records to agent-sec-cli          |
@@ -352,6 +352,15 @@ Startup logs identify the selected hook. The new gate uses the existing `allowCo
 Tool parameters remain on `before_tool_call`, tool results/errors on `after_tool_call`, and assistant text on `llm_output`. `after_tool_call` cannot withhold or redact tool results before subsequent model use; `llm_output` cannot prevent delivery. These existing limitations are unchanged.
 
 By default, `capabilities["pii-scan-user-input"].policy` is `observe`, so findings are audited without a user-visible warning. `warn` logs warnings without sensitive input, `ask` requests approval for supported pre-tool calls and otherwise falls back to `warn`, and `block` rejects pre-execution `deny` verdicts. Tool output and model output fall back to warnings. CLI failures warn and fail open with the existing 10-second timeout. Legacy `enableBlock: true/false` maps to `block/warn` when `policy` is absent.
+
+### Configuring `prompt-scan`
+
+The `prompt-scan` capability registers the same model-entry gate selection as `pii-scan-user-input`, based on `api.runtime.version`:
+
+- Stable OpenClaw `>=2026.5.12`: `before_agent_run` scans the assembled model input (`systemPrompt`, `prompt`, and message text) via `agent-sec-cli scan-prompt --source model_input`.
+- Older supported hosts, prereleases, and unrecognized versions: `before_dispatch` scans host-provided inbound text with `--source user_input` and logs a compatibility warning.
+
+Startup logs identify the selected hook. Every scan is recorded as `[prompt-scan] pass` / `WARN` / deny audit entries regardless of the blocking setting. Set `promptScanBlock: true` (openclaw.json plugin config) to turn a `deny` verdict into a blocked run (`{outcome: "block", reason: "prompt_scan_deny"}` at the model-entry gate, or a final reply on the legacy gate); without it a `deny` is audit-logged only. `warn` verdicts pass through with a warning at both gates. CLI failures and crashes fail open. `PROMPT_SCANNER_HOOK_ENABLED=false` disables the capability, and `PROMPT_SCANNER_SCAN_MODE=fast|standard|strict` selects the scan mode.
 
 ### Configuring `observability`
 

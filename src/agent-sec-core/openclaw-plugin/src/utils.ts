@@ -40,6 +40,21 @@ export function envHookPolicy(name: string, defaultValue: HookPolicy): HookPolic
   return normalizeHookPolicy(process.env[name], defaultValue);
 }
 
+/**
+ * True when the host runtime exposes the model-entry gate (`before_agent_run`).
+ * Stable OpenClaw >=2026.5.12 moved inbound text there; prereleases and
+ * unrecognized builds keep the legacy `before_dispatch` inbound event.
+ */
+export function supportsModelInputGate(version: unknown): boolean {
+  if (typeof version !== "string") return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
+  if (!match) return false;
+  const [year, month, day] = match.slice(1, 4).map(Number);
+  return (
+    year > 2026 || (year === 2026 && (month > 5 || (month === 5 && day >= 12)))
+  );
+}
+
 export type CliResult = {
   /** Raw stdout text (may be empty) */
   stdout: string;

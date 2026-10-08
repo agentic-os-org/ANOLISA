@@ -12,22 +12,12 @@ import {
   envHookPolicy,
   isHookPolicyValue,
   normalizeHookPolicy,
+  supportsModelInputGate,
   type HookPolicy,
 } from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
 const INPUT_SCAN_PRIORITY = 200;
-
-function supportsModelInputGate(version: unknown): boolean {
-  if (typeof version !== "string") return false;
-  // Prereleases and unknown builds retain the supported legacy hook.
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
-  if (!match) return false;
-  const [year, month, day] = match.slice(1, 4).map(Number);
-  return (
-    year > 2026 || (year === 2026 && (month > 5 || (month === 5 && day >= 12)))
-  );
-}
 
 type PiiScanConfig = {
   scanUserInput: boolean;
