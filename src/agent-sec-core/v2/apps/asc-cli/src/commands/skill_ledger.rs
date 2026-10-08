@@ -2,10 +2,8 @@
 
 use crate::InputError;
 use asc_daemon_protocol::{DaemonRequest, method};
-use asc_foundation_types::is_valid_anolisa_data_home;
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read as _;
 use std::os::unix::fs::DirBuilderExt as _;
@@ -15,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) struct Selection {
     /// Skill path; omitted only with --all.
     skill_dir: Option<PathBuf>,
-    /// Include registered Skills and the current user's default Skill directories.
+    /// Include registered Skills and the daemon's configured managed directories.
     #[arg(long)]
     all: bool,
 }
@@ -258,8 +256,13 @@ impl Selection {
                 "select a Skill path or --all, exclusively".into(),
             ));
         }
+        // Aggregates are discovered by the daemon against its configured
+        // patterns; the CLI sends no client-side expansion. A client-side
+        // list of conventional directories would let a root-owned system
+        // Skill reject the whole batch before the daemon's ownership-filtered
+        // discovery can process the caller's own Skills.
         Ok(
-            json!({"command":command,"skillDir":self.skill_dir.as_ref().map(|p| absolute(p)).transpose()?,"all":self.all,"skillDirs":if self.all { discover()? } else { Vec::new() }}),
+            json!({"command":command,"skillDir":self.skill_dir.as_ref().map(|p| absolute(p)).transpose()?,"all":self.all,"skillDirs":[]}),
         )
     }
 }
@@ -270,15 +273,16 @@ fn init_params(
     scanners: Option<&str>,
     skill_dirs: &[PathBuf],
 ) -> Result<Value, InputError> {
-    let mut roots = if no_baseline { Vec::new() } else { discover()? };
-    if !no_baseline {
-        roots.extend(
-            skill_dirs
-                .iter()
-                .map(|p| absolute(p))
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-    }
+    // Only explicit user-supplied roots travel in the request; the baseline's
+    // discovered set comes from the daemon's configured patterns.
+    let roots = if no_baseline {
+        Vec::new()
+    } else {
+        skill_dirs
+            .iter()
+            .map(|p| absolute(p))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     Ok(
         json!({"command":"init","baseline":!no_baseline,"forceKeys":force_keys,"skillDirs":roots,"scanners":names(scanners)}),
     )
@@ -361,130 +365,12 @@ fn absolute(path: &Path) -> Result<PathBuf, InputError> {
     Ok(normalized)
 }
 
-fn discover() -> Result<Vec<PathBuf>, InputError> {
-    let mut parents = vec![
-        (PathBuf::from("/usr/share/anolisa/skills"), false),
-        (PathBuf::from("/usr/local/share/anolisa/skills"), false),
-    ];
-    // Match the installer's UID home fallback when HOME is unset or empty.
-    let home = dirs::home_dir();
-    let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    if let Some(parent) = anolisa_skill_dir(home.as_deref(), data_home.as_deref()) {
-        parents.push((parent, false));
-    }
-    if let Some(home) = home {
-        for path in [
-            ".openclaw/skills",
-            ".copilot-shell/skills",
-            ".hermes/skills",
-            ".qoder/skills",
-        ] {
-            parents.push((home.join(path), path == ".hermes/skills"));
-        }
-    }
-    let mut roots = BTreeSet::new();
-    let mut count = 0;
-    for (parent, recursive) in parents {
-        discover_in(&parent, recursive, 0, &mut count, &mut roots)?;
-    }
-    Ok(roots.into_iter().collect())
-}
-
-fn anolisa_skill_dir(home: Option<&Path>, data_home: Option<&Path>) -> Option<PathBuf> {
-    // Match ANOLISA's installer before path normalization can discard dot segments.
-    match data_home.filter(|path| is_valid_anolisa_data_home(&path.to_string_lossy())) {
-        Some(root) => Some(root.join("anolisa/skills")),
-        None => home.map(|root| root.join(".local/share/anolisa/skills")),
-    }
-}
-
-fn discover_in(
-    parent: &Path,
-    recursive: bool,
-    depth: usize,
-    count: &mut usize,
-    roots: &mut BTreeSet<PathBuf>,
-) -> Result<(), InputError> {
-    let entries = match fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        *count += 1;
-        if *count > 10_000 || roots.len() > 1024 || depth > 32 {
-            return Err(InputError::SkillSec(
-                "Skill discovery exceeds directory limits".into(),
-            ));
-        }
-        let entry = entry?;
-        // Ledger snapshots also contain SKILL.md; never discover hidden/internal subtrees.
-        if entry.file_name().as_encoded_bytes().starts_with(b".") || !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let path = entry.path();
-        if fs::symlink_metadata(path.join("SKILL.md")).is_ok_and(|m| m.is_file()) {
-            roots.insert(absolute(&path)?);
-        }
-        if recursive {
-            discover_in(&path, true, depth + 1, count, roots)?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{anolisa_skill_dir, discover_in};
     use crate::Cli;
     use serde_json::json;
-    use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::path::Path;
-
-    #[test]
-    fn anolisa_root_matches_installer_fallback_rules() {
-        let home = Path::new("/home/test");
-        for value in [
-            None,
-            Some(""),
-            Some("relative"),
-            Some("~/data"),
-            Some("/data/./share"),
-            Some("/data/../share"),
-            Some("/data/."),
-        ] {
-            assert_eq!(
-                anolisa_skill_dir(Some(home), value.map(Path::new)),
-                Some(home.join(".local/share/anolisa/skills")),
-                "XDG_DATA_HOME={value:?}"
-            );
-            assert_eq!(anolisa_skill_dir(None, value.map(Path::new)), None);
-        }
-        for value in [
-            "/data",
-            "/data with spaces/用户",
-            "//data//share/",
-            "/",
-            "/missing/data",
-        ] {
-            let root = Path::new(value);
-            for home in [Some(home), None] {
-                assert_eq!(
-                    anolisa_skill_dir(home, Some(root)),
-                    Some(root.join("anolisa/skills"))
-                );
-            }
-        }
-    }
 
     #[test]
     fn export_creates_private_directories_and_preserves_existing_permissions() {
@@ -523,31 +409,30 @@ mod tests {
     }
 
     #[test]
-    fn discovery_excludes_internal_snapshots_but_keeps_nested_skills() {
-        let home = std::env::temp_dir().join(format!("asc-discovery-{}", uuid::Uuid::new_v4()));
-        let parent = home.join(".hermes/skills");
-        for relative in [
-            "demo",
-            "demo/nested",
-            "demo/.skill-meta/versions/v000001.snapshot",
-            "demo/.git/hidden-skill",
-            ".archive/old-skill",
-            ".hidden",
-        ] {
-            let root = parent.join(relative);
-            fs::create_dir_all(&root).unwrap();
-            fs::write(root.join("SKILL.md"), "Safe skill").unwrap();
+    fn aggregates_are_daemon_discovered_and_explicit_paths_stay_explicit() {
+        // scan --all / check --all carry no client-side expansion: the daemon's
+        // discovery against its configured patterns decides the batch, so a
+        // root-owned system Skill cannot reject the caller's own Skills before
+        // they are processed when per-skill ownership isolation is armed.
+        for command in ["scan", "check"] {
+            let cli = Cli::parse_from(["agent-sec-cli", "skill-ledger", command, "--all"]).unwrap();
+            let params = cli.request().unwrap().params;
+            assert_eq!(params["all"], true, "{command}");
+            assert_eq!(params["skillDirs"], json!([]), "{command}");
         }
-        for recursive in [false, true] {
-            let mut roots = BTreeSet::new();
-            discover_in(&parent, recursive, 0, &mut 0, &mut roots).unwrap();
-            let mut expected = BTreeSet::from([parent.join("demo")]);
-            if recursive {
-                expected.insert(parent.join("demo/nested"));
-            }
-            assert_eq!(roots, expected);
-        }
-        fs::remove_dir_all(home).unwrap();
+        // Explicit baseline roots remain exact caller-named targets.
+        let cli = Cli::parse_from([
+            "agent-sec-cli",
+            "skill-ledger",
+            "init",
+            "--skill-dir",
+            "/one",
+            "--skill-dir",
+            "/two",
+        ])
+        .unwrap();
+        let params = cli.request().unwrap().params;
+        assert_eq!(params["skillDirs"], json!(["/one", "/two"]));
     }
 
     #[test]

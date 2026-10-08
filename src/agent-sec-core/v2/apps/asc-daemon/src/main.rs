@@ -96,11 +96,22 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
-        Ok(service) => service,
-        Err(error) => {
-            report_error(telemetry, &error);
-            return (ExitCode::FAILURE, None);
+    let (skill_sec, skillfs_config, require_skill_ownership) = {
+        let require_ownership = match skill_sec::require_ownership_from_env(
+            std::env::var_os(skill_sec::REQUIRE_OWNERSHIP_ENV).as_deref(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                report_error(telemetry, &error);
+                return (ExitCode::FAILURE, None);
+            }
+        };
+        match skill_sec::start(cli.skillsec_config.as_deref(), require_ownership) {
+            Ok(service) => service,
+            Err(error) => {
+                report_error(telemetry, &error);
+                return (ExitCode::FAILURE, None);
+            }
         }
     };
     let repository = Arc::new(ProcessLocalPapRepository::default());
@@ -128,7 +139,8 @@ async fn run(
             return (ExitCode::FAILURE, Some(durable_sinks));
         }
     };
-    let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone());
+    let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone())
+        .with_require_skill_ownership(require_skill_ownership);
     if let Some(bridge) = &skillfs {
         executor = executor.with_environment(bridge.environment());
     }
@@ -253,7 +265,9 @@ fn recover_and_start_skills(
         );
     }
     worker.start(actions.clone(), move || {
-        executor.discover(std::time::Instant::now() + Duration::from_secs(30))
+        // Daemon-owned background discovery runs as root and stays
+        // unrestricted under per-skill ownership isolation.
+        executor.discover(0, std::time::Instant::now() + Duration::from_secs(30))
     })
 }
 

@@ -11,8 +11,12 @@ pub struct SkillSecConfig {
     /// Private service-owned directory containing the current signing identity.
     pub state_dir: PathBuf,
     /// Administrator-authorized exact roots, direct-child `/*`, or recursive `/**` patterns.
-    // TODO(SkillSec maintainers): add per-user isolation before restricting the phase-one
-    // contract that allows every local caller to operate every managed Skill.
+    //
+    // Per-user isolation now exists as an opt-in deployment mode (the daemon's
+    // root-owned `requireSkillOwnership` setting arms the executor with it):
+    // non-root callers may then only operate the Skills they own. The phase-one
+    // contract — every local caller may operate every managed Skill — remains
+    // the default until the maintainers decide to flip it.
     pub managed_skill_dirs: Vec<ManagedSkillDir>,
 }
 

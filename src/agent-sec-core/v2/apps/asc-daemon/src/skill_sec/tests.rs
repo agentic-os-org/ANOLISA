@@ -123,6 +123,37 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
 }
 
 #[test]
+fn ownership_isolation_is_an_environment_toggle_not_a_settings_key() {
+    // The rollback-safety contract: no new key ever enters skillsec.json.
+    // Settings denies unknown fields and the RPM marks the file
+    // %config(noreplace), so a persisted key would keep a downgraded daemon
+    // from starting. The environment variable is invisible to older daemons,
+    // so a downgrade silently falls back to the phase-one access contract.
+    let legacy: Settings =
+        serde_json::from_str(r#"{"stateDir":"/var/lib/agent-sec/skillsec"}"#).unwrap();
+    assert_eq!(
+        legacy.state_dir,
+        PathBuf::from("/var/lib/agent-sec/skillsec")
+    );
+    assert!(
+        serde_json::from_str::<Settings>(r#"{"requireSkillOwnership":true}"#).is_err(),
+        "the toggle must never become a settings key"
+    );
+
+    // Unset keeps the phase-one contract; the two documented values arm and
+    // disarm; anything else is a startup error instead of a silent disarm.
+    assert!(!require_ownership_from_env(None).unwrap());
+    assert!(require_ownership_from_env(Some(OsStr::new("true"))).unwrap());
+    assert!(!require_ownership_from_env(Some(OsStr::new("false"))).unwrap());
+    for invalid in ["1", "yes", "TRUE", ""] {
+        assert!(
+            require_ownership_from_env(Some(OsStr::new(invalid))).is_err(),
+            "{invalid} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn startup_finalizes_preparation_failures_once_and_continues_with_the_next_skill() {
     use asc_capability_skill_sec::executor::{SkillEnvironment, SkillSecExecutor};
     struct Environment(&'static str);

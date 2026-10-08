@@ -46,6 +46,47 @@ impl SkillRoot {
         })
     }
 
+    /// Opens the physical directory of a direct Skill and pins its identity.
+    ///
+    /// Every later privileged open re-verifies the pinned `(device, inode)`,
+    /// so a caller with parent rename rights cannot present one directory for
+    /// authorization and substitute another at the same path before the
+    /// operation runs; a replacement fails closed instead of being operated.
+    ///
+    /// # Errors
+    /// Rejects relative, ambiguous or traversal-containing paths, and any
+    /// directory that cannot be opened with no-symlink traversal.
+    pub fn pinned_direct(path: impl AsRef<Path>) -> Result<Self, SkillSecError> {
+        let identity = SkillIdentity::new(path)?;
+        let directory = Directory::open(identity.path())?;
+        let metadata = directory
+            .file
+            .metadata()
+            .map_err(|e| io_error(identity.path(), e))?;
+        Ok(Self {
+            io_dir: identity.path().into(),
+            identity,
+            file_identity: Some((metadata.dev(), metadata.ino())),
+            resolution_error: None,
+            host_backed: true,
+        })
+    }
+
+    /// The filesystem owner of the pinned physical directory.
+    ///
+    /// `None` when the directory at the request path is no longer the pinned
+    /// object or cannot be inspected, so ownership decisions fail closed.
+    #[cfg(unix)]
+    pub(crate) fn pinned_owner_uid(&self) -> Option<u32> {
+        let metadata = self.open_verified().ok()?.file.metadata().ok()?;
+        metadata.is_dir().then(|| metadata.uid())
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn pinned_owner_uid(&self) -> Option<u32> {
+        None
+    }
+
     /// Separates source identity from a physical path authenticated by the runtime resolver.
     ///
     /// # Errors

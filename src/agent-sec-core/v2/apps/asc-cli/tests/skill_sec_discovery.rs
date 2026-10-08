@@ -1,67 +1,36 @@
-//! Caller environment discovery is exercised through real CLI requests without global env mutation.
+//! Aggregate requests stay daemon-discovered regardless of the caller environment.
 
 mod common;
 
 use serde_json::{Value, json};
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 
 #[tokio::test]
-async fn batch_commands_discover_the_callers_anolisa_install_root() {
+async fn aggregate_requests_carry_no_client_side_discovery() {
     let directory = common::Directory::new();
     let home = directory.0.join("home");
     let default_data = home.join(".local/share");
     let custom_data = directory.0.join("custom data");
-    for data in [
-        &default_data,
-        &custom_data,
-        &directory.0.join(".local/share"),
-    ] {
-        for relative in [
-            "demo",
-            "demo/.skill-meta/snapshot",
-            ".hidden",
-            "group/nested",
-        ] {
-            let skill = data.join("anolisa/skills").join(relative);
-            fs::create_dir_all(&skill).unwrap();
-            fs::write(skill.join("SKILL.md"), "Safe skill").unwrap();
-        }
+    // Conventional directories exist with Skills; none of them may leak into
+    // the request, because the daemon's configured patterns decide aggregates.
+    for data in [&default_data, &custom_data] {
+        let skill = data.join("anolisa/skills/demo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "Safe skill").unwrap();
     }
     let socket = directory.0.join("daemon.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let cases = [
-        (Some(home.as_path()), None, Some(&default_data)),
-        (
-            Some(home.as_path()),
-            Some(custom_data.clone()),
-            Some(&custom_data),
-        ),
-        (Some(home.as_path()), Some("".into()), Some(&default_data)),
-        (
-            Some(home.as_path()),
-            Some("relative".into()),
-            Some(&default_data),
-        ),
-        (
-            Some(home.as_path()),
-            Some(custom_data.join(".")),
-            Some(&default_data),
-        ),
-        (
-            Some(home.as_path()),
-            Some(directory.0.join("missing")),
-            None,
-        ),
-        (None, Some(custom_data.clone()), Some(&custom_data)),
-        (None, None, None),
-        (Some(Path::new("")), None, None),
+        (Some(home.as_path()), None),
+        (Some(home.as_path()), Some(custom_data.clone())),
+        (None, Some(custom_data.clone())),
+        (None, None),
     ];
-    for (home, data, expected) in cases {
+    for (home, data) in cases {
         for arguments in [
             ["init", "--scanners=code-scanner"],
             ["scan", "--all"],
@@ -86,25 +55,9 @@ async fn batch_commands_discover_the_callers_anolisa_install_root() {
             }
             let request = capture_request(&listener, cli).await;
             assert_eq!(request["method"], "action.skill_sec");
-            let actual: Vec<_> = request["params"]["skillDirs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|root| Path::new(root).starts_with(&directory.0))
-                .collect();
-            let discovers = arguments[1] == "--all" || arguments[1] == "--scanners=code-scanner";
-            let expected: Vec<_> = expected
-                .filter(|_| discovers)
-                .map(|root| root.join("anolisa/skills/demo"))
-                .into_iter()
-                .collect();
             assert_eq!(
-                actual,
-                expected
-                    .iter()
-                    .map(|p| p.to_str().unwrap())
-                    .collect::<Vec<_>>(),
+                request["params"]["skillDirs"],
+                json!([]),
                 "arguments={arguments:?}, HOME={home:?}, XDG_DATA_HOME={data:?}"
             );
         }

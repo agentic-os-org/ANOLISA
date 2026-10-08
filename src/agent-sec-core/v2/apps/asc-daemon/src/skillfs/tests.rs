@@ -319,7 +319,12 @@ fn resolver_aliases_share_identity_and_reject_false_mappings_without_fallback() 
         assert!(bridge.resolve(&canonical, deadline()).is_err());
     }
     fixture.mode.store(0, Ordering::Release);
-    let outside = SkillIdentity::new(fixture.directory.path().join("outside")).unwrap();
+    // Identities outside every mount resolve as direct directories; direct
+    // resolution now pins the physical directory, so the outside Skill must
+    // actually exist for the no-fallback passthrough to be observable.
+    let outside_root = fixture.directory.path().join("outside");
+    fs::create_dir(&outside_root).unwrap();
+    let outside = SkillIdentity::new(&outside_root).unwrap();
     assert_eq!(
         bridge.resolve(&outside, deadline()).unwrap().io_dir,
         outside.path()
