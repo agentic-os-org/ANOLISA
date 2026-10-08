@@ -375,18 +375,108 @@ fn trace_file_path() -> &'static std::path::PathBuf {
     })
 }
 
-/// Initialize trace file with opening bracket and register exit hook
+/// Write the trace file's opening bracket.
+fn write_trace_header<W: Write>(writer: &mut W) -> std::io::Result<()> {
+    writer.write_all(b"[\n")
+}
+
+/// Write the trace file's closing bracket.
+fn write_trace_footer<W: Write>(writer: &mut W) -> std::io::Result<()> {
+    writer.write_all(b"]\n")
+}
+
+/// Write one trace event as a JSON array element.
+///
+/// The whole element — separator, serialized event, newline — is assembled
+/// first and handed to the writer as one `write_all`, so a failure cannot
+/// strand a dangling comma in front of an element that never arrived, and
+/// two writes from the same append cannot interleave. Serialization happens
+/// before anything is written, so an event that cannot serialize writes
+/// nothing instead of an empty array element. The `first_write` claim is
+/// consumed only on success.
+fn write_trace_event<W: Write>(
+    writer: &mut W,
+    event: &ChromeTraceEvent,
+    first_write: &mut bool,
+) -> std::io::Result<()> {
+    let serialized = serde_json::to_string(event)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut element = String::with_capacity(serialized.len() + 2);
+    if !*first_write {
+        element.push(',');
+    }
+    element.push_str(&serialized);
+    element.push('\n');
+    writer.write_all(element.as_bytes())?;
+    *first_write = false;
+    Ok(())
+}
+
+/// Initialize trace file with opening bracket and register exit hook.
+///
+/// Every failure is logged: the chrome-trace export is explicitly enabled
+/// via `AGENTSIGHT_CHROME_TRACE`, so an operator whose trace file cannot be
+/// created (read-only working directory, deleted cwd) or whose header write
+/// fails must be told the export produced nothing — a silent no-op leaves
+/// `analyze-chatml --chrome-trace` looking for a file that was never born.
 fn init_trace_file() {
     let path = trace_file_path();
-    if let Ok(mut file) = std::fs::File::create(path) {
-        let _ = file.write_all(b"[\n");
+    match std::fs::File::create(path) {
+        Ok(mut file) => {
+            if let Err(error) = write_trace_header(&mut file) {
+                log::warn!(
+                    "chrome-trace header write to {} failed: {error}; the trace file will not be valid JSON",
+                    path.display()
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!(
+                "chrome-trace file {} cannot be created: {error}; trace export is enabled but will produce nothing",
+                path.display()
+            );
+        }
     }
 
-    // Register exit hook to close the JSON array
+    // Register exit hook to close the JSON array.
+    //
+    // The hook runs as an `extern "C"` callback under `libc::atexit`: a
+    // panic raised inside it cannot unwind through the C ABI and aborts the
+    // process during an otherwise normal exit. The reporting path itself is
+    // one plausible panic source — the in-tree logger's `enabled` check
+    // unwraps its filter mutex, so a poisoned logger panics on the first
+    // `log::warn!` — so the whole body is contained with `catch_unwind`,
+    // and a caught panic is reported through a bare stderr write that does
+    // not go through the logger.
     extern "C" fn close_trace_file() {
+        if std::panic::catch_unwind(write_footer_at_exit).is_err() {
+            let _ = std::io::stderr().write_all(
+                b"agentsight: chrome-trace footer could not be written; the trace file will not be valid JSON\n",
+            );
+        }
+    }
+
+    fn write_footer_at_exit() {
         let path = trace_file_path();
-        if let Ok(mut file) = OpenOptions::new().append(true).open(path) {
-            let _ = file.write_all(b"]\n");
+        match OpenOptions::new().append(true).open(path) {
+            Ok(mut file) => {
+                if let Err(error) = write_trace_footer(&mut file) {
+                    log::warn!(
+                        "chrome-trace footer write to {} failed: {error}; the trace file will not be valid JSON",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) => {
+                // Only a warning when the file exists but cannot be reopened;
+                // a file that was never created was already reported at init.
+                if path.exists() {
+                    log::warn!(
+                        "chrome-trace file {} cannot be reopened for the footer: {error}",
+                        path.display()
+                    );
+                }
+            }
         }
     }
     unsafe {
@@ -397,17 +487,100 @@ fn init_trace_file() {
 /// Track if first write (no comma needed)
 static FIRST_WRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Append a trace event to the file
+/// Latch for the trace-unavailable warning.
+///
+/// While the trace file cannot be opened, every generated event reaches the
+/// failure branch in `append_trace_event`, and the in-tree logger emits each
+/// WARN synchronously — one persistent exporter failure would otherwise
+/// become an unbounded warning stream that degrades collection. The latch is
+/// re-armed whenever the file opens again, so each stretch of unavailability
+/// is reported exactly once.
+static TRACE_OPEN_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Warn that a trace event was dropped, at most once per stretch of
+/// trace-file unavailability. Returns whether the warning was emitted.
+fn report_trace_unavailable(
+    warned: &std::sync::atomic::AtomicBool,
+    path: &std::path::Path,
+) -> bool {
+    if warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    log::warn!(
+        "chrome-trace event dropped: {} cannot be opened; was the trace file removed while \
+         the process runs? Further drops while it stays unavailable are not reported",
+        path.display()
+    );
+    true
+}
+
+/// A writer proxy that counts how many bytes actually landed on the inner
+/// writer, so a failed `write_all` can tell a partially-written element
+/// from one that never started.
+struct LandedPrefix<W> {
+    inner: W,
+    landed: usize,
+}
+
+impl<W: Write> Write for LandedPrefix<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.landed += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Write one event under the global first-write claim.
+///
+/// The claim is taken up front and handed back only when the element left
+/// not a single byte in the file. `write_all` can land a prefix and then
+/// fail (a nearly-full filesystem returns ENOSPC mid-element), and a prefix
+/// that stops just short of the trailing newline can already be a complete
+/// JSON object: releasing the claim then would make the next event append
+/// without its separator, corrupting a trace that one more element could
+/// have repaired. A partial write cannot be rolled back, so once any byte
+/// has landed the claim stays consumed.
+fn append_element_with_claim<W: Write>(
+    writer: &mut W,
+    event: &ChromeTraceEvent,
+    first_write: &std::sync::atomic::AtomicBool,
+) {
+    let mut is_first = first_write.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let mut sink = LandedPrefix {
+        inner: writer,
+        landed: 0,
+    };
+    if let Err(error) = write_trace_event(&mut sink, event, &mut is_first) {
+        if sink.landed == 0 {
+            // Not one byte reached the file — the failed append is
+            // effectively rolled back, so the claim returns for the next
+            // event, which then still writes without a separator.
+            first_write.store(is_first, std::sync::atomic::Ordering::SeqCst);
+        }
+        log::warn!("chrome-trace event write failed: {error}");
+    }
+}
+
+/// Append a trace event to the file.
+///
+/// Write failures are logged instead of swallowed. An unopenable trace file
+/// is reported once per stretch of unavailability rather than per event,
+/// and the first-write claim is released only by an append that landed
+/// nothing (see `append_element_with_claim`).
 pub fn append_trace_event(event: &ChromeTraceEvent) {
     let path = trace_file_path();
-    if let Ok(mut file) = OpenOptions::new().append(true).create(false).open(path) {
-        // Add comma before event (except first one)
-        if !FIRST_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            let _ = file.write_all(b",");
-        }
-        let _ = file.write_all(serde_json::to_string(event).unwrap_or_default().as_bytes());
-        let _ = file.write_all(b"\n");
-    }
+    let Ok(mut file) = OpenOptions::new().append(true).create(false).open(path) else {
+        report_trace_unavailable(&TRACE_OPEN_WARNED, path);
+        return;
+    };
+    // The file opened again: re-arm the unavailability warning so a later
+    // disappearance is still reported (once).
+    TRACE_OPEN_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
+    append_element_with_claim(&mut file, event, &FIRST_WRITE);
 }
 
 /// Export trace events to file if enabled
@@ -434,6 +607,205 @@ pub fn export_trace_events<T: ToChromeTraceEvent>(result: &T) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A writer that fails on every write, keeping what did land.
+    #[derive(Default)]
+    struct FailingWriter {
+        written: Vec<u8>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full (fixture)"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that records everything and never fails.
+    #[derive(Default)]
+    struct VecWriter {
+        written: Vec<u8>,
+    }
+
+    impl Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn sample_event(name: &str) -> ChromeTraceEvent {
+        ChromeTraceEvent::instant(name, "test", 1, 2, 100)
+    }
+
+    #[test]
+    fn trace_elements_are_single_writes_with_correct_separators() {
+        // The element — separator, serialized event, newline — must leave the
+        // writer as one write: a comma written in its own write_all could be
+        // stranded in front of an event that never arrived.
+        let mut writer = VecWriter::default();
+        let mut first = true;
+        write_trace_event(&mut writer, &sample_event("one"), &mut first).unwrap();
+        assert!(!first, "sanity: the flag flips on success");
+        write_trace_event(&mut writer, &sample_event("two"), &mut first).unwrap();
+        assert!(!first);
+
+        let text = String::from_utf8(writer.written).unwrap();
+        let mut lines = text.split('\n');
+        let first_line = lines.next().unwrap();
+        let second_line = lines.next().unwrap();
+        assert!(
+            first_line.starts_with('{'),
+            "the first element must start with its JSON object, not a separator: {first_line:?}"
+        );
+        assert!(
+            second_line.starts_with(",{"),
+            "the second element must carry the separator in front: {second_line:?}"
+        );
+        // Each element, separator excluded, is one complete JSON object.
+        let first_event: serde_json::Value = serde_json::from_str(first_line)
+            .unwrap_or_else(|error| panic!("first element must parse: {error}"));
+        let second_event: serde_json::Value = serde_json::from_str(&second_line[1..])
+            .unwrap_or_else(|error| panic!("second element must parse: {error}"));
+        assert!(first_event.is_object() && second_event.is_object());
+    }
+
+    #[test]
+    fn a_failed_event_write_is_surfaced_and_keeps_the_first_write_claim() {
+        // On the pre-fix behaviour the comma went out in its own write_all
+        // and every error was swallowed: a failing disk left a dangling
+        // separator with no report, and the first-write claim was spent.
+        let mut writer = FailingWriter::default();
+        let mut first = true;
+        let result = write_trace_event(&mut writer, &sample_event("doomed"), &mut first);
+        assert!(
+            result.is_err(),
+            "a write failure must surface to the caller (which logs it), not vanish"
+        );
+        assert!(first, "the claim is consumed only on success");
+        assert!(
+            writer.written.is_empty(),
+            "a failed element write must not leave a stray separator in the file"
+        );
+
+        // The retained claim means the next successful event is still the
+        // first: no separator before it.
+        let mut good = VecWriter::default();
+        write_trace_event(&mut good, &sample_event("next"), &mut first).unwrap();
+        let text = String::from_utf8(good.written).unwrap();
+        assert!(!text.starts_with(','), "{text:?}");
+        assert!(serde_json::from_str::<serde_json::Value>(text.trim()).is_ok());
+    }
+
+    #[test]
+    fn header_and_footer_write_their_brackets_or_report_the_failure() {
+        let mut ok_writer = VecWriter::default();
+        write_trace_header(&mut ok_writer).unwrap();
+        write_trace_footer(&mut ok_writer).unwrap();
+        assert_eq!(ok_writer.written, b"[\n]\n");
+
+        let mut failing = FailingWriter::default();
+        assert!(write_trace_header(&mut failing).is_err());
+        assert!(write_trace_footer(&mut failing).is_err());
+    }
+
+    /// A disk that accepts a fixed number of bytes and then fails like a
+    /// filesystem that ran out of space mid-`write_all`.
+    struct FullDiskWriter {
+        capacity: usize,
+        written: Vec<u8>,
+    }
+
+    impl Write for FullDiskWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let room = self.capacity - self.written.len();
+            if room == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+            }
+            let take = room.min(buf.len());
+            self.written.extend_from_slice(&buf[..take]);
+            Ok(take)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_partially_written_element_keeps_the_first_write_claim_consumed() {
+        // ENOSPC can strike mid-element: the serialized object lands in the
+        // file but its trailing newline does not. That prefix is already a
+        // complete JSON object, so the next element must still carry a
+        // separator — releasing the claim here (the pre-fix behaviour)
+        // appended the next event without a comma and corrupted a trace
+        // that one more element could have repaired.
+        let element_len = {
+            let mut probe = VecWriter::default();
+            let mut first = true;
+            write_trace_event(&mut probe, &sample_event("first"), &mut first).unwrap();
+            probe.written.len()
+        };
+        let mut disk = FullDiskWriter {
+            capacity: element_len - 1,
+            written: Vec::new(),
+        };
+        let claim = std::sync::atomic::AtomicBool::new(true);
+        append_element_with_claim(&mut disk, &sample_event("first"), &claim);
+        assert_eq!(
+            disk.written.len(),
+            element_len - 1,
+            "sanity: the element's prefix landed before the failure"
+        );
+        assert!(
+            !claim.load(std::sync::atomic::Ordering::SeqCst),
+            "a landed prefix must keep the first-write claim consumed"
+        );
+
+        // Once space is freed, the next element lands behind a separator
+        // and the recovered content still reads as JSON array elements:
+        // `{first},{second}`, not the unparseable `{first}{second}`.
+        let mut recovered = disk.written.clone();
+        append_element_with_claim(&mut recovered, &sample_event("second"), &claim);
+        let text = String::from_utf8(recovered).unwrap();
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&format!("[{}]", text.trim_end())).unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn a_cleanly_failed_append_hands_the_first_write_claim_back() {
+        // A write that fails before landing a single byte is effectively
+        // rolled back: the file is untouched, so the next event is still
+        // the first and must not begin with a separator.
+        let mut writer = FailingWriter::default();
+        let claim = std::sync::atomic::AtomicBool::new(true);
+        append_element_with_claim(&mut writer, &sample_event("doomed"), &claim);
+        assert!(
+            claim.load(std::sync::atomic::Ordering::SeqCst),
+            "an append that landed nothing must release the claim"
+        );
+    }
+
+    #[test]
+    fn the_trace_unavailable_warning_fires_once_per_stretch() {
+        // While the trace file stays unavailable, the first dropped event is
+        // reported and the rest stay quiet — one persistent exporter failure
+        // must not become an unbounded warning stream.
+        let warned = std::sync::atomic::AtomicBool::new(false);
+        let path = std::path::Path::new("trace-unavailable.json");
+        assert!(report_trace_unavailable(&warned, path));
+        assert!(!report_trace_unavailable(&warned, path));
+        assert!(!report_trace_unavailable(&warned, path));
+        // The file opens again — the latch re-arms, so a later
+        // disappearance is still reported instead of muted forever.
+        warned.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(report_trace_unavailable(&warned, path));
+    }
 
     #[test]
     fn test_next_flow_id_increments() {
