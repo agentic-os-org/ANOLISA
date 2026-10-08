@@ -149,6 +149,10 @@ summary = "Agent security core adapters and runtime"
 targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
+kind = "raw"
+package = "sec-core"
+
+[[components.backends]]
 kind = "rpm"
 package = "agent-sec-core"
 provides = "anolisa-component(sec-core)"

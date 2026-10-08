@@ -99,6 +99,8 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 # Delete a line as soon as its capability lands in the V2 CLI/daemon; do not
 # collapse the list into a directory-level ignore, or migrated coverage will
 # stay silently disabled.
+PII_HOOK_LAYOUT = installed
+
 .PHONY: test-e2e-rpm-v2
 test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@echo "🧪 Running V2 E2E tests on installed RPM..."
@@ -108,12 +110,13 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@# The shared code-scanner E2E imports rule metadata before it can decide
 	@# whether source-only inventory assertions apply to this installed V2 RPM.
 	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
-	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=installed SKILLSEC_HOOK_LAYOUT=installed python3 -m pytest tests/e2e/ tests/v2/ \
+	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=$(PII_HOOK_LAYOUT) SKILLSEC_HOOK_LAYOUT=installed python3 -m pytest tests/e2e/ tests/v2/ \
 		--import-mode=importlib -ra \
 		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
 		--ignore=tests/e2e/cli/test_session_report_e2e.py \
+		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
 		--ignore=tests/e2e/prompt-scanner/test_prompt_scanner_e2e.py \
@@ -215,6 +218,7 @@ test: test-python test-rust test-openclaw-plugin ## Run all tests
 BUILD_DIR ?= target
 CLI_WHEEL_BUILD_DIR ?= agent-sec-cli/target/wheels
 CLI_WHEEL_PATTERN := agent_sec_cli-*.whl
+COMPONENT_CONTRACT ?= .anolisa/component.toml
 
 # The normal targets retain their network-enabled developer workflow. RPM builds
 # select OFFLINE_BUILD through build-all-v2-offline after Source1 supplies every
@@ -329,9 +333,9 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 	cp -p tools/sign-skill.sh $(BUILD_DIR)/tools/
 
 .PHONY: stage-component-manifest
-stage-component-manifest: ## Stage component.toml into BUILD_DIR
+stage-component-manifest: ## Stage the selected component contract into BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/share/anolisa/components/sec-core
-	install -p -m 0644 .anolisa/component.toml \
+	install -p -m 0644 $(COMPONENT_CONTRACT) \
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
@@ -376,37 +380,16 @@ OUTPUT_DIR ?= $(BUILD_DIR)/raw
 TARGET_OS ?= linux
 TARGET_ARCH ?= $(shell uname -m)
 RAW_CONTRACT ?= .anolisa/component.toml
-RAW_PYTHON_VERSION := 3.11.6
-RAW_PYTHON_ENV ?= $(BUILD_DIR)/raw-python-env
 RAW_PYTHON_RUNTIME ?= $(BUILD_DIR)/python-runtime
 RAW_PYTHON_ARCHIVE ?= $(BUILD_DIR)/downloads/cpython-3.11.6+20231002-x86_64-unknown-linux-gnu-install_only.tar.gz
 
 .PHONY: prepare-raw-python
-prepare-raw-python: build-all ## Stage pinned Python and locked production dependencies for raw packaging
-	rm -rf $(CLI_STAGED_SITE) $(RAW_PYTHON_ENV)
+prepare-raw-python: build-all-v2 ## Stage the adapter-only bundled Python runtime
 	./packaging/raw/prepare_python_runtime.sh \
 		"$(abspath $(RAW_PYTHON_RUNTIME))" "$(abspath $(RAW_PYTHON_ARCHIVE))"
-	cd agent-sec-cli && UV_PROJECT_ENVIRONMENT="$(abspath $(RAW_PYTHON_ENV))" \
-		uv sync --python "$(abspath $(RAW_PYTHON_RUNTIME))/bin/python3.11" \
-			--no-managed-python --frozen --no-dev --no-install-project --link-mode copy
-	@set -eu; \
-		python="$(abspath $(RAW_PYTHON_ENV))/bin/python3.11"; \
-		version="$$("$$python" -c 'import platform; print(platform.python_version())')"; \
-		[ "$$version" = "$(RAW_PYTHON_VERSION)" ] || { \
-			echo "ERROR: raw package requires Python $(RAW_PYTHON_VERSION), found $$version" >&2; \
-			exit 1; \
-		}
-	install -d -m 0755 $(CLI_STAGED_SITE)
-	cp -a $(RAW_PYTHON_ENV)/lib/python3.11/site-packages/. $(CLI_STAGED_SITE)/
-	@$(call require_single_cli_wheel,$(BUILD_DIR)/wheels) \
-		uv pip install --python $(RAW_PYTHON_ENV)/bin/python3.11 \
-			--target $(CLI_STAGED_SITE) --no-deps --no-cache --link-mode copy "$$1"
-	rm -rf $(CLI_STAGED_SITE)/bin
-	rm -f $(CLI_STAGED_SITE)/.lock
-	rm -rf $(RAW_PYTHON_ENV)
 
 .PHONY: stage-raw
-stage-raw: ## Stage built raw payload under DESTDIR (build outputs must already exist)
+stage-raw: ## Stage the V2 raw payload under DESTDIR
 	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
 		DESTDIR="$(DESTDIR)" \
 		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
@@ -415,7 +398,7 @@ stage-raw: ## Stage built raw payload under DESTDIR (build outputs must already 
 		./packaging/raw/package.sh stage
 
 .PHONY: package-raw
-package-raw: prepare-raw-python ## Build deterministic raw tar archive in OUTPUT_DIR
+package-raw: prepare-raw-python ## Build the deterministic V2 raw archive
 	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
 		OUTPUT_DIR="$(abspath $(OUTPUT_DIR))" \
 		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
@@ -589,9 +572,9 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
 
 .PHONY: install-component-manifest
-install-component-manifest: ## Install component.toml to DESTDIR
+install-component-manifest: ## Install the selected component contract to DESTDIR
 	install -d -m 0755 $(DESTDIR)$(COMPONENT_DIR)
-	install -m 0644 .anolisa/component.toml \
+	install -m 0644 $(COMPONENT_CONTRACT) \
 		$(DESTDIR)$(COMPONENT_DIR)/component.toml
 
 .PHONY: install-systemd-user

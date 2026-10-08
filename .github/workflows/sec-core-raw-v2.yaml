@@ -1,0 +1,170 @@
+name: CI / sec-core Raw Build
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
+    paths:
+      - 'src/agent-sec-core/**'
+      - '.github/workflows/sec-core-raw-v2.yaml'
+  workflow_dispatch:
+
+jobs:
+  raw-install-e2e:
+    name: Build, install, and test V2 raw package
+    runs-on: anolisa-k8s-general-ci-x64
+    container:
+      image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    steps:
+      - name: Configure mirrors and install dependencies
+        run: |
+          set -euo pipefail
+          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+          dnf install -y tar git make gcc clang llvm openssl-devel libseccomp-devel \
+                         bubblewrap systemd systemd-rpm-macros python3-pip \
+                         curl gzip jq gnupg2 nodejs
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+
+      - name: Build a temporary ANOLISA CLI
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path distribution/anolisa/Cargo.toml
+          install -m 0755 distribution/anolisa/target/release/anolisa /usr/local/bin/anolisa
+          anolisa --version
+
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+          enable-cache: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - name: Build the V2 raw artifact
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH=1700000000 make -C src/agent-sec-core package-raw
+          find src/agent-sec-core/target/raw -name 'sec-core-*-linux-x86_64.tar.gz' -print
+
+      - name: Publish a temporary local raw repository
+        id: raw-repo
+        run: |
+          set -euo pipefail
+          artifact="$(find src/agent-sec-core/target/raw -name 'sec-core-*-linux-x86_64.tar.gz' -print -quit)"
+          test -n "$artifact"
+          version="$(python3 src/agent-sec-core/packaging/raw/verify_release.py \
+            src/agent-sec-core src/agent-sec-core/.anolisa/component.toml)"
+          repo_root="$(mktemp -d /tmp/sec-core-raw-repo.XXXXXX)"
+          repo="$repo_root/v1"
+          mkdir -p "$repo"
+          artifact_name="$(basename "$artifact")"
+          cp "$artifact" "$repo/$artifact_name"
+          sha256="$(sha256sum "$repo/$artifact_name" | cut -d ' ' -f 1)"
+          manifest_digest="sha256:$(sha256sum src/agent-sec-core/.anolisa/component.toml | cut -d ' ' -f 1)"
+
+          cp distribution/anolisa/manifests/components-v2.toml "$repo/components-v2.toml"
+
+          cat > "$repo/index-v2.toml" <<EOF
+          schema_version = 1
+          channel = "stable"
+          publisher = "sec-core-raw-ci"
+
+          [[entries]]
+          component = "sec-core"
+          version = "$version"
+          channel = "stable"
+          artifact_type = "tar_gz"
+          backend = "raw"
+          url = "$artifact_name"
+          os = "linux"
+          arch = "x86_64"
+          install_modes = ["system"]
+          sha256 = "$sha256"
+          manifest_digest = "$manifest_digest"
+          EOF
+          cp "$repo/index-v2.toml" "$repo/index.toml"
+          echo "url=file://$repo" >> "$GITHUB_OUTPUT"
+
+      - name: Install the V2 raw artifact through ANOLISA
+        run: |
+          set -euo pipefail
+          anolisa --install-mode system install sec-core --backend raw \
+            --repo '${{ steps.raw-repo.outputs.url }}'
+          agent-sec-cli --help
+          agent-sec-daemon --help
+          linux-sandbox --help
+          test -f /usr/local/lib/systemd/system/agent-sec-core.service
+          test ! -e /usr/local/lib/systemd/user/agent-sec-core.service
+          test ! -e /usr/local/lib/anolisa/sec-core/python3.11/site-packages
+          systemd-analyze verify /usr/local/lib/systemd/system/agent-sec-core.service
+
+      - name: Start V2 daemon for installed-binary E2E
+        run: |
+          set -euo pipefail
+          runtime_dir="$(mktemp -d /tmp/agent-sec-core-raw-ci.XXXXXX)"
+          socket="$runtime_dir/daemon.sock"
+          daemon_log="$RUNNER_TEMP/agent-sec-daemon.log"
+          chmod 0700 "$runtime_dir"
+          agent-sec-daemon --socket "$socket" >"$daemon_log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/agent-sec-daemon.pid"
+          echo "AGENT_SEC_DAEMON_SOCKET=$socket" >> "$GITHUB_ENV"
+          echo "AGENT_SEC_DAEMON_LOG=$daemon_log" >> "$GITHUB_ENV"
+          for _ in $(seq 1 100); do
+            if ! kill -0 "$(cat "$RUNNER_TEMP/agent-sec-daemon.pid")" 2>/dev/null; then
+              cat "$daemon_log" >&2
+              exit 1
+            fi
+            if python3 - "$socket" <<'PY'
+          import socket
+          import sys
+          try:
+              connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              connection.settimeout(0.1)
+              connection.connect(sys.argv[1])
+              connection.close()
+          except OSError:
+              raise SystemExit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 0.05
+          done
+          cat "$daemon_log" >&2
+          exit 1
+
+      - name: Run V2 E2E against the raw installation
+        run: |
+          set -euo pipefail
+          source_dir=src/agent-sec-core/agent-sec-cli
+          hidden_root="$(mktemp -d)"
+          mv "$source_dir" "$hidden_root/agent-sec-cli"
+          restore_source() {
+            mv "$hidden_root/agent-sec-cli" "$source_dir"
+            rmdir "$hidden_root"
+          }
+          trap restore_source EXIT
+          unset PYTHONPATH
+          if python3 -c 'import agent_sec_cli' 2>/dev/null; then
+            echo "ERROR: V1 Python CLI remains importable after raw installation" >&2
+            exit 1
+          fi
+          make -C src/agent-sec-core PII_HOOK_LAYOUT=raw test-e2e-rpm-v2
+
+      - name: Show daemon log after failure
+        if: failure()
+        run: test -f "$AGENT_SEC_DAEMON_LOG" && cat "$AGENT_SEC_DAEMON_LOG" || true
+
+      - name: Stop V2 daemon
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/agent-sec-daemon.pid"; then
+            kill "$(cat "$RUNNER_TEMP/agent-sec-daemon.pid")" 2>/dev/null || true
+          fi
