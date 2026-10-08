@@ -771,24 +771,29 @@ impl<'a> TokenQuery<'a> {
 
         let total_tokens: u64 = records.iter().map(|r| r.total_tokens()).sum();
 
-        // Group by agent name (or comm if no agent)
-        let mut agent_totals: std::collections::HashMap<String, (u64, u64, u64, u64)> =
+        // Group by agent name (or comm if no agent), case-insensitively like
+        // every other agent-attributed view (the genai store's COLLATE NOCASE
+        // filters, `list_agent_names`, the lowercased latency grouping key):
+        // "Agent-A" and "agent-a" are one agent. The lowercase spelling keys
+        // the map; the first original spelling seen labels the group.
+        let mut agent_totals: std::collections::HashMap<String, (String, u64, u64, u64, u64)> =
             std::collections::HashMap::new();
 
         for record in records {
             let name = record.agent.as_ref().unwrap_or(&record.comm).clone();
+            let key = name.to_lowercase();
 
-            let entry = agent_totals.entry(name).or_insert((0, 0, 0, 0));
-            entry.0 += record.total_tokens();
-            entry.1 += record.billed_input_tokens();
-            entry.2 += record.output_tokens;
-            entry.3 += 1;
+            let entry = agent_totals.entry(key).or_insert((name, 0, 0, 0, 0));
+            entry.1 += record.total_tokens();
+            entry.2 += record.billed_input_tokens();
+            entry.3 += record.output_tokens;
+            entry.4 += 1;
         }
 
         // Convert to breakdown
         let mut breakdown: Vec<TokenBreakdown> = agent_totals
             .into_iter()
-            .map(|(name, (total, input, output, count))| {
+            .map(|(_, (name, total, input, output, count))| {
                 let percentage = if total_tokens > 0 {
                     (total as f64 / total_tokens as f64) * 100.0
                 } else {
@@ -1280,6 +1285,38 @@ mod tests {
 
         let result = TokenQuery::new(&store).by_period(TimePeriod::Yesterday);
         assert_eq!(result.total_tokens, 60);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_breakdown_merges_case_variant_agents() {
+        // The genai store merges agent-name case variants everywhere (COLLATE
+        // NOCASE filters, list_agent_names, the lowercased latency grouping
+        // key); the token breakdown is the one agent-attributed view still
+        // grouping on the raw spelling, so "Agent-A" and "agent-a" showed as
+        // two rows and split the same agent's tokens across both.
+        let path = unique_db_path("breakdown_case_variants");
+        let store = TokenStore::new(&path).unwrap();
+        let (start, _) = TimePeriod::Today.time_range();
+        for (i, agent) in ["Agent-A", "agent-a"].iter().enumerate() {
+            let ts = start + (i as u64) * 1_000_000_000;
+            store.insert(&make_record(ts, Some(agent), 40, 20)).unwrap();
+        }
+
+        let result = TokenQuery::new(&store).by_period_with_breakdown(TimePeriod::Today);
+        assert_eq!(
+            result.breakdown.len(),
+            1,
+            "case variants must merge into one breakdown row, got {:?}",
+            result
+                .breakdown
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(result.breakdown[0].total_tokens, 120);
+        assert_eq!(result.breakdown[0].request_count, 2);
+        assert_eq!(result.breakdown[0].percentage, 100.0);
         cleanup_db(&path);
     }
 
