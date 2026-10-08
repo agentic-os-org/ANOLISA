@@ -1710,6 +1710,8 @@ fn eval_vfs_cache_pressure(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
     }
     let is_db_or_cache = info.has_process("postgres")
         || info.has_process("mysqld")
+        || info.has_process("mariadbd")
+        || info.has_process("mongod")
         || info.has_process("clickhouse")
         || info.has_process("redis-server")
         || info.has_process("memcached")
@@ -8217,6 +8219,34 @@ mod tests {
         assert!(
             recs.iter().all(|r| !r.param.contains("hugepage")),
             "a streaming workload is not latency-sensitive"
+        );
+    }
+
+    #[test]
+    fn test_vfs_cache_pressure_with_mongod_and_mariadbd() {
+        // The vfs_cache_pressure gate forgot mongod (in every sibling db list)
+        // and mariadbd (added to the sibling gates by 73bdd5835/51913a79b but
+        // missed here). Both must trigger the recommendation; a build job must not.
+        for name in ["mongod", "mariadbd"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let recs = evaluate(&info).unwrap().recommendations;
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "vm.vfs_cache_pressure")
+                .unwrap_or_else(|| panic!("{name} must get the vfs_cache_pressure recommendation"));
+            assert_eq!(rec.recommended_value, "50");
+        }
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "make".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter().all(|r| r.param != "vm.vfs_cache_pressure"),
+            "a build job is not a database or cache"
         );
     }
 
