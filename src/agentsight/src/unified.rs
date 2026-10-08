@@ -1821,7 +1821,7 @@ impl AgentSight {
         let drained = self.aggregator.drain_connections_for_pid(pid);
 
         // 2. Persist drained connections as pending calls
-        for (conn_id, state) in &drained {
+        for (conn_id, state, _continuation) in &drained {
             let Some(request) = state.pending_request() else {
                 continue;
             };
@@ -1943,7 +1943,7 @@ impl AgentSight {
             Option<String>,
         )> = Vec::new();
 
-        for (conn_id, state) in drained {
+        for (conn_id, state, continuation_bytes) in drained {
             let Some(request) = state.pending_request().cloned() else {
                 continue;
             };
@@ -2029,6 +2029,29 @@ impl AgentSight {
                         if let Some(mut enrichment) =
                             GenAIBuilder::extract_sse_enrichment(&sse_events)
                         {
+                            // The process died mid-read, so an event split
+                            // across TLS records was parsed with a truncated
+                            // `data:` field and its tail lives only in the
+                            // continuation buffer the drain handed over — the
+                            // same bytes `extract_token_from_sse` re-parses on
+                            // the normal completion path. Reassemble them
+                            // first: the terminal usage event a dying process
+                            // had already received beats every estimate below.
+                            if enrichment.input_tokens.is_none()
+                                || enrichment.output_tokens.is_none()
+                            {
+                                if let Some((input, output)) = continuation_bytes
+                                    .as_deref()
+                                    .and_then(drained_continuation_usage)
+                                {
+                                    if enrichment.input_tokens.is_none() {
+                                        enrichment.input_tokens = Some(input);
+                                    }
+                                    if enrichment.output_tokens.is_none() {
+                                        enrichment.output_tokens = Some(output);
+                                    }
+                                }
+                            }
                             // If SSE didn't carry usage data (stream was interrupted before
                             // the final chunk), compute tokens via the real tokenizer.
                             if enrichment.input_tokens.is_none()
@@ -3001,6 +3024,29 @@ pub(crate) fn drain_fallback_tokenizer(
             None
         }
     }
+}
+
+/// Reassemble a drained stream's terminal usage from its SSE continuation
+/// buffer.
+///
+/// The dead-PID drain ends an uncompressed stream mid-read: an event that
+/// spans TLS records was parsed with a truncated `data:` field, and its tail
+/// was buffered as raw continuation bytes — exactly what
+/// `Analyzer::extract_token_from_sse` re-parses (via the legacy SSE parser)
+/// when a stream completes normally. Reading them here recovers the terminal
+/// usage event a dying process had already received, so the persisted pending
+/// row keeps the provider's own numbers instead of a tokenizer estimate for
+/// the input side and nothing at all for the output side.
+fn drained_continuation_usage(bytes: &[u8]) -> Option<(i64, i64)> {
+    let text = String::from_utf8_lossy(bytes);
+    let reassembled = crate::parser::sse::SSEParser::parse_stream(&text);
+    let token_parser = crate::analyzer::token::TokenParser::new();
+    reassembled
+        .events
+        .iter()
+        .filter_map(|event| token_parser.parse_data(&event.data))
+        .fold(None, crate::analyzer::token::merge_usage)
+        .map(|usage| (usage.input_tokens as i64, usage.output_tokens as i64))
 }
 
 /// Count the input tokens of a drained request from its captured body.
