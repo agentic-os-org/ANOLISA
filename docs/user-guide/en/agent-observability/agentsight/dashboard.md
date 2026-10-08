@@ -25,8 +25,16 @@ Token authentication is on by default.
 
 | Access path | What is required |
 |---|---|
-| `http://127.0.0.1:7396` from the same host | Nothing; loopback requests skip authentication |
+| `http://127.0.0.1:7396` (or `localhost`) from the same host | Nothing; loopback requests skip authentication |
 | `http://<host>:7396` from elsewhere | The Dashboard token, as `?token=<TOKEN>` in the URL, as `Authorization: Bearer <TOKEN>`, or typed into the login form |
+
+Loopback access is only a location shortcut for local, non-browser callers and the dashboard's own
+same-origin calls: a browser page loaded from a *different* origin is rejected with `403
+cross_origin_forbidden` before authentication is even considered, and the same gate applies when
+authentication is disabled. A page whose `Origin` and `Host` merely match each other is not trusted
+either — the `Host` must name the loopback endpoint itself, so a DNS-rebound domain or a
+reverse-proxy public name in front of a loopback server does not inherit the loopback shortcut;
+requests arriving that way need the token.
 
 ![Dashboard login screen](../../../../images/agentsight/en/dashboard-login.png)
 
@@ -45,7 +53,10 @@ An invalid-token message means the server rejected the token; check it with the 
 A connection-error message can also mean the server or a reverse proxy returned an HTTP error.
 Check that AgentSight is running and reachable, then retry the login.
 
-To turn authentication off — only sensible on a trusted internal network:
+To turn authentication off — only sensible on a trusted internal network, and only for direct
+loopback use; with authentication disabled, browser calls that arrive through a reverse proxy or
+under a non-loopback `Host` are rejected rather than served, so a token-less public binding no
+longer exposes the data to visited web pages:
 
 ```json
 { "server": { "auth": { "enabled": false } } }

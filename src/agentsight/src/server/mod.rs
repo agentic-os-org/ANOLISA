@@ -1190,8 +1190,13 @@ pub async fn run_server(
     }
 
     let server = match HttpServer::new(move || {
+        // Same-origin only: the dashboard is embedded and served by this very
+        // server, so no legitimate consumer needs a foreign origin — while
+        // `allow_any_origin` let any visited web page read every response
+        // (combined with the loopback bypass, the whole API was
+        // cross-origin-readable without a token).
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin_fn(crate::http_origin::cors_allows_origin)
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
             .allowed_headers(vec!["Content-Type", "Authorization"])
             .max_age(3600);
