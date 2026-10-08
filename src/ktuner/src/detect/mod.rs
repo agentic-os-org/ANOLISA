@@ -2097,6 +2097,34 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Spawn an executable the test itself has just written or copied.
+    ///
+    /// On the CI runners' overlay filesystem the write-side close of that
+    /// fresh file can lag the `exec`-side open, so an immediate single-shot
+    /// spawn fails with `ETXTBSY` under load (#6638). `fs::write` and
+    /// `fs::copy` have both returned by then, so this is an incidental
+    /// timing assumption of the runner, not a property under test — retry
+    /// the spawn for a short bounded window, the same way `wait_for_cmdline`
+    /// retries the argv read.
+    fn spawn_fresh_executable(
+        command: &mut std::process::Command,
+        context: &str,
+    ) -> std::process::Child {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match command.spawn() {
+                Ok(child) => return child,
+                Err(err)
+                    if err.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(err) => panic!("{context}: {err}"),
+            }
+        }
+    }
+
     /// Wait until a freshly spawned child's `/proc/<pid>/cmdline` carries
     /// `needle`.
     ///
@@ -2164,11 +2192,9 @@ mod tests {
         let exporter_path = dir.join("postgres_exporter");
         fs::copy("/bin/sleep", &exporter_path).expect("copy sleep to exporter name");
 
-        let mut exporter = std::process::Command::new(&exporter_path)
-            .arg("30")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn exporter-named process");
+        let mut command = std::process::Command::new(&exporter_path);
+        command.arg("30").stdout(std::process::Stdio::null());
+        let mut exporter = spawn_fresh_executable(&mut command, "spawn exporter-named process");
         let pid = exporter.id().to_string();
         wait_for_cmdline(&pid, b"postgres_exporter");
 
@@ -2199,11 +2225,9 @@ mod tests {
         let client_path = root.join("clickhouse-client");
         fs::copy("/bin/sleep", &client_path).expect("copy sleep to the client's name");
 
-        let mut client = std::process::Command::new(&client_path)
-            .arg("30")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn a client-named process");
+        let mut command = std::process::Command::new(&client_path);
+        command.arg("30").stdout(std::process::Stdio::null());
+        let mut client = spawn_fresh_executable(&mut command, "spawn a client-named process");
         let pid = client.id().to_string();
         wait_for_cmdline(&pid, b"clickhouse-client");
 
@@ -2244,10 +2268,9 @@ mod tests {
         fs::write(&script, b"#!/bin/sh\nsleep 30\n").expect("write tool script");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("make it runnable");
 
-        let mut tool = std::process::Command::new(&script)
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn a tool-named script");
+        let mut command = std::process::Command::new(&script);
+        command.stdout(std::process::Stdio::null());
+        let mut tool = spawn_fresh_executable(&mut command, "spawn a tool-named script");
         let pid = tool.id().to_string();
         wait_for_cmdline(&pid, b"kafka-topics.sh");
 
@@ -2267,6 +2290,44 @@ mod tests {
             !listed_as_kafka,
             "kafka-topics.sh is a client tool, not the broker"
         );
+    }
+
+    /// A write handle still open on a fresh script fails an immediate
+    /// single-shot spawn with ETXTBSY — what the runners' lagging write-side
+    /// close looks like to exec (#6638) — so the spawn helper must retry
+    /// past it and win once the holder drops the file.
+    #[test]
+    fn spawn_retries_while_the_script_is_text_busy() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ktuner_txtbusy_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).expect("create temp dir");
+        let script = root.join("busy-tool.sh");
+        fs::write(&script, b"#!/bin/sh\nsleep 30\n").expect("write tool script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("make it runnable");
+
+        let mut command = std::process::Command::new(&script);
+        command.stdout(std::process::Stdio::null());
+
+        let (opened, busy) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _held = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&script)
+                .expect("hold the script open for writing");
+            opened.send(()).expect("signal the handle is held");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+        busy.recv().expect("wait for the write handle");
+
+        let mut tool = spawn_fresh_executable(&mut command, "spawn a busy script");
+
+        let pid = tool.id().to_string();
+        wait_for_cmdline(&pid, b"busy-tool.sh");
+        holder.join().expect("holder thread");
+        tool.kill().ok();
+        tool.wait().ok();
+        fs::remove_dir_all(&root).ok();
     }
 
     /// The program names the tool filter must catch and the daemon names it
@@ -2450,10 +2511,11 @@ mod tests {
         let exporter_path = dir.join("postgres_exporter");
         fs::copy("/bin/sleep", &exporter_path).expect("copy sleep to exporter name");
 
-        let mut exporter = std::process::Command::new(&exporter_path)
-            .arg("30")
-            .spawn()
-            .expect("spawn exporter-named process");
+        let mut exporter = {
+            let mut command = std::process::Command::new(&exporter_path);
+            command.arg("30");
+            spawn_fresh_executable(&mut command, "spawn exporter-named process")
+        };
         let mut service = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
