@@ -288,6 +288,122 @@ fn classify_warning_stays_accurate_in_dry_run() {
     );
 }
 
+/// The dry-run listing prints store skill names — adopted verbatim from
+/// directory names — on stdout, where the same line-fabrication and
+/// terminal-command forgery the load-error diagnostics escape applies.
+#[test]
+fn classify_dry_run_listing_escapes_control_characters_in_skill_names() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+    // Both hostile names carry a loadable SKILL.md, so they reach the
+    // dry-run listing (the store adopts the directory name verbatim).
+    for hostile in ["evil\n  Injected: trusted line", "ansi\u{1b}]777;id\u{7}"] {
+        create_skill_dir(source.path(), hostile, VALID_SKILL);
+    }
+
+    let out = Command::new(bin_path())
+        .args(["classify", source.path().to_str().unwrap(), "--dry-run"])
+        .output()
+        .expect("invoke skillfs classify --dry-run");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "dry-run must exit 0, stdout={stdout} stderr={stderr}"
+    );
+
+    // No attacker-controlled control byte reaches stdout raw...
+    assert!(
+        !stdout.contains("evil\n"),
+        "a newline inside a skill name must be escaped, not printed raw: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("ansi\u{1b}"),
+        "the OSC sequence inside a skill name must be escaped, not printed raw: {stdout:?}"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("Injected:")),
+        "the hostile name must not fabricate new listing lines: {stdout:?}"
+    );
+    // ...and the names are still reported, in escaped form.
+    assert!(
+        stdout.contains("evil\\n"),
+        "the newline-named skill must be listed with an escaped newline: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\\x1b]777;id\\x07"),
+        "the OSC-named skill must be listed with an escaped ESC: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("good-skill"),
+        "healthy skill names must stay readable: {stdout:?}"
+    );
+}
+
+/// The existing-config report echoes view names, descriptions and skill
+/// entries straight out of `skillfs-views.toml`; those fields are
+/// tree-controlled content and get the same escaping on stdout.
+#[test]
+fn classify_existing_views_report_escapes_control_characters() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+    // TOML string escapes so the parsed fields carry real control bytes: a
+    // newline in a skill entry and an OSC 777 sequence in the view name.
+    let hostile_views = "[[view]]\nname = \"major\\u001b]777;id\\u0007\"\ndefault = true\ndescription = \"desc\\u001b[2J\"\nskills = [\"good-skill\", \"evil\\nline\"]\n";
+    let views_path = views_path(source.path());
+    std::fs::write(&views_path, hostile_views).expect("seed hostile views config");
+
+    let out = Command::new(bin_path())
+        .args(["classify", source.path().to_str().unwrap()])
+        .output()
+        .expect("invoke skillfs classify");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "classify on an existing config must exit 0, stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("skillfs-views.toml already exists"),
+        "existing config must be reported, stdout={stdout}"
+    );
+
+    assert!(
+        !stdout.contains("evil\nline"),
+        "a newline inside a views entry must be escaped, not printed raw: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("desc\u{1b}"),
+        "an ESC inside a view description must be escaped, not printed raw: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("major\u{1b}"),
+        "an ESC inside a view name must be escaped, not printed raw: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("evil\\nline"),
+        "the newline entry must be reported with an escaped newline: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("major\\x1b]777;id\\x07"),
+        "the view name must be reported with an escaped ESC: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("desc\\x1b[2J"),
+        "the description must be reported with an escaped ESC: {stdout:?}"
+    );
+    // The existing file itself is untouched.
+    let after = std::fs::read_to_string(&views_path).expect("views config must survive");
+    assert_eq!(
+        after, hostile_views,
+        "existing config must not be rewritten"
+    );
+}
+
 fn views_path(source: &Path) -> std::path::PathBuf {
     source.join("skillfs-views.toml")
 }

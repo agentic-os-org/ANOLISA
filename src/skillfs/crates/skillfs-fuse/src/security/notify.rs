@@ -518,7 +518,16 @@ impl NotifyClient for UnixSocketNotifyClient {
                         "notify acknowledgement ended before any response",
                     )));
                 }
-                Ok(n) if n as u64 > MAX_RESPONSE_BYTES => {
+                Ok(n)
+                    if {
+                        // read_line counts the trailing newline; the limit is on
+                        // the response body, so exactly MAX bytes + '\n' (n =
+                        // MAX+1) is legal. take() already caps the read at
+                        // MAX+1, so only a body that is itself too long remains.
+                        let body_len = n - usize::from(line.ends_with('\n'));
+                        body_len as u64 > MAX_RESPONSE_BYTES
+                    } =>
+                {
                     return Err(NotifyError::InvalidResponse {
                         body: format!("response exceeds {MAX_RESPONSE_BYTES} byte limit"),
                     });
@@ -4582,6 +4591,49 @@ mod tests {
         assert!(
             matches!(result, Err(NotifyError::InvalidResponse { .. })),
             "oversized response must be rejected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unix_socket_client_accepts_response_at_the_byte_limit() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut _req = String::new();
+            reader.read_line(&mut _req).unwrap();
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(&stream);
+            // Body of exactly MAX_RESPONSE_BYTES bytes (JSON plus padding)
+            // followed by the framing newline: legal, the limit is on the body.
+            let mut body =
+                String::from(r#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#);
+            body.push_str(&" ".repeat(MAX_RESPONSE_BYTES as usize - body.len()));
+            assert_eq!(body.len() as u64, MAX_RESPONSE_BYTES);
+            writer.write_all(body.as_bytes()).unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+        });
+
+        let result = client.send(&event);
+        handle.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "exactly-limit response must be accepted: {result:?}"
         );
     }
 

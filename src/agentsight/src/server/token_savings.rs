@@ -39,9 +39,10 @@ pub struct SavingsSummary {
     pub baseline_tokens: i64,
     pub total_saved_tokens: i64,
     pub total_compounded_saved: i64,
-    /// Fraction of tokens saved: `total_saved_tokens / total_tokens`, in [0.0, 1.0].
+    /// Fraction of tokens saved: `total_saved_tokens / total_tokens`, clamped
+    /// to [0.0, 1.0].
     pub savings_rate: f64,
-    /// Fraction saved including the compounding effect, in [0.0, 1.0].
+    /// Fraction saved including the compounding effect, clamped to [0.0, 1.0].
     pub compounded_savings_rate: f64,
     pub total_tool_saved: i64,
     pub total_mcp_saved: i64,
@@ -92,9 +93,10 @@ pub struct SessionSavingsDto {
     pub baseline_tokens: i64,
     pub saved_tokens: i64,
     pub compounded_saved: i64,
-    /// Fraction of tokens saved: `saved_tokens / total_tokens`, in [0.0, 1.0].
+    /// Fraction of tokens saved: `saved_tokens / total_tokens`, clamped to
+    /// [0.0, 1.0].
     pub savings_rate: f64,
-    /// Fraction saved including the compounding effect, in [0.0, 1.0].
+    /// Fraction saved including the compounding effect, clamped to [0.0, 1.0].
     pub compounded_savings_rate: f64,
     pub request_count: i64,
     pub tool_saved: i64,
@@ -127,9 +129,29 @@ pub struct SessionSavingsDetail {
     pub total_actual_tokens: i64,
     pub total_compounded_saved: i64,
     pub total_original_tokens: i64,
-    /// Fraction of tokens saved: `total_compounded_saved / total_actual_tokens`, in [0.0, 1.0].
+    /// Fraction of tokens saved: `total_compounded_saved / total_actual_tokens`,
+    /// clamped to [0.0, 1.0].
     pub savings_rate: f64,
     pub items: Vec<OptimizationItemDto>,
+}
+
+// ─── Rate helpers ────────────────────────────────────────────────────────────
+
+/// Fraction of tokens saved, clamped to the documented `[0, 1]` range.
+///
+/// The ratio is `saved / total`, and a hard-compressed tool output can save
+/// more than the run it belongs to ever billed: tokenless shortens the output
+/// before it enters the prompt, so the saving is measured against a baseline
+/// the model never paid for. The field documents a fraction, so an
+/// out-of-range ratio is clamped here — the same treatment the negative
+/// saving gets where it is computed, and the same range the sibling
+/// `compression_ratio` already enforces.
+fn savings_fraction(saved: i64, total: i64) -> f64 {
+    if total > 0 {
+        (saved as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 // ─── Mapping helpers ─────────────────────────────────────────────────────────
@@ -647,16 +669,8 @@ pub async fn get_token_savings(
         }
 
         // FIX(#1): use compounded/total_tokens for both list and detail pages
-        let savings_rate = if total_tokens > 0 {
-            session_saved as f64 / total_tokens as f64
-        } else {
-            0.0
-        };
-        let compounded_savings_rate = if total_tokens > 0 {
-            session_compounded_saved as f64 / total_tokens as f64
-        } else {
-            0.0
-        };
+        let savings_rate = savings_fraction(session_saved, total_tokens);
+        let compounded_savings_rate = savings_fraction(session_compounded_saved, total_tokens);
 
         grand_input += session.total_input_tokens;
         grand_output += session.total_output_tokens;
@@ -686,16 +700,8 @@ pub async fn get_token_savings(
     }
 
     let grand_total = grand_input + grand_output;
-    let grand_rate = if grand_total > 0 {
-        grand_saved as f64 / grand_total as f64
-    } else {
-        0.0
-    };
-    let grand_compounded_rate = if grand_total > 0 {
-        grand_compounded_saved as f64 / grand_total as f64
-    } else {
-        0.0
-    };
+    let grand_rate = savings_fraction(grand_saved, grand_total);
+    let grand_compounded_rate = savings_fraction(grand_compounded_saved, grand_total);
 
     // FIX(#2): strategy = operation key (for frontend color lookup),
     //           label = Chinese display name
@@ -862,11 +868,7 @@ pub async fn get_session_savings(
     }
 
     // FIX(#1): use compounded/total_tokens — consistent with get_token_savings
-    let savings_rate = if total_tokens > 0 {
-        total_compounded_saved as f64 / total_tokens as f64
-    } else {
-        0.0
-    };
+    let savings_rate = savings_fraction(total_compounded_saved, total_tokens);
 
     HttpResponse::Ok().json(SessionSavingsDetail {
         session_id,
@@ -987,6 +989,17 @@ mod tests {
     }
 
     // ─── Unit tests for mapping functions ─────────────────────────────────
+
+    #[test]
+    fn savings_fraction_guards_zero_and_bounds_both_ends() {
+        // No total to divide by: the rate is zero, never a NaN/inf.
+        assert_eq!(savings_fraction(100, 0), 0.0);
+        // In range: the ratio is reported as-is.
+        assert!((savings_fraction(2200, 2700) - 2200.0 / 2700.0).abs() < 1e-9);
+        // Out of range on either side is clamped to the documented fraction.
+        assert_eq!(savings_fraction(9000, 150), 1.0);
+        assert_eq!(savings_fraction(-5, 150), 0.0);
+    }
 
     #[test]
     fn test_map_operation_to_category() {
@@ -1312,6 +1325,136 @@ mod tests {
         );
 
         // Restore HOME
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The rate fields document "a fraction in [0.0, 1.0]", but the ratio is
+    /// `saved / total` against the COMPRESSED run's token total: tokenless
+    /// shortens a tool output before it ever enters the prompt, so the saved
+    /// amount is measured against a baseline that never billed the model and
+    /// can exceed the run's own total. The rate then left the documented
+    /// range (a small session with one hard-compressed tool output reported
+    /// 60x), and every consumer that treats the field as a percentage — the
+    /// dashboard's savings ring included — read a number that cannot exist.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn savings_rates_stay_within_the_documented_unit_interval() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_savings_ratio_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // One small call: 100 input + 50 output tokens.
+        let db_path = tmp.join("genai_events.db");
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &db_path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+             VALUES ('llm_call', 'sess-big-saving', 'call-1', 'test-agent', 'gpt-4', 100, 50, 100000000, '{}', '[\"tc-big\"]')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // One tool output shortened from 10_000 to 1_000 tokens: 9_000 saved
+        // against a run that billed 150.
+        let stats_dir = tmp.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        let stats = rusqlite::Connection::open(stats_dir.join("stats.db")).unwrap();
+        stats
+            .execute_batch(
+                "CREATE TABLE stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    tool_use_id TEXT,
+                    before_tokens INTEGER,
+                    after_tokens INTEGER,
+                    before_text TEXT,
+                    after_text TEXT,
+                    operation TEXT
+                );",
+            )
+            .unwrap();
+        stats
+            .execute(
+                "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+                 VALUES ('sess-big-saving', 'tc-big', 10000, 1000, 'long text', 'short', 'compress-response')",
+                [],
+            )
+            .unwrap();
+        drop(stats);
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings)
+                .service(get_session_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+        assert!(
+            body["summary"]["total_saved_tokens"].as_i64().unwrap_or(0) > 150,
+            "fixture must save more than the run billed: {body}"
+        );
+
+        let summary = &body["summary"];
+        for field in ["savings_rate", "compounded_savings_rate"] {
+            let rate = summary[field]
+                .as_f64()
+                .expect("summary rate must be a number");
+            assert!(
+                (0.0..=1.0).contains(&rate),
+                "summary.{field} is documented as a fraction in [0, 1], got {rate}"
+            );
+        }
+        let session = &body["sessions"][0];
+        for field in ["savings_rate", "compounded_savings_rate"] {
+            let rate = session[field]
+                .as_f64()
+                .expect("session rate must be a number");
+            assert!(
+                (0.0..=1.0).contains(&rate),
+                "session.{field} is documented as a fraction in [0, 1], got {rate}"
+            );
+        }
+
+        // The session page documents the same range on the same numbers.
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings/session/sess-big-saving")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let detail: serde_json::Value = actix_test::read_body_json(resp).await;
+        let rate = detail["savings_rate"]
+            .as_f64()
+            .expect("detail rate must be a number");
+        assert!(
+            (0.0..=1.0).contains(&rate),
+            "detail.savings_rate is documented as a fraction in [0, 1], got {rate}"
+        );
+
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },

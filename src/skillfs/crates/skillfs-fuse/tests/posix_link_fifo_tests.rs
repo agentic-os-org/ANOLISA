@@ -319,6 +319,322 @@ fn test_same_skill_hardlink_allowed() {
     );
 }
 
+#[test]
+fn test_hardlink_alias_rename_is_a_noop() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+    });
+    write_passthrough(&fx, "alpha", "src.txt", b"shared");
+
+    let src = fx.skill_path("alpha").join("src.txt");
+    let dst = fx.skill_path("alpha").join("link.txt");
+    std::fs::hard_link(&src, &dst).expect("hardlink same-skill regular file");
+
+    // Both names get distinct per-path FUSE inodes (SkillFS maps paths to
+    // inodes even for hard links); pin them before the rename.
+    let src_ino = std::fs::symlink_metadata(&src).expect("lstat src").ino();
+    let dst_ino = std::fs::symlink_metadata(&dst).expect("lstat dst").ino();
+    assert_ne!(src_ino, dst_ino, "per-path FUSE inodes must differ");
+
+    // POSIX: rename(a, b) where a and b are links to the same object is a
+    // successful no-op — both directory entries survive. The kernel's VFS
+    // does not short-circuit it here (the two names carry distinct
+    // per-path FUSE inodes), so the rename reaches the daemon, whose
+    // same-object recognition (`backing_object_identity` in mutate.rs)
+    // must keep the inode map untouched.
+    std::fs::rename(&src, &dst).expect("rename onto same-object hardlink");
+
+    // The kernel moved `src`'s dentry onto `dst`'s name and keeps its
+    // cached attributes (1s validity) until revalidation; wait that out
+    // so the re-stats below answer from fresh LOOKUPs — i.e. from the
+    // daemon's inode map, which is the contract under test.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    for path in [&src, &dst] {
+        assert!(
+            std::fs::symlink_metadata(path).is_ok(),
+            "both names must survive the same-object rename: {}",
+            path.display()
+        );
+    }
+    // `src`'s mapping was untouched by the no-op, so a fresh LOOKUP
+    // returns the same FUSE inode. (`dst`'s userspace inode number
+    // legitimately changes: the kernel replaced the target dentry,
+    // FORGOT the old per-path inode, and the next LOOKUP allocates a
+    // fresh one. What must NOT happen is `dst` adopting `src`'s
+    // identity — exactly what the pre-fix inode surgery produced by
+    // re-pointing the moved subtree onto the replaced name.)
+    assert_eq!(
+        std::fs::symlink_metadata(&src)
+            .expect("lstat src after")
+            .ino(),
+        src_ino,
+        "src must keep its inode across a same-object rename"
+    );
+    assert_ne!(
+        std::fs::symlink_metadata(&dst)
+            .expect("lstat dst after")
+            .ino(),
+        src_ino,
+        "dst must not adopt src's inode across a same-object rename"
+    );
+    // And both names keep serving the shared content, including after one
+    // link is removed.
+    assert_eq!(std::fs::read(&src).expect("read src"), b"shared");
+    assert_eq!(std::fs::read(&dst).expect("read dst"), b"shared");
+
+    // The same no-op in the other direction. Pin dst's CURRENT inode
+    // first: after the first rename it is a freshly allocated per-path
+    // inode (the original one was FORGOT when the kernel replaced the
+    // target dentry), and it is now the SOURCE side of the reverse
+    // rename, whose mapping the no-op must leave untouched.
+    let dst_ino_now = std::fs::symlink_metadata(&dst)
+        .expect("lstat dst before reverse")
+        .ino();
+    assert_ne!(dst_ino_now, src_ino);
+    std::fs::rename(&dst, &src).expect("rename back onto same object");
+    // Wait out the moved dentry's attribute validity again so the
+    // re-stats answer from fresh LOOKUPs.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(
+        std::fs::symlink_metadata(&dst)
+            .expect("lstat dst after back")
+            .ino(),
+        dst_ino_now,
+        "dst must keep its inode across the reverse same-object rename"
+    );
+    assert_ne!(
+        std::fs::symlink_metadata(&src)
+            .expect("lstat src after back")
+            .ino(),
+        dst_ino_now,
+        "src must not adopt dst's inode across the reverse same-object rename"
+    );
+
+    std::fs::remove_file(&src).expect("unlink src");
+    assert_eq!(
+        std::fs::read(&dst).expect("read dst after unlink"),
+        b"shared"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Same-object rename whose physical paths exceed PATH_MAX
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Open `root` as a directory and descend `components` one `openat` at a
+/// time. Passing a single component per syscall is how the kernel itself
+/// traverses trees whose total path length exceeds PATH_MAX.
+#[cfg(target_os = "linux")]
+fn openat_walk_dir(root: &Path, components: &[&std::ffi::OsStr]) -> std::fs::File {
+    use std::os::unix::io::FromRawFd;
+
+    let root_c = CString::new(root.as_os_str().as_bytes()).expect("root cstring");
+    let mut fd = unsafe {
+        libc::open(
+            root_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    assert!(fd >= 0, "open {}", root.display());
+    for comp in components {
+        let c = CString::new(comp.as_bytes()).expect("component cstring");
+        let next = unsafe {
+            libc::openat(
+                fd,
+                c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(next >= 0, "openat component of length {}", comp.len());
+        unsafe { libc::close(fd) };
+        fd = next;
+    }
+    unsafe { std::fs::File::from_raw_fd(fd) }
+}
+
+/// `fstatat(dir, leaf, AT_SYMLINK_NOFOLLOW)` — stat one leaf through an
+/// already-open directory fd.
+#[cfg(target_os = "linux")]
+fn fstatat_through(dir: &std::fs::File, leaf: &str) -> libc::stat {
+    use std::os::unix::io::AsRawFd;
+
+    let c = CString::new(leaf).expect("leaf cstring");
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    assert_eq!(rc, 0, "fstatat leaf of length {}", leaf.len());
+    st
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_hardlink_alias_rename_beyond_path_max_is_a_noop() {
+    use std::io::{Read, Write};
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+    });
+
+    // Build a deep chain inside the physical skill dir whose deepest
+    // directory stays below PATH_MAX (so every parent remains openable)
+    // while the leaf names push the absolute file paths past it — the
+    // shape where plain lstat and the absolute-path rename both fail
+    // with ENAMETOOLONG but the dirfd rename succeeds.
+    let mut deep = fx.source_skill_path("alpha");
+    let mut chain: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        let component = "d".repeat(200);
+        let next = deep.join(&component);
+        // Descend as deep as the directory path itself allows; the
+        // ~240-char leaf names then push the file paths past PATH_MAX.
+        if next.as_os_str().len() >= libc::PATH_MAX as usize {
+            break;
+        }
+        std::fs::create_dir(&next).expect("deep mkdir");
+        chain.push(component.into());
+        deep = next;
+    }
+    let leaf_a = "s".repeat(240);
+    let leaf_b = "l".repeat(240);
+    assert!(
+        deep.join(&leaf_a).as_os_str().len() >= libc::PATH_MAX as usize,
+        "the physical leaf paths must exceed PATH_MAX"
+    );
+    assert!(
+        deep.as_os_str().len() < libc::PATH_MAX as usize,
+        "the deepest physical directory must stay openable"
+    );
+
+    // Create the file and its hard-link alias on the source side through
+    // the parent dir fd — the absolute paths cannot be used at this depth.
+    let src_dir = openat_walk_dir(
+        &fx.source_skill_path("alpha"),
+        &chain.iter().map(|c| c.as_os_str()).collect::<Vec<_>>(),
+    );
+    {
+        let ca = CString::new(leaf_a.as_bytes()).expect("leaf a cstring");
+        let fd = unsafe {
+            libc::openat(
+                src_dir.as_raw_fd(),
+                ca.as_ptr(),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        assert!(fd >= 0, "create leaf a via dirfd");
+        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+        f.write_all(b"shared").expect("write leaf a");
+    }
+    {
+        let ca = CString::new(leaf_a.as_bytes()).expect("leaf a cstring");
+        let cb = CString::new(leaf_b.as_bytes()).expect("leaf b cstring");
+        let rc = unsafe {
+            libc::linkat(
+                src_dir.as_raw_fd(),
+                ca.as_ptr(),
+                src_dir.as_raw_fd(),
+                cb.as_ptr(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "linkat through the dirfd must succeed");
+    }
+
+    // Walk the same chain through the MOUNT, one component per openat;
+    // each step is a FUSE lookup, so the deepest lookups exercise the
+    // daemon's own long-path fallback.
+    let mut mount_components: Vec<std::ffi::OsString> = vec!["skills".into(), "alpha".into()];
+    mount_components.extend(chain.iter().cloned());
+    let mount_dir = openat_walk_dir(
+        fx.mountpoint(),
+        &mount_components
+            .iter()
+            .map(|c| c.as_os_str())
+            .collect::<Vec<_>>(),
+    );
+
+    // Pin the per-path FUSE inodes of both aliases.
+    let ino_a = fstatat_through(&mount_dir, &leaf_a).st_ino;
+    let ino_b = fstatat_through(&mount_dir, &leaf_b).st_ino;
+    assert_ne!(ino_a, ino_b, "per-path FUSE inodes must differ");
+
+    // rename(a, b) through the mount. The kernel forwards it (distinct
+    // per-path FUSE inodes, so no VFS same-inode short-circuit), the
+    // daemon's physical paths exceed PATH_MAX, and the physical rename
+    // succeeds through its dirfd fallback as a POSIX no-op. The identity
+    // probe must recognize the same-object pair through its own dirfd
+    // fallback, or the inode surgery evicts the still-live alias.
+    {
+        let ca = CString::new(leaf_a.as_bytes()).expect("leaf a cstring");
+        let cb = CString::new(leaf_b.as_bytes()).expect("leaf b cstring");
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                mount_dir.as_raw_fd(),
+                ca.as_ptr(),
+                mount_dir.as_raw_fd(),
+                cb.as_ptr(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "renameat2 through the mount must succeed");
+    }
+
+    // The kernel moved `leaf_a`'s dentry onto `leaf_b`'s name and keeps
+    // its cached attributes (1s validity) until revalidation; wait that
+    // out so the re-stats below answer from fresh LOOKUPs — i.e. from
+    // the daemon's inode map, which is the contract under test.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    // Both aliases survive with stable identities: `src`'s mapping was
+    // untouched by the no-op (a fresh LOOKUP returns the same FUSE
+    // inode), and `dst` never adopts `src`'s identity — the pre-fix
+    // inode surgery re-pointed the moved subtree onto the replaced name,
+    // which is exactly what must not happen. (`dst`'s userspace inode
+    // number itself may change: the kernel replaced the target dentry
+    // and FORGOT the old per-path inode, so the next LOOKUP can allocate
+    // a fresh one.)
+    assert_eq!(
+        fstatat_through(&mount_dir, &leaf_a).st_ino,
+        ino_a,
+        "src must keep its inode across a same-object rename beyond PATH_MAX"
+    );
+    assert_ne!(
+        fstatat_through(&mount_dir, &leaf_b).st_ino,
+        ino_a,
+        "dst must not adopt src's inode across a same-object rename beyond PATH_MAX"
+    );
+
+    // And the shared content is still served through the mount.
+    {
+        let cb = CString::new(leaf_b.as_bytes()).expect("leaf b cstring");
+        let fd = unsafe {
+            libc::openat(
+                mount_dir.as_raw_fd(),
+                cb.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(fd >= 0, "open leaf b through the mount");
+        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).expect("read leaf b");
+        assert_eq!(buf, b"shared");
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Hardlink — rejected
 // ─────────────────────────────────────────────────────────────────────────────
@@ -604,5 +920,78 @@ fn test_fifo_under_skill_discover_rejected() {
     assert!(
         err == libc::EROFS || err == libc::EACCES,
         "skill-discover mkfifo must be denied (EROFS or EACCES), got {err}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Symbolic-link metadata (no-follow setattr)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_lutimes_on_symlink_does_not_touch_target() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+    });
+    let skill = fx.skill_path("alpha");
+    std::fs::create_dir(skill.join("sub")).expect("mkdir sub");
+    let target = skill.join("sub").join("target.txt");
+    std::fs::write(&target, b"hello").expect("seed target");
+    let link = skill.join("sub").join("link");
+    std::os::unix::fs::symlink("target.txt", &link).expect("symlink same-skill relative");
+
+    // Assert on the backing files, not the mount: FUSE caches attributes for
+    // a second, so a mount-side stat can read a stale value inside the window.
+    let backing = fx.source_skill_path("alpha").join("sub");
+    let backing_target = backing.join("target.txt");
+    let backing_link = backing.join("link");
+    let target_before = std::fs::metadata(&backing_target).expect("stat backing target");
+
+    // A no-follow timestamp update on the link inode must change the LINK's
+    // mtime only: the daemon used utimensat(..., 0), which followed the link
+    // and stamped the target instead, then failed the request with EIO.
+    let c_link = CString::new(link.as_os_str().as_bytes()).expect("CString");
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: 1_000_000,
+            tv_nsec: 0,
+        },
+    ];
+    let rc = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c_link.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "lutimes on the link must succeed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let link_after = std::fs::symlink_metadata(&backing_link).expect("lstat backing link");
+    assert_eq!(
+        link_after.mtime(),
+        1_000_000,
+        "the link's own mtime must be updated"
+    );
+    let target_after = std::fs::metadata(&backing_target).expect("stat backing target");
+    assert_eq!(
+        target_after.mtime(),
+        target_before.mtime(),
+        "the symlink target's mtime must be untouched"
+    );
+    assert_eq!(
+        target_after.mtime_nsec(),
+        target_before.mtime_nsec(),
+        "the symlink target's mtime nanoseconds must be untouched"
     );
 }

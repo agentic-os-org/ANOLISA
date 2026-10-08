@@ -714,18 +714,16 @@ impl ProcTrace {
             .name("proctrace-poll".into())
             .spawn(move || {
                 let timeout = Duration::from_millis(POLL_TIMEOUT_MS);
-                loop {
-                    if stop_flag_inner.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match rb.poll(timeout) {
-                        Ok(_) => {}
-                        Err(e) if e.kind() == libbpf_rs::ErrorKind::Interrupted => break,
-                        Err(e) => {
-                            eprintln!("proctrace poll error: {e:#}");
-                            break;
-                        }
-                    }
+                let outcome = super::drive_poll_loop(timeout, &stop_flag_inner, |timeout| {
+                    rb.poll(timeout)
+                        .map(|_| ())
+                        .map_err(|error| match error.kind() {
+                            libbpf_rs::ErrorKind::Interrupted => super::PollFailure::Interrupted,
+                            _ => super::PollFailure::Fatal(format!("{error:#}")),
+                        })
+                });
+                if let super::PollEnd::Failed(message) = outcome {
+                    eprintln!("proctrace poll error: {message}");
                 }
             })
             .context("failed to spawn poll thread")?;

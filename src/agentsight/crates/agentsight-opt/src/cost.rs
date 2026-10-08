@@ -815,9 +815,16 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
     let checkout = c.contains("git checkout") && !c.contains("git checkout -b");
     let stash =
         c.contains("git stash") && !c.contains("git stash list") && !c.contains("git stash show");
-    ["git reset", "git revert", "git restore", "回退", "撤销"]
-        .iter()
-        .any(|k| c.contains(k))
+    [
+        "git reset",
+        "git revert",
+        "git restore",
+        "git clean",
+        "回退",
+        "撤销",
+    ]
+    .iter()
+    .any(|k| c.contains(k))
         || checkout
         || stash
 }
@@ -827,6 +834,11 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Tools whose target file identifies the artifact a turn produced.
+///
+/// The single write-tool set for the crate: the turn ledger's rework targets
+/// (`write_target`) and the accuracy coverage evidence
+/// (`requirement_check::aggregate_files_touched`) must agree, or edits made with
+/// a name one of them misses vanish from that consumer.
 const WRITE_TOOLS: &[&str] = &[
     "write",
     "edit",
@@ -835,6 +847,8 @@ const WRITE_TOOLS: &[&str] = &[
     "str_replace_editor",
     "create_file",
     "apply_patch",
+    "writefile",
+    "editfile",
 ];
 
 /// Above this turn count the ledger switches to short heads to stay in context.
@@ -979,7 +993,7 @@ pub(crate) fn build_turn_ledger(
                 let backtrack = step
                     .calls()
                     .iter()
-                    .any(|c| is_backtrack_cmd(&c.command_summary(CMD_SIG_CHARS)));
+                    .any(|c| c.command().is_some_and(is_backtrack_cmd));
                 let action_sig = step
                     .calls()
                     .first()
@@ -1153,7 +1167,7 @@ pub(crate) fn extract_waste_candidates_from(
                             .and_then(|id| {
                                 step.calls()
                                     .iter()
-                                    .find(|c| c.tool_call_id == id)
+                                    .find(|c| agentsight_atif::same_call_id(&c.tool_call_id, id))
                                     .map(|c| c.function_name.clone())
                             })
                             .or_else(|| {
@@ -2188,6 +2202,9 @@ mod tests {
         assert!(is_backtrack_cmd("git checkout -- src/lib.rs"));
         assert!(is_backtrack_cmd("git checkout ."));
         assert!(is_backtrack_cmd("git reset --hard HEAD~1"));
+        // `git clean` discards untracked files — a working-tree rewind.
+        assert!(is_backtrack_cmd("git clean -fd"));
+        assert!(is_backtrack_cmd("git clean -n"));
 
         // End to end: the ledger and the detour facts must not count a
         // branch creation as a backtrack.
@@ -2273,5 +2290,68 @@ mod tests {
             "no ledger row may carry the BACKTRACK flag: {:?}",
             set.ledger
         );
+    }
+
+    /// The keyword table is matched against the *command* a call ran, not
+    /// against its argument blob. `command_summary` serializes the whole
+    /// `arguments` object, so arguments that merely *mention* a reversal — a
+    /// `Grep` for the pattern `git stash pop`, an `Edit` whose replacement text
+    /// quotes 回退 — used to flag the turn BACKTRACK and inflate the detour
+    /// facts' 回退 count, while a real reversal truncated past the summary
+    /// window was missed.
+    #[test]
+    fn arguments_mentioning_a_reversal_are_not_a_backtrack() {
+        let build = |name: &str, arguments: &str| {
+            let mut steps = String::from(
+                r#"{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"start"}"#,
+            );
+            steps.push_str(&format!(
+                r#",{{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+                    "tool_calls":[{{"tool_call_id":"c1","function_name":"{name}","arguments":{arguments}}}],
+                    "observation":{{"results":[{{"source_call_id":"c1","content":"done"}}]}}}}"#
+            ));
+            for id in 3..=6 {
+                steps.push_str(&format!(
+                    r#",{{"step_id":{id},"source":"agent","timestamp":"2026-07-02T06:30:0{id}.000Z","message":"working"}}"#
+                ));
+            }
+            extract_waste_candidates(&traj(&format!("[{steps}]"))).unwrap()
+        };
+        let backtracks = |set: &crate::cost::WasteCandidateSet| {
+            (
+                set.ledger.iter().filter(|row| row.backtrack).count(),
+                set.candidates
+                    .iter()
+                    .find(|candidate| candidate.id == "detour")
+                    .map(|candidate| candidate.facts.contains("1 处回退"))
+                    .unwrap_or(false),
+            )
+        };
+
+        // Calls whose *arguments* name a reversal but which ran no command at
+        // all: a search pattern, an edit body, a document path.
+        for (name, arguments) in [
+            ("Grep", r#"{"pattern":"git stash pop","path":"src"}"#),
+            ("Grep", r#"{"pattern":"git reset --hard","glob":"*.md"}"#),
+            (
+                "Edit",
+                r#"{"file_path":"src/a.rs","new_string":"// 回退到旧实现"}"#,
+            ),
+            (
+                "Write",
+                r#"{"file_path":"docs/plan.md","content":"撤销上一次改动"}"#,
+            ),
+            ("Read", r#"{"file_path":"docs/git-revert.md"}"#),
+        ] {
+            let (rows, facts_say_one) = backtracks(&build(name, arguments));
+            assert_eq!(rows, 0, "{name} {arguments} must not flag a ledger row");
+            assert!(!facts_say_one, "{name} {arguments} must not count a 回退");
+        }
+
+        // A real reversal still is one.
+        let (rows, facts_say_one) =
+            backtracks(&build("Bash", r#"{"command":"git reset --hard HEAD~1"}"#));
+        assert_eq!(rows, 1, "a real reversal must still flag its ledger row");
+        assert!(facts_say_one, "a real reversal must still be counted");
     }
 }

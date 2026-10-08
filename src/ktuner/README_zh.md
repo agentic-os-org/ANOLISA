@@ -143,6 +143,7 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ## 安全性
 
 - **代码执行拒绝列表**：`kernel.core_pattern`、`kernel.modprobe`、`kernel.hotplug`、`kernel.poweroff_cmd`、`kernel.modules_disabled`、`kernel.kexec_load_disabled`、`kernel.usermodehelper.*`、`fs.binfmt_misc.*` 在任何写路径（tune/fix/rollback）中都被无条件阻止。匹配基于解析后的文件系统路径而非参数拼写，因此 slash/dot/traversal 变体均会被拦截。
+- **运行时危险参数**：在运行主机上改动不安全的参数（`vm.nr_hugepages`）在同一写入咽喉点被所有调用方拒绝——tune 不将其纳入计划（在 `would_skip` 中标记 `runtime_dangerous`），fix 拒绝并建议持久化，库导入同样无法实时应用。同一参数的 slash/dot 拼写均会被拦截。
 - **并发操作**：tune、fix、库导入和 rollback 从原值读取、写入、记账到持久化共用一把锁。原值在持锁后读取；无法读取账本时阻止新写入。此保护协调 KTuner 操作，不覆盖外部 sysctl 写入者或崩溃恢复。
 - **回滚安全**：部分失败时保留回滚账本；原始值不会丢失。
 - **无自主 root 执行**：ktuner 检查 `euid == 0`，若非 root 则报错退出。cosh 的 sandbox-guard 加上权限提示确保人类在任何 `sudo ktuner tune` 执行前批准操作。

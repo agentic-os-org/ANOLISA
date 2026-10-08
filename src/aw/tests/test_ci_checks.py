@@ -103,6 +103,8 @@ class GateTests(unittest.TestCase):
             "    mode = 'empty' if 'aw-core' in sys.argv else 'valid'\n"
             "if mode == 'executor-empty':\n"
             "    mode = 'empty' if 'aw-exec' in sys.argv else 'valid'\n"
+            "if mode == 'host-empty':\n"
+            "    mode = 'empty' if 'aw-host' in sys.argv else 'valid'\n"
             "if mode.startswith('contract-empty-'):\n"
             "    target = mode.removeprefix('contract-empty-')\n"
             "    mode = 'empty' if target in sys.argv else 'valid'\n"
@@ -114,7 +116,7 @@ class GateTests(unittest.TestCase):
         )
         cargo.chmod(0o755)
         for mode in (
-            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty",
+            "valid", "empty", "ignored", "missing", "core-empty", "executor-empty", "host-empty",
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
             "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
@@ -157,6 +159,10 @@ class GateTests(unittest.TestCase):
                 ["aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"],
             ),
             ("aw-exec", self.root / "crates/aw-exec", ["libc", "thiserror"]),
+            (
+                "aw-host", self.root / "crates/aw-host",
+                ["aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"],
+            ),
         ):
             (directory / "src").mkdir(parents=True)
             (directory / "src/lib.rs").write_text("//! Fixture.\n", encoding="utf-8")
@@ -171,9 +177,9 @@ class GateTests(unittest.TestCase):
                             "name": dependency,
                             "path": (
                                 str(self.root) if dependency == "aw-contracts" else
-                                str(self.root / "crates/aw-config") if dependency == "aw-config" else None
+                                str(self.root / "crates" / dependency) if dependency.startswith("aw-") else None
                             ),
-                            "source": None if dependency in {"aw-contracts", "aw-config"} else "registry+fixture",
+                            "source": None if dependency.startswith("aw-") else "registry+fixture",
                         }
                         for dependency in dependencies
                     ],
@@ -184,6 +190,7 @@ class GateTests(unittest.TestCase):
         for package, dependency in (
             (0, "aw-core"), (1, "tokio"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
+            (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
         ):
             invalid = json.loads(json.dumps(metadata))
             invalid["packages"][package]["dependencies"].append({"name": dependency})
@@ -203,6 +210,12 @@ class GateTests(unittest.TestCase):
         invalid["packages"][3]["dependencies"][0]["path"] = str(self.root / "other-config")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
+        for dependency in ("aw-config", "aw-exec", "aw-provider"):
+            invalid = json.loads(json.dumps(metadata))
+            local = next(d for d in invalid["packages"][5]["dependencies"] if d["name"] == dependency)
+            local["path"] = str(self.root / "other-local-crate")
+            with self.subTest(dependency=dependency), self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
         with self.assertRaises(ValueError):
             gate.structure({**metadata, "workspace_members": ["aw-contracts"]}, self.root)
         invalid = json.loads(json.dumps(metadata))

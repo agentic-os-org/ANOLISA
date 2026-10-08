@@ -143,7 +143,8 @@ def metric_rows(path: Path | None) -> list[dict[str, str]]:
     """Read process metric rows, returning no rows for a missing artifact."""
     if path is None or not path.exists():
         return []
-    with path.open(newline="", encoding="utf-8") as handle:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, mode="rt", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
 

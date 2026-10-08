@@ -33,10 +33,12 @@ pub struct AdapterCapabilities {
     pub events: BTreeMap<String, Vec<String>>,
 }
 
-/// One step whose requested capabilities intersect all three admission sources.
+/// One configured step checked against the implementation and Adapter.
 ///
-/// This is not an executable Core plan or a Ready status. Runtime binding, event
-/// budgets, process ownership and native effect adoption remain Host concerns.
+/// Only steps returned by [`admit`] have also passed Provider admission. Steps
+/// returned by [`preflight`] remain candidates, and public fields carry no proof
+/// of admission. This is not an executable Core plan or a Ready status. Runtime
+/// binding, budgets, process ownership and adoption remain Host concerns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdmittedStep {
     /// The tool event that selects this step.
@@ -45,9 +47,9 @@ pub struct AdmittedStep {
     pub step_id: String,
     /// The named Provider in the desired configuration.
     pub provider: String,
-    /// The operation supported by the Provider for this event.
+    /// The requested Provider operation for this event.
     pub operation: String,
-    /// Requested effects supported by the implementation, Adapter and Provider.
+    /// Requested effects, checked against Provider support only by [`admit`].
     pub effects: Vec<String>,
     /// The Host action required when Provider execution fails.
     pub on_error: String,
@@ -69,6 +71,32 @@ pub fn admit(
     target: &str,
     capabilities: &AdapterCapabilities,
     providers: &BTreeMap<String, ProviderEvidence>,
+) -> Result<Vec<AdmittedStep>, Error> {
+    let steps = preflight(config, target, capabilities)?;
+    let spec = &config.as_value()["spec"];
+    for step in &steps {
+        check_provider(spec, step, providers)?;
+    }
+    Ok(steps)
+}
+
+/// Checks enabled steps before the Host discovers or runs any Provider.
+///
+/// Checks the configured target, implementation and trusted Adapter capabilities,
+/// transport, selectors and failure actions. Disabled events and steps are
+/// skipped; enabled events require support even when optional or empty. Step
+/// order within each event is preserved without choosing execution scheduling.
+///
+/// Returned steps are candidates, not Provider-admitted steps. Hosts must still
+/// call [`admit`] with discovered Provider evidence before executing them.
+///
+/// # Errors
+/// Rejects unsupported events, effects, transports, guards, selectors or failure
+/// actions, and invalid or mismatched Adapter evidence. No Provider is invoked.
+pub fn preflight(
+    config: &aw_config::Configuration,
+    target: &str,
+    capabilities: &AdapterCapabilities,
 ) -> Result<Vec<AdmittedStep>, Error> {
     let spec = &config.as_value()["spec"];
     let agent = spec["agents"]
@@ -99,7 +127,7 @@ pub fn admit(
     let events = spec["events"]
         .as_object()
         .ok_or(Error::Invalid("configuration events must be an object"))?;
-    let mut admitted = Vec::new();
+    let mut candidates = Vec::new();
     for (event_name, event) in events {
         if event["enabled"] != true {
             continue;
@@ -132,18 +160,17 @@ pub fn admit(
             if step["enabled"] == false {
                 continue;
             }
-            admitted.push(admit_step(spec, event_name, step, effects, providers)?);
+            candidates.push(preflight_step(spec, event_name, step, effects)?);
         }
     }
-    Ok(admitted)
+    Ok(candidates)
 }
 
-fn admit_step(
+fn preflight_step(
     spec: &Value,
     event: &str,
     step: &Value,
     adapter_effects: &[String],
-    providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<AdmittedStep, Error> {
     let provider_name = string(&step["provider"])?;
     let provider = spec["providers"]
@@ -155,26 +182,7 @@ fn admit_step(
             && provider["transport"]["location"] == "agent",
         "Provider transport or protocol is not supported",
     )?;
-    let evidence = providers
-        .get(provider_name)
-        .ok_or(Error::Invalid("enabled step lacks Provider evidence"))?;
-    require(
-        evidence.configuration.as_value() == &provider["config"],
-        "Provider validation evidence does not match its private configuration",
-    )?;
     let operation_name = string(&step["operation"])?;
-    let operation = evidence.description.as_value()["operations"]
-        .as_array()
-        .ok_or(Error::Invalid("Provider description lacks operations"))?
-        .iter()
-        .find(|operation| operation["name"] == operation_name)
-        .ok_or(Error::Invalid(
-            "Provider does not declare the requested operation",
-        ))?;
-    require(
-        contains(&operation["events"], event),
-        "Provider operation does not support the requested event",
-    )?;
     let mut effects = Vec::new();
     for effect in step["effects"]
         .as_array()
@@ -183,9 +191,8 @@ fn admit_step(
         let effect = string(effect)?;
         require(
             supported_effect(event, effect)
-                && adapter_effects.iter().any(|supported| supported == effect)
-                && contains(&operation["effects"], effect),
-            "requested effect is not supported by the implementation, Adapter and Provider",
+                && adapter_effects.iter().any(|supported| supported == effect),
+            "requested effect is not supported by the implementation and Adapter",
         )?;
         effects.push(effect.to_owned());
     }
@@ -205,6 +212,39 @@ fn admit_step(
         effects,
         on_error: on_error.to_owned(),
     })
+}
+
+fn check_provider(
+    spec: &Value,
+    step: &AdmittedStep,
+    providers: &BTreeMap<String, ProviderEvidence>,
+) -> Result<(), Error> {
+    let evidence = providers
+        .get(&step.provider)
+        .ok_or(Error::Invalid("enabled step lacks Provider evidence"))?;
+    require(
+        evidence.configuration.as_value() == &spec["providers"][&step.provider]["config"],
+        "Provider validation evidence does not match its private configuration",
+    )?;
+    let operation = evidence.description.as_value()["operations"]
+        .as_array()
+        .ok_or(Error::Invalid("Provider description lacks operations"))?
+        .iter()
+        .find(|operation| operation["name"] == step.operation)
+        .ok_or(Error::Invalid(
+            "Provider does not declare the requested operation",
+        ))?;
+    require(
+        contains(&operation["events"], &step.event),
+        "Provider operation does not support the requested event",
+    )?;
+    for effect in &step.effects {
+        require(
+            contains(&operation["effects"], effect),
+            "requested effect is not supported by the Provider",
+        )?;
+    }
+    Ok(())
 }
 
 fn supported_event(event: &str) -> bool {

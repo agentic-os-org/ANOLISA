@@ -436,9 +436,9 @@ impl GenAISqliteStore {
                 billed_input_col!(),
                 "), 0)                AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)           AS output_tokens,
-                COALESCE(SUM((",
+                COALESCE(SUM(COALESCE((",
                 billed_input_col!(),
-                ") + output_tokens), 0) AS total_tokens
+                "), 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
@@ -455,9 +455,9 @@ impl GenAISqliteStore {
                 billed_input_col!(),
                 "), 0)                AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)           AS output_tokens,
-                COALESCE(SUM((",
+                COALESCE(SUM(COALESCE((",
                 billed_input_col!(),
-                ") + output_tokens), 0) AS total_tokens
+                "), 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
@@ -524,20 +524,27 @@ impl GenAISqliteStore {
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
+        // Group on the *labelled* model, not the raw column: a NULL model and
+        // the literal `'unknown'` are the same series to every consumer (the
+        // dashboard keys the rows by this label and overwrites on collision),
+        // so grouping on the raw column returned two rows with the same
+        // `(bucket_start_ns, model)` key and one total was silently dropped.
+        // SQLite resolves the bare column here rather than the output alias,
+        // so the `COALESCE` has to be repeated in the `GROUP BY`.
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT
                 MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1)            AS bucket_idx,
                 ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
-                COALESCE(SUM((",
+                COALESCE(SUM(COALESCE((",
                 billed_input_col!(),
-                ") + output_tokens), 0) AS total_tokens
+                "), 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
                AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
-             GROUP BY bucket_idx, model
+             GROUP BY bucket_idx, COALESCE(model, 'unknown')
              ORDER BY bucket_idx ASC"
             )
         } else {
@@ -546,13 +553,13 @@ impl GenAISqliteStore {
                 MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1)            AS bucket_idx,
                 ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
-                COALESCE(SUM((",
+                COALESCE(SUM(COALESCE((",
                 billed_input_col!(),
-                ") + output_tokens), 0) AS total_tokens
+                "), 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-             GROUP BY bucket_idx, model
+             GROUP BY bucket_idx, COALESCE(model, 'unknown')
              ORDER BY bucket_idx ASC"
             )
         };
@@ -639,9 +646,9 @@ impl GenAISqliteStore {
             billed_input_col!(),
             "), 0)      AS input_tokens,
                     COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                    COALESCE(SUM((",
+                    COALESCE(SUM(COALESCE((",
             billed_input_col!(),
-            ") + output_tokens), 0) AS total_tokens,
+            "), 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens,
                     COUNT(*)                        AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'

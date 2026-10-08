@@ -151,6 +151,7 @@ Network `net.ipv4.conf` and `net.ipv6.conf` names preserve interface case and li
 ## Security
 
 - **Code-execution deny-list**: `kernel.core_pattern`, `kernel.modprobe`, `kernel.hotplug`, `kernel.poweroff_cmd`, `kernel.modules_disabled`, `kernel.kexec_load_disabled`, `kernel.usermodehelper.*`, `fs.binfmt_misc.*` are unconditionally blocked from any write path (tune/fix/rollback). Matching is done on the resolved filesystem path, not the parameter spelling, so slash/dot/traversal variants are all caught.
+- **Runtime-dangerous knobs**: knobs unsafe to change on a live host (`vm.nr_hugepages`) are refused at the same write choke point, for every caller — tune leaves them out of the plan (named in `would_skip` as `runtime_dangerous`), fix refuses them with the advice to persist, and a library import cannot apply them either. Slash/dot spellings of the same knob are both caught.
 - **Concurrent operations**: tune, fix, library imports, and rollback share a lock through original-value reads, writes, recording, and persistence. Originals are read after locking; an unreadable ledger blocks new writes. This coordinates KTuner operations, not external sysctl writers or crash recovery.
 - **Rollback safety**: Partial failures preserve the rollback ledger; originals are never lost.
 - **No autonomous root**: ktuner checks `euid == 0` and errors out if not root. cosh's sandbox-guard + permission prompt ensure the human approves before any `sudo ktuner tune` executes.

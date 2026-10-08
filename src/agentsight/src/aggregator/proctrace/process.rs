@@ -5,6 +5,23 @@
 
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, next_flow_id, ns_to_us};
 
+/// Cap on the stdout or stderr bytes retained per process.
+///
+/// A long-lived chatty process — or one whose exit event was lost — would
+/// otherwise retain its entire output for the process lifetime, and
+/// `to_chrome_trace_events` serialises the whole buffer into the trace args.
+/// 64 KiB per stream keeps the trace payload sane while preserving the head of
+/// the output the audit/trace consumers read.
+pub(crate) const MAX_RETAINED_PROCESS_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Append `data` up to the shared per-stream cap, returning the dropped byte count.
+fn append_capped(buffer: &mut Vec<u8>, data: &[u8]) -> usize {
+    let remaining = MAX_RETAINED_PROCESS_OUTPUT_BYTES.saturating_sub(buffer.len());
+    let take = data.len().min(remaining);
+    buffer.extend_from_slice(&data[..take]);
+    data.len() - take
+}
+
 /// Aggregated process data for a specific PID
 #[derive(Debug, Clone)]
 pub struct AggregatedProcess {
@@ -22,9 +39,9 @@ pub struct AggregatedProcess {
     pub filename: Option<String>,
     /// Command arguments (from exec event)
     pub args: Option<String>,
-    /// Collected stdout data
+    /// Collected stdout data, capped at [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub stdout_data: Vec<u8>,
-    /// Collected stderr data
+    /// Collected stderr data, capped at [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub stderr_data: Vec<u8>,
     /// Whether this aggregation is complete (process exited)
     pub is_complete: bool,
@@ -82,15 +99,31 @@ impl AggregatedProcess {
         self.end_timestamp_ns = timestamp_ns;
     }
 
-    /// Add stdout data
+    /// Add stdout data, retaining at most [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub fn add_stdout(&mut self, data: &[u8], timestamp_ns: u64) {
-        self.stdout_data.extend_from_slice(data);
+        // Only the chunk that crosses the cap logs; a chatty process must not
+        // produce one warning per event for the rest of its life.
+        let was_full = self.stdout_data.len() >= MAX_RETAINED_PROCESS_OUTPUT_BYTES;
+        let dropped = append_capped(&mut self.stdout_data, data);
+        if dropped > 0 && !was_full {
+            log::debug!(
+                "add_stdout(pid={}): output capped at {MAX_RETAINED_PROCESS_OUTPUT_BYTES} bytes",
+                self.pid
+            );
+        }
         self.end_timestamp_ns = timestamp_ns;
     }
 
-    /// Add stderr data
+    /// Add stderr data, retaining at most [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub fn add_stderr(&mut self, data: &[u8], timestamp_ns: u64) {
-        self.stderr_data.extend_from_slice(data);
+        let was_full = self.stderr_data.len() >= MAX_RETAINED_PROCESS_OUTPUT_BYTES;
+        let dropped = append_capped(&mut self.stderr_data, data);
+        if dropped > 0 && !was_full {
+            log::debug!(
+                "add_stderr(pid={}): output capped at {MAX_RETAINED_PROCESS_OUTPUT_BYTES} bytes",
+                self.pid
+            );
+        }
         self.end_timestamp_ns = timestamp_ns;
     }
 
@@ -116,12 +149,12 @@ impl AggregatedProcess {
             .saturating_sub(self.start_timestamp_ns)
     }
 
-    /// Get total stdout data size
+    /// Get retained stdout data size
     pub fn stdout_size(&self) -> usize {
         self.stdout_data.len()
     }
 
-    /// Get total stderr data size
+    /// Get retained stderr data size
     pub fn stderr_size(&self) -> usize {
         self.stderr_data.len()
     }
@@ -328,6 +361,20 @@ mod tests {
 
         // Empty first args should have "..." appended
         assert_eq!(proc.args, Some(" ...".to_string()));
+    }
+
+    #[test]
+    fn test_output_retention_is_capped_per_direction() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "chatty".to_string(), 1000);
+        let chunk = vec![b'x'; 32 * 1024];
+
+        for _ in 0..8 {
+            proc.add_stdout(&chunk, 2000);
+            proc.add_stderr(&chunk, 2000);
+        }
+
+        assert_eq!(proc.stdout_size(), MAX_RETAINED_PROCESS_OUTPUT_BYTES);
+        assert_eq!(proc.stderr_size(), MAX_RETAINED_PROCESS_OUTPUT_BYTES);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-AW provides unified configuration, versioned capability contracts and embeddable Core orchestration. `aw-config` validates configuration structure and references; `aw-provider` checks external Provider messages and capability admission offline; `aw-contracts` checks payload shapes and record relationships; `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
+AW provides unified configuration, versioned capability contracts and embeddable execution libraries. `aw-config` validates configuration; `aw-provider` checks Provider messages and admission offline; `aw-host` prepares and invokes local Providers through bounded command transport. `aw-contracts` checks record relationships, while `aw-core` executes pinned plans through caller-provided Hosts and journals execution facts. AW has no service process; native Agent control and final tool dispatch remain with the embedding application.
 
 The interfaces are experimental. Contract tests use synthetic records; command
 transport tests use local child processes. Neither certifies Agent integration.
@@ -21,6 +21,17 @@ not start an Agent or enable a policy. See the [configuration guide](../../docs/
 for fields and examples, and [Contributing to AW](CONTRIBUTING.md) for development
 setup, tests and CI.
 
+## Local Provider Host
+
+`aw-host` runs real `describe`, `validate_config` and `invoke` exchanges on Linux.
+It retains configuration and process context, enforces shared event deadlines,
+and returns candidate effects separately from execution failures. The caller
+supplies trusted Adapter capabilities and owns scheduling and effect adoption.
+
+Try the [local Host example](docs/design/provider-host.md#local-example) with the
+sample policy. It uses synthetic tool events and does not launch an Agent,
+install Hooks or persist audit records.
+
 ## Core embedding
 
 `aw-core` provides `Core::prepare` and `Core::execute`, trusted Host/Clock/Journal
@@ -37,8 +48,9 @@ native Agent integration and effect adoption require separate runtime validation
 
 `aw-exec` runs individual commands on Linux with an absolute deadline, byte limits,
 cancellation and owned process-group cleanup. Native stdout, stderr and exit status
-remain for the caller to interpret. This library provides process transport;
-Provider protocol wiring, daemon and Agent adapters remain separate work.
+remain for the caller to interpret. `aw-host` adds the Provider JSON protocol;
+native command callers keep using the raw byte interface. Daemon and Agent
+adapters remain separate work.
 See [bounded command execution](docs/design/bounded-execution.md) for its API,
 ownership and validation boundaries.
 
@@ -68,6 +80,6 @@ Hermes and all 16 event names, without claiming adapters are implemented.
 Configuration has no runtime `status`. `aw-provider` validates externally supplied
 operation/private-config responses and admits tool steps against caller-trusted
 Adapter capabilities. It does not execute discovery or establish native adoption.
-Provider execution and binding installation remain subsequent work.
+`aw-host` executes those exchanges; native binding installation remains subsequent work.
 See the [configuration design](docs/design/configuration.md) for the separation
 from the existing wire contracts.

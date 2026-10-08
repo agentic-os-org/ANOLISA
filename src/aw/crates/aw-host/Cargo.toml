@@ -1,0 +1,15 @@
+[package]
+name = "aw-host"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Prepared local execution of external AW Providers"
+publish = false
+
+[dependencies]
+aw-config = { workspace = true }
+aw-exec = { workspace = true }
+aw-provider = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

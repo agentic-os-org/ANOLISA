@@ -418,8 +418,15 @@ fn is_assignment(token: &str) -> bool {
 /// transparent execution prefixes (`sudo`, `env`, ...), possibly chained
 /// (`sudo env FOO=1`, `env nohup`), their options/value tokens
 /// (`sudo -u root`), and the bare arguments a prefix consumes before the
-/// command (`timeout 30`). An argument or subcommand of another command
-/// (`echo sudo virtualenv`, `pip install virtualenv`, `pyenv virtualenv`) is
+/// command (`timeout 30`) — a word that IS such a bare argument
+/// (`timeout pip ...`: the would-be duration operand, duration omitted)
+/// is not the command either, and neither is anything after a bare
+/// argument slot that a transparent prefix or an assignment filled
+/// (`timeout sudo pip ...`: `sudo` sits in the duration slot, the
+/// invocation fails before reaching the command). An argument or
+/// subcommand of another
+/// command (`echo sudo virtualenv`, `pip install virtualenv`,
+/// `pyenv virtualenv`) is
 /// not; a match inside a larger token (`VENV_TOOL=virtualenv`) or an option
 /// value with no following token (`sudo -u virtualenv id`) is not either.
 ///
@@ -460,9 +467,6 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                 return false; // the command word is already present; the match is its argument
             }
             Some(current) => {
-                if is_assignment(token) {
-                    continue; // `env FOO=1 cmd`
-                }
                 if !past_options && token == "--" {
                     // End of the prefix's options (`timeout -- 30 cmd`,
                     // `sudo -- cmd`): every later token is positional.
@@ -488,6 +492,25 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                     }
                     continue;
                 }
+                if leading_bare_args > 0 {
+                    // The wrapper's outstanding positional operand claims
+                    // this word BEFORE assignment or nested-prefix
+                    // handling can reinterpret it. When the word landing
+                    // in the slot (`timeout`'s duration) is itself a
+                    // transparent prefix or an assignment (`timeout sudo
+                    // pip ...`, `timeout -- env pip ...`), the invocation
+                    // is broken — that word can never be a valid
+                    // duration, so the wrapper's command never runs and
+                    // no position on the line is rewritable.
+                    if TRANSPARENT_PREFIXES.contains(&token) || is_assignment(token) {
+                        return false;
+                    }
+                    leading_bare_args -= 1; // `timeout 30 cmd`: the duration
+                    continue;
+                }
+                if is_assignment(token) {
+                    continue; // `env FOO=1 cmd`
+                }
                 if TRANSPARENT_PREFIXES.contains(&token) {
                     chain = Some(token); // `sudo env ...`, `env FOO=1 nohup ...`
                     leading_bare_args = prefix_leading_bare_args(token);
@@ -497,15 +520,15 @@ fn is_command_position(line: &str, pos: usize) -> bool {
                     past_options = false;
                     continue;
                 }
-                if leading_bare_args > 0 {
-                    leading_bare_args -= 1; // `timeout 30 cmd`: the duration
-                    continue;
-                }
                 return false; // a bare word ends the prefix chain: it is the command
             }
         }
     }
-    true
+    // An unspent bare-arg credit means the match IS the argument the
+    // wrapper consumes — `timeout pip install requests` (duration
+    // omitted) puts the match in the duration slot, not the command
+    // slot, so the line must stay verbatim.
+    leading_bare_args == 0
 }
 
 /// Tokenize `prefix` into shell-ish words, honoring single quotes, double
@@ -691,9 +714,13 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
         // virtualenv <name> → uv venv <name> — only when `virtualenv` is the
         // command being invoked: mkvirtualenv, pyenv virtualenv, and
         // `pip install virtualenv` are different words or argument positions
-        // and must pass through untouched.
+        // and must pass through untouched. Like the pip and venv forms
+        // above, the rewrite runs behind the `Run: ` documentation label,
+        // which stays transparent.
         if result.contains("virtualenv ") {
-            result = rewrite_command_invocations(&result, "virtualenv ", "uv venv ");
+            result = rewrite_after_doc_label(&result, |commands| {
+                rewrite_command_invocations(commands, "virtualenv ", "uv venv ")
+            });
         }
     }
 
@@ -1132,6 +1159,26 @@ Run: pip install requests
     }
 
     #[test]
+    fn test_heuristic_virtualenv_behind_the_run_label() {
+        let env = env_darwin_uv();
+        // The `Run: ` documentation label is transparent for the pip and
+        // venv rewrites; the sibling virtualenv rewrite must honor it too.
+        assert_eq!(
+            compile("Run: virtualenv proj\n", &env),
+            "Run: uv venv proj\n"
+        );
+        assert_eq!(
+            compile("  Run: virtualenv proj\n", &env),
+            "  Run: uv venv proj\n"
+        );
+        // A label in argument position is not transparent.
+        assert_eq!(
+            compile("echo Run: virtualenv proj\n", &env),
+            "echo Run: virtualenv proj\n"
+        );
+    }
+
+    #[test]
     fn test_heuristic_virtualenv_arguments_untouched() {
         let env = env_darwin_uv();
         // `virtualenv` in argument or word-interior position stays; the pip
@@ -1146,6 +1193,65 @@ Run: pip install requests
         assert_eq!(
             compile("pip install virtualenv\n", &env),
             "uv pip install virtualenv\n"
+        );
+    }
+
+    #[test]
+    fn timeout_without_duration_does_not_rewrite_the_duration_word() {
+        // Delta-audit round 9: `timeout pip install requests` — the
+        // duration operand omitted — treated the match word as the command
+        // and rewrote it to `timeout uv pip install requests`, silently
+        // corrupting the text (both forms fail identically at runtime, but
+        // the rewrite misclassifies the line). An unspent bare-arg credit
+        // means the match IS the argument the wrapper consumes, so the
+        // line must stay verbatim.
+        let env = env_darwin_uv();
+        let unchanged = concat!(
+            "timeout pip install requests\n",
+            "timeout virtualenv myenv\n",
+            "sudo timeout pip install requests\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+        // Controls: with the duration present the command still rewrites,
+        // and wrappers without a bare-arg credit are unaffected.
+        assert_eq!(
+            compile("timeout 30 pip install requests\n", &env),
+            "timeout 30 uv pip install requests\n"
+        );
+        assert_eq!(
+            compile("nice pip install requests\n", &env),
+            "nice uv pip install requests\n"
+        );
+    }
+
+    #[test]
+    fn timeout_duration_slot_filled_by_wrapper_word_stays_verbatim() {
+        // Review fix on top of the unspent-credit rule: with the duration
+        // operand omitted, the word landing in timeout's duration slot can
+        // itself be a listed transparent prefix — `timeout sudo pip
+        // install requests` (also `timeout -- sudo ...`). The prefix walk
+        // used to recognize that word as an inner wrapper, reset the
+        // credit, and rewrite the later command (`timeout sudo uv pip
+        // install requests`). But that word IS the duration operand: the
+        // invocation fails before reaching the command, so no position on
+        // the line is rewritable and the text must stay verbatim.
+        let env = env_darwin_uv();
+        let unchanged = concat!(
+            "timeout sudo pip install requests\n",
+            "timeout env pip install requests\n",
+            "timeout -- sudo pip install requests\n",
+            "timeout FOO=1 pip install requests\n",
+        );
+        assert_eq!(compile(unchanged, &env), unchanged);
+        // Controls: a genuine duration operand keeps the command
+        // rewriting, alone or ahead of a real inner wrapper chain.
+        assert_eq!(
+            compile("timeout 30 pip install requests\n", &env),
+            "timeout 30 uv pip install requests\n"
+        );
+        assert_eq!(
+            compile("timeout 30 sudo pip install requests\n", &env),
+            "timeout 30 sudo uv pip install requests\n"
         );
     }
 

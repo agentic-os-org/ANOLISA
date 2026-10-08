@@ -535,7 +535,8 @@ fn debounce_insert(
 ///   and stays unclassified.
 /// * `<source>/<skill>` — immediate skill-directory create/remove, including
 ///   inotify move events: `RenameMode::To` (move-in / rename target) restats
-///   the path like `Create`; `RenameMode::From` (move-out / rename source)
+///   the path no-follow like `Create` (a symlink to a directory is not a
+///   skill directory); `RenameMode::From` (move-out / rename source)
 ///   is emitted only for paths whose directory-ness the watcher has
 ///   retained — from the startup seed of the source root, from a restat of
 ///   an earlier event, or from the correlated new side of a paired rename —
@@ -552,6 +553,17 @@ fn debounce_insert(
 /// its internals. The W1 drift runtime in `skillfs-fuse` therefore
 /// observes manifest- and skill-directory-level drift, mirroring this
 /// helper's scope.
+/// No-follow directory test for the arms whose path still exists (the
+/// Create and move-in `To` arms): the path is restattable, but without
+/// following links — the same no-follow contract as the startup seed, the
+/// flush refresh, and the paired-rename correlation. `Path::is_dir`
+/// follows the link target, so a symlink pointing at a real directory was
+/// classified as a DirCreated for a non-skill object, an unbalanced
+/// phantom in the drift/audit trail.
+fn is_directory_entry(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
 fn classify_event(
     source: &Path,
     path: &Path,
@@ -596,7 +608,7 @@ fn classify_event(
     } else if is_immediate_child {
         use notify::event::{ModifyKind, RenameMode};
         match kind {
-            EventKind::Create(_) if path.is_dir() => {
+            EventKind::Create(_) if is_directory_entry(path) => {
                 Some(SkillEvent::DirCreated(path.to_path_buf()))
             }
             // Removed paths no longer exist. Use the event's original object
@@ -606,8 +618,9 @@ fn classify_event(
             }
             // MOVED_TO: the new name of a rename inside the source, or a
             // move-in from outside. inotify does not tag the event with
-            // the object type, so restat (the Create arm already does).
-            EventKind::Modify(ModifyKind::Name(RenameMode::To)) if path.is_dir() => {
+            // the object type, so restat no-follow — like the Create arm,
+            // never following a symlink to its directory target.
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) if is_directory_entry(path) => {
                 Some(SkillEvent::DirCreated(path.to_path_buf()))
             }
             // MOVED_FROM: the old name of a rename, or a move-out. The path
@@ -826,6 +839,72 @@ mod tests {
         assert!(
             event.is_none(),
             "a moved-in regular file is not a DirCreated"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn moved_in_symlink_to_directory_is_not_dir_created() {
+        // Delta-audit round 9: the To arm decided directory-ness with
+        // `path.is_dir()`, which FOLLOWS the link — a symlink pointing at
+        // a real directory, moved into the source, was reported as
+        // DirCreated for a non-skill object, an unbalanced phantom in the
+        // drift/audit trail. The no-follow contract already governs the
+        // seed, the refresh, and the paired-rename correlation.
+        let source = tempfile::tempdir().expect("source directory");
+        std::fs::create_dir(source.path().join("real-dir")).expect("real directory");
+        let link = source.path().join("linked-skill");
+        std::os::unix::fs::symlink("real-dir", &link).expect("symlink to a directory");
+
+        let event = classify_event(
+            source.path(),
+            &link,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To,
+            )),
+            &HashSet::new(),
+        );
+        assert!(
+            event.is_none(),
+            "a moved-in symlink is not a DirCreated, got {event:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn created_symlink_to_directory_is_not_dir_created() {
+        // The Create arm has the identical follow bug: `ln -s <dir>
+        // <source>/x` reported DirCreated for the symlink. Control: a
+        // real directory created at the same scope stays a DirCreated.
+        let source = tempfile::tempdir().expect("source directory");
+        std::fs::create_dir(source.path().join("real-dir")).expect("real directory");
+        let link = source.path().join("linked-skill");
+        std::os::unix::fs::symlink("real-dir", &link).expect("symlink to a directory");
+
+        let event = classify_event(
+            source.path(),
+            &link,
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            &HashSet::new(),
+        );
+        assert!(
+            event.is_none(),
+            "a created symlink is not a DirCreated, got {event:?}"
+        );
+
+        let real = source.path().join("fresh-skill");
+        std::fs::create_dir(&real).expect("real directory");
+        assert!(
+            matches!(
+                classify_event(
+                    source.path(),
+                    &real,
+                    notify::EventKind::Create(notify::event::CreateKind::Any),
+                    &HashSet::new(),
+                ),
+                Some(SkillEvent::DirCreated(_))
+            ),
+            "a real directory created at the same scope stays a DirCreated"
         );
     }
 

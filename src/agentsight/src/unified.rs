@@ -1644,6 +1644,7 @@ impl AgentSight {
     /// column on the corresponding `genai_events` row when SQLite is in use.
     fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref istore) = self.interruption_store {
+            let genai = self.genai_sqlite_store.as_deref();
             // Build a call_id → (session_id, conversation_id) lookup from
             // LLMCall events in this batch, so ToolUse events can inherit
             // the conversation context of their parent call.
@@ -1669,83 +1670,7 @@ impl AgentSight {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
                     for ie in &interruptions {
-                        // Deduplicate: skip if same (conversation_id, type, error_msg)
-                        // already recorded.  Same error retried N times produces only
-                        // 1 interruption; different errors each get 1.
-                        // NOTE: RetryStorm detection only fires when conversation_id is Some.
-                        // When None, each error inserts a separate row (no dedup, no storm detect).
-                        if let Some(ref cid) = ie.conversation_id {
-                            let error_msg = llm_call.error.as_deref();
-                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
-                            {
-                                log::debug!(
-                                    "Skipping duplicate {:?} for conversation_id={} error={:?}",
-                                    ie.interruption_type,
-                                    cid,
-                                    error_msg
-                                );
-                                // Still stamp the genai_events row so the call is marked
-                                if let Some(ref sqlite) = self.genai_sqlite_store {
-                                    let _ = sqlite.update_interruption_type(
-                                        &llm_call.call_id,
-                                        ie.interruption_type.as_str(),
-                                    );
-                                    // RetryStorm: if >= 5 total calls with same error type in
-                                    // this conversation, emit critical alert
-                                    let count = sqlite.count_interruption_type_for_conversation(
-                                        cid,
-                                        ie.interruption_type.as_str(),
-                                    );
-                                    if count >= 5
-                                        && ie.interruption_type
-                                            != crate::interruption::InterruptionType::RetryStorm
-                                    {
-                                        let storm_event =
-                                            crate::interruption::InterruptionEvent::new(
-                                                crate::interruption::InterruptionType::RetryStorm,
-                                                ie.session_id.clone(),
-                                                ie.trace_id.clone(),
-                                                ie.conversation_id.clone(),
-                                                ie.call_id.clone(),
-                                                ie.pid,
-                                                ie.agent_name.clone(),
-                                                llm_call.end_timestamp_ns as i64,
-                                                Some(serde_json::json!({
-                                                    "repeated_type": ie.interruption_type.as_str(),
-                                                    "count": count,
-                                                })),
-                                            );
-                                        if !istore.exists_for_conversation(
-                                            cid,
-                                            &crate::interruption::InterruptionType::RetryStorm,
-                                            None,
-                                        ) {
-                                            let _ = istore.insert(&storm_event);
-                                            log::warn!(
-                                                "RetryStorm detected: {} × {:?} in conversation {}",
-                                                count,
-                                                ie.interruption_type,
-                                                cid
-                                            );
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                        if let Err(e) = istore.insert(ie) {
-                            log::warn!("Failed to store interruption event: {e}");
-                        }
-                        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
-                        // so the SLS index keeps interruption records co-located with LLM calls.
-                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
-                        // Also stamp genai_events row with interruption_type
-                        if let Some(ref sqlite) = self.genai_sqlite_store {
-                            let _ = sqlite.update_interruption_type(
-                                &llm_call.call_id,
-                                ie.interruption_type.as_str(),
-                            );
-                        }
+                        store_interruption(ie, llm_call, istore, genai);
                     }
 
                     // ── Cross-call DeadLoop detection ──────────────────────────────
@@ -2129,31 +2054,19 @@ impl AgentSight {
                                     }
                                     // ── output tokens ──
                                     if enrichment.output_tokens.is_none() {
-                                        use crate::analyzer::token::extract_response_content;
-                                        let mut all_content = String::new();
-                                        let mut all_reasoning = String::new();
-                                        let mut all_tool_calls = Vec::new();
-                                        for ev in &sse_events {
-                                            if let Some(chunk) = ev.json_body() {
-                                                if let Some((content, reasoning, tool_calls)) =
-                                                    extract_response_content(Some(&chunk))
-                                                {
-                                                    if !content.is_empty() {
-                                                        all_content.push_str(&content);
-                                                    }
-                                                    if let Some(r) = reasoning {
-                                                        if !r.is_empty() {
-                                                            all_reasoning.push_str(&r);
-                                                        }
-                                                    }
-                                                    for tc in tool_calls {
-                                                        if !tc.is_empty() {
-                                                            all_tool_calls.push(tc);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        // The shared merge counts each delta
+                                        // once and reads the Responses closing
+                                        // events only as a fallback, so a
+                                        // complete capture is not counted
+                                        // two or three times.
+                                        let chunks: Vec<serde_json::Value> = sse_events
+                                            .iter()
+                                            .filter_map(|ev| ev.json_body())
+                                            .collect();
+                                        let (all_content, all_reasoning, all_tool_calls) =
+                                            crate::analyzer::token::merge_response_output_text(
+                                                &chunks,
+                                            );
                                         let mut total = 0usize;
                                         if !all_reasoning.is_empty() {
                                             let wrapped =
@@ -2745,7 +2658,7 @@ fn apply_retro_session_fixup(
         // safe and is required: dropping the entry after only one store
         // succeeded would leave the other permanently unrepaired.
         let interruption_repaired = match istore {
-            Some(istore) => match istore.backfill_null_session_id(&call_id, &session_id) {
+            Some(istore) => match istore.backfill_placeholder_session_id(&call_id, &session_id) {
                 Ok(n) => {
                     if n > 0 {
                         log::debug!(
@@ -2840,6 +2753,114 @@ fn oom_crash_groups_for_pid(
         (agent_name.clone(), session_id, conversation_id, call_ids)
     })
     .collect()
+}
+
+/// Store one detected interruption: message-matched dedup, the insert, the
+/// logtail export, the per-call `genai_events` stamp, and the RetryStorm
+/// threshold.
+///
+/// Extracted from `detect_and_store_interruptions` so the dedup / stamp /
+/// storm path is unit-testable without constructing a full `AgentSight`.
+fn store_interruption(
+    ie: &crate::interruption::InterruptionEvent,
+    call: &crate::genai::LLMCall,
+    istore: &InterruptionStore,
+    genai_store: Option<&GenAISqliteStore>,
+) {
+    // Deduplicate: skip if same (conversation_id, type, error_msg)
+    // already recorded.  Same error retried N times produces only
+    // 1 interruption; different errors each get 1.
+    // NOTE: RetryStorm detection only fires when conversation_id is Some.
+    // When None, each error inserts a separate row (no dedup, no storm detect).
+    let error = call.error.as_deref();
+    let duplicate = ie
+        .conversation_id
+        .as_deref()
+        .is_some_and(|cid| istore.exists_for_conversation(cid, &ie.interruption_type, error));
+    if duplicate {
+        log::debug!(
+            "Skipping duplicate {:?} for conversation_id={:?} error={:?}",
+            ie.interruption_type,
+            ie.conversation_id,
+            error
+        );
+    } else {
+        if let Err(e) = istore.insert(ie) {
+            log::warn!("Failed to store interruption event: {e}");
+        }
+        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
+        // so the SLS index keeps interruption records co-located with LLM calls.
+        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
+    }
+    // Stamp the genai_events row, then run the type-counted RetryStorm check
+    // on both paths: the dedup above matches one *message*, while the storm
+    // threshold counts one *type*.
+    if let Some(sqlite) = genai_store {
+        let _ = sqlite.update_interruption_type(&call.call_id, ie.interruption_type.as_str());
+        if let Some(ref cid) = ie.conversation_id {
+            maybe_record_retry_storm(cid, ie, call.end_timestamp_ns as i64, istore, sqlite);
+        }
+    }
+}
+
+/// Write one unresolved `RetryStorm` for a conversation once the same
+/// interruption type reaches the retry threshold.
+///
+/// `RetryStorm`'s contract counts one *type* ("the same error type repeats at
+/// least 5 times within one conversation"), which is what
+/// `count_interruption_type_for_conversation` measures, so the check must not
+/// live inside the message-matched dedup branch: five same-type errors whose
+/// texts differ all take the insert path and never reached it.
+///
+/// Extracted as a free function so the decision is unit-testable without
+/// constructing a full `AgentSight` instance.
+fn maybe_record_retry_storm(
+    cid: &str,
+    ie: &crate::interruption::InterruptionEvent,
+    occurred_at_ns: i64,
+    istore: &InterruptionStore,
+    genai_store: &GenAISqliteStore,
+) {
+    use crate::interruption::{InterruptionEvent, InterruptionType};
+
+    if ie.interruption_type == InterruptionType::RetryStorm {
+        return;
+    }
+
+    // >= 5 calls with the same error type in this conversation: the agent is
+    // stuck retrying.
+    let count =
+        genai_store.count_interruption_type_for_conversation(cid, ie.interruption_type.as_str());
+    if count < 5 {
+        return;
+    }
+
+    // At most one unresolved storm per conversation.
+    if istore.exists_for_conversation(cid, &InterruptionType::RetryStorm, None) {
+        return;
+    }
+
+    let storm_event = InterruptionEvent::new(
+        InterruptionType::RetryStorm,
+        ie.session_id.clone(),
+        ie.trace_id.clone(),
+        ie.conversation_id.clone(),
+        ie.call_id.clone(),
+        ie.pid,
+        ie.agent_name.clone(),
+        occurred_at_ns,
+        Some(serde_json::json!({
+            "repeated_type": ie.interruption_type.as_str(),
+            "count": count,
+        })),
+    );
+    let _ = istore.insert(&storm_event);
+    log::warn!(
+        "RetryStorm detected: {} × {:?} in conversation {}",
+        count,
+        ie.interruption_type,
+        cid
+    );
 }
 
 /// Record `agent_crash` interruption events for the pending calls of an
@@ -3198,6 +3219,137 @@ mod tests {
         info.pid = pid;
         genai_store.insert_pending(&info).expect("insert_pending");
         (dir, genai_store, istore)
+    }
+
+    #[test]
+    fn retry_storm_counts_one_type_not_one_message() {
+        // `RetryStorm` is documented as "the same error type repeats at least
+        // 5 times within one conversation". `exists_for_conversation` matches
+        // on the error message, so five same-type failures whose texts differ
+        // are never duplicates — and while the storm check sat inside the
+        // duplicate branch, none of them ever reached it.
+        let dir = unique_tmp_dir("retry-storm-same-type");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .expect("genai store");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+
+        for i in 0..5 {
+            let call_id = format!("storm-call-{i}");
+            let mut info = make_test_pending_info(&call_id);
+            info.conversation_id = Some("conv-storm".to_string());
+            genai_store.insert_pending(&info).expect("insert_pending");
+            genai_store
+                .update_interruption_type(&call_id, "context_overflow")
+                .expect("stamp");
+            let ie = crate::interruption::InterruptionEvent::new(
+                crate::interruption::InterruptionType::ContextOverflow,
+                Some("sess-storm".to_string()),
+                Some("trace-storm".to_string()),
+                Some("conv-storm".to_string()),
+                Some(call_id.clone()),
+                Some(7),
+                Some("test-agent".to_string()),
+                i as i64,
+                Some(serde_json::json!({
+                    "error": format!(
+                        "prompt is too long: {} tokens > 200000 maximum",
+                        210_000 + i * 10_000
+                    ),
+                })),
+            );
+            // Each failure carries a different message, so none of them is a
+            // duplicate of a recorded interruption.
+            let seen = istore.exists_for_conversation("conv-storm", &ie.interruption_type, None);
+            assert!(
+                !seen,
+                "precondition: failure {i} must not match a recorded interruption"
+            );
+            maybe_record_retry_storm("conv-storm", &ie, i as i64, &istore, &genai_store);
+        }
+
+        let storm = crate::interruption::InterruptionType::RetryStorm;
+        assert!(istore.exists_for_conversation("conv-storm", &storm, None));
+
+        // A RetryStorm-typed event must return before the threshold check, so
+        // the guard never records a storm of storms.
+        let storm_typed = crate::interruption::InterruptionEvent::new(
+            storm.clone(),
+            Some("sess-storm".to_string()),
+            Some("trace-storm".to_string()),
+            Some("conv-storm".to_string()),
+            Some("storm-call-4".to_string()),
+            Some(7),
+            Some("test-agent".to_string()),
+            5,
+            None,
+        );
+        maybe_record_retry_storm("conv-storm", &storm_typed, 5, &istore, &genai_store);
+        assert_eq!(istore.count_for_conversation("conv-storm", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drive the extracted store path end to end: the same message twice is a
+    /// duplicate, a different message inserts, and the storm threshold counts
+    /// one *type* across messages whose texts differ — the shape the dedup
+    /// branch used to hide (this is the placement the PR changes).
+    #[test]
+    fn store_interruption_dedups_by_message_and_storms_by_type() {
+        let dir = unique_tmp_dir("store-interruption");
+        let genai_store = GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .expect("genai store");
+        let istore =
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db")).expect("istore");
+        let rate_limit = crate::interruption::InterruptionType::RateLimit;
+
+        let mut call = make_test_llm_call("store-call-0");
+        let mut last = None;
+        for i in 0..5 {
+            call.call_id = format!("store-call-{i}");
+            call.error = Some(format!("rate limit exceeded, retry after {}s", 30 + i));
+            let mut info = make_test_pending_info(&call.call_id);
+            info.conversation_id = Some("conv-store".to_string());
+            genai_store.insert_pending(&info).expect("insert_pending");
+            genai_store
+                .update_interruption_type(&call.call_id, "rate_limit")
+                .expect("stamp");
+            let ie = crate::interruption::InterruptionEvent::new(
+                rate_limit.clone(),
+                Some("sess-store".to_string()),
+                Some("trace-store".to_string()),
+                Some("conv-store".to_string()),
+                Some(call.call_id.clone()),
+                Some(8),
+                Some("test-agent".to_string()),
+                i as i64,
+                Some(serde_json::json!({ "error": call.error.clone() })),
+            );
+            store_interruption(&ie, &call, &istore, Some(&genai_store));
+            assert_eq!(
+                istore.count_for_conversation("conv-store", &rate_limit),
+                i + 1
+            );
+            last = Some(ie);
+        }
+
+        // Same error *type*, five different messages: the count is what the
+        // storm threshold measures, so the storm must exist.
+        let storm = crate::interruption::InterruptionType::RetryStorm;
+        assert!(istore.exists_for_conversation("conv-store", &storm, None));
+
+        // Replaying the last failure verbatim is a message duplicate: no new
+        // row, and the "at most one storm" guard keeps the count at one.
+        let replay = last.expect("last event");
+        store_interruption(&replay, &call, &istore, Some(&genai_store));
+        assert_eq!(istore.count_for_conversation("conv-store", &rate_limit), 5);
+        assert_eq!(istore.count_for_conversation("conv-store", &storm), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn list_crash_events(

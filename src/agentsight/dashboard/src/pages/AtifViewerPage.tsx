@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { roundMatchesText } from '../utils/trajectoryTextFilter';
 import { useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
@@ -622,6 +623,7 @@ export const AtifViewerPage: React.FC = () => {
   // UI state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  const [roundFilter, setRoundFilter] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Subagent navigation: a trajectory-id path from the root, mirrored in the URL
@@ -632,6 +634,10 @@ export const AtifViewerPage: React.FC = () => {
   const tree = React.useMemo(() => buildTrajectoryTree(doc), [doc]);
   const selectedNode = tree ? findNodeByPath(tree, nodePath) : null;
   const activeDoc = selectedNode?.doc ?? doc;
+
+  useEffect(() => {
+    setRoundFilter('');
+  }, [activeDoc]);
 
   const selectNode = useCallback((node: TrajNode) => {
     // Subagents referenced by session id only (never embedded) still live on
@@ -828,6 +834,10 @@ export const AtifViewerPage: React.FC = () => {
   // Compute metrics (fallback when final_metrics is partial)
   const steps = activeDoc?.steps ?? [];
   const rounds = React.useMemo(() => groupIntoRounds(activeDoc?.steps ?? [], t), [activeDoc, t]);
+  const visibleRounds = React.useMemo(
+    () => rounds.filter((round) => roundMatchesText(round.steps, roundFilter)),
+    [rounds, roundFilter],
+  );
   const activeRound = rounds.find(r => r.key === selectedRound) ?? null;
   const computedMetrics = activeDoc ? (() => {
     const fm = activeDoc.final_metrics;
@@ -1061,7 +1071,22 @@ export const AtifViewerPage: React.FC = () => {
                 <div className="grid grid-cols-1 lg:grid-cols-[minmax(240px,1fr)_2fr_minmax(300px,380px)] gap-4 items-start">
                   {/* Left: round list */}
                   <div className="space-y-2 lg:max-h-[calc(100vh-200px)] lg:overflow-y-auto lg:sticky lg:top-4 pr-1">
-                    {rounds.map(round => (
+                    <div className="bg-white rounded-xl border border-gray-200 p-3 space-y-2">
+                      <input
+                        type="search"
+                        value={roundFilter}
+                        onChange={(event) => setRoundFilter(event.target.value)}
+                        aria-label={t('atif.filterRounds')}
+                        placeholder={t('atif.filterRounds')}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                      />
+                      <div className="flex items-center justify-between gap-2 text-xs text-gray-500">
+                        <span aria-live="polite">{t('atif.matchingRounds', { matched: visibleRounds.length, total: rounds.length })}</span>
+                        {roundFilter && <button onClick={() => setRoundFilter('')} className="text-blue-600 hover:text-blue-800">{t('atif.clearRoundFilter')}</button>}
+                      </div>
+                    </div>
+                    {visibleRounds.length === 0 && <p className="p-4 text-sm text-gray-500">{t('atif.noMatchingRounds')}</p>}
+                    {visibleRounds.map(round => (
                       <RoundListItem
                         key={round.key}
                         round={round}

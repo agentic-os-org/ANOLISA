@@ -9,6 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use crate::bench::BenchResult;
+use crate::category;
 use crate::rules::Recommendation;
 
 const ROLLBACK_PATH: &str = "/var/lib/ktuner/rollback.json";
@@ -87,6 +88,12 @@ fn apply_locked(
     let mut failed: Vec<ApplyFailure> = Vec::new();
     let mut clamped: Vec<ClampNote> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
+        // A *_bytes knob clears its ratio sibling as a side effect; snapshot
+        // the sibling before the write or the original ratio is unrecorded
+        // and no rollback can ever bring it back. (The `applied` counter
+        // below already counts writes, not ledger records, so the sibling
+        // record leaves the batch's progress and exit code unchanged.)
+        let sibling = cleared_sibling_entry(&rec.param);
         match apply_recordable(rec) {
             Ok((previous, outcome)) => {
                 if !quiet {
@@ -128,6 +135,14 @@ fn apply_locked(
                     applied_rec.current_value = previous;
                     applied_recs.push(applied_rec);
                 }
+                // A *_bytes write cleared the ratio sibling as a kernel side
+                // effect: record what was live before the write (the snapshot
+                // above), or no rollback can ever bring that original back.
+                // The sibling is a live change of the pair even when the knob
+                // itself was unrecordable, so it lands outside the branch.
+                if let Some(entry) = sibling {
+                    applied_recs.push(sibling_rec(entry));
+                }
             }
             Err(e) => {
                 failed.push(ApplyFailure {
@@ -153,10 +168,10 @@ fn apply_locked(
         persist_from_rollback(guard)?;
         if !quiet {
             println!();
-            println!(
-                "  {} 项配置已应用并持久化（重启后自动生效）",
-                applied_recs.len()
-            );
+            // Count writes, not ledger records: a *_bytes knob also records
+            // the ratio sibling the kernel clears for it, and the batch's
+            // progress and exit-code semantics stay per-write.
+            println!("  {} 项配置已应用并持久化（重启后自动生效）", applied);
         }
     } else if applied == 0 && !quiet {
         println!();
@@ -169,23 +184,56 @@ fn apply_locked(
     })
 }
 
+/// One applied single-parameter fix: what the rollback ledger recorded, plus
+/// the write itself.
+pub struct AppliedFix {
+    /// The pre-write original captured under the transaction lock — the value
+    /// the ledger records as `previous` and `ktuner rollback` restores.
+    /// Recommendations are gathered before locking, so `rec.current_value`
+    /// can be stale (the knob moved between gather and apply); callers
+    /// reporting the original must report this, or their output contradicts
+    /// the ledger and `rollback --list`. `None` for a write-only tunable (no
+    /// original could be read): nothing is recorded and nothing is
+    /// restorable.
+    pub recorded_previous: Option<String>,
+    /// The write outcome: the value the kernel actually took and whether it
+    /// clamped the request.
+    pub outcome: WriteOutcome,
+}
+
 /// Apply a single recommendation with rollback recording and persistence, but
 /// without apply()'s progress output — used by `ktuner fix` so a single fix is
-/// just as reversible (and survives reboot) as `tune`. Returns the write
-/// outcome so `fix` can report the value the kernel actually took. A param
-/// whose original cannot be read (write-only tunable) applies without a
-/// rollback record, mirroring apply_import.
-pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
+/// just as reversible (and survives reboot) as `tune`. Returns the recorded
+/// original (read under the lock, so it is what a rollback restores) and the
+/// write outcome so `fix` can report both without re-reading the ledger. A
+/// param whose original cannot be read (write-only tunable) applies without a
+/// rollback record, mirroring apply_import, and reports no original.
+pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?;
+    // Snapshot the ratio sibling before the write: a *_bytes knob clears it
+    // as a kernel side effect, and only the ledger can bring the original
+    // back on rollback.
+    let sibling = cleared_sibling_entry(&rec.param);
     let (previous, outcome) = apply_recordable(rec)?;
-    if let Some(previous) = previous {
+    let mut batch = Vec::new();
+    if let Some(recorded) = &previous {
         let mut applied = rec_with_effective(rec, &outcome);
-        applied.current_value = previous;
-        save_rollback(&guard, std::slice::from_ref(&applied))?;
+        applied.current_value = recorded.clone();
+        batch.push(applied);
+    }
+    // The cleared sibling is a live change of the pair even when the knob
+    // itself was unrecordable (no readable pristine value), so it extends
+    // the batch regardless.
+    batch.extend(sibling.map(sibling_rec));
+    if !batch.is_empty() {
+        save_rollback(&guard, &batch)?;
         persist_from_rollback(&guard)?;
     }
-    Ok(outcome)
+    Ok(AppliedFix {
+        recorded_previous: previous,
+        outcome,
+    })
 }
 
 // Recommendations are gathered before locking and may describe an older
@@ -217,6 +265,56 @@ fn apply_recordable(rec: &Recommendation) -> Result<(Option<String>, WriteOutcom
     Ok((previous, outcome))
 }
 
+/// The ratio knob the kernel clears as a side effect of writing `param`.
+/// `vm.dirty_bytes` and `vm.dirty_background_bytes` are mutually exclusive
+/// with their ratio twins — writing one zeroes the other (mm/page-writeback.c
+/// clears the sibling whenever the value changes; the rules state the same
+/// invariant when they cap the percentage advice to <64GB hosts) — so
+/// applying a bytes knob is a live change to TWO knobs while the batch
+/// records one.
+fn cleared_sibling(param: &str) -> Option<&'static str> {
+    match param {
+        "vm.dirty_bytes" => Some("vm.dirty_ratio"),
+        "vm.dirty_background_bytes" => Some("vm.dirty_background_ratio"),
+        _ => None,
+    }
+}
+
+/// Ledger tuple for the ratio knob a `*_bytes` write is about to clear:
+/// `(sibling, live value, "0")`, read BEFORE the write lands — after it the
+/// kernel has already zeroed the sibling and the original is gone forever.
+/// None when `param` clears nothing, the sibling is unreadable, or it holds
+/// no configured value. The recorded `applied` is "0" because that is the
+/// value the kernel puts live, exactly like a clamped read-back (#4160): the
+/// ledger must describe live reality for both knobs of the pair, or a
+/// rollback restores `dirty_bytes = 0` and leaves the host with a zeroed
+/// `dirty_ratio` — writeback throttling silently disabled.
+fn cleared_sibling_entry(param: &str) -> Option<(String, String, String)> {
+    let sibling = cleared_sibling(param)?;
+    let live = read_previous(sibling).ok()?;
+    sibling_cleared_record(sibling, &live)
+}
+
+/// Pure decision core of [`cleared_sibling_entry`]: whether a `*_bytes` write
+/// that sees `live` on the ratio sibling must record it. A sibling that is
+/// already 0 (or unreadably empty) loses nothing, so nothing is recorded.
+fn sibling_cleared_record(sibling: &str, live: &str) -> Option<(String, String, String)> {
+    (!live.is_empty() && live != "0")
+        .then(|| (sibling.to_string(), live.to_string(), "0".to_string()))
+}
+
+/// A synthetic ledger record from a [`cleared_sibling_entry`] tuple. It
+/// documents a side effect the kernel performs, not a write ktuner made, so
+/// every field beyond the ledger triple is default.
+fn sibling_rec(entry: (String, String, String)) -> Recommendation {
+    Recommendation {
+        param: entry.0,
+        current_value: entry.1,
+        recommended_value: entry.2,
+        ..Default::default()
+    }
+}
+
 /// The result of a verified write: the value now live in the kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteOutcome {
@@ -237,6 +335,18 @@ pub struct WriteOutcome {
 pub fn write_and_verify(param: &str, value: &str) -> Result<WriteOutcome> {
     if is_forbidden_param(param) {
         anyhow::bail!("拒绝写入可执行代码的内核参数 {param}（core_pattern / modprobe 等）");
+    }
+    // The runtime-dangerous policy tune and fix enforce (tune filters the
+    // knob out of the plan and names it in would_skip; fix refuses with the
+    // advice to persist instead) holds here too: a library import routes
+    // through the same choke point and must not apply vm.nr_hugepages at
+    // runtime — allocating hugepages on a live host is what the policy
+    // exists to prevent. Dotted-normalize the spelling first: the guard is
+    // exact-match while import accepts slashed aliases of the same knob.
+    if category::is_runtime_dangerous(&param.replace('/', ".")) {
+        anyhow::bail!(
+            "拒绝在运行时写入 {param}（运行时危险参数，请写入 /etc/sysctl.d 在重启时生效）"
+        );
     }
 
     let path = param_to_path(param);
@@ -467,29 +577,42 @@ pub fn is_safe_param(param: &str) -> bool {
 /// value is "safe". ktuner's own rules never recommend these, so guarding the
 /// write choke point (write_and_verify) with this list is defense-in-depth
 /// with zero legitimate-use regression.
-pub fn is_forbidden_param(param: &str) -> bool {
-    // Match on the RESOLVED filesystem path, not on the parameter's spelling, so
-    // every equivalent spelling that lands on the same file is rejected: dotted
-    // `kernel.core_pattern`, slashed `kernel/core_pattern`, doubled separators
-    // `kernel//core_pattern`, or a `..`-laden name. A dotted-name-only deny-list
-    // was fully bypassable because param_to_path's `.replace('.', "/")` is a
-    // no-op on an already-slashed name, so `kernel/core_pattern` dodged the list
-    // yet still resolved to /proc/sys/kernel/core_pattern.
-    const FORBIDDEN_PATHS: &[&str] = &[
-        "/proc/sys/kernel/core_pattern",
-        "/proc/sys/kernel/modprobe",
-        "/proc/sys/kernel/hotplug",
-        "/proc/sys/kernel/poweroff_cmd",
-        "/proc/sys/kernel/modules_disabled",
-        "/proc/sys/kernel/kexec_load_disabled",
-        "/proc/sys/kernel/usermodehelper", // + /bset, /inheritable ...
-        "/proc/sys/fs/binfmt_misc",        // + /register ...
-    ];
+///
+/// Matching is on the RESOLVED filesystem path, not on a parameter's spelling,
+/// so every equivalent spelling that lands on the same file is rejected:
+/// dotted `kernel.core_pattern`, slashed `kernel/core_pattern`, doubled
+/// separators `kernel//core_pattern`, or a `..`-laden name. A
+/// dotted-name-only deny-list was fully bypassable because param_to_path's
+/// `.replace('.', "/")` is a no-op on an already-slashed name, so
+/// `kernel/core_pattern` dodged the list yet still resolved to
+/// /proc/sys/kernel/core_pattern.
+const FORBIDDEN_PATHS: &[&str] = &[
+    "/proc/sys/kernel/core_pattern",
+    "/proc/sys/kernel/modprobe",
+    "/proc/sys/kernel/hotplug",
+    "/proc/sys/kernel/poweroff_cmd",
+    "/proc/sys/kernel/modules_disabled",
+    "/proc/sys/kernel/kexec_load_disabled",
+    "/proc/sys/kernel/usermodehelper", // + /bset, /inheritable ...
+    "/proc/sys/fs/binfmt_misc",        // + /register ...
+];
 
-    let resolved = canonicalize_path(&param_to_path(param));
+/// Whether a *filesystem path* (already resolved, as written) is deny-listed.
+///
+/// Both enforcement points go through here so they cannot drift: the write
+/// choke point resolves a parameter into its path, while `restore` writes the
+/// path the ledger recorded — and the recorded path, not the parameter next
+/// to it, is what the kernel receives.
+fn is_forbidden_resolved_path(path: &str) -> bool {
+    let resolved = canonicalize_path(path);
     FORBIDDEN_PATHS
         .iter()
         .any(|p| resolved == *p || resolved.starts_with(&format!("{p}/")))
+}
+
+/// Whether a parameter name resolves to a deny-listed path.
+pub fn is_forbidden_param(param: &str) -> bool {
+    is_forbidden_resolved_path(&param_to_path(param))
 }
 
 /// Collapse empty/`.` segments and resolve `..` in a slash path so equivalent
@@ -626,9 +749,20 @@ where
             entry.applied = applied;
             continue;
         }
+        // The key may already exist under a path an older `param_to_path`
+        // resolved differently (a dotted interface written before 5448, e.g.
+        // `.../conf/Br0/100/forwarding`). `heal_alias_duplicates` compares
+        // canonicalized paths and cannot merge that pair, so the stale path
+        // would survive: the file does not exist, every restore skips the
+        // entry, and the ledger never clears. Re-point it at what this
+        // parameter resolves to now; `previous` stays the original.
+        let current_path = path.clone();
         data.entries
             .entry(param)
-            .and_modify(|e| e.applied = applied.clone())
+            .and_modify(|e| {
+                e.applied = applied.clone();
+                e.path = current_path.clone();
+            })
             .or_insert_with(|| RollbackEntry {
                 previous: previous.clone(),
                 applied: applied.clone(),
@@ -838,6 +972,15 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         anyhow::bail!("invalid parameter name {param}: traversal, empty segment, or absolute path");
     }
     validate_import_value(param, value)?;
+    // Refuse runtime-dangerous knobs before touching the filesystem: the
+    // ledger lock create_dir_all's /var/lib/ktuner, which fails in an
+    // unprivileged environment before write_and_verify's refusal can surface.
+    // Dotted-normalize the spelling exactly like the write choke point does.
+    if category::is_runtime_dangerous(&param.replace('/', ".")) {
+        anyhow::bail!(
+            "拒绝在运行时写入 {param}（运行时危险参数，请写入 /etc/sysctl.d 在重启时生效）"
+        );
+    }
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?;
     let previous = match read_previous(param) {
@@ -845,12 +988,16 @@ pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<(
         Err(error) if current.is_some() => return Err(error),
         Err(_) => None,
     };
+    // A bytes knob clears its ratio sibling as a kernel side effect; snapshot
+    // it before the write so the imported change records both knobs of the
+    // pair and stays reversible.
+    let sibling = cleared_sibling_entry(param);
     let outcome = write_and_verify(param, value)?;
     if let Some(previous) = previous {
         merge_rollback_locked(
             &guard,
             ROLLBACK_PATH,
-            std::iter::once((param.to_string(), previous, outcome.effective)),
+            std::iter::once((param.to_string(), previous, outcome.effective)).chain(sibling),
         )?;
         persist_from_rollback(&guard)?;
     }
@@ -884,6 +1031,18 @@ fn render_persistence(
             ));
             has_nonsysctl = true;
         } else if param.contains('.') || param.contains('/') {
+            // The kernel re-clears the ratio sibling when the bytes line is
+            // applied at boot, and a later "ratio = 0" line would zero the
+            // bytes value right back — so the side-effect record of a cleared
+            // ratio is never persisted while its clearer is in the ledger:
+            // the bytes line alone reproduces the live pair state (bytes set,
+            // ratio cleared).
+            let clearer_recorded = entries
+                .keys()
+                .any(|k| cleared_sibling(k) == Some(param.as_str()));
+            if clearer_recorded && entry.applied == "0" {
+                continue;
+            }
             // A slash as the first separator makes sysctl.d preserve literal
             // dots. Derive dotted-interface keys from the recorded proc path,
             // or systemd would interpret Br0.100 as two directories.
@@ -903,6 +1062,27 @@ fn render_persistence(
     (sysctl, nonsysctl)
 }
 
+/// The ledger entries persistence may render.
+///
+/// The rendered sysctl.d file (and the generated script) is applied by
+/// systemd-sysctl at boot with root privileges, so an entry the deny-list
+/// refuses must not reach it just because it sits in the ledger: rollback
+/// refuses to restore it, and persistence would otherwise hand the same write
+/// to the boot path instead — the root code-execution write the list exists to
+/// prevent, deferred to the next reboot. Both fields are checked, since the
+/// recorded path is what the script writes.
+fn persistable_entries(
+    entries: &BTreeMap<String, RollbackEntry>,
+) -> BTreeMap<String, RollbackEntry> {
+    entries
+        .iter()
+        .filter(|(param, entry)| {
+            !is_forbidden_param(param) && !is_forbidden_resolved_path(&entry.path)
+        })
+        .map(|(param, entry)| (param.clone(), entry.clone()))
+        .collect()
+}
+
 /// Regenerate the persisted config files from the cumulative rollback record,
 /// which is the single source of truth for everything ktuner has applied. This
 /// keeps persistence cumulative across runs (previously each run overwrote the
@@ -912,7 +1092,8 @@ fn render_persistence(
 /// lock renders its own ledger and never the production one.
 fn persist_from_rollback(guard: &LedgerLock) -> Result<()> {
     let data = load_rollback_from(&guard.path)?;
-    let (sysctl_content, nonsysctl_script) = render_persistence(&data.entries);
+    let entries = persistable_entries(&data.entries);
+    let (sysctl_content, nonsysctl_script) = render_persistence(&entries);
 
     if let Some(sysctl_content) = sysctl_content {
         // sysctl.d convention: world-readable, same as the systemd service
@@ -1103,7 +1284,13 @@ fn restore_entries_with(
     let mut failed = 0;
     let mut skipped = 0;
     for (param, entry) in &data.entries {
-        if is_forbidden_param(param) {
+        // The deny-list is enforced on BOTH fields: the parameter name (what a
+        // ktuner-written ledger records) and the recorded path, which is the
+        // file the kernel actually receives. Every ledger ktuner writes has the
+        // two in agreement, but a ledger that was edited or written by another
+        // version can point an innocent parameter at `kernel.core_pattern` —
+        // and restore runs as root.
+        if is_forbidden_param(param) || is_forbidden_resolved_path(&entry.path) {
             if !quiet {
                 println!("  {} {} : 拒绝恢复（代码执行参数）", "✗".red(), param);
             }
@@ -1449,6 +1636,125 @@ mod tests {
         }
     }
 
+    #[test]
+    fn render_persistence_omits_a_cleared_ratio_while_its_clearer_is_recorded() {
+        // The ledger after a dirty_bytes tune on a ratio-mode host: the kernel
+        // cleared vm.dirty_ratio as a side effect, so the record carries
+        // applied = 0. Persisting that line would make systemd apply
+        // "vm.dirty_ratio = 0" AFTER the bytes line at boot and zero the bytes
+        // value right back — the tuning would silently vanish across reboots.
+        // The bytes line alone reproduces the live pair state (kernel clears
+        // the ratio itself), so the cleared-ratio record must be skipped.
+        let entries = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1073741824".into(),
+                    path: "/proc/sys/vm/dirty_bytes".into(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "0".into(),
+                    path: "/proc/sys/vm/dirty_ratio".into(),
+                },
+            ),
+        ]);
+        let (config, _) = render_persistence(&entries);
+        let config = config.unwrap();
+        assert!(config.contains("vm.dirty_bytes = 1073741824"));
+        assert!(
+            !config.contains("dirty_ratio"),
+            "the cleared-ratio record must not be persisted: {config}"
+        );
+        // A ratio the host really uses (no clearer recorded, or a nonzero
+        // applied from a genuine ratio write) still persists its line.
+        let ratio_only = BTreeMap::from([(
+            "vm.dirty_ratio".to_string(),
+            RollbackEntry {
+                previous: "20".into(),
+                applied: "5".into(),
+                path: "/proc/sys/vm/dirty_ratio".into(),
+            },
+        )]);
+        let (config, _) = render_persistence(&ratio_only);
+        assert!(config.unwrap().contains("vm.dirty_ratio = 5"));
+        // Both knobs recorded with the ratio genuinely tuned (applied != 0):
+        // the pair is live ratio-mode, so both lines persist as before.
+        let both_live = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1073741824".into(),
+                    path: "/proc/sys/vm/dirty_bytes".into(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "5".into(),
+                    path: "/proc/sys/vm/dirty_ratio".into(),
+                },
+            ),
+        ]);
+        let (config, _) = render_persistence(&both_live);
+        let config = config.unwrap();
+        assert!(config.contains("vm.dirty_bytes = 1073741824"));
+        assert!(config.contains("vm.dirty_ratio = 5"));
+    }
+
+    #[test]
+    fn restore_entries_restores_the_ratio_after_the_bytes() {
+        // The dirty pair is mutually exclusive: writing either knob clears
+        // the other. The restore must therefore write the bytes knob FIRST
+        // (BTreeMap order guarantees "vm.dirty_bytes" < "vm.dirty_ratio") and
+        // the ratio last, or the ratio write would clear the restored bytes
+        // value on a live kernel. Guard test for the pair's ledger shape.
+        let dir = AtomicTestDir::new("dirty_pair_restore");
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio = dir.0.join("dirty_ratio");
+        fs::write(&bytes, "1073741824").unwrap();
+        fs::write(&ratio, "0").unwrap();
+        let entries = BTreeMap::from([
+            (
+                "vm.dirty_bytes".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1073741824".into(),
+                    path: bytes.to_str().unwrap().into(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".into(),
+                    applied: "0".into(),
+                    path: ratio.to_str().unwrap().into(),
+                },
+            ),
+        ]);
+        let outcome = restore_entries(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+        );
+        assert_eq!(outcome.restored, 2);
+        assert_eq!(fs::read_to_string(&bytes).unwrap(), "0");
+        assert_eq!(
+            fs::read_to_string(&ratio).unwrap(),
+            "20",
+            "the cleared ratio must come back with the rollback"
+        );
+        assert!(rollback_should_finalize(outcome.failed, outcome.skipped));
+    }
+
     use super::*;
 
     #[test]
@@ -1485,6 +1791,57 @@ mod tests {
         let (sysctl, nonsysctl) = render_persistence(&entries);
         assert!(sysctl.is_none());
         assert!(nonsysctl.is_none());
+    }
+
+    #[test]
+    fn persistence_drops_entries_the_deny_list_refuses() {
+        // The rendered sysctl.d file is applied by systemd-sysctl at boot with
+        // root privileges, so a deny-listed entry must not be re-emitted just
+        // because it sits in the ledger: rollback refuses to restore it, and
+        // persistence would otherwise hand the same root write to the boot
+        // path instead.
+        let entries = BTreeMap::from([
+            (
+                "vm.swappiness".to_string(),
+                RollbackEntry {
+                    previous: "60".to_string(),
+                    applied: "1".to_string(),
+                    path: "/proc/sys/vm/swappiness".to_string(),
+                },
+            ),
+            (
+                "kernel.core_pattern".to_string(),
+                RollbackEntry {
+                    previous: "core".to_string(),
+                    applied: "|/tmp/evil".to_string(),
+                    path: "/proc/sys/kernel/core_pattern".to_string(),
+                },
+            ),
+            (
+                "vm.dirty_ratio".to_string(),
+                RollbackEntry {
+                    previous: "20".to_string(),
+                    applied: "10".to_string(),
+                    // Innocent name, deny-listed recorded path.
+                    path: "/proc/sys/kernel/modprobe".to_string(),
+                },
+            ),
+        ]);
+
+        let kept = persistable_entries(&entries);
+        assert!(kept.contains_key("vm.swappiness"), "ordinary params stay");
+        assert!(
+            !kept.contains_key("kernel.core_pattern") && !kept.contains_key("vm.dirty_ratio"),
+            "a deny-listed param and a deny-listed path must both be dropped: {:?}",
+            kept.keys().collect::<Vec<_>>()
+        );
+        let (config, script) = render_persistence(&kept);
+        let config = config.unwrap_or_default();
+        assert!(
+            !config.contains("core_pattern") && !config.contains("modprobe"),
+            "nothing deny-listed may reach the rendered file: {config}"
+        );
+        assert!(script.is_none());
     }
 
     #[test]
@@ -1966,6 +2323,25 @@ mod tests {
     }
 
     #[test]
+    fn forbidden_paths_match_the_recorded_write_target() {
+        // The same list, applied to a *path*: this is the form `restore`
+        // checks, because the ledger's recorded path is what the kernel
+        // receives. Equivalent spellings of a deny-listed file must all match.
+        for path in [
+            "/proc/sys/kernel/core_pattern",
+            "/proc/sys//kernel/core_pattern",
+            "/proc/sys/kernel/../kernel/core_pattern",
+            "/proc/sys/kernel/modprobe",
+            "/proc/sys/fs/binfmt_misc/register",
+        ] {
+            assert!(is_forbidden_resolved_path(path), "{path} must be forbidden");
+        }
+        for path in ["/proc/sys/vm/swappiness", "/proc/sys/kernel/core_uses_pid"] {
+            assert!(!is_forbidden_resolved_path(path), "{path} must be allowed");
+        }
+    }
+
+    #[test]
     fn test_classify_rollback() {
         assert_eq!(
             classify_rollback(&RollbackOutcome {
@@ -2100,6 +2476,43 @@ mod tests {
         assert_eq!(entry.previous, "10");
         assert_eq!(entry.applied, "30");
         assert_eq!(entry.path, "/proc/sys/vm/swappiness");
+    }
+
+    /// A ledger entry whose recorded `path` predates the dotted-interface
+    /// fix (`5448`) must be re-pointed when the same parameter is merged
+    /// again, not just refreshed in `applied`.
+    ///
+    /// `heal_alias_duplicates` cannot do it: it compares canonicalized paths,
+    /// and `/proc/sys/net/ipv4/conf/Br0/100/forwarding` differs from the path
+    /// this parameter now resolves to. Left stale, the entry's file does not
+    /// exist, so every restore skips it — the original value never comes back
+    /// and the ledger entry never clears — while the write this merge records
+    /// has no usable rollback record at all.
+    #[test]
+    fn test_merge_refreshes_a_stale_path_for_the_same_param() {
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "net.ipv4.conf.Br0.100.forwarding":{
+                    "previous":"0","applied":"1",
+                    "path":"/proc/sys/net/ipv4/conf/Br0/100/forwarding"
+                }}}"#,
+        )
+        .unwrap();
+        let data = merge_entries(
+            data,
+            [(
+                "net.ipv4.conf.Br0.100.forwarding".to_string(),
+                "0".to_string(),
+                "1".to_string(),
+            )],
+        );
+        assert_eq!(data.entries.len(), 1);
+        let entry = &data.entries["net.ipv4.conf.Br0.100.forwarding"];
+        assert_eq!(entry.previous, "0");
+        assert_eq!(
+            entry.path, "/proc/sys/net/ipv4/conf/Br0.100/forwarding",
+            "the recorded path must be the one this parameter resolves to now"
+        );
     }
 
     #[test]
@@ -2384,6 +2797,44 @@ mod tests {
         assert_eq!(outcome.restored, 1);
         assert_eq!(outcome.failed, 2);
         assert_eq!(outcome.skipped, 1);
+    }
+
+    #[test]
+    fn restore_refuses_a_deny_listed_path_behind_an_innocent_param() {
+        // The ledger's recorded path is the write target, so the deny-list must
+        // cover it and not only the parameter spelling next to it: a ledger
+        // that was edited (or written by an older version) can point an
+        // innocent `vm.swappiness` at kernel.core_pattern, and `rollback` runs
+        // as root. The recorder stands in for the kernel write, so the test
+        // never touches procfs.
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "vm.swappiness".to_string(),
+            RollbackEntry {
+                previous: "10".to_string(),
+                applied: "20".to_string(),
+                path: "/proc/sys/kernel/core_pattern".to_string(),
+            },
+        );
+        let data = RollbackData {
+            version: 1,
+            entries,
+        };
+
+        let mut attempted: Vec<String> = Vec::new();
+        let outcome = restore_entries_with(&data, true, &mut |path, _value| {
+            attempted.push(path.to_string());
+            Ok(())
+        });
+        assert!(
+            attempted.is_empty(),
+            "a deny-listed target must never receive a write: {attempted:?}"
+        );
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (0, 1, 0),
+            "the entry must be counted as refused, not skipped or restored"
+        );
     }
 
     #[test]
@@ -3258,6 +3709,48 @@ mod tests {
         // write attempt, even for a param whose path does not exist.
         let err = write_and_verify("kernel.core_pattern", "x").unwrap_err();
         assert!(err.to_string().contains("拒绝写入"));
+    }
+
+    #[test]
+    fn test_write_and_verify_rejects_runtime_dangerous_params() {
+        // tune filters vm.nr_hugepages out of the plan (would_skip names it
+        // runtime_dangerous) and fix refuses it with the advice to persist
+        // instead; the write choke point must hold the same line for every
+        // other caller — a library import routes through here, and applying a
+        // runtime-dangerous knob from an imported .conf allocates hugepages
+        // on a live host, exactly what the policy exists to prevent. The
+        // guard fires before any path or write attempt, so both spellings of
+        // the knob are refused without side effects even on a host with a
+        // writable /proc/sys.
+        for spelling in ["vm.nr_hugepages", "vm/nr_hugepages"] {
+            let err = write_and_verify(spelling, "10").unwrap_err();
+            assert!(
+                err.to_string().contains("运行时危险"),
+                "the runtime-dangerous guard must refuse {spelling}: {err}"
+            );
+        }
+        // A knob outside the policy keeps flowing through the choke point:
+        // the refusal is the guard's, not a blanket write failure. On this
+        // read-only container the write itself fails, so assert the error is
+        // NOT the guard's message.
+        let err = write_and_verify("vm.ktuner_no_such", "1").unwrap_err();
+        assert!(!err.to_string().contains("运行时危险"));
+    }
+
+    #[test]
+    fn test_apply_import_refuses_runtime_dangerous_params() {
+        // The public import entrance is the caller the CLI guard never saw:
+        // an imported .conf carrying vm.nr_hugepages (either spelling) must
+        // be refused by the policy — before the original is read, before any
+        // write, before anything lands in the ledger — not applied live with
+        // the "same safety net as fix/tune" that entrance promises.
+        for spelling in ["vm.nr_hugepages", "vm/nr_hugepages"] {
+            let err = apply_import(spelling, "10", None).unwrap_err().to_string();
+            assert!(
+                err.contains("运行时危险"),
+                "import must refuse the runtime-dangerous {spelling}: {err}"
+            );
+        }
     }
 
     #[test]

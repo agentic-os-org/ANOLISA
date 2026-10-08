@@ -59,9 +59,10 @@ export const AgentHealthNotifier: React.FC = () => {
       notifiedRef.current.forEach(pid => {
         if (!currentPids.has(Math.abs(pid))) notifiedRef.current.delete(pid);
       });
-      // 如果 hung 进程恢复正常，清除其 hung 通知记录
+      // Recovery starts a new episode for either notice type, including PID reuse.
       agents.forEach(a => {
         if (a.status !== 'hung') notifiedRef.current.delete(-a.pid);
+        if (a.status !== 'offline' || !a.has_crash) notifiedRef.current.delete(a.pid);
       });
     } catch {
       // 通知是尽力而为的能力，接口失败时静默跳过本轮

@@ -36,72 +36,60 @@ impl ParsedRequest {
         std::str::from_utf8(self.body()).unwrap_or("")
     }
 
+    /// `Content-Encoding` of the request, the same view `ParsedResponse` uses.
+    pub fn content_encoding(&self) -> Option<&str> {
+        self.headers.get("content-encoding").map(|e| e.as_str())
+    }
+
+    fn is_chunked(&self) -> bool {
+        self.headers
+            .get("transfer-encoding")
+            .map(|v| v.to_lowercase().contains("chunked"))
+            .unwrap_or(false)
+    }
+
+    /// Body with the chunked transfer encoding removed, or `None` when the
+    /// request is not chunked.
+    fn dechunked_body(&self) -> Option<Vec<u8>> {
+        if !self.is_chunked() {
+            return None;
+        }
+        let dechunked = crate::utils::decompress::dechunk_body(self.body());
+        if dechunked.is_empty() && self.body_len > 0 {
+            None
+        } else {
+            Some(dechunked)
+        }
+    }
+
+    /// Body after chunked transfer encoding and `Content-Encoding` are removed.
+    ///
+    /// The same chain `ParsedResponse::decompressed_body` runs, so a request
+    /// and the response it is paired with are decoded identically.
+    pub fn decompressed_body(&self) -> Vec<u8> {
+        if let Some(dechunked) = self.dechunked_body() {
+            return crate::utils::decompress::decompress_body(&dechunked, self.content_encoding());
+        }
+        crate::utils::decompress::decompress_body(self.body(), self.content_encoding())
+    }
+
     /// 尝试将 body 解析为 JSON
     ///
-    /// 如果 body 是有效的 UTF-8 且是有效的 JSON，返回解析后的 Value。
-    /// 如果直接解析失败，会尝试剥离 HTTP chunked transfer encoding 后再解析。
+    /// 先按原样解析（未编码的 body 直接成功）；失败则走仓库统一的解码链：
+    /// 剥掉 chunked 传输编码、再按 `Content-Encoding` 解压，与响应侧
+    /// （`ParsedResponse::json_body`）和 HTTP/2 请求侧一致。以前这里用的是
+    /// 本文件私有的字符串解码器：它既不解压，也不认 chunk extension
+    /// （`1a;ext=1`），而完整性判定用的 `chunked_stream_complete` 是认的，
+    /// 于是这类 body 被管线放行、又被唯一的解码器拒收，请求侧整条丢失。
     pub fn json_body(&self) -> Option<serde_json::Value> {
         let body = self.body();
         if body.is_empty() {
             return None;
         }
-        let body_str = String::from_utf8_lossy(body);
-
-        // Try direct JSON parse first
-        if let Ok(v) = serde_json::from_str(&body_str) {
+        if let Ok(v) = serde_json::from_slice(body) {
             return Some(v);
         }
-
-        // Fallback: try stripping HTTP chunked transfer encoding
-        // Format: {hex_size}\r\n{data}\r\n...0\r\n\r\n
-        Self::decode_chunked_json(&body_str)
-    }
-
-    /// Decode HTTP chunked transfer encoding and parse as JSON
-    ///
-    /// All slicing uses `str::get(..)` so that arbitrary binary bodies (e.g.
-    /// OpenTelemetry Protobuf streams that we converted via
-    /// `from_utf8_lossy`) can't panic with "byte index N is not a char
-    /// boundary" when the parsed chunk size happens to point into the middle
-    /// of a multi-byte `U+FFFD` replacement char. In those cases we simply
-    /// abandon the chunked-decode attempt and return `None`, which the caller
-    /// treats as "not JSON".
-    fn decode_chunked_json(body: &str) -> Option<serde_json::Value> {
-        let mut decoded = String::new();
-        let mut remaining = body;
-
-        loop {
-            // Find the chunk size line
-            let newline_pos = remaining.find("\r\n")?;
-            let size_str = remaining.get(..newline_pos)?;
-            let chunk_size = usize::from_str_radix(size_str.trim(), 16).ok()?;
-
-            if chunk_size == 0 {
-                break; // End of chunks
-            }
-
-            let data_start = newline_pos + 2;
-            let data_end = data_start.checked_add(chunk_size)?;
-            if data_end > remaining.len() {
-                // Partial chunk — decode what we have (still guarded against
-                // landing inside a multi-byte char from from_utf8_lossy).
-                decoded.push_str(remaining.get(data_start..)?);
-                break;
-            }
-            decoded.push_str(remaining.get(data_start..data_end)?);
-
-            // Skip past chunk data and trailing \r\n
-            remaining = remaining.get(data_end..)?;
-            if remaining.starts_with("\r\n") {
-                remaining = remaining.get(2..)?;
-            }
-        }
-
-        if decoded.is_empty() {
-            return None;
-        }
-
-        serde_json::from_str(&decoded).ok()
+        serde_json::from_slice(&self.decompressed_body()).ok()
     }
 }
 
@@ -291,36 +279,35 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_chunked_json() {
+    fn test_json_body_decodes_chunked_bodies() {
         // Standard chunked encoding: "e\r\n{"key":"val"}\r\n0\r\n\r\n"
         let chunked = "e\r\n{\"key\":\"val\"}\r\n0\r\n\r\n";
-        let val = ParsedRequest::decode_chunked_json(chunked).unwrap();
+        let req = make_request(chunked.as_bytes(), &[("transfer-encoding", "chunked")]);
+        let val = req.json_body().expect("chunked body parses");
         assert_eq!(val["key"], "val");
     }
 
     #[test]
-    fn test_decode_chunked_json_invalid() {
-        assert!(ParsedRequest::decode_chunked_json("not chunked").is_none());
+    fn test_json_body_rejects_non_json_bodies() {
+        let req = make_request(b"not chunked", &[]);
+        assert!(req.json_body().is_none());
     }
 
-    /// Regression: a binary body (e.g. OTLP/Protobuf) passed through
-    /// `String::from_utf8_lossy` contains `U+FFFD` replacement chars that are
-    /// 3 bytes wide. If the chunk-size parser succeeds by accident and the
-    /// computed slice boundary lands inside one of those chars, the old
-    /// implementation panicked with "byte index N is not a char boundary".
-    /// The current implementation must return `None` instead.
+    /// Regression: a binary body (e.g. OTLP/Protobuf) must not panic the
+    /// decoder. The chunk framing is walked as bytes, so arbitrary
+    /// non-UTF-8 content is simply "not JSON" rather than a slice that can
+    /// land inside a `U+FFFD` replacement char.
     #[test]
-    fn test_decode_chunked_json_binary_body_does_not_panic() {
-        // A hex digit + \r\n + arbitrary invalid-UTF8 bytes (rendered as
-        // replacement chars by from_utf8_lossy) that intentionally place
-        // chunk_size past a multi-byte boundary.
+    fn test_json_body_binary_body_does_not_panic() {
+        // A hex digit + \r\n + arbitrary invalid-UTF8 bytes that would place a
+        // character-based chunk boundary past a multi-byte char.
         let mut raw: Vec<u8> = b"c27\r\n".to_vec();
         for _ in 0..4096 {
             raw.push(0xC2); // invalid stray UTF-8 lead byte
         }
-        let lossy = String::from_utf8_lossy(&raw);
-        // Must not panic; chunked decode should give up and return None.
-        assert!(ParsedRequest::decode_chunked_json(&lossy).is_none());
+        let req = make_request(&raw, &[("transfer-encoding", "chunked")]);
+        // Must not panic; the body is not JSON.
+        assert!(req.json_body().is_none());
     }
 
     #[test]
@@ -400,5 +387,61 @@ mod tests {
         };
         let debug_str = format!("{req:?}");
         assert!(debug_str.contains("GET"));
+    }
+
+    /// Build a request whose body is exactly `body`.
+    fn make_request(body: &[u8], headers: &[(&str, &str)]) -> ParsedRequest {
+        let mut full = b"POST /api HTTP/1.1\r\n".to_vec();
+        full.extend_from_slice(body);
+        let body_offset = full.len() - body.len();
+        let event = make_ssl_event(&full);
+        ParsedRequest {
+            method: "POST".to_string(),
+            path: "/api".to_string(),
+            version: 1,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body_offset,
+            body_len: body.len(),
+            source_event: event,
+            reassembled_body: None,
+        }
+    }
+
+    /// A chunk may carry an extension (`1a;ext=1`), which RFC 7230 §4.1 allows
+    /// and which the completeness check already tolerates: `HttpAggregator`
+    /// decides a chunked request body is complete by walking its framing with
+    /// `chunked_stream_complete`, and that walker stops the size line at `;`.
+    /// The private decoder then rejected the same body, so `json_body` returned
+    /// `None` and the entire request side (messages, tools, model, input
+    /// tokens) was lost for a body the pipeline had already admitted.
+    #[test]
+    fn test_json_body_accepts_chunk_extensions() {
+        let json = r#"{"key":"value"}"#;
+        let chunked = format!("{:x};ext=1\r\n{json}\r\n0\r\n\r\n", json.len());
+        let req = make_request(chunked.as_bytes(), &[("transfer-encoding", "chunked")]);
+        let val = req
+            .json_body()
+            .expect("a chunk extension must not lose the body");
+        assert_eq!(val["key"], "value");
+    }
+
+    /// A compressed request body arrived at `json_body` verbatim, while the
+    /// response side (`ParsedResponse::json_body`) and the HTTP/2 request side
+    /// both run the body through `utils::decompress` first. The whole request
+    /// side was lost for any client that compresses its prompts.
+    #[test]
+    fn test_json_body_decompresses_gzip_requests() {
+        let json = br#"{"key":"value"}"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, json).expect("gzip fixture");
+        let gz = encoder.finish().expect("gzip fixture");
+        let req = make_request(&gz, &[("content-encoding", "gzip")]);
+        let val = req
+            .json_body()
+            .expect("a gzip request body must be decompressed");
+        assert_eq!(val["key"], "value");
     }
 }

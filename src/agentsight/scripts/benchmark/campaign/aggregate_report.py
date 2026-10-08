@@ -23,6 +23,19 @@ def read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _artifact_number(value: Any) -> float | None:
+    """Read an int/float artifact field, or None for anything else.
+
+    campaign_evidence.finite_float rejects integers too large for float
+    (a corrupted counter in a metrics artifact raises OverflowError from
+    float() and math.isfinite()) and non-finite values, so one outlier
+    reads as missing instead of crashing the whole report.
+    """
+    if not isinstance(value, (int, float)):
+        return None
+    return campaign_evidence.finite_float(value)
+
+
 def nested(value: dict[str, Any], *keys: str) -> float | bool | None:
     """Read a finite numeric or boolean value from nested dictionaries."""
     current: Any = value
@@ -32,9 +45,7 @@ def nested(value: dict[str, Any], *keys: str) -> float | bool | None:
         current = current.get(key)
     if isinstance(current, bool):
         return current
-    if isinstance(current, (int, float)) and math.isfinite(current):
-        return float(current)
-    return None
+    return _artifact_number(current)
 
 
 def display(value: Any, suffix: str = "") -> str:
@@ -398,6 +409,26 @@ def write_recovery(
     return outcomes
 
 
+def fault_case_total(entry: object) -> int | None:
+    """Total repetitions of one fault case, when its counters are usable.
+
+    Mirrors the verdict-side classification in
+    ``campaign_evidence.fault_outcome``: a case entry must be an object of
+    non-negative integer counters, and booleans are not counts. Anything
+    else is unusable evidence and renders as a placeholder instead of
+    raising on the collector's own output.
+    """
+    if not isinstance(entry, dict):
+        return None
+    counters = entry.values()
+    if not all(
+        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        for count in counters
+    ):
+        return None
+    return sum(counters)
+
+
 def write_fault(
     results: Path,
     items: list[tuple[Path, dict[str, Any]]],
@@ -420,11 +451,18 @@ def write_fault(
         found = True
         fault = read_json(path)
         outcome = campaign_evidence.fault_outcome(run_path, run, settings, thresholds)
-        results_by_version[run["version"]] = outcome
+        # The verdict above already tolerates unusable artifact shapes; the
+        # table must too: `outcomes` entries that are not counter objects
+        # render a placeholder instead of raising.
+        version = str(run.get("version", "?"))
+        results_by_version[version] = outcome
         summary = run.get("summary", {})
-        for name, outcomes in fault.get("outcomes", {}).items():
+        outcomes = fault.get("outcomes")
+        outcomes = outcomes if isinstance(outcomes, dict) else {}
+        for name, entry in outcomes.items():
+            total = fault_case_total(entry)
             lines.append(
-                f"| {run['version']} | {name} | {sum(outcomes.values())} | "
+                f"| {version} | {name} | {total if total is not None else '—'} | "
                 f"{fault.get('server_healthy_after')} | {fault.get('process_alive_after')} | "
                 f"{ratio_display(nested(summary, 'http_success_rate'))}/"
                 f"{ratio_display(nested(summary, 'trace_completeness'))} | "
@@ -441,6 +479,7 @@ def write_regression(results: Path) -> dict[str, Any]:
     path = results / "regression.json"
     regression = read_json(path) if path.exists() else {}
     checks = regression.get("checks", [])
+    checks = checks if isinstance(checks, list) else []
     lines = [
         "# AgentSight 回归测试报告",
         "",
@@ -448,9 +487,21 @@ def write_regression(results: Path) -> dict[str, Any]:
         "| --- | ---: | --- |",
     ]
     for check in checks:
+        # A check that is not an object of a string command and an integer
+        # exit code is unusable evidence: render a placeholder row instead
+        # of raising and losing every other check in the report.
+        command = check.get("command") if isinstance(check, dict) else None
+        exit_code = check.get("exit_code") if isinstance(check, dict) else None
+        if (
+            not isinstance(command, str)
+            or not isinstance(exit_code, int)
+            or isinstance(exit_code, bool)
+        ):
+            lines.append("| — | — | — |")
+            continue
         lines.append(
-            f"| `{check['command']}` | {check['exit_code']} | "
-            f"{'PASS' if check['exit_code'] == 0 else 'FAIL'} |"
+            f"| `{command}` | {exit_code} | "
+            f"{'PASS' if exit_code == 0 else 'FAIL'} |"
         )
     if not checks:
         lines.append("| — | — | NOT EXECUTED |")
@@ -491,11 +542,9 @@ def comparison_summary(
     def values(field: str) -> tuple[float | None, float | None]:
         if before is None or after is None:
             return None, None
-        baseline = before.get(field)
-        optimized = after.get(field)
         return (
-            float(baseline) if isinstance(baseline, (int, float)) else None,
-            float(optimized) if isinstance(optimized, (int, float)) else None,
+            _artifact_number(before.get(field)),
+            _artifact_number(after.get(field)),
         )
 
     def regular_metric(field: str) -> dict[str, float | None]:
@@ -510,16 +559,8 @@ def comparison_summary(
     drop_baseline, drop_optimized = values("drop_rate")
     capacity_baseline = capacities.get("baseline", {}).get("maximum_sustainable_qps")
     capacity_optimized = capacities.get("optimized", {}).get("maximum_sustainable_qps")
-    capacity_before = (
-        float(capacity_baseline)
-        if isinstance(capacity_baseline, (int, float))
-        else None
-    )
-    capacity_after = (
-        float(capacity_optimized)
-        if isinstance(capacity_optimized, (int, float))
-        else None
-    )
+    capacity_before = _artifact_number(capacity_baseline)
+    capacity_after = _artifact_number(capacity_optimized)
     soak_slopes: dict[str, float | None] = {}
     for version in ("baseline", "optimized"):
         runs = [

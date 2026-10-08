@@ -716,6 +716,36 @@ fn evidence_digest_carries_what_the_rules_used() {
     );
 }
 
+/// The digest budget is a byte budget — that is what the prompt costs and what
+/// the constant documents — but the per-entry cut was taken in
+/// `chars().take(remaining)`, spending up to three bytes per character. A round
+/// whose observations are Chinese therefore handed the review roughly three
+/// times the documented bound, on a call paid for by the byte.
+#[test]
+fn the_evidence_digest_stays_inside_its_byte_budget() {
+    let entry = |step_id: usize, text: String| EvidenceEntry {
+        step_id,
+        source_call_id: None,
+        haystack: text,
+        numbers: Vec::new(),
+    };
+    let pool: Vec<EvidenceEntry> = (1..=6)
+        .map(|step| entry(step, "读取配置文件的缓冲区大小".repeat(400)))
+        .collect();
+
+    let digest = digest_pool(&pool);
+
+    assert!(
+        digest.len() <= EVIDENCE_DIGEST_LIMIT,
+        "digest is {} bytes, over the {EVIDENCE_DIGEST_LIMIT}-byte budget",
+        digest.len()
+    );
+    assert!(
+        digest.contains("读取配置文件的缓冲区大小"),
+        "the newest entry must still be carried"
+    );
+}
+
 #[test]
 fn scenario_call_id_separator_difference_still_correlates() {
     // Observed on a live agent: the call goes out as `call_47ad…` and the result

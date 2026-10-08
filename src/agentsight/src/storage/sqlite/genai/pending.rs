@@ -81,6 +81,11 @@ pub struct SseEnrichment {
     pub sse_event_count: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// Cache counters as the provider reported them; the live path stores the
+    /// same columns, and the drained-call total bills them for providers that
+    /// keep them outside `input_tokens` (see `billed_input_col!`).
+    pub cache_creation_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
 }
 
 impl GenAISqliteStore {
@@ -724,7 +729,8 @@ impl GenAISqliteStore {
     }
 
     /// Enrich a pending record with data extracted from captured SSE events.
-    /// Updates model, trace_id, provider, output_messages, sse_event_count, and token counts.
+    /// Updates model, trace_id, provider, output_messages, sse_event_count, the
+    /// cache columns, and the token counts.
     ///
     /// Only rows still in 'pending' are touched: a call that already completed
     /// holds the authoritative full-response values, and `insert_pending`
@@ -749,6 +755,12 @@ impl GenAISqliteStore {
             })
             .and_then(|messages| crate::genai::semantic::tool_call_ids_json(&messages));
         conn.execute(
+            // `total_tokens` restates the billed-input rule of
+            // `billed_input_col!`: Anthropic reports the cache counters
+            // outside `input_tokens` and bills them on top, every other
+            // provider already includes cached tokens in its reported input.
+            // The provider is taken after this UPDATE's own COALESCE so the
+            // row's stored provider and the enrichment's agree.
             "UPDATE genai_events SET
                 model            = COALESCE(?2, model),
                 trace_id         = COALESCE(?3, trace_id),
@@ -757,7 +769,15 @@ impl GenAISqliteStore {
                 sse_event_count  = COALESCE(?6, sse_event_count),
                 input_tokens     = COALESCE(?7, input_tokens),
                 output_tokens    = COALESCE(?8, output_tokens),
-                total_tokens     = COALESCE(?7, input_tokens, 0)
+                cache_creation_tokens = COALESCE(?10, cache_creation_tokens),
+                cache_read_tokens     = COALESCE(?11, cache_read_tokens),
+                total_tokens     = CASE
+                                     WHEN LOWER(COALESCE(COALESCE(?4, provider), '')) = 'anthropic'
+                                     THEN COALESCE(?7, input_tokens, 0)
+                                        + COALESCE(?10, cache_creation_tokens, 0)
+                                        + COALESCE(?11, cache_read_tokens, 0)
+                                     ELSE COALESCE(?7, input_tokens, 0)
+                                   END
                                  + COALESCE(?8, output_tokens, 0),
                 tool_call_ids    = COALESCE(?9, tool_call_ids)
              WHERE call_id = ?1 AND status = 'pending'",
@@ -771,6 +791,8 @@ impl GenAISqliteStore {
                 enrichment.input_tokens,
                 enrichment.output_tokens,
                 tool_call_ids,
+                enrichment.cache_creation_tokens,
+                enrichment.cache_read_tokens,
             ],
         )?;
         Ok(())

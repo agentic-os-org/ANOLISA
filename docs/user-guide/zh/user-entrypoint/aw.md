@@ -7,8 +7,8 @@ AW 将它的工具 Hook 接到选定的规则和处理程序。首批面向 Qwen
 OpenClaw 和 Hermes。
 
 计划中的交付物是 AW 安装包和一份 `aw.yaml`。切换 Agent 时复用这份策略，部署状态
-和审计记录由同一个服务管理。当前版本已经可以准备配置并检查文件，Agent 启动和
-策略执行仍在开发中。
+和审计记录由同一个服务管理。当前版本已经可以检查配置，并从源码运行本地 Provider
+Host 示例。Agent 启动和原生策略接入仍在开发中。
 
 ## 当前可用范围
 
@@ -20,15 +20,19 @@ OpenClaw 和 Hermes。
 | 从模板开始写配置 | ✅ 已支持 | 提供起步模板和完整示例 |
 | 检查字段、类型与 Provider 引用 | ✅ 已支持 | 离线校验器报告配置错误 |
 | 声明全部 16 个事件名 | ✅ 已支持 | 识别名称，不代表原生 Hook 已接通 |
+| 用合成工具事件试运行本地 Provider | ✅ 源码示例 | Host 执行发现、私有配置校验和有界调用，不启动 Agent |
 | 通过 AW 启动或接入 Agent | ❌ 待交付 | 独立服务和产品 CLI 尚未提供 |
 | 在原生工具执行前后调用 Provider | ❌ 待交付 | 各框架还需完成适配和效果验证 |
-| 用 sec-core 规则阻断工具或隐藏敏感结果 | ❌ 待交付 | 需要执行 Provider，并验证 Agent 确实采用响应 |
+| 用 sec-core 规则阻断工具或隐藏敏感结果 | ❌ 待交付 | 需要 sec-core Provider、受支持的效果，并验证 Agent 确实采用响应 |
 | 查看已应用策略与持久审计记录 | ❌ 待交付 | 由后续服务保存和查询 |
 | 安装 AW 并生成默认配置 | ❌ 待交付 | 当前手动复制起步模板 |
 | 主动请求人工审批或在原生 Hook 之外强制执行策略 | ❌ 后续范围 | 当前拒绝启用的 ask 步骤，尚不提供 OS 层执行约束 |
 
 四个首批 Agent 的标识都能写入配置，当前版本对它们的运行接入均为 ❌。QwenPaw
 与 Qwen Code 分别识别。适配交付后，再按 Agent 版本和具体操作公布实际支持情况。
+
+开发者可以在 Linux 上运行[本地 Provider Host 示例](../../../../src/aw/docs/design/provider-host_zh.md#本地示例)。
+它返回候选效果与执行失败，不安装 Hook、不激活 Agent 防护，也不持久写入审计记录。
 
 ## 从起步模板开始
 
@@ -115,11 +119,13 @@ Provider 是检查或处理事件的程序，可以是安全引擎，也可以�
 事件步骤通过 `provider` 引用这个名字，再用 `operation` 选择操作。
 [完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.yaml)
 中的 `business-before` 引用了 `business`，工具前末尾检查引用了 `security`。
-执行服务交付后，步骤按配置顺序运行；当前版本的 Provider 调用仍标为 ❌。
+原生步骤调度仍属于后续 Agent 接入工作。本地调用可通过独立的 Host 示例运行；
+围绕真实 Agent 工具执行 Provider 在当前版本仍标为 ❌。
 
 完整示例列出全部 16 个事件，另有一个默认关闭的结果隐藏步骤。其中的业务程序
-路径和 sec-core 命令仅作示意，待 Provider 协议与运行时交付后换成真实实现。
-当前修改 `enabled` 只会改变待校验的配置，不会安装 Hook 或开启防护。
+路径和 sec-core 命令仅作示意，接入 Agent 时需要换成真实实现。完整示例包含超出当前
+Host 支持的工具事件范围的能力，不是它的可运行模板。修改 `enabled` 会改变待校验的
+配置，不会安装 Hook 或开启防护。
 
 ## 使用配置启动 Agent
 

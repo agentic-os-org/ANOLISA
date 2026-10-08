@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-AW 提供统一配置、版本化能力合同和可嵌入的 Core 编排。`aw-config` 校验配置结构和引用；`aw-provider` 离线检查外部 Provider 消息与能力准入；`aw-contracts` 检查数据结构及记录间关系；`aw-core` 通过调用方提供的 Host 执行固定计划，并持久记录执行事实。AW 没有独立服务进程，原生 Agent 控制和最终工具执行仍由接入方负责。
+AW 提供统一配置、版本化能力合同和可嵌入的执行库。`aw-config` 校验配置；`aw-provider` 离线检查 Provider 消息与准入；`aw-host` 通过有界命令传输准备并调用本地 Provider。`aw-contracts` 检查记录间关系，`aw-core` 通过调用方提供的 Host 执行固定计划，并持久记录执行事实。AW 没有独立服务进程，原生 Agent 控制和最终工具执行仍由接入方负责。
 
 当前接口仍处于实验阶段。合同测试使用合成记录，命令传输测试使用本地子进程；
 两者均不证明 Agent 已完成接入。
@@ -20,6 +20,15 @@ cargo run --locked -p aw-config --example validate -- crates/aw-config/examples/
 字段和示例见[配置指南](../../docs/developer-guide/zh/aw/configuration.md)，
 开发环境、测试与 CI 说明见[参与 AW 开发](CONTRIBUTING_zh.md)。
 
+## 本地 Provider Host
+
+`aw-host` 在 Linux 上执行真实的 `describe`、`validate_config` 和 `invoke` 交互。
+它保留配置与进程上下文，执行共享的事件截止时间限制，并分别返回候选效果与执行失败。
+调用方提供可信 Adapter 能力，负责调度和效果采用。
+
+可以通过[本地 Host 示例](docs/design/provider-host_zh.md#本地示例)运行样例策略。
+示例使用合成工具事件，不启动 Agent、不安装 Hook，也不持久写入审计记录。
+
 ## 嵌入 Core
 
 `aw-core` 提供 `Core::prepare`、`Core::execute`、可信 Host/Clock/Journal 端口，
@@ -33,8 +42,9 @@ Core 测试使用合成 Host；Agent 原生接入和效果采用需要单独进�
 ## 命令执行
 
 `aw-exec` 在 Linux 上执行单条命令，提供绝对截止时间、字节上限、取消及所属进程组清理。
-原生 stdout、stderr 和退出状态保留给调用方解释。该库提供进程传输能力；Provider 协议接线、
-daemon 和 Agent 适配另行交付。API、所有权与验证边界见[有界命令执行](docs/design/bounded-execution_zh.md)。
+原生 stdout、stderr 和退出状态保留给调用方解释。`aw-host` 在其上接入 Provider JSON 协议，
+原生命令调用方继续使用原始字节接口。daemon 和 Agent 适配另行交付。
+API、所有权与验证边界见[有界命令执行](docs/design/bounded-execution_zh.md)。
 
 ## 源码参考
 
@@ -60,5 +70,5 @@ Registry 包含 21 个 Schema 资源。`crates/aw-contracts/schemas/` 中的 8 �
 Qoder CLI、OpenClaw、Hermes 及全部 16 个事件名，不表示适配器已经实现。
 配置中没有运行时 `status`。`aw-provider` 校验外部提供的操作声明和私有配置响应，
 并依据调用方信任的 Adapter 能力准入工具步骤；它不执行发现，也不证明原生采用。
-Provider 执行和绑定安装由后续增量交付。与既有 wire 合同的关系见
+`aw-host` 执行这些交互；原生绑定安装由后续增量交付。与既有 wire 合同的关系见
 [配置设计](docs/design/configuration_zh.md)。

@@ -15,7 +15,8 @@
     "test:dashboard-controls": "node tests/run-dashboard-controls-regression.cjs",
     "test:agent-sessions-subagent-count": "node tests/run-agent-sessions-subagent-count-regression.cjs",
     "test:product-branding": "node --test tests/product-branding-regression.test.cjs",
-    "test:agent-health-notifier": "node --test tests/agent-health-notifier-regression.test.cjs"
+    "test:agent-health-notifier": "node --test tests/agent-health-notifier-regression.test.cjs",
+    "test:crash-episodes": "node --test tests/crash-episode-regression.test.cjs"
   },
   "dependencies": {
     "react": "^18.2.0",

@@ -122,7 +122,11 @@ fn process_session(
             .unwrap_or(0);
         let cutoff_ns = agentsight_sqlite_lifecycle::retention_cutoff_ns(now_ns, retention_days)?;
         if file_mtime_ns < i64::try_from(cutoff_ns).unwrap_or(i64::MAX) {
-            store.set_file_state(&file_path, file_size, file_mtime_ns)?;
+            // No `set_file_state` here: the retention decision is recomputed
+            // by stat on every scan, and persisting it as `skipped_files`
+            // bookkeeping would make the file indistinguishable from a failed
+            // conversion — a later widened window would then match the stale
+            // size/mtime and never re-admit the now-eligible file.
             return Ok(false);
         }
     }
@@ -306,6 +310,50 @@ mod tests {
         assert!(
             !process_session(&store, &s2, 0).unwrap(),
             "unchanged second path must not re-ingest"
+        );
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_process_session_re_admits_file_after_retention_widens() {
+        // The retention pre-check used to persist `skipped_files` state,
+        // indistinguishable from failed-conversion bookkeeping. When the
+        // window was later widened, the stale row still matched the
+        // unchanged size/mtime and the now-eligible file was never
+        // ingested. The retention decision is recomputed by stat every
+        // scan, so it must not leave state behind.
+        let base = tmp_dir("retention-widen");
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let path = write_session(&projects);
+
+        // Age the file beyond a one-day retention window.
+        let aged = std::time::SystemTime::now() - Duration::from_secs(10 * 24 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
+
+        let session = DiscoveredSession {
+            path,
+            project: "data-myapp".into(),
+            session_id: UUID_A.into(),
+            is_subagent: false,
+            source: "qoder".into(),
+        };
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+
+        // Expired: skipped by the pre-check before any conversion.
+        assert!(!process_session(&store, &session, 1).unwrap());
+        assert_eq!(store.count().unwrap(), 0);
+
+        // Widened window (0 disables the pre-check): the unchanged file must
+        // now be ingested instead of matching the retention skip's state.
+        assert!(
+            process_session(&store, &session, 0).unwrap(),
+            "a widened retention window must re-admit the previously skipped file"
         );
         assert_eq!(store.count().unwrap(), 1);
     }

@@ -37,9 +37,35 @@ impl SkillFs {
             return reply.error(libc::EOPNOTSUPP);
         }
 
-        let physical = match self.resolve_physical_path(&path) {
-            Some(p) => p,
-            None => return reply.error(libc::EOPNOTSUPP),
+        // xattr *reads* observe the same directory as every other read: the
+        // D1.1 resolver's snapshot for a fallback skill, the live source for
+        // a current skill, staging/pending/grace candidates from source, and
+        // nothing for a hidden skill. The trusted `.skill-meta` management
+        // view is the exception (live source, matching lookup/getattr/open),
+        // and mutations below stay live-source by design.
+        let physical = match &path_type {
+            PathType::Passthrough {
+                skill_name,
+                relative_path,
+            } => {
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&pt, req) {
+                    // Untrusted callers keep the metadata isolation.
+                    Some(false) => return reply.error(libc::ENOENT),
+                    // Trusted callers read `.skill-meta` from the live
+                    // physical source even when the regular view is a
+                    // fallback snapshot or hidden.
+                    Some(true) => self.skill_physical_dir(skill_name).join(relative_path),
+                    None => match self.flat_access_read_path(skill_name, Some(relative_path)) {
+                        Some(p) => p,
+                        None => return reply.error(libc::ENOENT),
+                    },
+                }
+            }
+            _ => return reply.error(libc::EOPNOTSUPP),
         };
 
         let res = xattr_lget(&physical, name, size as usize);
@@ -64,7 +90,6 @@ impl SkillFs {
         size: u32,
         reply: ReplyXattr,
     ) {
-        let _ = req;
         let path = match self.inodes.get_path(ino) {
             Some(p) => p,
             None => return reply.error(libc::ENOENT),
@@ -78,9 +103,28 @@ impl SkillFs {
             return reply.error(libc::EOPNOTSUPP);
         }
 
-        let physical = match self.resolve_physical_path(&path) {
-            Some(p) => p,
-            None => return reply.error(libc::EOPNOTSUPP),
+        // Same resolver-aware directory as `getxattr`: a fallback skill's
+        // xattr list must describe the snapshot the bytes come from, with
+        // the same trusted `.skill-meta` live-source exception.
+        let physical = match &path_type {
+            PathType::Passthrough {
+                skill_name,
+                relative_path,
+            } => {
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&pt, req) {
+                    Some(false) => return reply.error(libc::ENOENT),
+                    Some(true) => self.skill_physical_dir(skill_name).join(relative_path),
+                    None => match self.flat_access_read_path(skill_name, Some(relative_path)) {
+                        Some(p) => p,
+                        None => return reply.error(libc::ENOENT),
+                    },
+                }
+            }
+            _ => return reply.error(libc::EOPNOTSUPP),
         };
 
         // Always fetch the full physical list first so we can filter to the

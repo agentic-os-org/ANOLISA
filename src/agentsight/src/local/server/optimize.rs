@@ -503,25 +503,33 @@ pub async fn update_optimize_config(
     data: web::Data<OptimizeAppState>,
     body: web::Json<UpdateOptConfig>,
 ) -> impl Responder {
-    let updated = {
-        let mut config = match data.optimize.config.write() {
-            Ok(config) => config,
-            Err(_) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": "config lock poisoned"}));
-            }
-        };
-        apply_config_update(&mut config, &body);
-        config.clone()
+    let updated = match persist_config_update(&data.optimize, &body) {
+        Ok(updated) => updated,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("failed to persist config: {e}")
+            }));
+        }
     };
 
-    if let Err(e) = updated.save(&data.optimize.config_path) {
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("failed to persist config: {e}")
-        }));
-    }
-
     HttpResponse::Ok().json(config_response(&updated))
+}
+
+fn persist_config_update(
+    state: &OptimizeState,
+    update: &UpdateOptConfig,
+) -> std::io::Result<OptLlmConfig> {
+    let mut config = state
+        .config
+        .write()
+        .map_err(|_| std::io::Error::other("config lock poisoned"))?;
+    // Publish memory only after persistence succeeds, keeping the lock
+    // through both so another update cannot save an older snapshot last.
+    let mut updated = config.clone();
+    apply_config_update(&mut updated, update);
+    updated.save(&state.config_path)?;
+    *config = updated.clone();
+    Ok(updated)
 }
 
 // ─── Semantic session search ────────────────────────────────────────────────
@@ -574,6 +582,76 @@ pub async fn semantic_search_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_config_update_keeps_memory_and_allows_retry() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_local_failed_update_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(tmp.join(CONFIG_FILE_NAME)).unwrap();
+        let state = OptimizeState::init(&tmp, None);
+        let update = UpdateOptConfig {
+            model: Some("synthetic-model".into()),
+            search_timeout_secs: Some(17),
+            api_key: None,
+            base_url: None,
+        };
+        assert!(persist_config_update(&state, &update).is_err());
+        assert!(state.snapshot().model.is_none());
+        assert!(state.snapshot().search_timeout_secs.is_none());
+        std::fs::remove_dir(tmp.join(CONFIG_FILE_NAME)).unwrap();
+        persist_config_update(&state, &update).unwrap();
+        assert_eq!(state.snapshot().model.as_deref(), Some("synthetic-model"));
+        assert_eq!(
+            OptLlmConfig::load(&tmp.join(CONFIG_FILE_NAME)).search_timeout_secs,
+            Some(17)
+        );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn concurrent_config_updates_preserve_both_fields_on_restart() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_local_concurrent_update_{}",
+            std::process::id()
+        ));
+        let state = OptimizeState::init(&tmp, None);
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let workers: Vec<_> = (0..2)
+            .map(|index| {
+                let state = Arc::clone(&state);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..50 {
+                        persist_config_update(
+                            &state,
+                            &UpdateOptConfig {
+                                model: (index == 0).then(|| "synthetic-model".into()),
+                                search_timeout_secs: (index == 1).then_some(17),
+                                api_key: None,
+                                base_url: None,
+                            },
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let restarted = OptimizeState::init(&tmp, None).snapshot();
+        assert_eq!(restarted.model.as_deref(), Some("synthetic-model"));
+        assert_eq!(restarted.search_timeout_secs, Some(17));
+        assert_eq!(
+            state.snapshot().search_timeout_secs,
+            restarted.search_timeout_secs
+        );
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
 
     #[test]
     fn test_opt_llm_config_default() {

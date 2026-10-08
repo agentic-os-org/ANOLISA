@@ -353,6 +353,72 @@ async fn test_watcher_symlink_rename_is_not_a_dir_deletion() {
 
 #[tokio::test]
 #[ignore = "flaky in CI - filesystem events may not fire reliably"]
+#[cfg(unix)]
+async fn test_watcher_symlink_moved_in_is_not_a_dir_created() {
+    // Delta-audit round 9, real inotify: a symlink pointing at a real
+    // directory, moved into the source, must not emit DirCreated — the
+    // drift conversion would report a skill directory that never existed.
+    // Pins the no-follow contract of the move-in (To) arm.
+    let parent = tempdir().expect("parent directory");
+    let source = parent.path().join("source");
+    std::fs::create_dir(&source).expect("source directory");
+    let real_target = parent.path().join("real-target");
+    std::fs::create_dir(&real_target).expect("real directory target");
+    let staging = parent.path().join("staging");
+    std::fs::create_dir(&staging).expect("staging directory");
+    let link = staging.join("linked-skill");
+    std::os::unix::fs::symlink("../real-target", &link).expect("symlink to a directory");
+
+    let (mut rx, handle) = watch_source_with_handle(source.clone(), 50)
+        .await
+        .expect("watcher must be attached before moving the symlink in");
+    std::fs::rename(&link, source.join("linked-skill")).expect("move the symlink into the source");
+
+    // Ordered sentinel, same watch session: a REAL directory moved in
+    // right after the symlink. Requiring its DirCreated proves the
+    // watcher observed this session's move events — otherwise (notify
+    // dropped or delayed them, the exact flake this test's `#[ignore]`
+    // names) the negative assertion below would pass vacuously without
+    // ever exercising the production RenameMode::To path.
+    let real_skill = staging.join("real-skill");
+    std::fs::create_dir(&real_skill).expect("real skill directory");
+    std::fs::rename(&real_skill, source.join("real-skill"))
+        .expect("move the real directory in after the symlink");
+
+    let linked_in_source = source.join("linked-skill");
+    let real_in_source = source.join("real-skill");
+    let mut saw_dir_created_for_link = false;
+    let mut saw_sentinel_dir_created = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(SkillEvent::DirCreated(path))) => {
+                if path == linked_in_source {
+                    saw_dir_created_for_link = true;
+                    eprintln!("unexpected DirCreated: {}", path.display());
+                } else if path == real_in_source {
+                    saw_sentinel_dir_created = true;
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    handle.shutdown().await;
+    assert!(
+        saw_sentinel_dir_created,
+        "the sentinel real-directory move-in was never observed: this session's \
+         filesystem events did not fire, so the negative assertion below would \
+         prove nothing"
+    );
+    assert!(
+        !saw_dir_created_for_link,
+        "a moved-in symlink must never be reported as a skill-directory creation"
+    );
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
 async fn test_watcher_debouncing() {
     let source_dir = tempdir().unwrap();
     let source = source_dir.path().to_path_buf();

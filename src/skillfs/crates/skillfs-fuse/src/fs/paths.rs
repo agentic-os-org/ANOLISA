@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use fuser::{FUSE_ROOT_ID, FileType};
 
 use super::SkillFs;
-use crate::path::{PathType, is_skill_discover_path};
+use crate::path::{PathType, is_hermes_management_path, is_skill_discover_path};
 use crate::security::{
     inbox::{is_inbox_dir_name, is_valid_inbox_skill_name},
     lifecycle::is_reserved_lifecycle_name,
@@ -363,10 +363,11 @@ impl SkillFs {
     ///
     /// The Hermes root listing is the physical workspace, so the filters the
     /// flat `/skills` listing applies have to run here as well: reserved
-    /// lifecycle roots (S3), installer staging roots (I2), and
-    /// activation-hidden skills (D1.1). Only skill-shaped leaves are gated by
-    /// activation — plain files and category directories are passthrough
-    /// content and stay visible.
+    /// lifecycle roots (S3), installer staging roots (I2),
+    /// activation-hidden skills (D1.1), and dot-prefixed directories the
+    /// store loader skips (they are never managed Skills). Only skill-shaped
+    /// leaves are gated by activation — plain files and category directories
+    /// are passthrough content and stay visible.
     pub(super) fn hermes_root_entry_is_hidden(
         &self,
         name: &str,
@@ -380,6 +381,19 @@ impl SkillFs {
             if matcher.is_staging_root(name) {
                 return true;
             }
+        }
+        // The store loader skips dot-prefixed directories, so they are never
+        // managed Skills and the flat `/skills` listing cannot surface them.
+        // A hidden directory that carries SKILL.md would otherwise parse as
+        // a top-level skill and be listed while the store holds no entry for
+        // it (non-in-place reads answer ENOENT). Hide it like the flat
+        // listing does; plain dot content and management paths (`.hub`,
+        // `.bundled_manifest`, …) keep their existing rules.
+        if name.starts_with('.')
+            && !is_hermes_management_path(name)
+            && skillfs_core::store::has_regular_skill_md(physical)
+        {
+            return true;
         }
         self.active_resolver.is_some()
             && skillfs_core::store::has_regular_skill_md(physical)
@@ -601,5 +615,33 @@ mod tests {
             std::fs::canonicalize(fd_path).expect("canonical parent fd"),
             std::fs::canonicalize(&skill_dir).expect("canonical skill dir")
         );
+    }
+
+    #[test]
+    fn hidden_top_level_skill_dir_is_not_a_visible_root_entry() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let hidden = source.path().join(".hidden-skill");
+        std::fs::create_dir_all(&hidden).expect("hidden dir");
+        std::fs::write(
+            hidden.join("SKILL.md"),
+            "---\nname: h\ndescription: x\n---\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: skillfs_core::SharedSkillStore = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared,
+            true,
+        );
+        assert!(
+            fs.hermes_root_entry_is_hidden(".hidden-skill", &hidden),
+            "predicate must hide a dot-prefixed skill dir"
+        );
+        // Reverse: management paths and ordinary entries stay visible.
+        assert!(!fs.hermes_root_entry_is_hidden(".hub", &hidden));
     }
 }

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -86,6 +86,14 @@ pub struct HealthChecker {
     interruption_store: Option<Arc<InterruptionStore>>,
     /// Optional GenAI store for querying pending calls and marking them interrupted
     genai_store: Option<Arc<GenAISqliteStore>>,
+    /// Offline entries whose crash decision had to be deferred because the
+    /// pending-call query failed.
+    ///
+    /// `mark_stale_offline` reports only the entries that *just* went offline, so
+    /// a deferred one would otherwise never be examined again: the crash it may
+    /// represent would go unrecorded and the entry would sit in the store until
+    /// the TTL cleanup removed it.
+    deferred_offline: Mutex<Vec<AgentHealthStatus>>,
 }
 
 impl HealthChecker {
@@ -101,6 +109,7 @@ impl HealthChecker {
             http_timeout: Duration::from_secs(5),
             interruption_store: None,
             genai_store: None,
+            deferred_offline: Mutex::new(Vec::new()),
         }
     }
 
@@ -166,6 +175,10 @@ impl HealthChecker {
             vec![]
         };
 
+        let mut newly_offline = newly_offline;
+        if let Ok(mut deferred) = self.deferred_offline.lock() {
+            newly_offline.append(&mut deferred);
+        }
         self.record_offline_agent_crashes(&newly_offline);
 
         log::debug!("Health check: found {} agent(s)", agents.len());
@@ -272,7 +285,17 @@ impl HealthChecker {
                     let rep = group.iter().max_by_key(|o| o.pid).unwrap();
 
                     // ── Branch A: pending (in-flight) LLM calls ──────────────────────────
-                    let pending_calls = self.get_pending_calls_for_pids(&pids);
+                    // "We could not ask" is not "there were none": with an empty
+                    // list the agent is written off as a normal shutdown, which
+                    // records no crash and lets `remove_normal_exits` erase the
+                    // only trace of it. Defer the decision to the next cycle
+                    // instead.
+                    let Some(pending_calls) = self.get_pending_calls_for_pids(&pids) else {
+                        if let Ok(mut deferred) = self.deferred_offline.lock() {
+                            deferred.extend(group.iter().map(|entry| (**entry).clone()));
+                        }
+                        continue;
+                    };
                     if !pending_calls.is_empty() {
                         // Trace mode records each agent's raw exit status into
                         // the shared interruption DB. When every offline pid in
@@ -404,23 +427,50 @@ impl HealthChecker {
                         // Mark all PIDs in this group as having a crash event
                         crash_pids.extend(group.iter().map(|o| o.pid));
                     } else {
-                        // No pending calls — treat as normal/graceful shutdown.
-                        log::debug!(
-                            "Agent {agent_name} (pids={pids:?}) exited with no pending calls — treating as normal shutdown"
-                        );
+                        // An empty pending list is not proof of a normal exit:
+                        // when trace mode records the crash it marks the dying
+                        // pid's in-flight calls `interrupted` first, so a crash
+                        // it already handled arrives here with nothing left to
+                        // find. Only a group with no crash behind it is a
+                        // graceful shutdown — the entry is what carries
+                        // `has_crash` to the health page and the crash notifier,
+                        // and `remove_normal_exits` drops it without that flag.
+                        if pids
+                            .iter()
+                            .any(|&p| istore.agent_crash_exists_recent(p, 120))
+                        {
+                            crash_pids.extend(group.iter().map(|o| o.pid));
+                        } else {
+                            log::debug!(
+                                "Agent {agent_name} (pids={pids:?}) exited with no pending calls — treating as normal shutdown"
+                            );
+                        }
                     }
                 }
 
-                // Update store: mark crash PIDs, then remove normal exits
+                // Update store: mark crash PIDs, then remove normal exits — but
+                // only when every group was actually decided. An undecided entry
+                // is kept so the next cycle can still record its crash.
+                let undecided = self
+                    .deferred_offline
+                    .lock()
+                    .map(|deferred| !deferred.is_empty())
+                    .unwrap_or(true);
                 if let Ok(mut store) = self.store.write() {
                     for pid in &crash_pids {
                         store.mark_has_crash(*pid);
                     }
-                    let removed = store.remove_normal_exits();
-                    if removed > 0 {
+                    if undecided {
                         log::debug!(
-                            "Removed {removed} normal-exit entries from health store (no crash event)"
+                            "Keeping offline entries whose crash decision could not be made yet"
                         );
+                    } else {
+                        let removed = store.remove_normal_exits();
+                        if removed > 0 {
+                            log::debug!(
+                                "Removed {removed} normal-exit entries from health store (no crash event)"
+                            );
+                        }
                     }
                 }
             }
@@ -551,17 +601,22 @@ impl HealthChecker {
     fn get_pending_calls_for_pids(
         &self,
         pids: &[i32],
-    ) -> Vec<(String, Option<String>, Option<String>, Option<String>)> {
+    ) -> Option<Vec<(String, Option<String>, Option<String>, Option<String>)>> {
         if let Some(ref genai_store) = self.genai_store {
             match genai_store.list_pending_for_pids(pids) {
-                Ok(calls) => calls,
+                Ok(calls) => Some(calls),
                 Err(e) => {
-                    log::warn!("Failed to query pending calls for pids={pids:?}: {e}");
-                    vec![]
+                    log::error!(
+                        "Failed to query pending calls for pids={pids:?}, deferring the crash \
+                         decision: {e}"
+                    );
+                    None
                 }
             }
         } else {
-            vec![]
+            // No GenAI store: there is nothing to ask, so the answer is a real
+            // "no pending calls" rather than an unknown.
+            Some(vec![])
         }
     }
 
@@ -737,6 +792,23 @@ mod tests {
         Arc<GenAISqliteStore>,
         Arc<InterruptionStore>,
     ) {
+        let (dir, _store, checker, genai_store, istore) = setup_checker_with_store(tag, pid);
+        (dir, checker, genai_store, istore)
+    }
+
+    /// Same, but hands back the health store so a test can assert what the
+    /// checker left in it.
+    #[allow(clippy::type_complexity)]
+    fn setup_checker_with_store(
+        tag: &str,
+        pid: i32,
+    ) -> (
+        std::path::PathBuf,
+        Arc<RwLock<HealthStore>>,
+        HealthChecker,
+        Arc<GenAISqliteStore>,
+        Arc<InterruptionStore>,
+    ) {
         let dir = unique_tmp_dir(tag);
         let genai_store = Arc::new(
             GenAISqliteStore::new_with_path(
@@ -771,13 +843,91 @@ mod tests {
             pending_match_key: None,
         };
         genai_store.insert_pending(&info).expect("insert_pending");
-        let checker = HealthChecker::new(
-            Arc::new(RwLock::new(HealthStore::new())),
-            Duration::from_secs(30),
-        )
-        .with_interruption_store(Arc::clone(&istore))
-        .with_genai_store(Arc::clone(&genai_store));
-        (dir, checker, genai_store, istore)
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(Arc::clone(&store), Duration::from_secs(30))
+            .with_interruption_store(Arc::clone(&istore))
+            .with_genai_store(Arc::clone(&genai_store));
+        (dir, store, checker, genai_store, istore)
+    }
+
+    /// "We could not ask" is not "there were none". A failed pending-call query
+    /// used to be read as a normal shutdown: no crash was recorded, and
+    /// `remove_normal_exits` then erased the only trace of the agent from the
+    /// store, while its LLM calls stayed `pending` forever.
+    #[test]
+    fn a_failed_pending_query_keeps_the_offline_entry() {
+        let dir = unique_tmp_dir("pending-query-failure");
+        let db = dir.join("foreign.db");
+        // A database whose `genai_events` has none of the columns the lookup
+        // needs — the shape a foreign or legacy file has — so the query fails
+        // the way a real migration gap or a locked file does.
+        rusqlite::Connection::open(&db)
+            .expect("fixture connection")
+            .execute_batch("CREATE TABLE genai_events (id INTEGER PRIMARY KEY);")
+            .expect("fixture schema");
+        let genai =
+            Arc::new(GenAISqliteStore::open_read_only_existing(&db).expect("foreign store"));
+
+        let health = Arc::new(RwLock::new(HealthStore::new()));
+        let pid = 2_000_000_001;
+        health.write().unwrap().update(pid, offline_status(pid));
+        let checker = HealthChecker::new(Arc::clone(&health), Duration::from_secs(30))
+            .with_interruption_store(Arc::new(
+                InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                    .expect("interruption store"),
+            ))
+            .with_genai_store(genai);
+
+        checker.record_offline_agent_crashes(&[offline_status(pid)]);
+
+        assert!(
+            health
+                .read()
+                .unwrap()
+                .all_agents()
+                .iter()
+                .any(|entry| entry.pid == pid),
+            "an undecided entry must not be erased from the store"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guard for the fix above: a query that succeeds and finds nothing is
+    /// still a normal shutdown, so the entry is removed as before.
+    #[test]
+    fn an_empty_pending_answer_still_reports_a_normal_shutdown() {
+        let dir = unique_tmp_dir("pending-query-empty");
+        let genai = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .expect("genai store"),
+        );
+        let health = Arc::new(RwLock::new(HealthStore::new()));
+        let pid = 2_000_000_002;
+        health.write().unwrap().update(pid, offline_status(pid));
+        let checker = HealthChecker::new(Arc::clone(&health), Duration::from_secs(30))
+            .with_interruption_store(Arc::new(
+                InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                    .expect("interruption store"),
+            ))
+            .with_genai_store(genai);
+
+        checker.record_offline_agent_crashes(&[offline_status(pid)]);
+
+        assert!(
+            !health
+                .read()
+                .unwrap()
+                .all_agents()
+                .iter()
+                .any(|entry| entry.pid == pid),
+            "a decided normal shutdown must still be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn offline_status(pid: u32) -> AgentHealthStatus {
@@ -892,6 +1042,84 @@ mod tests {
                 .len(),
             1,
             "pending call must not be marked interrupted on graceful reap"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Trace mode records the crash itself and then marks the dying pid's
+    /// in-flight calls `interrupted` (`record_agent_crash_interruptions` →
+    /// `mark_pending_interrupted_for_pid`), so the 30 s health scan that runs
+    /// afterwards finds no pending row for that pid. An empty pending lookup is
+    /// therefore not proof of a graceful shutdown: reading it as one leaves the
+    /// entry with `has_crash == false`, and `remove_normal_exits` then drops it,
+    /// hiding the crash from the health page badge and the crash notifier.
+    #[test]
+    fn trace_recorded_crash_survives_the_empty_pending_lookup() {
+        let pid = 4_100_006;
+        let (dir, store, checker, genai_store, istore) =
+            setup_checker_with_store("trace-crash", pid);
+        store
+            .write()
+            .unwrap()
+            .update(pid as u32, offline_status(pid as u32));
+
+        // What trace mode leaves behind: a recent agent_crash row plus an
+        // interrupted (no longer pending) call for the same pid.
+        istore
+            .insert(&crate::interruption::InterruptionEvent::new(
+                crate::interruption::InterruptionType::AgentCrash,
+                Some("sess-1".to_string()),
+                None,
+                Some("conv-1".to_string()),
+                Some("hc-call-trace-crash".to_string()),
+                Some(pid),
+                Some("cosh-core".to_string()),
+                (now_ms() as i64) * 1_000_000,
+                None,
+            ))
+            .expect("insert crash event");
+        genai_store
+            .mark_pending_interrupted_for_pid(pid, "agent_crash")
+            .expect("mark interrupted");
+        assert!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .is_empty(),
+            "trace mode must leave nothing pending for the checker to see"
+        );
+
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        let kept = store
+            .read()
+            .unwrap()
+            .all_agents()
+            .into_iter()
+            .find(|agent| agent.pid == pid as u32)
+            .expect("a trace-recorded crash must keep its offline entry");
+        assert!(
+            kept.has_crash,
+            "the entry must stay marked as a crash so the health page and the notifier surface it"
+        );
+
+        // Control: without a crash record and without pending calls the entry
+        // is still a normal exit and must be removed.
+        let quiet_pid = 4_100_007;
+        store
+            .write()
+            .unwrap()
+            .update(quiet_pid as u32, offline_status(quiet_pid as u32));
+        checker.record_offline_agent_crashes(&[offline_status(quiet_pid as u32)]);
+        assert!(
+            !store
+                .read()
+                .unwrap()
+                .all_agents()
+                .iter()
+                .any(|agent| agent.pid == quiet_pid as u32),
+            "a real normal exit must still leave the health store"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -2,8 +2,9 @@
 
 [English](bounded-execution.md)
 
-`aw-exec` 为单条命令提供字节上限、绝对截止时间和取消能力。原生 Hook 命令及后续
-Provider Host 可共用这一进程传输层。它不依赖 `aw-config`、`aw-core` 或 `aw-provider`。
+`aw-exec` 为单条命令提供字节上限、绝对截止时间和取消能力。原生 Hook 命令及
+[本地 Provider Host](provider-host_zh.md) 共用这一进程传输层。
+它不依赖 `aw-config`、`aw-core` 或 `aw-provider`。
 
 ## API 与归属
 
@@ -48,8 +49,9 @@ Linux 实现使用非阻塞管道，每轮读写量有上限，避免管道背�
 ## 原生语义与后续防护
 
 当前交付服务于 `tool.before` 和 `tool.after`。调度仍由原生 Adapter 负责：并发调用
-各自独立，串行 Hook 保持串行，库不补造 after 事件或审批。Provider 协议接线、daemon/CLI
-及四框架真实采用验收分别增量交付。该库不需要新增 `aw.yaml` 字段或 Core profile。
+各自独立，串行 Hook 保持串行，库不补造 after 事件或审批。`aw-host` 将该传输层与
+Provider 协议组合；daemon/CLI 及四框架真实采用验收仍分别增量交付。原生命令调用方
+继续直接使用 `aw-exec`。该库不需要新增 `aw.yaml` 字段或 Core profile。
 
 扩展边界区分传输、策略判断和效果执行。Adapter 报告真实原生能力；后续 OS 后端可提供
 另外验收的防护能力。进程组清理不是沙箱：子进程可以通过新 session 或进程组逃逸，

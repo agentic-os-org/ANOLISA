@@ -117,7 +117,7 @@ impl SkillStore {
                 let cat_name = name.to_string();
 
                 // Try to load _category.yaml
-                let cat_meta = load_category_meta(&path, &cat_name);
+                let cat_meta = load_category_meta(&path, &cat_name, config.max_skill_size);
                 self.categories.insert(cat_name.clone(), cat_meta);
 
                 // Load skills inside this category directory
@@ -498,19 +498,48 @@ pub fn adopt_directory_name(entry: &mut SkillEntry, dir_name: &str) {
 
 /// Load `_category.yaml` from `dir` if present; fall back to a default meta
 /// with `name = cat_name`.
-fn load_category_meta(dir: &Path, cat_name: &str) -> CategoryMeta {
-    let yaml_path = dir.join("_category.yaml");
-    if yaml_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&yaml_path) {
-            if let Ok(meta) = serde_yaml::from_str::<CategoryMeta>(&content) {
-                return meta;
-            }
+///
+/// The file lives in the same source tree as the SKILL.md files, so the read
+/// is bounded by the same `ParseConfig` limit; a file that is not a regular
+/// file or is over the limit is treated as absent.
+fn load_category_meta(dir: &Path, cat_name: &str, max_size: usize) -> CategoryMeta {
+    if let Some(content) = read_category_yaml(&dir.join("_category.yaml"), max_size) {
+        if let Ok(meta) = serde_yaml::from_str::<CategoryMeta>(&content) {
+            return meta;
         }
     }
     CategoryMeta {
         name: cat_name.to_string(),
         description: String::new(),
     }
+}
+
+/// Read `path` as UTF-8 if it is a regular file of at most `max_size` bytes.
+///
+/// The open is non-blocking so a FIFO under this name cannot stall the load
+/// before the handle's own type is checked. A stat length is only a snapshot
+/// (the file can grow after it, and a FIFO reports 0), so the read itself is
+/// capped at `max_size + 1` bytes and an extra byte means over the limit.
+fn read_category_yaml(path: &Path, max_size: usize) -> Option<String> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut raw = Vec::new();
+    file.take(max_size as u64 + 1).read_to_end(&mut raw).ok()?;
+    if raw.len() > max_size {
+        return None;
+    }
+    String::from_utf8(raw).ok()
 }
 
 #[cfg(test)]
@@ -641,6 +670,84 @@ mod tests {
     // -----------------------------------------------------------------------
     // Load from Directory Tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn oversized_category_meta_is_treated_as_absent() {
+        // _category.yaml lives in the same agent-writable source tree as the
+        // SKILL.md files, so the read is bound by the same ParseConfig limit.
+        // A file over the limit must fall back to the default meta instead of
+        // being read whole into memory.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // A category directory carries `_category.yaml` plus one skill
+        // subdir each holding its SKILL.md.
+        let cat_dir = temp_dir.path().join("team");
+        let skill_dir = cat_dir.join("team-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let oversized = format!("name: team\ndescription: {}\n", "x".repeat(2_048));
+        std::fs::write(cat_dir.join("_category.yaml"), oversized).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: team-skill\ndescription: d\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_024,
+            max_skills: 1000,
+        };
+
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        assert!(errors.is_empty());
+        let meta = &store.categories["team"];
+        // Over the limit: the file is treated as absent and the default meta
+        // (name only, empty description) applies.
+        assert_eq!(meta.name, "team");
+        assert_eq!(meta.description, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_category_meta_is_treated_as_absent() {
+        // A FIFO reports length 0, so a size check alone passes it, and a
+        // blocking open/read waits for a writer that may stream without end.
+        // The load must refuse it as a non-regular file and finish.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cat_dir = temp_dir.path().join("team");
+        let skill_dir = cat_dir.join("team-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let fifo = std::ffi::CString::new(
+            cat_dir
+                .join("_category.yaml")
+                .into_os_string()
+                .into_encoded_bytes(),
+        )
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: team-skill\ndescription: d\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let root = temp_dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut store = SkillStore::new();
+            let errors = store.load_from_directory(&root, &ParseConfig::default());
+            tx.send((errors.is_empty(), store.categories["team"].clone()))
+                .ok();
+        });
+
+        let (no_errors, meta) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("store load stalled on a FIFO _category.yaml");
+        assert!(no_errors);
+        assert_eq!(meta.name, "team");
+        assert_eq!(meta.description, "");
+    }
 
     #[test]
     fn test_load_from_directory_empty() {

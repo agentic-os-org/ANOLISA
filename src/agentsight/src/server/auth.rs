@@ -7,6 +7,9 @@
 //! 1. `Authorization: Bearer <token>` header
 //! 2. `?token=<token>` query parameter
 //! 3. `agentsight_session` cookie (set after a successful login)
+//!
+//! Every credential the request carries is verified, so a stale credential in
+//! one source does not veto a valid credential in another.
 
 use std::future::{Future, Ready, ready};
 use std::path::{Path, PathBuf};
@@ -492,13 +495,7 @@ where
         // network location, not an authorization boundary: unprivileged local processes
         // must not be able to use the root server as a confused deputy.
         if path.matches(|value| is_enforcement_mutation_path(req.method(), value)) {
-            let authenticated = self.auth.enabled
-                && extract_token(&req)
-                    .map(|candidate| {
-                        self.auth.verify_token(&candidate)
-                            || self.auth.verify_session_cookie(&candidate)
-                    })
-                    .unwrap_or(false);
+            let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
                 let fut = self.service.call(req);
                 return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
@@ -529,13 +526,8 @@ where
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
 
-        // Try to extract and verify the token or session cookie.
-        let authenticated = extract_token(&req)
-            .map(|candidate| {
-                // Try raw token match first, then session cookie verification.
-                self.auth.verify_token(&candidate) || self.auth.verify_session_cookie(&candidate)
-            })
-            .unwrap_or(false);
+        // Try every credential the request carries.
+        let authenticated = is_authenticated(&self.auth, &req);
 
         if authenticated {
             let fut = self.service.call(req);
@@ -560,20 +552,25 @@ where
     }
 }
 
-/// Extract a candidate token from the request.
+/// Credential candidates carried by the request.
 ///
 /// Checks in order:
 /// 1. `Authorization: Bearer <token>` header
 /// 2. `token` query parameter
 /// 3. `agentsight_session` cookie
-fn extract_token(req: &ServiceRequest) -> Option<String> {
+///
+/// Every non-empty source is offered, so a stale credential in one source
+/// cannot veto a valid credential in another.
+fn credential_candidates(req: &ServiceRequest) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(3);
+
     // 1. Authorization header
     if let Some(auth_header) = req.headers().get("Authorization") {
         if let Ok(value) = auth_header.to_str() {
             if let Some(token) = value.strip_prefix("Bearer ") {
                 let trimmed = token.trim();
                 if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
+                    candidates.push(trimmed.to_string());
                 }
             }
         }
@@ -583,7 +580,7 @@ fn extract_token(req: &ServiceRequest) -> Option<String> {
     let query_string = req.query_string();
     if let Some(token_param) = extract_query_param(query_string, "token") {
         if !token_param.is_empty() {
-            return Some(token_param);
+            candidates.push(token_param);
         }
     }
 
@@ -591,11 +588,21 @@ fn extract_token(req: &ServiceRequest) -> Option<String> {
     if let Some(cookie) = req.cookie("agentsight_session") {
         let value = cookie.value();
         if !value.is_empty() {
-            return Some(value.to_string());
+            candidates.push(value.to_string());
         }
     }
 
-    None
+    candidates
+}
+
+/// Whether the request carries any verifiable credential.
+///
+/// Every candidate is verified as a raw token and as a session cookie: a stale
+/// credential in one source must not veto a valid credential in another.
+fn is_authenticated(auth: &DashboardAuth, req: &ServiceRequest) -> bool {
+    credential_candidates(req)
+        .iter()
+        .any(|candidate| auth.verify_token(candidate) || auth.verify_session_cookie(candidate))
 }
 
 /// Extract a query parameter value from a query string without full parsing.
@@ -1312,6 +1319,46 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn middleware_accepts_a_valid_cookie_when_the_bearer_is_stale() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_stale_bearer");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let cookie_value = auth.create_session_cookie(3600);
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                12345,
+            ))
+            .insert_header(("Authorization", "Bearer stale-token"))
+            .cookie(actix_web::cookie::Cookie::new(
+                "agentsight_session",
+                cookie_value,
+            ))
+            .to_request();
+
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            200,
+            "a valid session cookie must not be vetoed by a stale bearer"
+        );
+    }
+
+    #[actix_web::test]
     async fn middleware_rejects_invalid_bearer_token() {
         let dir = std::env::temp_dir().join("auth_mw_reject");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1357,29 +1404,27 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
-    // ─── extract_token unit tests ────────────────────────────────────────────
+    // ─── credential_candidates unit tests ────────────────────────────────────
 
     #[actix_web::test]
-    async fn extract_token_from_bearer_header() {
+    async fn credential_candidates_read_the_bearer_header() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test")
             .insert_header(("Authorization", "Bearer abc123"))
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("abc123".to_string()));
+        assert_eq!(credential_candidates(&req), vec!["abc123".to_string()]);
     }
 
     #[actix_web::test]
-    async fn extract_token_from_query_param() {
+    async fn credential_candidates_read_the_query_param() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test?token=query-tok")
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("query-tok".to_string()));
+        assert_eq!(credential_candidates(&req), vec!["query-tok".to_string()]);
     }
 
     #[actix_web::test]
-    async fn extract_token_from_cookie() {
+    async fn credential_candidates_read_the_cookie() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test")
             .cookie(actix_web::cookie::Cookie::new(
@@ -1387,12 +1432,11 @@ mod tests {
                 "cookie-val",
             ))
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("cookie-val".to_string()));
+        assert_eq!(credential_candidates(&req), vec!["cookie-val".to_string()]);
     }
 
     #[actix_web::test]
-    async fn extract_token_prefers_bearer_over_query_and_cookie() {
+    async fn credential_candidates_keep_the_documented_order() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test?token=query-tok")
             .insert_header(("Authorization", "Bearer bearer-tok"))
@@ -1401,17 +1445,22 @@ mod tests {
                 "cookie-val",
             ))
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, Some("bearer-tok".to_string()));
+        assert_eq!(
+            credential_candidates(&req),
+            vec![
+                "bearer-tok".to_string(),
+                "query-tok".to_string(),
+                "cookie-val".to_string()
+            ]
+        );
     }
 
     #[actix_web::test]
-    async fn extract_token_returns_none_when_no_credentials() {
+    async fn credential_candidates_skip_empty_sources() {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/test")
             .to_srv_request();
-        let token = extract_token(&req);
-        assert_eq!(token, None);
+        assert!(credential_candidates(&req).is_empty());
     }
 }
 

@@ -189,6 +189,12 @@ elsewhere.
 
 This is the page to open when you need to know exactly what the Agent sent and received.
 
+**Filter round content** searches the currently selected trajectory locally. It matches a
+case-insensitive literal substring in messages, reasoning, tool names, arguments, and result content,
+and shows the matching/total round count. **Clear filter** restores the full list. The selected round
+detail stays visible while filtering; selecting another trajectory or importing/loading a new
+document clears the filter. Searching sends no model request and leaves **Download JSON** unchanged.
+
 ## Settings
 
 The SQLite storage card consumes schema v2 from authenticated `GET /api/storage/status`. On Linux,

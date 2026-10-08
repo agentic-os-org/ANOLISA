@@ -122,9 +122,12 @@ def resource_samples(run_path: Path, field: str) -> list[tuple[float, float]]:
     """Read one process or internal metric from the recovery CSV."""
     path = run_path.parent / "measurement" / "metrics.csv"
     if not path.exists():
+        path = path.with_suffix(path.suffix + ".gz")
+    if not path.exists():
         return []
     samples = []
-    with path.open(encoding="utf-8", newline="") as handle:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, mode="rt", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             sample_time = timestamp(row.get("timestamp"))
             value = finite_float(row.get(field))
@@ -173,6 +176,20 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
     }
 
 
+def summary_of_phase(
+    phases: dict[str, tuple[Path, dict[str, Any]]], label: str
+) -> dict[str, Any]:
+    """Read one phase's summary object from its run artifact.
+
+    A run artifact whose summary is absent or not an object carries no
+    evidence: the recovery gates must report it as missing instead of
+    raising KeyError/AttributeError on the collector's own output.
+    """
+    run = phases[label][1]
+    summary = run.get("summary") if isinstance(run, dict) else None
+    return summary if isinstance(summary, dict) else {}
+
+
 def recovery_outcome(
     phases: dict[str, tuple[Path, dict[str, Any]]],
     settings: dict[str, Any],
@@ -187,7 +204,7 @@ def recovery_outcome(
             "failed": [],
             "seconds": {},
         }
-    stable = phases["stable"][1]["summary"]
+    stable = summary_of_phase(phases, "stable")
     recover_path, recover_run = phases["recover"]
     started_at = numeric(recover_run.get("started_at_unix"))
     if started_at is None:
@@ -197,7 +214,7 @@ def recovery_outcome(
             "failed": [],
             "seconds": {},
         }
-    recover = recover_run["summary"]
+    recover = summary_of_phase(phases, "recover")
     tolerance = settings["tolerance_ratio"]
     window = settings["recovery_window_seconds"]
     load = load_samples(recover_path)
@@ -240,7 +257,12 @@ def recovery_outcome(
     seconds = {
         name: continuous_recovery(
             samples,
-            float(reference) if isinstance(reference, (int, float)) else None,
+            # A reference that is not a finite number is unusable evidence,
+            # not a threshold: a boolean is an int subclass (True would gate
+            # at 1.0) and a non-finite latency reference with
+            # lower-is-better passes every sample, so both must read as
+            # missing instead of silently gating the recovery.
+            finite_float(reference),
             tolerance,
             window,
             higher_is_better=higher_is_better,
@@ -360,6 +382,21 @@ def fault_outcome(
     return {"verdict": verdict, "missing": missing, "failed": failed}
 
 
+def confirmation_verdicts(evidence: object, level: int) -> list[str]:
+    """Verdict strings a capacity result recorded for one QPS level.
+
+    The confirmation map comes from the capacity probe's own result file:
+    a non-object map, a non-list entry, or non-string verdicts are
+    incomplete evidence and read as no verdicts. Reading them as `str`
+    would silently pass `"PASSPASSPASS"` as three passes through
+    ``str.count``'s substring semantics.
+    """
+    entries = evidence.get(str(level)) if isinstance(evidence, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, str)]
+
+
 def audit_campaign(
     campaign_data: dict[str, Any],
     items: list[tuple[Path, dict[str, Any]]],
@@ -385,15 +422,19 @@ def audit_campaign(
         if not isinstance(maximum, int) or failure != maximum + resolution:
             issues.append(f"{version} capacity lacks an adjacent failed QPS")
             continue
+        # The confirmation map comes from the capacity probe's own result
+        # file, so an unusable shape is incomplete evidence — the audit's
+        # contract is to enumerate every blocking reason, never to raise.
+        # A non-list entry must also not fall through to str.count, whose
+        # substring semantics would count "PASSPASSPASS" as three passes.
         evidence = value.get("confirmation", {})
-        if evidence.get(str(maximum), []).count("PASS") < required_confirmations:
+        passes = confirmation_verdicts(evidence, maximum)
+        fails = confirmation_verdicts(evidence, failure)
+        if passes.count("PASS") < required_confirmations:
             issues.append(f"{version} capacity pass confirmation is incomplete")
-        if evidence.get(str(failure), []).count("FAIL") < required_confirmations:
+        if fails.count("FAIL") < required_confirmations:
             issues.append(f"{version} capacity fail confirmation is incomplete")
-        if (
-            len(evidence.get(str(maximum), [])) < confirmations
-            or len(evidence.get(str(failure), [])) < confirmations
-        ):
+        if len(passes) < confirmations or len(fails) < confirmations:
             issues.append(f"{version} capacity repetitions are incomplete")
 
     maxima = [

@@ -125,6 +125,49 @@ impl ParsedHttp2Frame {
         ) && (self.flags & 0x04) != 0
     }
 
+    /// The HPACK header block fragment of a HEADERS frame, with the RFC 7540
+    /// framing prefixes removed.
+    ///
+    /// A HEADERS payload is not raw HPACK: the PADDED flag (0x08) adds a
+    /// leading pad-length byte and that many trailing padding bytes, and the
+    /// PRIORITY flag (0x20) adds a five-byte stream-dependency/weight prefix.
+    /// Any header decode has to start after those bytes — decoding from the
+    /// raw payload would walk the framing as if it were HPACK. Frames that
+    /// cannot carry a header block have none.
+    pub fn header_block_fragment(&self) -> &[u8] {
+        if !self.is_headers() && self.frame_type != Http2FrameType::Continuation {
+            return &[];
+        }
+        let payload = self.payload();
+        let mut offset = 0;
+        let mut end = payload.len();
+
+        // PADDED (0x08): first byte is the pad length, that many trailing
+        // bytes are padding (RFC 7540 section 6.2).
+        if self.flags & 0x08 != 0 {
+            let Some((&pad_length, _)) = payload.split_first() else {
+                return &[];
+            };
+            let pad_length = pad_length as usize;
+            offset += 1;
+            if end <= pad_length {
+                return &[];
+            }
+            end -= pad_length;
+        }
+
+        // PRIORITY (0x20): 4-byte stream dependency plus 1-byte weight.
+        if self.flags & 0x20 != 0 {
+            offset += 5;
+        }
+
+        if offset >= end {
+            return &[];
+        }
+
+        &payload[offset..end]
+    }
+
     /// Human-readable frame type name
     pub fn type_name(&self) -> &'static str {
         self.frame_type.name()
@@ -199,7 +242,7 @@ impl ParsedHttp2Frame {
             return None;
         }
 
-        let payload = self.payload();
+        let payload = self.header_block_fragment();
         if payload.is_empty() {
             return Some(Vec::new());
         }
@@ -229,7 +272,7 @@ impl ParsedHttp2Frame {
             return Vec::new();
         }
 
-        let payload = self.payload();
+        let payload = self.header_block_fragment();
         if payload.is_empty() {
             return Vec::new();
         }
@@ -242,7 +285,10 @@ impl ParsedHttp2Frame {
 
             // Indexed Header Field (1xxxxxxx) - fully indexed in static or dynamic table
             if first_byte & 0x80 != 0 {
-                let index = (first_byte & 0x7F) as usize;
+                // The index is an HPACK integer (RFC 7541 §5.1) with a 7-bit
+                // prefix: 0x7F continues in base-128 octets, so dynamic
+                // indices from 127 up need the continuation consumed too.
+                let (index, consumed) = Self::decode_hpack_integer(payload, pos, 0x7F);
                 if let Some((name, value)) = Self::get_static_table_entry(index) {
                     result.push((name.to_string(), Some(value.to_string())));
                 } else if index == 0 {
@@ -251,7 +297,7 @@ impl ParsedHttp2Frame {
                     // Dynamic table index - cannot decode without state
                     result.push((format!("<dynamic:{index}>"), None));
                 }
-                pos += 1;
+                pos += consumed;
             }
             // Literal Header Field with Incremental Indexing (01xxxxxx)
             else if first_byte & 0xC0 == 0x40 {
@@ -267,7 +313,8 @@ impl ParsedHttp2Frame {
                 // the extended string length in `decode_literal_string`.
                 // Those octets belong to the update — skipping only the
                 // first one left the next field starting mid-integer.
-                pos += Self::hpack_integer_len(payload, pos);
+                let (_, update_len) = Self::decode_hpack_integer(payload, pos, 0x1F);
+                pos += update_len;
             }
             // Literal Header Field without Indexing (0000xxxx) or Never Indexed (0001xxxx)
             else {
@@ -285,15 +332,23 @@ impl ParsedHttp2Frame {
         &self,
         payload: &[u8],
         start: usize,
-        _indexed: bool,
+        indexed: bool,
     ) -> (String, String, usize) {
         let mut pos = start;
-        let first_byte = payload[pos];
-        pos += 1;
 
-        // Extract name (either from static table or literal)
+        // Extract name (either from static table or literal). The name index
+        // is an HPACK integer (RFC 7541 §5.1): the incremental-indexing form
+        // carries it in a 6-bit prefix, the without/never-indexed forms in a
+        // 4-bit prefix, and an all-ones prefix continues in base-128 octets —
+        // the same encoding as the extended string length in
+        // `decode_literal_string`. Reading the prefix bits alone left the walk
+        // mid-integer, so the continuation octets were parsed as the name or
+        // value and every following field shifted.
+        let prefix_mask: u8 = if indexed { 0x3F } else { 0x0F };
+        let (name_index, consumed) = Self::decode_hpack_integer(payload, pos, prefix_mask);
+        pos += consumed;
+
         let name: String;
-        let name_index = (first_byte & 0x3F) as usize;
 
         if name_index > 0 {
             // Name is in static table
@@ -314,6 +369,37 @@ impl ParsedHttp2Frame {
         pos += consumed;
 
         (name, value, pos - start)
+    }
+
+    /// Decode the HPACK integer beginning at `start` (RFC 7541 §5.1).
+    ///
+    /// The first octet carries the `prefix_mask` bits of the value; an
+    /// all-ones prefix continues in base-128 octets, seven bits each, until
+    /// an octet with its high bit clear. Returns the value and the number of
+    /// octets consumed. A chain that never terminates inside the block stops
+    /// at the payload end and saturates the value — the same corrupt-input
+    /// contract `decode_literal_string` keeps for extended lengths.
+    fn decode_hpack_integer(payload: &[u8], start: usize, prefix_mask: u8) -> (usize, usize) {
+        let prefix_max = prefix_mask as usize;
+        let first = (payload[start] & prefix_mask) as usize;
+        if first < prefix_max {
+            return (first, 1);
+        }
+
+        let mut value = first;
+        let mut len = 1usize;
+        let mut shift = 0u32;
+        while let Some(&b) = payload.get(start + len) {
+            len += 1;
+            if let Some(addend) = ((b & 0x7F) as usize).checked_shl(shift) {
+                value = value.saturating_add(addend);
+            }
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        (value, len)
     }
 
     /// Decode a literal string (length-prefixed, possibly Huffman encoded)
@@ -352,11 +438,16 @@ impl ParsedHttp2Frame {
             }
         }
 
-        if pos + length > payload.len() {
+        // `length` can saturate to usize::MAX through the continuation chain
+        // above, so the end offset must be computed without overflowing.
+        let Some(end) = pos.checked_add(length) else {
+            return (String::new(), pos - start);
+        };
+        if end > payload.len() {
             return (String::new(), pos - start);
         }
 
-        let string_bytes = &payload[pos..pos + length];
+        let string_bytes = &payload[pos..end];
 
         let result = if is_huffman {
             // Huffman decode
@@ -365,30 +456,7 @@ impl ParsedHttp2Frame {
             String::from_utf8_lossy(string_bytes).to_string()
         };
 
-        (result, pos + length - start)
-    }
-
-    /// Number of octets in the HPACK integer beginning at `start`.
-    ///
-    /// A dynamic-table size update is a single HPACK integer (RFC 7541
-    /// §6.3) with a 5-bit prefix: a value below 31 fits in the first octet,
-    /// while the all-ones prefix continues in base-128 octets — the same
-    /// encoding as the extended string length in
-    /// [`Self::decode_literal_string`]. Only the octet count is needed to
-    /// skip one statelessly; a chain that never terminates inside the
-    /// block stops at the payload end, like that walk.
-    fn hpack_integer_len(payload: &[u8], start: usize) -> usize {
-        let mut len = 1;
-        if payload[start] & 0x1F != 0x1F {
-            return len;
-        }
-        while let Some(&b) = payload.get(start + len) {
-            len += 1;
-            if b & 0x80 == 0 {
-                break;
-            }
-        }
-        len
+        (result, end - start)
     }
 
     /// Decode an HPACK Huffman-encoded string (RFC 7541 Appendix B) using the
@@ -712,6 +780,23 @@ mod tests {
     /// corrupt/truncated input is a lossy result, not a panic — this input is
     /// reachable from captured bytes (HPACK header blocks are decoded from
     /// observed traffic).
+    /// A chain of continuation bytes can saturate `length` to `usize::MAX`
+    /// through `saturating_add`. `pos + length` then overflows: it panics in a
+    /// debug build and wraps in release, where the wrapped end still fails the
+    /// bounds check and the following slice panics. Reachable from captured
+    /// HPACK bytes, so it must degrade to a lossy result.
+    #[test]
+    fn test_decode_literal_string_saturated_extended_length_does_not_panic() {
+        let mut payload = vec![0x7f];
+        payload.extend(std::iter::repeat_n(0xffu8, 10));
+        payload.push(0x00);
+
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&payload, 0);
+
+        assert_eq!(value, "");
+        assert_eq!(consumed, payload.len(), "the whole payload is consumed");
+    }
+
     #[test]
     fn test_decode_literal_string_truncated_extended_length_does_not_panic() {
         let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&[0xff, 0x80], 0);
@@ -796,6 +881,171 @@ mod tests {
             headers_frame(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF])
                 .decode_headers_stateless()
                 .is_empty()
+        );
+    }
+
+    /// A HEADERS frame with explicit flags, for tests that exercise the
+    /// PADDED / PRIORITY framing prefixes.
+    fn headers_frame_with_flags(flags: u8, payload: Vec<u8>) -> ParsedHttp2Frame {
+        let mut frame = data_frame(payload);
+        frame.frame_type = Http2FrameType::Headers;
+        frame.flags = flags;
+        frame
+    }
+
+    /// `:status: 200` (static index 8) plus a literal `content-type` header:
+    /// an HPACK block the stateless walker resolves without dynamic state.
+    fn hpack_status_and_content_type() -> Vec<u8> {
+        let mut block = vec![0x88]; // indexed field 8: :status: 200
+        block.push(0x00); // literal, new name
+        block.push(b"content-type".len() as u8);
+        block.extend_from_slice(b"content-type");
+        let value = b"text/event-stream";
+        block.push(value.len() as u8);
+        block.extend_from_slice(value);
+        block
+    }
+
+    fn assert_status_and_content_type(headers: &[(String, Option<String>)]) {
+        assert!(
+            headers.contains(&(":status".to_string(), Some("200".to_string()))),
+            "expected :status in {headers:?}"
+        );
+        assert!(
+            headers.contains(&(
+                "content-type".to_string(),
+                Some("text/event-stream".to_string())
+            )),
+            "expected content-type in {headers:?}"
+        );
+    }
+
+    /// PADDED (0x08) frames carry a leading pad-length byte and trailing
+    /// padding around the HPACK block. The stateless walk — the fallback when
+    /// the dynamic table is missing, e.g. on mid-connection captures — used
+    /// to start at the pad-length byte and decode garbage.
+    #[test]
+    fn stateless_walk_strips_padding() {
+        let mut payload = vec![5u8]; // pad length
+        payload.extend(hpack_status_and_content_type());
+        payload.extend(std::iter::repeat_n(0u8, 5));
+        let frame = headers_frame_with_flags(0x0c, payload); // END_HEADERS | PADDED
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// PRIORITY (0x20) frames carry a five-byte stream dependency/weight
+    /// prefix before the HPACK block.
+    #[test]
+    fn stateless_walk_skips_priority_prefix() {
+        let mut payload = vec![0x00, 0x00, 0x00, 0x00, 0x10]; // dep 0, weight 16
+        payload.extend(hpack_status_and_content_type());
+        let frame = headers_frame_with_flags(0x24, payload); // END_HEADERS | PRIORITY
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// PADDED and PRIORITY together (0x28): pad-length byte, priority prefix,
+    /// HPACK block, trailing padding.
+    #[test]
+    fn stateless_walk_strips_priority_and_padding() {
+        let mut payload = vec![2u8]; // pad length
+        payload.extend([0x00, 0x00, 0x00, 0x00, 0x10]); // priority prefix
+        payload.extend(hpack_status_and_content_type());
+        payload.extend(std::iter::repeat_n(0u8, 2));
+        let frame = headers_frame_with_flags(0x2c, payload); // END_HEADERS | PADDED | PRIORITY
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// A bare HEADERS block (no framing flags) must keep decoding exactly as
+    /// before.
+    #[test]
+    fn stateless_walk_keeps_bare_block_intact() {
+        let payload = hpack_status_and_content_type();
+        let frame = headers_frame_with_flags(0x04, payload); // END_HEADERS only
+        assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// A payload that is all framing (pad length covers everything) has no
+    /// header block to decode.
+    #[test]
+    fn stateless_walk_on_padding_only_payload_is_empty() {
+        let payload = vec![5u8, 0, 0, 0, 0, 0]; // pad length covers everything
+        let frame = headers_frame_with_flags(0x0c, payload);
+        assert!(frame.decode_headers_stateless().is_empty());
+    }
+
+    /// The hpack crate encodes `content-type` (static name index 31) in the
+    /// literal-without-indexing form, whose 4-bit name prefix saturates at 15
+    /// and continues in a base-128 octet: 0x0F 0x10 = 15 + 16 = 31. The
+    /// stateless walk read only the prefix bits (accept-charset, index 15)
+    /// and then parsed the continuation octet as the value length, so the
+    /// value came back truncated and every following field shifted.
+    #[test]
+    fn stateless_decodes_literal_with_extended_name_index() {
+        use hpack::Encoder;
+        let mut encoder = Encoder::new();
+        let headers = [
+            (b":status".to_vec(), b"200".to_vec()),
+            (b"content-type".to_vec(), b"Text/Event-Stream".to_vec()),
+        ];
+        let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
+
+        // Pin the wire form the test exists for: :status indexed, then a
+        // without-indexing literal whose name index needs one continuation
+        // octet (15 + 16 = 31, content-type).
+        assert!(
+            encoded.starts_with(&[0x88, 0x0f, 0x10]),
+            "the encoder must keep using the extended name index form: {encoded:02x?}"
+        );
+
+        let decoded = headers_frame(encoded).decode_headers_stateless();
+        assert_eq!(
+            decoded,
+            vec![
+                (":status".to_string(), Some("200".to_string())),
+                (
+                    "content-type".to_string(),
+                    Some("Text/Event-Stream".to_string())
+                ),
+            ],
+            "a literal with an extended name index must decode exactly"
+        );
+    }
+
+    /// An indexed field with a 7-bit prefix: 0xFF continues in one octet, so
+    /// 0xFF 0x01 is dynamic index 128. The walk read only the prefix
+    /// (`<dynamic:127>`) and then parsed the continuation octet 0x01 as
+    /// another indexed field (:authority), shifting everything after it.
+    #[test]
+    fn stateless_decodes_indexed_field_with_extended_index() {
+        let decoded = headers_frame(vec![0xff, 0x01, 0x82]).decode_headers_stateless();
+        assert_eq!(
+            decoded,
+            vec![
+                ("<dynamic:128>".to_string(), None),
+                (":method".to_string(), Some("GET".to_string())),
+            ],
+            "the continuation octet belongs to the index, not the next field"
+        );
+    }
+
+    /// A literal with incremental indexing whose 6-bit name prefix saturates
+    /// at 63 and continues in one octet: 0x7F 0x25 names dynamic index
+    /// 63 + 37 = 100. The name cannot be resolved statelessly, but its
+    /// octets must still be consumed or the value and every following field
+    /// shift.
+    #[test]
+    fn stateless_consumes_extended_name_index_of_indexed_literal() {
+        let mut payload = vec![0x7f, 0x25, 0x03];
+        payload.extend_from_slice(b"abc");
+        payload.push(0x82); // :method GET
+        let decoded = headers_frame(payload).decode_headers_stateless();
+        assert_eq!(
+            decoded,
+            vec![
+                ("<unknown:100>".to_string(), Some("abc".to_string())),
+                (":method".to_string(), Some("GET".to_string())),
+            ],
+            "the dynamic name is opaque but the value and the next field decode exactly"
         );
     }
 }

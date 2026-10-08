@@ -18,6 +18,8 @@ use tempfile::tempdir;
 
 const JSON_REASON_ENV: &str = "ANOLISA_TEST_MISSING_INDEX_REASON";
 const PLATFORM_JSON_REASON_ENV: &str = "ANOLISA_TEST_PLATFORM_MISMATCH_REASON";
+const UPDATE_SELF_JSON_REASON_ENV: &str = "ANOLISA_TEST_UPDATE_SELF_HINT_REASON";
+const UPDATE_SELF_JSON_COMMAND_ENV: &str = "ANOLISA_TEST_UPDATE_SELF_HINT_COMMAND";
 const JSON_BEGIN: &str = "ANOLISA_TEST_JSON_BEGIN";
 const JSON_END: &str = "ANOLISA_TEST_JSON_END";
 
@@ -67,6 +69,32 @@ fn render_platform_mismatch_error_json_child() {
     crate::output::write_stdout(format_args!("{JSON_END}"), true);
     crate::output::flush_stdout();
     assert_eq!(exit_code, std::process::ExitCode::from(2));
+}
+
+/// Isolated child for the update-self hint JSON regression: renders the
+/// production refusal (command and reason both passed through from the real
+/// error) through the production `--json` path, so the parent asserts the
+/// corrected hint reaches `error.reason` while the stable envelope fields —
+/// `ok`, `schema_version`, `command`, `error.code`, exit code — are unchanged.
+#[test]
+#[ignore = "invoked as an isolated child by the update-self hint JSON regression"]
+fn render_update_self_hint_error_json_child() {
+    let reason = std::env::var(UPDATE_SELF_JSON_REASON_ENV)
+        .expect("update-self JSON child must be invoked by its parent regression test");
+    let command = std::env::var(UPDATE_SELF_JSON_COMMAND_ENV)
+        .expect("update-self JSON child must receive the production command name");
+    let tmp = tempdir().expect("tmpdir");
+    let err = crate::response::CliError::Runtime { command, reason };
+
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_BEGIN}"), true);
+    crate::output::flush_stdout();
+    let exit_code =
+        crate::response::render_error(&ctx_with_prefix(true, Some(tmp.path().join("sys"))), &err);
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_END}"), true);
+    crate::output::flush_stdout();
+    assert_eq!(exit_code, std::process::ExitCode::from(1));
 }
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
@@ -2653,8 +2681,8 @@ install_modes = ["system"]
         Err(err) => err,
     };
     assert!(
-        err.reason().contains("cannot parse") && err.reason().contains("self-update"),
-        "refusal must explain the unparsable entry and hint self-update, got: {}",
+        err.reason().contains("cannot parse") && err.reason().contains("update self"),
+        "refusal must explain the unparsable entry and hint update self, got: {}",
         err.reason()
     );
     assert!(
@@ -2805,9 +2833,117 @@ install_modes = [1]
         Err(err) => err,
     };
     assert!(
-        err.reason().contains("cannot parse") && err.reason().contains("self-update"),
+        err.reason().contains("cannot parse") && err.reason().contains("update self"),
         "got: {}",
         err.reason()
+    );
+}
+
+/// The corrected `update self` hint is machine-readable as well as human-
+/// readable: under `--json`, `render_error` copies the refusal reason
+/// verbatim into `error.reason`, so the JSON surface must carry the hint
+/// while the envelope shape, error code, and exit code stay the stable
+/// contract. Drives the unparsable-entry refusal; the hint wording is shared
+/// by all three hint sites, and Rust-level assertions pin the other two.
+#[test]
+fn skipped_entry_json_error_carries_update_self_hint() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "sec-core",
+        &["1.0.0"],
+        &["system"],
+    );
+    // Publish 2.0.0 with an entry shape this build cannot represent.
+    let env = anolisa_env::EnvService::detect();
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "sec-core"
+version = "2.0.0"
+channel = "stable"
+artifact_type = "hologram_v9"
+backend = "raw"
+url = "sec-core-2.0.0.tar.gz"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+"#,
+        os = env.os,
+        arch = env.arch,
+    ));
+    std::fs::write(&index_path, index).expect("write index");
+
+    let addr = serve_repo_over_http(tmp.path().join("repo"));
+    let repo_url = format!("http://user:secret@{addr}/private/v1");
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let err = match resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "sec-core".to_string(),
+            package: "sec-core".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            repository_origin: None,
+            version: None,
+            warnings: Vec::new(),
+        },
+    ) {
+        Ok(_) => panic!("unparsable newer entry must refuse, not downgrade to 1.0.0"),
+        Err(err) => err,
+    };
+    let reason = err.reason();
+    assert_no_repository_secret(&reason);
+    assert!(reason.contains(&format!("http://{addr}")));
+    assert!(
+        reason.contains("run 'anolisa update self' and retry"),
+        "refusal must carry the corrected hint, got: {reason}"
+    );
+
+    // Run this test executable as an isolated child so the production
+    // renderer's stdout can be asserted without replacing process-global
+    // output in-process.
+    let child_module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let child_test = format!("{child_module}::render_update_self_hint_error_json_child");
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([child_test.as_str(), "--exact", "--ignored", "--nocapture"])
+        .env(UPDATE_SELF_JSON_REASON_ENV, &reason)
+        .env(UPDATE_SELF_JSON_COMMAND_ENV, err.command())
+        .output()
+        .expect("run isolated JSON renderer child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "JSON renderer child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let (_, after_begin) = stdout
+        .split_once(JSON_BEGIN)
+        .expect("child stdout must contain the JSON start marker");
+    let (json, _) = after_begin
+        .split_once(JSON_END)
+        .expect("child stdout must contain the JSON end marker");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json.trim()).expect("rendered error must be valid JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["schema_version"], crate::response::SCHEMA_VERSION);
+    assert_eq!(parsed["command"], err.command());
+    assert_eq!(parsed["error"]["code"], "EXECUTION_FAILED");
+    assert_eq!(parsed["error"]["reason"], reason);
+    assert!(
+        parsed["error"]["reason"]
+            .as_str()
+            .expect("error.reason must be a string")
+            .contains("anolisa update self"),
+        "machine-readable surface must carry the corrected hint"
     );
 }
 

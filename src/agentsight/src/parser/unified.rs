@@ -53,6 +53,19 @@ impl Parser {
 
         let _comm = ssl_event.comm.trim_end_matches('\0');
 
+        // 0. Connections already being reassembled as HTTP/2 route by state
+        // before any stateless heuristic: a read that continues a frame split
+        // across TLS records starts inside a payload and can look like
+        // anything, so it would never match the frame detection below.
+        if self.http2_parser.is_tracking(&ssl_event) {
+            let frames = self.http2_parser.parse(ssl_event.clone());
+            if !frames.is_empty() {
+                return ParseResult {
+                    messages: vec![ParsedMessage::Http2Frames(frames)],
+                };
+            }
+        }
+
         // 1. HTTP/1.x detection (text-based protocols)
         if ssl_event.is_http() {
             match self.http_parser.parse(ssl_event.clone()) {
@@ -131,9 +144,21 @@ impl Parser {
                         is_handshake: ssl_event.is_handshake,
                         ssl_ptr: ssl_event.ssl_ptr,
                     };
-                    let prefix_events = self.sse_parser.parse(Rc::new(trimmed));
-                    for ev in prefix_events {
-                        messages.push(ParsedMessage::SseEvent(ev));
+                    let trimmed = Rc::new(trimmed);
+                    let prefix_events = self.sse_parser.parse(Rc::clone(&trimmed));
+                    if prefix_events.is_empty() {
+                        // Not SSE text: for a compressed body these are the
+                        // last compressed bytes, which only the aggregator's
+                        // compressed-buffer state can decode. Dropping them
+                        // truncated the frame, so `dechunk_body` +
+                        // `decompress_body` failed and the whole response
+                        // decoded to zero events. Forward them as a body
+                        // continuation instead.
+                        messages.push(ParsedMessage::RawData(Rc::clone(&trimmed)));
+                    } else {
+                        for ev in prefix_events {
+                            messages.push(ParsedMessage::SseEvent(ev));
+                        }
                     }
                 }
 
@@ -325,5 +350,59 @@ mod tests {
             ),
             other => panic!("write-direction buffer must be emitted as RawData, got {other:?}"),
         }
+    }
+
+    /// Raw HTTP/2 frame: 3-byte length, type, flags, 4-byte stream id, payload.
+    fn h2_frame(frame_type: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+        let len = payload.len();
+        let mut buf = vec![
+            ((len >> 16) & 0xFF) as u8,
+            ((len >> 8) & 0xFF) as u8,
+            (len & 0xFF) as u8,
+            frame_type,
+            flags,
+            ((stream_id >> 24) & 0x7F) as u8,
+            ((stream_id >> 16) & 0xFF) as u8,
+            ((stream_id >> 8) & 0xFF) as u8,
+            (stream_id & 0xFF) as u8,
+        ];
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn test_split_http2_frame_continuation_is_routed_by_state() {
+        let parser = Parser::new();
+        let payload = br#"{"model":"gpt-4","messages":[{"role":"user"}]}"#;
+        let data = h2_frame(0, 0x01, 3, payload);
+        let split = 9 + payload.len() / 2;
+
+        // The first read carries a complete SETTINGS frame (so the stateless
+        // frame detection succeeds) followed by a truncated DATA frame.
+        let mut first = h2_frame(4, 0x00, 0, &[]);
+        first.extend_from_slice(&data[..split]);
+        let first = parser.parse_ssl_event(make_ssl_event(first));
+        assert!(
+            matches!(
+                first.messages.as_slice(),
+                [ParsedMessage::Http2Frames(frames)] if frames.len() == 1 && frames[0].is_settings()
+            ),
+            "first read must emit only the complete SETTINGS frame, got {:?}",
+            first.messages
+        );
+
+        // The continuation starts inside the DATA payload; without state
+        // routing it would not reach the HTTP/2 parser at all.
+        let second = parser.parse_ssl_event(make_ssl_event(data[split..].to_vec()));
+        let [ParsedMessage::Http2Frames(frames)] = second.messages.as_slice() else {
+            panic!(
+                "continuation must be routed to the HTTP/2 parser, got {:?}",
+                second.messages
+            );
+        };
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].is_data());
+        assert_eq!(frames[0].stream_id, 3);
+        assert_eq!(frames[0].payload(), payload);
     }
 }

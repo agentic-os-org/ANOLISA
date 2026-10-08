@@ -442,6 +442,8 @@ fn eval_swappiness(
 ) -> usize {
     let is_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse")
         || info.has_process("redis-server");
@@ -482,6 +484,8 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         || info.has_process("memcached")
         || info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
         || info.has_process("clickhouse");
 
     if is_latency_sensitive && info.sysctl.thp_enabled == "always" {
@@ -505,6 +509,8 @@ fn eval_dirty_ratio(
 ) -> usize {
     let is_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     let is_latency_sensitive = is_db || *workload == WorkloadType::IoLatency;
@@ -533,7 +539,11 @@ fn eval_dirty_ratio(
         });
     }
 
-    if info.sysctl.dirty_background_ratio > target_bg {
+    // The dirty limit this host ends up with: the write above only lowers it.
+    let dirty_limit = info.sysctl.dirty_ratio.min(target_ratio);
+    if info.sysctl.dirty_background_ratio > target_bg
+        && dirty_background_takes_effect(dirty_limit, target_bg)
+    {
         recs.push(Recommendation {
             param: "vm.dirty_background_ratio".to_string(),
             current_value: info.sysctl.dirty_background_ratio.to_string(),
@@ -545,6 +555,27 @@ fn eval_dirty_ratio(
         });
     }
     2
+}
+
+/// Whether a `vm.dirty_background_ratio` target can change the effective
+/// threshold at all.
+///
+/// `domain_dirty_limits()` (mm/page-writeback.c) replaces a background
+/// threshold at or above the dirty threshold with half of it:
+///
+/// ```text
+///     if (bg_thresh >= thresh)
+///         bg_thresh = thresh / 2;
+/// ```
+///
+/// A target that does not stay strictly below the dirty limit in force
+/// therefore leaves the effective background threshold at `limit / 2` — on a
+/// host that already sits there the write changes nothing, so a rule that
+/// promises an earlier background flush stays quiet instead. `dirty_limit` is
+/// the ratio this run's advice leaves in force, which may be lower than the
+/// current one.
+fn dirty_background_takes_effect(dirty_limit: u64, target: u64) -> bool {
+    target < dirty_limit
 }
 
 fn eval_somaxconn(
@@ -828,30 +859,121 @@ fn eval_netdev_max_backlog(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_tcp_max_syn_backlog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_max_syn_backlog";
+    eval_tcp_max_syn_backlog_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_max_syn_backlog",
+        "/proc/sys/net/ipv4/tcp_syncookies",
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_max_syn_backlog`] (the `eval_*_at`
+/// idiom) so the syncookies gate is assertable against temp files on any
+/// host, listener or not.
+///
+/// The syncookies input is read SIGNED: through v5.10 net/ipv4/
+/// sysctl_net_ipv4.c registered tcp_syncookies as a plain `proc_dointvec`
+/// int with no min/max, so -1 is a legal value there, and every consumer is
+/// a truthiness test (net/ipv4/tcp_input.c: `if (syncookies)`,
+/// `if (!syncookies && ...)`, plus the documented `syncookies == 2` mode).
+/// The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the backlog rule sized the knob on exactly the
+/// hosts where the kernel skips its only reader.
+fn eval_tcp_max_syn_backlog_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    syncookies_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
-        return 1;
-    }
-    let current = read_sysctl_u64(path);
-    if current < 8192 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_max_syn_backlog".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "65536".to_string(),
-            reason: "增大半连接队列，避免突发连接请求时 SYN 被丢弃".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = syn_backlog_recommendation(
+        read_sysctl_u64(path),
+        read_sysctl_i64(syncookies_path),
+        info.has_listen_sockets(),
+    ) {
+        recs.push(rec);
     }
     1
 }
 
+/// Value-driven core of the syn-backlog rule (the `*_recommendation` idiom):
+/// every input the branch needs is a parameter, so the gate is assertable on
+/// any host instead of only on one that happens to have a listener and
+/// disabled syncookies.
+///
+/// The knob has exactly one reader in v6.6: the last-quarter reservation in
+/// `tcp_conn_request()` (net/ipv4/tcp_input.c):
+///
+/// ```text
+///    if (!want_cookie && !isn) {
+///        int max_syn_backlog = READ_ONCE(net->ipv4.sysctl_max_syn_backlog);
+///
+///        /* Kill the following clause, if you dislike this way. */
+///        if (!syncookies &&
+///            (max_syn_backlog - inet_csk_reqsk_queue_len(sk) <
+///             (max_syn_backlog >> 2)) &&
+///            !tcp_peer_is_proven(req, dst)) {
+///            ... goto drop_and_release;
+///        }
+/// ```
+///
+/// and the clause is skipped entirely while syncookies are enabled — the
+/// kernel default (tcp_ipv4.c: `net->ipv4.sysctl_tcp_syncookies = 1`) and what
+/// this engine's own `net.ipv4.tcp_syncookies` rule asks for. The request queue
+/// itself is bounded by `sk_max_ack_backlog`
+/// (`inet_csk_reqsk_queue_is_full`), i.e. the listener backlog capped by
+/// `net.core.somaxconn`, so on a syncookie host this knob sizes nothing and the
+/// reason's promise ("避免突发连接请求时 SYN 被丢弃") cannot be delivered by
+/// writing it. A host that turned syncookies off still reads it — including a
+/// kernel built without CONFIG_SYN_COOKIES, where the file is absent and the
+/// read falls back to 0 — so only the enabled case is skipped.
+///
+/// `syncookies` is i64 because the sysctl held a signed int through v5.10
+/// (plain `proc_dointvec`, no min/max) and -1 means enabled there: the check
+/// is the kernel's own truthiness (`if (!syncookies …)`), not an equality.
+fn syn_backlog_recommendation(
+    current: u64,
+    syncookies: i64,
+    has_listen_sockets: bool,
+) -> Option<Recommendation> {
+    if !has_listen_sockets || syncookies != 0 || current >= 8192 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_max_syn_backlog".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "65536".to_string(),
+        reason: "增大半连接队列，避免突发连接请求时 SYN 被丢弃".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
+}
+
 fn eval_rmem_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/rmem_max";
+    eval_rmem_max_at(info, recs, "/proc/sys/net/core/rmem_max")
+}
+
+/// Path-injectable form of [`eval_rmem_max`] (the `eval_*_at` idiom) so the
+/// reason's claim is assertable against a temp file on any host.
+///
+/// `net.core.rmem_max` bounds what an application can ask for with an
+/// explicit `setsockopt(SO_RCVBUF)`: `sock_setsockopt()` clamps the request
+/// with `min_t(u32, val, READ_ONCE(sysctl_rmem_max))`, and TCP disables
+/// automatic tuning for that socket — the sysctl documentation spells the
+/// resulting split out for `tcp_rmem`: "Calling setsockopt() with SO_RCVBUF
+/// disables automatic tuning of that socket's receive buffer size, in which
+/// case this value is ignored". The cap for TCP's *automatic* tuning is
+/// `tcp_rmem[2]` alone — `tcp_rcv_space_adjust()` grows the buffer with
+/// `min_t(u64, ..., READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_rmem[2]))` — and
+/// `sysctl_rmem_max` has no reader in the TCP receive path at all (tree-wide
+/// it is consumed by the SO_RCVBUF clamp, the window-scale guess in
+/// `tcp_select_initial_window()` and IPVS). Raising it lets applications
+/// request bigger explicit buffers; it is not what makes the `tcp_rmem` max
+/// effective.
+fn eval_rmem_max_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -864,7 +986,7 @@ fn eval_rmem_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
             param: "net.core.rmem_max".to_string(),
             current_value: current.to_string(),
             recommended_value: "16777216".to_string(),
-            reason: "rmem_max 是 TCP 接收缓冲区的硬上限，不调大它 tcp_rmem 的 max 值不会生效"
+            reason: "万兆网卡场景下，应用显式 setsockopt(SO_RCVBUF) 能申请的上限偏小；TCP 自动调优的上限由 net.ipv4.tcp_rmem 的 max 单独决定，不受此值约束"
                 .to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -875,7 +997,20 @@ fn eval_rmem_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_wmem_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/wmem_max";
+    eval_wmem_max_at(info, recs, "/proc/sys/net/core/wmem_max")
+}
+
+/// Path-injectable form of [`eval_wmem_max`] (the `eval_*_at` idiom) so the
+/// reason's claim is assertable against a temp file on any host.
+///
+/// The send-side twin of [`eval_rmem_max_at`]: `net.core.wmem_max` clamps an
+/// explicit `setsockopt(SO_SNDBUF)` (`sock_setsockopt()` uses
+/// `min_t(u32, val, READ_ONCE(sysctl_wmem_max))`), while TCP's automatic
+/// tuning is capped by `tcp_wmem[2]` alone — `tcp_sndbuf_expand()` writes
+/// `min(sndmem, READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_wmem[2]))`. Raising
+/// it lets applications request bigger explicit buffers; it is not what makes
+/// the `tcp_wmem` max effective.
+fn eval_wmem_max_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -888,7 +1023,7 @@ fn eval_wmem_max(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
             param: "net.core.wmem_max".to_string(),
             current_value: current.to_string(),
             recommended_value: "16777216".to_string(),
-            reason: "wmem_max 是 TCP 发送缓冲区的硬上限，不调大它 tcp_wmem 的 max 值不会生效"
+            reason: "万兆网卡场景下，应用显式 setsockopt(SO_SNDBUF) 能申请的上限偏小；TCP 自动调优的上限由 net.ipv4.tcp_wmem 的 max 单独决定，不受此值约束"
                 .to_string(),
             confidence: Confidence::High,
             category: Category::Performance,
@@ -977,26 +1112,79 @@ fn eval_tcp_wmem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_tcp_slow_start_after_idle(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_slow_start_after_idle";
+    eval_tcp_slow_start_after_idle_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_slow_start_after_idle",
+        "/proc/sys/net/ipv4/tcp_congestion_control",
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_slow_start_after_idle`] (the `eval_*_at`
+/// idiom) so the value and the congestion control both come from test files
+/// instead of the live /proc.
+fn eval_tcp_slow_start_after_idle_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    congestion_control_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
-        return 1;
-    }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_slow_start_after_idle".to_string(),
-            current_value: "1".to_string(),
-            recommended_value: "0".to_string(),
-            reason: "长连接空闲后重新慢启动会造成突发延迟，禁用后保持已探测的拥塞窗口".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = slow_start_after_idle_recommendation(
+        read_sysctl_i64(path),
+        &read_sysctl_string(congestion_control_path),
+        info.has_listen_sockets(),
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the slow-start-after-idle rule (the `*_recommendation`
+/// idiom): the value, the congestion control and the listener flag are all
+/// parameters, so the gate is assertable on any host instead of only on one
+/// that listens on TCP and runs a control without `cong_control`.
+///
+/// Both readers of the knob skip congestion controls that define
+/// `cong_control` — `tcp_output.c`'s starvation branch ends
+/// `... && !ca_ops->cong_control`, and the `include/net/tcp.h` helper returns
+/// early on `ca_ops->cong_control` — and BBR is the in-tree algorithm that
+/// defines it (`net/ipv4/tcp_bbr.c`: `.cong_control = bbr_main`). BBR is also
+/// what this engine's own `net.ipv4.tcp_congestion_control` rule asks for, so
+/// on a BBR host the write cannot change any cwnd behavior and the reason's
+/// promise ("禁用后保持已探测的拥塞窗口") already describes what BBR does by
+/// design: it never restarts slow start after an idle period.
+///
+/// `current` is i64 because the knob is a truthiness flag, not an enum: it is
+/// consumed as `if (READ_ONCE(...sysctl_tcp_slow_start_after_idle) && ...)` in
+/// net/ipv4/tcp_output.c, and through v5.10 it was registered as a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), where -1
+/// is a legal, enabled value; since v5.14 the u8 registration
+/// (`proc_dou8vec_minmax`, no extra1/extra2) accepts any 0-255 value, and
+/// every nonzero one is enabled. The old `!= 1` gate missed both shapes — a
+/// -1 host read as the fallback 0, and a u8 host holding 2 was skipped
+/// outright — so the gate is now the kernel's own truthiness: any nonzero
+/// value restarts slow start after idle and is worth disabling for long-lived
+/// connections.
+fn slow_start_after_idle_recommendation(
+    current: i64,
+    congestion_control: &str,
+    has_listen_sockets: bool,
+) -> Option<Recommendation> {
+    if !has_listen_sockets || congestion_control == "bbr" || current == 0 {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.tcp_slow_start_after_idle".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "0".to_string(),
+        reason: "长连接空闲后重新慢启动会造成突发延迟，禁用后保持已探测的拥塞窗口".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_ip_local_port_range(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -1334,11 +1522,32 @@ fn eval_tcp_keepalive_probes(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 }
 
 fn eval_tcp_no_metrics_save(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_no_metrics_save";
+    eval_tcp_no_metrics_save_at(info, recs, "/proc/sys/net/ipv4/tcp_no_metrics_save")
+}
+
+/// Path-injectable form of [`eval_tcp_no_metrics_save`] (the `eval_*_at`
+/// idiom) so the signed read is unit-testable against a temp file.
+///
+/// Through v5.10 net/ipv4/sysctl_net_ipv4.c registered tcp_no_metrics_save as
+/// a plain `proc_dointvec` int with no min/max, so -1 is a legal value there,
+/// and its only consumer is a truthiness test (net/ipv4/tcp_metrics.c:
+/// `if (READ_ONCE(net->ipv4.sysctl_tcp_nometrics_save) || !dst) return;`) —
+/// -1 means "do not save metrics", i.e. the recommended state. The unsigned
+/// reader parsed "-1" to Err and fell back to 0 — the *saving* value — so
+/// the `== 0` gate invented a finding on a host that already discards
+/// cached metrics. Since v5.14 the knob is u8 (`proc_dou8vec_minmax`), where
+/// negatives are rejected at write time; the signed reader keeps the
+/// truthiness contract correct on both registrations.
+fn eval_tcp_no_metrics_save_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value disables metrics saving, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_no_metrics_save".to_string(),
@@ -1539,6 +1748,8 @@ fn eval_read_ahead_kb(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 
     let is_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
 
@@ -1620,7 +1831,12 @@ fn eval_rq_affinity(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
 // ─── CPU/Scheduler Rules ─────────────────────────────────────────────────────
 
 fn eval_numa_balancing(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/numa_balancing";
+    eval_numa_balancing_at(info, recs, "/proc/sys/kernel/numa_balancing")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+fn eval_numa_balancing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -1629,6 +1845,8 @@ fn eval_numa_balancing(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
     }
     let is_db = info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     if !is_db {
@@ -1744,14 +1962,33 @@ fn eval_sched_migration_cost_at(
 // ─── Additional Security Rules ───────────────────────────────────────────────
 
 fn eval_tcp_syncookies(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_syncookies";
+    eval_tcp_syncookies_at(info, recs, "/proc/sys/net/ipv4/tcp_syncookies")
+}
+
+/// Path-injectable form of [`eval_tcp_syncookies`] (the `eval_*_at` idiom) so
+/// the signed read is unit-testable against a temp file.
+///
+/// Through v5.10 net/ipv4/sysctl_net_ipv4.c registered tcp_syncookies as a
+/// plain `proc_dointvec` int with no min/max, so -1 is a legal value there,
+/// and every consumer is a truthiness test (net/ipv4/tcp_input.c:
+/// `if (syncookies)` arms the cookie path, `if (!syncookies && ...)` guards
+/// the last-quarter reservation, and `syncookies == 2` selects the documented
+/// always-cookie mode) — so -1 means enabled, exactly what this rule asks
+/// for. The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the `== 0` gate invented a SYN-flood finding on a
+/// host that already answers floods with cookies. Since v5.14 the knob is
+/// u8 (`proc_dou8vec_minmax`, no extra1/extra2), where negatives are
+/// rejected at write time; the signed reader keeps the truthiness contract
+/// correct on both registrations.
+fn eval_tcp_syncookies_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value arms the cookie path, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_syncookies".to_string(),
@@ -1768,15 +2005,64 @@ fn eval_tcp_syncookies(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_send_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/send_redirects";
+    eval_send_redirects_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/all/send_redirects",
+        std::path::Path::new("/proc/sys/net/ipv4/conf"),
+    )
+}
+
+/// Path-injectable form of [`eval_send_redirects`] (the `eval_*_at` idiom) so
+/// the forwarding precondition is assertable against a synthetic conf tree.
+///
+/// The knob only decides whether this host *sends* an ICMP redirect, and a
+/// redirect is sent from exactly one place: `ip_forward()` (net/ipv4/
+/// ip_forward.c) calls `ip_rt_send_redirect()`, which re-checks
+/// `IN_DEV_TX_REDIRECTS` before anything goes out. A host whose input
+/// interface does not forward never reaches that code — `ip_route_input_slow()`
+/// (net/ipv4/route.c) turns a non-local destination into an error route
+/// instead:
+///
+/// ```text
+///    if (!IN_DEV_FORWARD(in_dev)) {
+///        err = -EHOSTUNREACH;
+///        goto no_route;
+///    }
+/// ```
+///
+/// which is what the kernel documentation summarises as "Send redirects, if
+/// router" (Documentation/networking/ip-sysctl.rst). This engine recommends
+/// `net.ipv4.ip_forward = 0` on every host without containers/VPNs/routers, so
+/// after its own plan the write cannot change anything there. An unreadable
+/// conf tree counts as "no forwarding", so the rule stays quiet when it cannot
+/// verify that a redirect could ever be sent.
+///
+/// The value is read SIGNED: `devinet_conf_proc` (net/ipv4/devinet.c) routes
+/// every `conf/<iface>/…` entry through a plain `proc_dointvec` on an int
+/// slot of `struct ipv4_devconf` with no min/max, so -1 is a legal value, and
+/// `IN_DEV_TX_REDIRECTS` (include/linux/inetdevice.h) consumes it through
+/// `IN_DEV_ORCONF` — a truthiness test. The old `== 1` gate skipped the rule
+/// on a host whose redirects are enabled with -1, while the unsigned reader
+/// parsed "-1" to Err and fell back to 0, the *disabled* value.
+fn eval_send_redirects_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    conf_root: &std::path::Path,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    if !any_interface_forwards(conf_root) {
+        return 1;
+    }
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.send_redirects".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "服务器不应发送 ICMP 重定向，避免被利用进行网络拓扑探测或路由劫持".to_string(),
             confidence: Confidence::High,
@@ -1785,6 +2071,24 @@ fn eval_send_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
         });
     }
     1
+}
+
+/// Whether any interface — every per-interface entry plus the `all` and
+/// `default` templates — has forwarding enabled, which is what makes the
+/// redirect path reachable at all (see [`eval_send_redirects_at`]). An
+/// unreadable or missing tree reports `false`, so a rule that promises to stop
+/// redirects it cannot prove are possible stays quiet.
+fn any_interface_forwards(conf_root: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(conf_root) else {
+        return false;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let forwarding = entry.path().join("forwarding");
+        if read_sysctl_u64(&forwarding.to_string_lossy()) != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn eval_perf_event_paranoid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -2061,22 +2365,51 @@ fn dir_has_bond(dir: &std::path::Path) -> bool {
 }
 
 fn eval_ip_forward(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/ip_forward";
+    eval_ip_forward_at(info, recs, "/proc/sys/net/ipv4/ip_forward")
+}
+
+/// Path-injectable form of [`eval_ip_forward`] (the `eval_*_at` idiom) so the
+/// signed read is unit-testable against a temp file.
+///
+/// `ctl_forward_entry` (net/ipv4/devinet.c) routes net.ipv4.ip_forward
+/// through `devinet_sysctl_forward`, which calls a plain `proc_dointvec` on
+/// the int FORWARDING slot — its `extra1`/`extra2` are the devconf and net
+/// context, not min/max bounds — so any int is accepted, -1 included. The
+/// consumers read it as a truthiness flag (`IN_DEV_FORWARD` in
+/// include/linux/inetdevice.h; `if (*valp)` in the handler's own fan-out),
+/// so -1 means forwarding is on, exactly the state this rule asks a
+/// non-router host to turn off. The unsigned reader parsed "-1" to Err and
+/// fell back to 0, and the old `== 1` gate then skipped the rule on the
+/// host that most looks like a jumpbox.
+fn eval_ip_forward_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 && !host_needs_ip_forward(info) {
-        recs.push(Recommendation {
-            param: "net.ipv4.ip_forward".to_string(),
-            current_value: "1".to_string(),
-            recommended_value: "0".to_string(),
-            reason: "未检测到容器/虚拟化/VPN/路由用途，关闭 IP 转发可防止被用作中间人或跳板（若本机需转发请忽略）".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Security, writable: true,
-        });
+    if let Some(rec) = ip_forward_recommendation(read_sysctl_i64(path), host_needs_ip_forward(info))
+    {
+        recs.push(rec);
     }
     1
+}
+
+/// Value-driven core of the ip_forward rule (the `*_recommendation` idiom):
+/// the value and the router verdict are parameters, so the truthiness gate
+/// is assertable on any host — `host_needs_ip_forward` reads the live
+/// process list and `/sys/class/net`, which a unit test cannot control.
+/// Any nonzero value forwards (see [`eval_ip_forward_at`] for the
+/// registration and consumers), so -1 and 2 are as on as 1.
+fn ip_forward_recommendation(current: i64, host_needs_forwarding: bool) -> Option<Recommendation> {
+    if current == 0 || host_needs_forwarding {
+        return None;
+    }
+    Some(Recommendation {
+        param: "net.ipv4.ip_forward".to_string(),
+        current_value: current.to_string(),
+        recommended_value: "0".to_string(),
+        reason: "未检测到容器/虚拟化/VPN/路由用途，关闭 IP 转发可防止被用作中间人或跳板（若本机需转发请忽略）".to_string(),
+        confidence: Confidence::Medium,
+        category: Category::Security, writable: true,
+    })
 }
 
 fn eval_unprivileged_bpf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -2111,7 +2444,12 @@ fn recommend_unprivileged_bpf(current: u64, recs: &mut Vec<Recommendation>) {
 }
 
 fn eval_core_uses_pid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_core_uses_pid_at(info, recs, "/proc/sys/kernel/core_uses_pid")
+    eval_core_uses_pid_at(
+        info,
+        recs,
+        "/proc/sys/kernel/core_uses_pid",
+        "/proc/sys/kernel/core_pattern",
+    )
 }
 
 /// Path-injectable form of [`eval_core_uses_pid`] (the `eval_*_at` idiom).
@@ -2121,9 +2459,31 @@ fn eval_core_uses_pid(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 /// legal, already-enabled value. The unsigned reader turns "-1" into the
 /// fallback 0 — the *not-enabled* value — so the `== 0` gate invented the
 /// recommendation on a host that already appends the PID.
-fn eval_core_uses_pid_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+///
+/// That same condition also says when there is nothing left to recommend:
+/// `core_uses_pid` is only the backward-compatibility half of the core-file
+/// name, and `pid_in_pattern` is set by a literal `%p` — the very specifier
+/// whose absence the reason complains about. A piped pattern
+/// (systemd-coredump ships `|/usr/lib/systemd/systemd-coredump %P %u ...`)
+/// never reaches the filename logic at all. Where either holds, the write
+/// cannot add a PID the kernel already records, so the reason's promise is
+/// already met — the "never recommend a no-op" rule the hardlockup_panic and
+/// page-cluster gates follow. An unreadable pattern keeps the recommendation:
+/// the kernel's default "core", which does use the knob, is what a failed
+/// read leaves behind.
+fn eval_core_uses_pid_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    pattern_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
+    }
+    if let Ok(pattern) = std::fs::read_to_string(pattern_path) {
+        if core_pattern_records_the_pid(&pattern) {
+            return 1;
+        }
     }
     // Any nonzero value is enabled, so -1 must not read as the value 0.
     let current = read_sysctl_i64(path);
@@ -2140,6 +2500,33 @@ fn eval_core_uses_pid_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path
         });
     }
     1
+}
+
+/// Whether `core_pattern` already records the crashing pid, so that
+/// `core_uses_pid` has nothing to add. Mirrors `format_corename()`
+/// (fs/coredump.c): a piped pattern bypasses the filename logic, and
+/// `pid_in_pattern` is set by a literal `%p` specifier. `%P` (global pid) and
+/// an escaped `%%` do not set it, so the scan walks the `%` escapes instead of
+/// string-matching the raw text — `core.%%p` names the file with a literal
+/// `%p` and still gets the `.PID` compatibility suffix.
+fn core_pattern_records_the_pid(pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.starts_with('|') {
+        return true;
+    }
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('p') => return true,
+                // `%%` emits one literal percent; every other specifier
+                // consumes its own character and none of them marks the pid.
+                Some(_) => {}
+                None => break,
+            }
+        }
+    }
+    false
 }
 
 fn eval_yama_ptrace_scope(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -2267,19 +2654,37 @@ fn quarter_memory_hugepages(memory_gb: u64, hugepage_kb: u64) -> u64 {
 }
 
 fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/nr_hugepages";
+    eval_nr_hugepages_at(
+        info,
+        recs,
+        "/proc/sys/vm/nr_hugepages",
+        crate::detect::read_default_hugepage_kb(),
+    )
+}
+
+/// Path- and page-size-injectable form (the `eval_*_at` idiom): the live probe
+/// reads the count from /proc and the default huge-page size from
+/// /proc/meminfo, so injecting both is the only way to assert either branch on
+/// any host.
+///
+/// The gate is the shared boundary-aware database predicate, not the
+/// hand-rolled `postgres || mysqld` list: MariaDB 10.4+ runs as `mariadbd`
+/// (the daemon comm Debian and Ubuntu ship), so a MariaDB-only host missed
+/// the rule while the sibling SysV IPC sizing rules already counted it.
+fn eval_nr_hugepages_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    hugepage_kb: u64,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let needs_hugepages = info.has_process("postgres") || info.has_process("mysqld");
-    if !needs_hugepages {
+    if !is_database_present(info) {
         return 1;
     }
     let current = read_sysctl_u64(path);
-    let recommended = quarter_memory_hugepages(
-        info.memory_total_gb,
-        crate::detect::read_default_hugepage_kb(),
-    );
+    let recommended = quarter_memory_hugepages(info.memory_total_gb, hugepage_kb);
     if current == 0 && info.memory_total_gb >= 16 && recommended > 0 {
         recs.push(Recommendation {
             param: "vm.nr_hugepages".to_string(),
@@ -2297,12 +2702,21 @@ fn eval_nr_hugepages(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 }
 
 fn eval_shmmax(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/shmmax";
+    eval_shmmax_at(info, recs, "/proc/sys/kernel/shmmax")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+///
+/// The gate is the shared boundary-aware database predicate, like the sibling
+/// SysV IPC rules: `kernel.shmmax` sizes the very shared-memory segment MariaDB
+/// and PostgreSQL keep their buffer pools in, and the hand-rolled
+/// `postgres || mysqld` list skipped the MariaDB 10.4+ `mariadbd` daemon comm.
+fn eval_shmmax_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let needs_shm = info.has_process("postgres") || info.has_process("mysqld");
-    if !needs_shm {
+    if !is_database_present(info) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -2630,7 +3044,17 @@ fn eval_dirty_background_ratio(
     workload: &WorkloadType,
     recs: &mut Vec<Recommendation>,
 ) -> usize {
-    let path = "/proc/sys/vm/dirty_background_ratio";
+    eval_dirty_background_ratio_at(info, workload, recs, "/proc/sys/vm/dirty_background_ratio")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the database gate is
+/// unit-testable against a temp file instead of the live /proc.
+fn eval_dirty_background_ratio_at(
+    info: &SystemInfo,
+    workload: &WorkloadType,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -2644,9 +3068,14 @@ fn eval_dirty_background_ratio(
         WorkloadType::IoLatency => 3,
         _ => 5,
     };
-    if current > target as u64 {
+    // This rule leaves the dirty ratio alone, so the limit in force stays the
+    // current one — see [`dirty_background_takes_effect`] for the clamp.
+    let takes_effect = dirty_background_takes_effect(info.sysctl.dirty_ratio, target as u64);
+    if takes_effect && current > target as u64 {
         let has_db = info.has_process("postgres")
             || info.has_process("mysqld")
+            // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+            || info.has_process("mariadbd")
             || info.has_process("mongod")
             || info.has_process("clickhouse");
         if has_db || matches!(workload, WorkloadType::IoLatency) || current > 10 {
@@ -2761,10 +3190,18 @@ fn eval_tcp_rfc1337(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 }
 
 fn eval_secure_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_secure_redirects_at(info, recs, "/proc/sys/net/ipv4/conf/all/secure_redirects")
+    eval_secure_redirects_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/all/secure_redirects",
+        std::path::Path::new("/proc/sys/net/ipv4/conf"),
+    )
 }
 
-/// Path-injectable form of [`eval_secure_redirects`] (the `eval_*_at` idiom).
+/// Path-injectable form of [`eval_secure_redirects`] (the `eval_*_at` idiom)
+/// so the shared-media precondition is assertable against a synthetic conf
+/// tree.
+///
 /// The `conf/all/secure_redirects` entry is a plain `proc_dointvec` int slot
 /// (`devinet_conf_proc` in net/ipv4/devinet.c, no min/max), and
 /// `IN_DEV_SEC_REDIRECTS` (include/linux/inetdevice.h) reads it through
@@ -2772,12 +3209,39 @@ fn eval_secure_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 /// `if (IN_DEV_SEC_REDIRECTS(in_dev) && ...)`. -1 is therefore enabled and
 /// must be flagged, but the unsigned reader parsed "-1" to Err — its fallback
 /// 0 skipped the rule on exactly the host whose secure redirects are on.
+///
+/// That consumer sits in the branch `__ip_do_redirect()` reaches only when
+/// shared-media redirects are disabled:
+///
+/// ```text
+///    if (!IN_DEV_SHARED_MEDIA(in_dev)) {
+///        if (!inet_addr_onlink(in_dev, new_gw, old_gw))
+///            goto reject_redirect;
+///        if (IN_DEV_SEC_REDIRECTS(in_dev) && ip_fib_check_default(new_gw, dev))
+///            goto reject_redirect;
+///    } else {
+///        if (inet_addr_type(net, new_gw) != RTN_UNICAST)
+///            goto reject_redirect;
+///    }
+/// ```
+///
+/// The sysctl documentation states the override outright — "shared_media ...
+/// Overrides secure_redirects" and "Overridden by shared_media"
+/// (Documentation/networking/ip-sysctl.rst) — and `IN_DEV_SHARED_MEDIA` is an
+/// OR of the `all` template with the device's own value, so while every
+/// interface runs the default (shared media on) the assignment cannot change
+/// how a redirect is judged. The rule stays quiet then, and only a host that
+/// already proved the knob reachable keeps the recommendation.
 fn eval_secure_redirects_at(
     info: &SystemInfo,
     recs: &mut Vec<Recommendation>,
     path: &str,
+    conf_root: &std::path::Path,
 ) -> usize {
     if !info.param_exists(path) {
+        return 1;
+    }
+    if !shared_media_disabled_somewhere(conf_root) {
         return 1;
     }
     // Any nonzero value is enabled, so -1 must not read as the value 0.
@@ -2795,6 +3259,32 @@ fn eval_secure_redirects_at(
         });
     }
     1
+}
+
+/// Whether any interface has shared-media redirects off, the only state in
+/// which `net/ipv4/route.c` reads `IN_DEV_SEC_REDIRECTS` at all (see
+/// [`eval_secure_redirects_at`]). `IN_DEV_SHARED_MEDIA` is an
+/// `IN_DEV_ORCONF` of the `all` template and the device's own value
+/// (include/linux/inetdevice.h), so a nonzero `all` settles every interface
+/// at once, and only a device — or the `default` template that new devices
+/// inherit — carrying an explicit zero makes the per-interface half
+/// reachable. A value that is missing or unreadable does not count as off, so
+/// an unprovable tree keeps the rule quiet.
+fn shared_media_disabled_somewhere(conf_root: &std::path::Path) -> bool {
+    let zero = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .map(|value| value.trim().parse::<i64>().unwrap_or(1) == 0)
+            .unwrap_or(false)
+    };
+    if !zero(&conf_root.join("all").join("shared_media")) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(conf_root) else {
+        return false;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.file_name() != "all" && zero(&entry.path().join("shared_media")))
 }
 
 fn eval_mmap_min_addr(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3137,7 +3627,25 @@ fn sched_child_runs_first_recommendation(
 }
 
 fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/page-cluster";
+    eval_page_cluster_at(info, recs, "/proc/sys/vm/page-cluster", "/proc/swaps")
+}
+
+/// Path-injectable form of [`eval_page_cluster`] (the `eval_*_at` idiom) so the
+/// swap gate is assertable against a synthetic /proc/swaps.
+///
+/// The knob only sizes the swap-in readahead window: v6.6 reads `page_cluster`
+/// solely in `mm/swap_state.c` (`swapin_nr_pages`, `swapin_readahead` and the
+/// swap VMA readahead), and the kernel documentation calls it "the swap
+/// counterpart to page cache readahead" (`sysctl/vm.rst`). A host with no swap
+/// area has nothing to read in, so the recommendation's promised saving cannot
+/// happen there — the same "never recommend a no-op" rule the hardlockup_panic
+/// gate already follows for a disabled NMI watchdog.
+fn eval_page_cluster_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    swaps_path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -3146,6 +3654,9 @@ fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
         .iter()
         .any(|d| matches!(d.disk_type, DiskType::NVMe | DiskType::SSD));
     if !has_ssd {
+        return 1;
+    }
+    if !swap_configured(swaps_path) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3162,6 +3673,16 @@ fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
         });
     }
     1
+}
+
+/// Whether `/proc/swaps` lists at least one swap area. The table always carries
+/// its header line, so a configured area means a following non-empty line
+/// (zram and file-backed areas are listed the same way). An unreadable table
+/// counts as "no swap", so the rule stays quiet instead of promising a swap
+/// saving it cannot verify.
+fn swap_configured(path: &str) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|content| content.lines().skip(1).any(|line| !line.trim().is_empty()))
 }
 
 fn eval_rmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3314,12 +3835,45 @@ fn max_dgram_qlen_recommendation(current: u64) -> Option<Recommendation> {
 }
 
 fn eval_rps_sock_flow_entries(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/rps_sock_flow_entries";
+    eval_rps_sock_flow_entries_at(
+        info,
+        recs,
+        "/proc/sys/net/core/rps_sock_flow_entries",
+        std::path::Path::new("/sys/class/net"),
+    )
+}
+
+/// Path-injectable form of [`eval_rps_sock_flow_entries`] (the `eval_*_at`
+/// idiom) so the RFS precondition is assertable against a synthetic sysfs
+/// tree instead of the live `/sys/class/net`.
+///
+/// The global flow table this rule sizes is read only by `get_rps_cpu()`, and
+/// that read sits behind the per-queue flow table: net/core/dev.c does
+/// `if (!flow_table && !map) goto done;` and consults `sock_flow_table` inside
+/// `if (flow_table && sock_flow_table) { ... }`. The per-queue table is what
+/// `rps_flow_cnt` sizes, so a receive queue that has only `rps_cpus` set takes
+/// the plain-RPS branch and never reads the global table, while a queue with
+/// `rps_flow_cnt` reaches it even when every `rps_cpus` is left at 0 —
+/// `rps_sock_flow_sysctl()` raises the RPS gate itself when the global table
+/// becomes non-zero (net/core/sysctl_net_core.c: `static_branch_inc(&rps_needed);
+/// static_branch_inc(&rfs_needed);`). The kernel documentation states the
+/// matching requirement next to the two flow-table knobs: "Both of these need
+/// to be set before RFS is enabled for a receive queue"
+/// (Documentation/networking/scaling.rst).
+fn eval_rps_sock_flow_entries_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    net_root: &std::path::Path,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
+        return 1;
+    }
+    if !rfs_flow_table_configured(net_root) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3336,6 +3890,35 @@ fn eval_rps_sock_flow_entries(info: &SystemInfo, recs: &mut Vec<Recommendation>)
         });
     }
     1
+}
+
+/// Whether any receive queue has its RFS flow table configured — a non-zero
+/// `rps_flow_cnt` — the per-queue half of the pair `get_rps_cpu()` consults
+/// before reading the global table this rule sizes (see
+/// [`eval_rps_sock_flow_entries_at`]). A queue without the file, or with `0`,
+/// holds no flow table and never reaches the global one; `rps_cpus` on its own
+/// steers through plain RPS instead.
+fn rfs_flow_table_configured(net_root: &std::path::Path) -> bool {
+    let Ok(interfaces) = std::fs::read_dir(net_root) else {
+        return false;
+    };
+    for interface in interfaces.filter_map(|entry| entry.ok()) {
+        let Ok(queues) = std::fs::read_dir(interface.path().join("queues")) else {
+            continue;
+        };
+        for queue in queues.filter_map(|entry| entry.ok()) {
+            if !queue.file_name().to_string_lossy().starts_with("rx-") {
+                continue;
+            }
+            let Ok(count) = std::fs::read_to_string(queue.path().join("rps_flow_cnt")) else {
+                continue;
+            };
+            if count.trim().parse::<u64>().is_ok_and(|count| count > 0) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn eval_neigh_gc_thresh3(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -3514,11 +4097,39 @@ fn eval_watchdog_thresh(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_admin_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/admin_reserve_kbytes";
-    if !std::path::Path::new(path).exists() {
+    eval_admin_reserve_kbytes_at(
+        info,
+        recs,
+        "/proc/sys/vm/admin_reserve_kbytes",
+        "/proc/sys/vm/overcommit_memory",
+    )
+}
+
+/// Path-injectable form of [`eval_admin_reserve_kbytes`] (the `eval_*_at`
+/// idiom) so the overcommit-mode precondition is assertable against synthetic
+/// files.
+///
+/// The reserve is only subtracted on the `OVERCOMMIT_NEVER` path of
+/// `__vm_enough_memory()` (mm/util.c): `vm.overcommit_memory == 0` (the
+/// default "guess" mode) returns from that function before either
+/// `sysctl_admin_reserve_kbytes` or `sysctl_user_reserve_kbytes` is read, and
+/// mode 1 returns even earlier. On such a host the reason's promised recovery
+/// headroom does not exist, so the write cannot change any allocation —
+/// the sibling [`overcommit_ratio_recommendation`] gate already keys on the
+/// same `oc_mode == 2` condition.
+fn eval_admin_reserve_kbytes_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    overcommit_path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     if info.memory_total_gb < 64 {
+        return 1;
+    }
+    if !overcommit_reserves_are_live(overcommit_path) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -3534,6 +4145,17 @@ fn eval_admin_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
         });
     }
     1
+}
+
+/// Whether the kernel reads the commit reserves at all: in
+/// `__vm_enough_memory()` (mm/util.c) both `sysctl_admin_reserve_kbytes` and
+/// `sysctl_user_reserve_kbytes` are subtracted *after* the
+/// `sysctl_overcommit_memory == OVERCOMMIT_GUESS` early return, so only a host
+/// running `vm.overcommit_memory == 2` ("never overcommit") consults them.
+/// An unreadable mode file counts as "not consulted", so the rules stay quiet
+/// instead of promising recovery headroom nothing reads.
+fn overcommit_reserves_are_live(overcommit_path: &str) -> bool {
+    read_sysctl_u64(overcommit_path) == 2
 }
 
 fn eval_nr_open(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -4117,16 +4739,42 @@ fn eval_default_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
     1
 }
 
-fn eval_default_send_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/default/send_redirects";
-    if !std::path::Path::new(path).exists() {
+fn eval_default_send_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_default_send_redirects_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/default/send_redirects",
+        std::path::Path::new("/proc/sys/net/ipv4/conf"),
+    )
+}
+
+/// Path-injectable form of [`eval_default_send_redirects`] (the `eval_*_at`
+/// idiom). The `default` template is what new interfaces inherit, and a
+/// redirect can still only be sent by an interface that forwards — see
+/// [`eval_send_redirects_at`] for the kernel path and the documentation line.
+/// The `default` forwarding template counts as forwarding here, so a host that
+/// arms future interfaces keeps the recommendation. Like every
+/// `devinet_conf_proc` entry the slot is a plain `proc_dointvec` int with no
+/// min/max, so the value is read SIGNED and the gate is the consumer's own
+/// truthiness (`IN_DEV_TX_REDIRECTS`): -1 is enabled and must be flagged.
+fn eval_default_send_redirects_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    conf_root: &std::path::Path,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    if !any_interface_forwards(conf_root) {
+        return 1;
+    }
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.send_redirects".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "新建网络接口默认发送 ICMP 重定向，非路由器应禁用以防网络拓扑探测".to_string(),
             confidence: Confidence::High,
@@ -4440,11 +5088,38 @@ fn eval_msgmnb(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 // hardening set it themselves; an auto-tuner aimed at beginners must not.
 
 fn eval_user_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/user_reserve_kbytes";
-    if !std::path::Path::new(path).exists() {
+    eval_user_reserve_kbytes_at(
+        info,
+        recs,
+        "/proc/sys/vm/user_reserve_kbytes",
+        "/proc/sys/vm/overcommit_memory",
+    )
+}
+
+/// Path-injectable form of [`eval_user_reserve_kbytes`] (the `eval_*_at`
+/// idiom) so the overcommit-mode precondition is assertable against synthetic
+/// files.
+///
+/// Same condition as its sibling, and the documented one: `user_reserve_kbytes`
+/// is only consulted under overcommit "never" — the kernel documentation opens
+/// with "When overcommit_memory is set to 2, 'never overcommit' mode, reserve
+/// min(3% of current process size, user_reserve_kbytes) of free memory"
+/// (sysctl/vm.rst) — and `__vm_enough_memory()` (mm/util.c) returns before the
+/// reserve under the default guess mode. The reason's promise of a usable
+/// login path therefore only holds where the kernel reads the value.
+fn eval_user_reserve_kbytes_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    overcommit_path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     if info.memory_total_gb < 64 {
+        return 1;
+    }
+    if !overcommit_reserves_are_live(overcommit_path) {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -4716,13 +5391,27 @@ fn eval_percpu_pagelist_high_fraction(info: &SystemInfo, recs: &mut Vec<Recommen
     1
 }
 
-fn eval_accept_ra(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv6/conf/default/accept_ra";
-    if !std::path::Path::new(path).exists() {
+fn eval_accept_ra(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_accept_ra_at(info, recs, "/proc/sys/net/ipv6/conf/default/accept_ra")
+}
+
+/// Path-injectable form of [`eval_accept_ra`] (the `eval_*_at` idiom).
+///
+/// `accept_ra` is an `__s32` slot of `struct ipv6_devconf`
+/// (`include/linux/ipv6.h`) registered through a plain `proc_dointvec` with no
+/// min/max (`net/ipv6/addrconf.c`), so -1 is a legal value; `ipv6_accept_ra()`
+/// (`include/net/ipv6.h`) reads the slot as a truthiness test when forwarding
+/// is off, so -1 means Router Advertisements are accepted. The unsigned reader
+/// parses "-1" to Err and falls back to 0 — the *disabled* value — so the old
+/// `> 0` gate stayed silent on a host that accepts RAs. This is the IPv6
+/// counterpart of the ipv4 devconf booleans read signed in f57a3c81a.
+fn eval_accept_ra_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current > 0 {
+    // Any nonzero value is enabled, so -1 must not read as the value 0.
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv6.conf.default.accept_ra".to_string(),
             current_value: current.to_string(),
@@ -5539,11 +6228,40 @@ fn eval_compact_memory(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_min_slab_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/vm/min_slab_ratio";
-    if !std::path::Path::new(path).exists() {
+    eval_min_slab_ratio_at(
+        info,
+        recs,
+        "/proc/sys/vm/min_slab_ratio",
+        "/proc/sys/vm/zone_reclaim_mode",
+    )
+}
+
+/// Path-injectable form of [`eval_min_slab_ratio`] (the `eval_*_at` idiom) so
+/// the node-reclaim precondition is assertable against synthetic files.
+///
+/// The knob feeds `pgdat->min_slab_pages` (`setup_min_slab_ratio()` in
+/// mm/page_alloc.c), which only `node_reclaim()` reads — and the allocator
+/// calls node reclaim only while `node_reclaim_enabled()` holds, i.e. while
+/// `/proc/sys/vm/zone_reclaim_mode` is non-zero (include/linux/swap.h and
+/// mm/page_alloc.c, v6.6). ktuner itself recommends turning that mode off on
+/// every multi-NUMA host, so once its own plan is applied (or on any host that
+/// keeps the default 0) the write this rule asks for cannot change any
+/// behavior — the "never recommend a no-op" rule the hardlockup_panic and
+/// page-cluster gates already follow. An unreadable mode file counts as "off",
+/// so the rule stays quiet rather than promising a reclaim it cannot verify.
+fn eval_min_slab_ratio_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    zone_reclaim_path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     if info.memory_total_gb < 64 {
+        return 1;
+    }
+    if read_sysctl_u64(zone_reclaim_path) == 0 {
         return 1;
     }
     let current = read_sysctl_u64(path);
@@ -6274,6 +6992,143 @@ mod tests {
             eval_shmmni_at(&info, &mut recs, shmmni_path.to_str().unwrap());
             assert!(recs.is_empty(), "{name} must not gate the IPC rules in");
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A process list holding exactly `names`, otherwise the standard fixture.
+    fn info_with_processes(names: &[&str]) -> SystemInfo {
+        let mut info = make_test_info();
+        info.processes = names
+            .iter()
+            .map(|n| ProcessInfo {
+                name: n.to_string(),
+            })
+            .collect();
+        info
+    }
+
+    #[test]
+    fn mariadb_daemon_gates_the_database_tuning_rules() {
+        // MariaDB 10.4+ runs as mariadbd — the comm Debian and Ubuntu ship for
+        // the same OLTP database `mysqld` names. The canonical predicate counts
+        // it (73c675865), but these rules still hand-roll the list around
+        // mysqld, so a MariaDB-only host got none of this advice.
+        let mut info = info_with_processes(&["mariadbd"]);
+        // Below the >=64GB branch of the swappiness and dirty rules, so only
+        // the database gate can produce a recommendation here.
+        info.memory_total_gb = 32;
+        info.sysctl.swappiness = 60;
+        info.sysctl.thp_enabled = "always".to_string();
+        info.sysctl.dirty_ratio = 20;
+        info.disks[0].disk_type = DiskType::NVMe;
+        info.disks[0].read_ahead_kb = 512;
+
+        let mut recs = Vec::new();
+        eval_swappiness(&info, &WorkloadType::Mixed, &mut recs);
+        assert!(
+            recs.iter().any(|r| r.param == "vm.swappiness"),
+            "mariadbd must gate the swappiness rule in"
+        );
+
+        let mut recs = Vec::new();
+        eval_thp(&info, &mut recs);
+        assert!(
+            recs.iter()
+                .any(|r| r.param == "transparent_hugepage/enabled"),
+            "mariadbd must gate the THP rule in"
+        );
+
+        let mut recs = Vec::new();
+        eval_dirty_ratio(&info, &WorkloadType::Mixed, &mut recs);
+        assert!(
+            recs.iter().any(|r| r.param == "vm.dirty_ratio"),
+            "mariadbd must gate the dirty_ratio rule in"
+        );
+
+        let mut recs = Vec::new();
+        eval_read_ahead_kb(&info, &mut recs);
+        assert!(
+            recs.iter()
+                .any(|r| r.param == "block/nvme0n1/read_ahead_kb"),
+            "mariadbd must gate the read-ahead rule in"
+        );
+    }
+
+    #[test]
+    fn mariadb_daemon_gates_the_shared_memory_rules() {
+        // The SysV/shared-memory sizing gates are on the canonical predicate
+        // since 5c878f7ea: kernel.shmmax and vm.nr_hugepages belong to the same
+        // family as kernel.sem / kernel.shmmni, and the hand-rolled
+        // `postgres || mysqld` list kept a MariaDB-only host out of both.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_mariadb_gates_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, content: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let shmmax = write("shmmax", "65536\n");
+        let nr_hugepages = write("nr_hugepages", "0\n");
+        let numa_balancing = write("numa_balancing", "1\n");
+        let dirty_background_ratio = write("dirty_background_ratio", "10\n");
+
+        let mut info = info_with_processes(&["mariadbd"]);
+        info.memory_total_gb = 32;
+        info.numa_nodes = 2;
+
+        let mut recs = Vec::new();
+        eval_shmmax_at(&info, &mut recs, shmmax.to_str().unwrap());
+        assert!(
+            recs.iter().any(|r| r.param == "kernel.shmmax"),
+            "mariadbd must gate the shmmax rule in"
+        );
+
+        let mut recs = Vec::new();
+        eval_nr_hugepages_at(&info, &mut recs, nr_hugepages.to_str().unwrap(), 2048);
+        assert!(
+            recs.iter().any(|r| r.param == "vm.nr_hugepages"),
+            "mariadbd must gate the huge-page rule in"
+        );
+
+        let mut recs = Vec::new();
+        eval_numa_balancing_at(&info, &mut recs, numa_balancing.to_str().unwrap());
+        assert!(
+            recs.iter().any(|r| r.param == "kernel.numa_balancing"),
+            "mariadbd must gate the numa_balancing rule in"
+        );
+
+        let mut recs = Vec::new();
+        eval_dirty_background_ratio_at(
+            &info,
+            &WorkloadType::Mixed,
+            &mut recs,
+            dirty_background_ratio.to_str().unwrap(),
+        );
+        assert!(
+            recs.iter().any(|r| r.param == "vm.dirty_background_ratio"),
+            "mariadbd must gate the dirty_background_ratio rule in"
+        );
+
+        // Boundary guard: the client tools are not the database.
+        let mut client = info_with_processes(&["mariadb-dump"]);
+        client.memory_total_gb = 32;
+        client.numa_nodes = 2;
+        let mut recs = Vec::new();
+        eval_shmmax_at(&client, &mut recs, shmmax.to_str().unwrap());
+        eval_nr_hugepages_at(&client, &mut recs, nr_hugepages.to_str().unwrap(), 2048);
+        eval_numa_balancing_at(&client, &mut recs, numa_balancing.to_str().unwrap());
+        eval_dirty_background_ratio_at(
+            &client,
+            &WorkloadType::Mixed,
+            &mut recs,
+            dirty_background_ratio.to_str().unwrap(),
+        );
+        assert!(recs.is_empty(), "mariadb-dump is not the database");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -7641,6 +8496,293 @@ mod tests {
     }
 
     #[test]
+    fn syn_backlog_is_only_worth_sizing_where_the_kernel_reads_it() {
+        // tcp_input.c reads sysctl_max_syn_backlog in exactly one place: the
+        // last-quarter reservation inside tcp_conn_request(), guarded by
+        // `!syncookies`. Syncookies are on by default (tcp_ipv4.c sets 1) and
+        // are what this engine's own tcp_syncookies rule asks for, so the
+        // shape the rule used to fire on — a listener host with the default
+        // 1024 — cannot read the value at all; the request queue is bounded by
+        // sk_max_ack_backlog / net.core.somaxconn instead.
+        assert!(
+            syn_backlog_recommendation(1024, 0, true).is_some(),
+            "a syncookie-less listener host still reads the knob"
+        );
+        for syncookies in [1, 2] {
+            assert!(
+                syn_backlog_recommendation(1024, syncookies, true).is_none(),
+                "syncookies={syncookies} skips the only reader of the knob"
+            );
+        }
+        assert!(
+            syn_backlog_recommendation(1024, 0, false).is_none(),
+            "no listener means no request queue to size"
+        );
+        assert!(
+            syn_backlog_recommendation(8192, 0, true).is_none(),
+            "an adequate backlog stays untouched"
+        );
+
+        let rec = syn_backlog_recommendation(1024, 0, true).expect("recommendation");
+        assert_eq!(rec.param, "net.ipv4.tcp_max_syn_backlog");
+        assert_eq!(rec.current_value, "1024");
+        assert_eq!(rec.recommended_value, "65536");
+    }
+
+    #[test]
+    fn test_tcp_syncookies_reads_truthiness_signed() {
+        // tcp_syncookies was a plain proc_dointvec int with no min/max
+        // through v5.10 (net/ipv4/sysctl_net_ipv4.c), and every consumer is a
+        // truthiness test (net/ipv4/tcp_input.c: `if (syncookies)` arms the
+        // cookie path, `if (!syncookies && ...)` guards the last-quarter
+        // reservation, `syncookies == 2` selects the documented always-cookie
+        // mode), so -1 is a legal, already-enabled value. The unsigned reader
+        // parsed "-1" to Err and fell back to 0 — the *disabled* value — so
+        // the `== 0` gate invented a SYN-flood finding on a host that already
+        // answers floods with cookies.
+        let info = make_test_info();
+        // The rule only speaks on a host that listens on TCP; bind one so
+        // the gate is exercised on any machine (the network_identity suite
+        // uses the same trick).
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_syncookies_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_syncookies_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 leaves SYN cookies off"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_syncookies");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn syn_backlog_skips_when_syncookies_hold_minus_one() {
+        // The syn-backlog rule reads tcp_syncookies as its gate, and that
+        // knob was a plain proc_dointvec int through v5.10, so "-1" is a
+        // legal, enabled value. The unsigned reader turned it into the
+        // fallback 0 — disabled — and the rule sized the backlog on exactly
+        // the hosts where the kernel skips the knob's only reader.
+        let info = make_test_info();
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_syn_backlog_signed_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let backlog = dir.join("tcp_max_syn_backlog");
+        let syncookies = dir.join("tcp_syncookies");
+        std::fs::write(&backlog, "1024\n").unwrap();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+            std::fs::write(&syncookies, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_max_syn_backlog_at(
+                &info,
+                &mut recs,
+                backlog.to_str().unwrap(),
+                syncookies.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "syncookies {value}: any nonzero value skips the knob's only reader"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn slow_start_after_idle_is_not_read_by_bbr() {
+        // Both readers of the knob skip congestion controls that define
+        // `cong_control`: tcp_output.c's starvation branch ends
+        // "... && !ca_ops->cong_control", and the include/net/tcp.h helper
+        // returns early on `ca_ops->cong_control`. BBR defines it
+        // (net/ipv4/tcp_bbr.c: `.cong_control = bbr_main`) and is exactly the
+        // control this engine's own tcp_congestion_control rule asks for, so
+        // on a BBR host the write cannot change any cwnd behavior.
+        assert!(
+            slow_start_after_idle_recommendation(1, "cubic", true).is_some(),
+            "a control without cong_control still reads the knob"
+        );
+        assert!(
+            slow_start_after_idle_recommendation(1, "bbr", true).is_none(),
+            "BBR defines cong_control, so neither reader consults the knob"
+        );
+        assert!(
+            slow_start_after_idle_recommendation(1, "", true).is_some(),
+            "an unreadable congestion-control file keeps today's behavior"
+        );
+        assert!(
+            slow_start_after_idle_recommendation(0, "cubic", true).is_none(),
+            "an already-disabled knob stays untouched"
+        );
+        assert!(
+            slow_start_after_idle_recommendation(1, "cubic", false).is_none(),
+            "no listener means no connection to keep warm"
+        );
+
+        let rec = slow_start_after_idle_recommendation(1, "cubic", true).expect("recommendation");
+        assert_eq!(rec.param, "net.ipv4.tcp_slow_start_after_idle");
+        assert_eq!(rec.current_value, "1");
+        assert_eq!(rec.recommended_value, "0");
+    }
+
+    #[test]
+    fn slow_start_after_idle_treats_every_nonzero_value_as_enabled() {
+        // tcp_slow_start_after_idle is a truthiness flag, not an enum:
+        // tcp_output.c consumes it as
+        // `if (READ_ONCE(...sysctl_tcp_slow_start_after_idle) && ...)`.
+        // Through v5.10 it was a plain proc_dointvec int with no min/max
+        // (net/ipv4/sysctl_net_ipv4.c), so -1 is a legal, enabled value; since
+        // v5.14 the u8 registration (proc_dou8vec_minmax, no extra1/extra2)
+        // accepts any 0-255 value, and every nonzero one is enabled. The old
+        // `!= 1` gate missed both shapes: a -1 host read as the fallback 0,
+        // and a u8 host holding 2 was skipped outright.
+        for (value, expects_rec) in [(-1, true), (0, false), (1, true), (2, true)] {
+            let rec = slow_start_after_idle_recommendation(value, "cubic", true);
+            assert_eq!(
+                rec.is_some(),
+                expects_rec,
+                "value {value}: any nonzero value restarts slow start after idle"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value,
+                    value.to_string(),
+                    "the reported original is the value the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+    }
+
+    #[test]
+    fn slow_start_after_idle_reads_the_live_value_signed() {
+        // The reader itself must parse "-1" out of the file: the slot held a
+        // signed int through v5.10, and the reported current has to be the
+        // value the kernel actually holds, not the fallback of a failed
+        // unsigned parse.
+        let info = make_test_info();
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_slow_start_signed_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let value = dir.join("tcp_slow_start_after_idle");
+        let cc = dir.join("tcp_congestion_control");
+        std::fs::write(&cc, "cubic\n").unwrap();
+        for (raw, expects_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&value, format!("{raw}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_tcp_slow_start_after_idle_at(
+                &info,
+                &mut recs,
+                value.to_str().unwrap(),
+                cc.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "raw {raw}: any nonzero value restarts slow start after idle"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_slow_start_after_idle");
+                assert_eq!(recs[0].current_value, raw);
+                assert_eq!(recs[0].recommended_value, "0");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_tcp_no_metrics_save_reads_truthiness_signed() {
+        // tcp_no_metrics_save was a plain proc_dointvec int with no min/max
+        // through v5.10 (net/ipv4/sysctl_net_ipv4.c), and tcp_metrics.c
+        // consumes it as
+        // `if (READ_ONCE(net->ipv4.sysctl_tcp_nometrics_save) || !dst) return;`
+        // — a truthiness test — so -1 is a legal value that already stops
+        // metric caching. The unsigned reader parsed "-1" to Err and fell
+        // back to 0, the *saving* value, so the `== 0` gate invented a
+        // finding on a host that already discards stale metrics.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_no_metrics_save_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_no_metrics_save_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 keeps caching TCP metrics"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_no_metrics_save");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn ip_forward_treats_every_nonzero_value_as_enabled() {
+        // net.ipv4.ip_forward is a plain proc_dointvec int behind
+        // devinet_sysctl_forward (net/ipv4/devinet.c) — the handler's
+        // extra1/extra2 are the devconf and net context, not min/max — and
+        // IN_DEV_FORWARD (include/linux/inetdevice.h) is a truthiness test,
+        // so -1 is a legal value that means forwarding is on. The unsigned
+        // reader turned "-1" into the fallback 0 and the old `== 1` gate
+        // skipped the rule on exactly that host.
+        for (value, host_needs, expects_rec) in [
+            (-1, false, true),
+            (0, false, false),
+            (1, false, true),
+            (2, false, true),
+            (-1, true, false),
+            (1, true, false),
+        ] {
+            let rec = ip_forward_recommendation(value, host_needs);
+            assert_eq!(
+                rec.is_some(),
+                expects_rec,
+                "value {value}, host_needs {host_needs}"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(rec.param, "net.ipv4.ip_forward");
+                assert_eq!(
+                    rec.current_value,
+                    value.to_string(),
+                    "the reported original is the value the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+    }
+
+    #[test]
     fn test_inotify_watches() {
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -7725,6 +8867,58 @@ mod tests {
             "Should recommend lower dirty_background_ratio for DB"
         );
         assert_eq!(rec.unwrap().recommended_value, "3");
+    }
+
+    #[test]
+    fn test_dirty_background_ratio_needs_room_under_the_limit() {
+        // domain_dirty_limits() (mm/page-writeback.c) replaces a background
+        // threshold at or above the dirty threshold with half of it, so a
+        // target at or above the dirty ratio in force cannot move the
+        // effective threshold — it already is dirty_limit / 2.
+        let mut info = make_test_info();
+        info.memory_total_gb = 32; // <64GB uses the ratio form
+        info.processes.clear(); // not a database host
+        info.sysctl.dirty_ratio = 5;
+        info.sysctl.dirty_background_ratio = 15;
+
+        let mut recs = Vec::new();
+        eval_dirty_background_ratio(&info, &WorkloadType::Mixed, &mut recs);
+        assert!(
+            recs.is_empty(),
+            "a 5% target cannot move the effective threshold below 5% / 2"
+        );
+
+        // Room under the dirty limit keeps the advice.
+        info.sysctl.dirty_ratio = 20;
+        let mut recs = Vec::new();
+        eval_dirty_background_ratio(&info, &WorkloadType::Mixed, &mut recs);
+        assert_eq!(recs.len(), 1, "5% stays below the 20% dirty limit");
+        assert_eq!(recs[0].recommended_value, "5");
+    }
+
+    #[test]
+    fn test_dirty_ratio_rule_keeps_its_background_advice_reachable() {
+        // The same clamp applies to the latency rule's background half: while
+        // the dirty ratio stays at or below 3%, lowering the background
+        // threshold to 3% changes nothing.
+        let mut info = make_test_info();
+        info.memory_total_gb = 32;
+        info.processes.clear();
+        info.sysctl.dirty_ratio = 3;
+        info.sysctl.dirty_background_ratio = 15;
+
+        let mut recs = Vec::new();
+        eval_dirty_ratio(&info, &WorkloadType::IoLatency, &mut recs);
+        assert!(
+            recs.is_empty(),
+            "a 3% dirty ratio already clamps the background threshold to 1.5%"
+        );
+
+        info.sysctl.dirty_ratio = 4;
+        let mut recs = Vec::new();
+        eval_dirty_ratio(&info, &WorkloadType::IoLatency, &mut recs);
+        assert_eq!(recs.len(), 1, "3% still fits under a 4% dirty ratio");
+        assert_eq!(recs[0].recommended_value, "3");
     }
 
     #[test]
@@ -7832,6 +9026,85 @@ mod tests {
         {
             assert_eq!(rec.recommended_value, "2");
         }
+    }
+
+    #[test]
+    fn rfs_flow_table_is_only_sized_where_the_queue_flow_table_is() {
+        // get_rps_cpu() consults the global table only after the receive
+        // queue's own flow table exists (net/core/dev.c: `if (!flow_table &&
+        // !map) goto done;` ... `if (flow_table && sock_flow_table) { ... }`),
+        // and that per-queue table is what `rps_flow_cnt` sizes. A queue with
+        // only `rps_cpus` set takes the plain-RPS branch and never reads the
+        // global table; a queue with `rps_flow_cnt` reaches it even when every
+        // `rps_cpus` mask is left at 0, because writing the global table
+        // raises `rps_needed` itself (net/core/sysctl_net_core.c).
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_rfs_flow_cnt_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |relative: &str, content: &str| {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            std::fs::write(&path, content).unwrap();
+        };
+        let param = dir.join("rps_sock_flow_entries");
+        std::fs::write(&param, "4096\n").unwrap();
+
+        let mut info = make_test_info();
+        info.network = vec![NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 10000,
+        }];
+        // The shape RFS needs: a receive queue with its own flow table, even
+        // though no queue carries an `rps_cpus` mask.
+        write("eth0/queues/rx-0/rps_cpus", "0\n");
+        write("eth0/queues/rx-0/rps_flow_cnt", " 2048 \n");
+        let mut recs = Vec::new();
+        eval_rps_sock_flow_entries_at(&info, &mut recs, param.to_str().unwrap(), &dir);
+        assert!(
+            recs.iter()
+                .any(|r| r.param == "net.core.rps_sock_flow_entries"),
+            "rps_flow_cnt reaches the global table without any rps_cpus"
+        );
+
+        // `rps_cpus` on its own steers through plain RPS and never reads the
+        // global table.
+        write("eth0/queues/rx-0/rps_flow_cnt", "0\n");
+        write("eth0/queues/rx-0/rps_cpus", "00000000,00000030\n");
+        let mut recs = Vec::new();
+        eval_rps_sock_flow_entries_at(&info, &mut recs, param.to_str().unwrap(), &dir);
+        assert!(recs.is_empty(), "rps_cpus alone reads no flow table");
+
+        // A transmit queue's flow count must not count, and an unreadable tree
+        // counts as unconfigured instead of panicking.
+        write("eth0/queues/rx-0/rps_cpus", "0\n");
+        write("eth0/queues/tx-0/rps_flow_cnt", "4096\n");
+        let mut recs = Vec::new();
+        eval_rps_sock_flow_entries_at(&info, &mut recs, param.to_str().unwrap(), &dir);
+        assert!(recs.is_empty(), "a transmit queue holds no rx flow table");
+        let mut recs = Vec::new();
+        eval_rps_sock_flow_entries_at(
+            &info,
+            &mut recs,
+            param.to_str().unwrap(),
+            &dir.join("missing"),
+        );
+        assert!(recs.is_empty(), "no sysfs tree means nothing is steered");
+
+        // The 10-GbE gate is unchanged.
+        let mut slow = make_test_info();
+        slow.network = vec![NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 1000,
+        }];
+        let mut recs = Vec::new();
+        eval_rps_sock_flow_entries_at(&slow, &mut recs, param.to_str().unwrap(), &dir);
+        assert!(recs.is_empty(), "a slow NIC keeps the rule silent");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -8207,6 +9480,70 @@ mod tests {
     }
 
     #[test]
+    fn page_cluster_needs_a_swap_area_to_be_worth_setting() {
+        // vm.page-cluster sizes the swap-in readahead window: v6.6 reads it
+        // only from mm/swap_state.c (swapin_nr_pages / swapin_readahead / the
+        // swap VMA readahead). On an SSD host with no swap area the
+        // recommendation's promised IO saving cannot happen, so the rule must
+        // stay quiet — the same "don't recommend a no-op" rule the
+        // hardlockup_panic gate follows for a disabled NMI watchdog.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_page_cluster_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let param = dir.join("page-cluster");
+        std::fs::write(&param, b"3\n").unwrap();
+        // /proc/swaps always carries its header, so a header-only table means
+        // no configured area.
+        let header_only = dir.join("swaps-header-only");
+        std::fs::write(
+            &header_only,
+            b"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n",
+        )
+        .unwrap();
+        let with_swap = dir.join("swaps-active");
+        std::fs::write(
+            &with_swap,
+            b"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/sda2                               partition\t16776188\t0\t\t-2\n",
+        )
+        .unwrap();
+        let missing = dir.join("swaps-missing");
+
+        let info = make_test_info();
+
+        for swaps in [&header_only, &missing] {
+            let mut recs = Vec::new();
+            eval_page_cluster_at(
+                &info,
+                &mut recs,
+                param.to_str().unwrap(),
+                swaps.to_str().unwrap(),
+            );
+            assert!(
+                recs.is_empty(),
+                "{}: no swap area means nothing to read in",
+                swaps.display()
+            );
+        }
+
+        let mut recs = Vec::new();
+        eval_page_cluster_at(
+            &info,
+            &mut recs,
+            param.to_str().unwrap(),
+            with_swap.to_str().unwrap(),
+        );
+        assert!(
+            recs.iter().any(|r| r.param == "vm.page-cluster"),
+            "an active swap area keeps the rule"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_rmem_default_10g() {
         let mut info = make_test_info();
         info.network = vec![NetInfo {
@@ -8408,6 +9745,131 @@ mod tests {
             assert_eq!(rec.recommended_value, "0");
             assert_eq!(rec.category, Category::Security);
         }
+    }
+
+    #[test]
+    fn send_redirects_advice_needs_a_forwarding_interface() {
+        // ip_route_input_slow() turns a non-local destination into an
+        // EHOSTUNREACH error route when the input interface does not forward
+        // ("if (!IN_DEV_FORWARD(in_dev)) { err = -EHOSTUNREACH; goto no_route; }"),
+        // so ip_forward() — the only caller of ip_rt_send_redirect(), where
+        // IN_DEV_TX_REDIRECTS is checked — never runs. The kernel documentation
+        // states the same precondition: "Send redirects, if router."
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_send_redirects_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |relative: &str, content: &str| {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+
+        let info = make_test_info();
+        let all = write("all/send_redirects", "1\n");
+        let default = write("default/send_redirects", "1\n");
+        for interface in ["all", "default", "lo", "eth0"] {
+            write(&format!("{interface}/forwarding"), "0\n");
+        }
+
+        // Nothing forwards, so no redirect can be sent on this host.
+        let mut recs = Vec::new();
+        eval_send_redirects_at(&info, &mut recs, all.to_str().unwrap(), &dir);
+        eval_default_send_redirects_at(&info, &mut recs, default.to_str().unwrap(), &dir);
+        assert!(
+            recs.is_empty(),
+            "a host that forwards nothing cannot send a redirect"
+        );
+
+        // One forwarding interface keeps both rules.
+        write("eth0/forwarding", "1\n");
+        let mut recs = Vec::new();
+        eval_send_redirects_at(&info, &mut recs, all.to_str().unwrap(), &dir);
+        eval_default_send_redirects_at(&info, &mut recs, default.to_str().unwrap(), &dir);
+        assert_eq!(recs.len(), 2, "a router still gets both recommendations");
+
+        // The `default` template alone arms future interfaces, so it counts.
+        write("eth0/forwarding", "0\n");
+        write("default/forwarding", "1\n");
+        let mut recs = Vec::new();
+        eval_default_send_redirects_at(&info, &mut recs, default.to_str().unwrap(), &dir);
+        assert!(!recs.is_empty(), "the template arms new interfaces");
+
+        // A missing tree cannot prove a redirect is possible.
+        write("default/forwarding", "0\n");
+        let mut recs = Vec::new();
+        eval_send_redirects_at(
+            &info,
+            &mut recs,
+            all.to_str().unwrap(),
+            &dir.join("missing"),
+        );
+        eval_default_send_redirects_at(
+            &info,
+            &mut recs,
+            default.to_str().unwrap(),
+            &dir.join("missing"),
+        );
+        assert!(recs.is_empty(), "an unreadable tree stays quiet");
+
+        // A disabled knob stays quiet even where a router exists.
+        write("eth0/forwarding", "1\n");
+        let off = write("default/send_redirects_off", "0\n");
+        let mut recs = Vec::new();
+        eval_default_send_redirects_at(&info, &mut recs, off.to_str().unwrap(), &dir);
+        assert!(recs.is_empty(), "an already-disabled knob is satisfied");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn send_redirects_rules_read_truthiness_signed() {
+        // conf/*/send_redirects is a devinet_conf_proc plain proc_dointvec int
+        // slot with no min/max (net/ipv4/devinet.c) — the same registration
+        // the five signed-read fixes already covered — and
+        // IN_DEV_TX_REDIRECTS (include/linux/inetdevice.h) consumes it
+        // through IN_DEV_ORCONF, a truthiness test. The old `== 1` gate
+        // skipped a host whose redirects are enabled with -1, while the
+        // unsigned reader parsed "-1" to Err and fell back to 0, the
+        // *disabled* value.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_send_redirects_signed_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("all")).unwrap();
+        std::fs::create_dir_all(dir.join("default")).unwrap();
+        let all = dir.join("all/send_redirects");
+        let default = dir.join("default/send_redirects");
+        // One forwarding interface makes the redirect path reachable.
+        std::fs::create_dir_all(dir.join("eth0")).unwrap();
+        std::fs::write(dir.join("eth0/forwarding"), "1\n").unwrap();
+
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, true), (0, false), (1, true)] {
+            std::fs::write(&all, format!("{value}\n")).unwrap();
+            std::fs::write(&default, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            eval_send_redirects_at(&info, &mut recs, all.to_str().unwrap(), &dir);
+            eval_default_send_redirects_at(&info, &mut recs, default.to_str().unwrap(), &dir);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec) * 2,
+                "value {value}: both templates track the same value"
+            );
+            if expects_rec {
+                for rec in &recs {
+                    assert_eq!(rec.current_value, value.to_string());
+                    assert_eq!(rec.recommended_value, "0");
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -8618,6 +10080,106 @@ mod tests {
             rec.is_none(),
             "Should not recommend user_reserve_kbytes for small memory"
         );
+    }
+
+    #[test]
+    fn commit_reserves_need_overcommit_never_to_be_read() {
+        // `__vm_enough_memory()` (mm/util.c) returns inside the
+        // OVERCOMMIT_GUESS branch before either reserve is subtracted:
+        //
+        //	if (sysctl_overcommit_memory == OVERCOMMIT_GUESS) { ...; return 0; }
+        //	allowed = vm_commit_limit();
+        //	if (!cap_sys_admin)
+        //		allowed -= sysctl_admin_reserve_kbytes >> ...;
+        //	if (mm) { ... sysctl_user_reserve_kbytes ... }
+        //
+        // So only vm.overcommit_memory == 2 reads them, which is why the
+        // sibling overcommit_ratio rule already gates on oc_mode == 2. On any
+        // other host the promised recovery headroom cannot exist.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_commit_reserves_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, content: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let admin = write("admin_reserve_kbytes", "8192\n");
+        let user = write("user_reserve_kbytes", "16384\n");
+        let mode_never = write("overcommit_memory.never", "2\n");
+        let mode_guess = write("overcommit_memory.guess", "0\n");
+        let mode_always = write("overcommit_memory.always", "1\n");
+        let mode_missing = dir.join("overcommit_memory.missing");
+
+        let mut info = make_test_info();
+        info.memory_total_gb = 128;
+
+        for mode in [&mode_guess, &mode_always, &mode_missing] {
+            let mut recs = Vec::new();
+            eval_admin_reserve_kbytes_at(
+                &info,
+                &mut recs,
+                admin.to_str().unwrap(),
+                mode.to_str().unwrap(),
+            );
+            eval_user_reserve_kbytes_at(
+                &info,
+                &mut recs,
+                user.to_str().unwrap(),
+                mode.to_str().unwrap(),
+            );
+            assert!(
+                recs.is_empty(),
+                "{}: the kernel never reads either reserve",
+                mode.display()
+            );
+        }
+
+        let mut recs = Vec::new();
+        eval_admin_reserve_kbytes_at(
+            &info,
+            &mut recs,
+            admin.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        assert!(
+            recs.iter().any(|r| r.param == "vm.admin_reserve_kbytes"),
+            "overcommit never reads the admin reserve"
+        );
+        eval_user_reserve_kbytes_at(
+            &info,
+            &mut recs,
+            user.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        assert!(
+            recs.iter().any(|r| r.param == "vm.user_reserve_kbytes"),
+            "overcommit never reads the user reserve"
+        );
+
+        // Adequate reserves stay untouched, still under the mode that reads
+        // them.
+        let admin_ok = write("admin_reserve_kbytes_ok", "131072\n");
+        let user_ok = write("user_reserve_kbytes_ok", "262144\n");
+        let mut recs = Vec::new();
+        eval_admin_reserve_kbytes_at(
+            &info,
+            &mut recs,
+            admin_ok.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        eval_user_reserve_kbytes_at(
+            &info,
+            &mut recs,
+            user_ok.to_str().unwrap(),
+            mode_never.to_str().unwrap(),
+        );
+        assert!(recs.is_empty(), "an adequate reserve stays untouched");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -8832,6 +10394,48 @@ mod tests {
     }
 
     #[test]
+    fn accept_ra_reads_the_signed_devconf_value() {
+        // accept_ra is an __s32 slot of struct ipv6_devconf behind a plain
+        // proc_dointvec (net/ipv6/addrconf.c), and ipv6_accept_ra()
+        // (include/net/ipv6.h) reads it as a truthiness test when forwarding
+        // is off — so -1 means enabled. The unsigned reader parsed "-1" to
+        // the disabled value 0, and the rule then stayed silent on a host
+        // that accepts Router Advertisements.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_accept_ra_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accept_ra");
+        let info = make_test_info();
+
+        for (content, expected) in [
+            ("-1\n", Some("-1")),
+            ("1\n", Some("1")),
+            ("2\n", Some("2")),
+            ("0\n", None),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            let mut recs = Vec::new();
+            eval_accept_ra_at(&info, &mut recs, path.to_str().unwrap());
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv6.conf.default.accept_ra");
+            assert_eq!(
+                rec.map(|r| r.current_value.as_str()),
+                expected,
+                "accept_ra={content}"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_tcp_autocorking() {
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -8890,6 +10494,72 @@ mod tests {
             rec.is_none(),
             "Should not recommend min_slab_ratio for small memory"
         );
+    }
+
+    #[test]
+    fn min_slab_ratio_needs_node_reclaim_enabled() {
+        // vm.min_slab_ratio feeds pgdat->min_slab_pages, which only
+        // node_reclaim() reads, and the allocator only calls node reclaim
+        // while vm.zone_reclaim_mode is non-zero (include/linux/swap.h,
+        // mm/page_alloc.c). ktuner's own advice turns that mode off on
+        // multi-NUMA hosts, so without the gate the rule keeps asking for a
+        // write that cannot change anything.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_min_slab_ratio_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let param = dir.join("min_slab_ratio");
+        std::fs::write(&param, b"3\n").unwrap();
+        let mode_off = dir.join("zone_reclaim_mode.off");
+        std::fs::write(&mode_off, b"0\n").unwrap();
+        let mode_on = dir.join("zone_reclaim_mode.on");
+        std::fs::write(&mode_on, b"1\n").unwrap();
+        let mode_missing = dir.join("zone_reclaim_mode.missing");
+
+        let mut info = make_test_info();
+        info.memory_total_gb = 256;
+
+        for mode in [&mode_off, &mode_missing] {
+            let mut recs = Vec::new();
+            eval_min_slab_ratio_at(
+                &info,
+                &mut recs,
+                param.to_str().unwrap(),
+                mode.to_str().unwrap(),
+            );
+            assert!(
+                recs.is_empty(),
+                "{}: node reclaim is off, the knob cannot act",
+                mode.display()
+            );
+        }
+
+        let mut recs = Vec::new();
+        eval_min_slab_ratio_at(
+            &info,
+            &mut recs,
+            param.to_str().unwrap(),
+            mode_on.to_str().unwrap(),
+        );
+        assert!(
+            recs.iter().any(|r| r.param == "vm.min_slab_ratio"),
+            "node reclaim enabled keeps the rule"
+        );
+
+        // The memory gate still applies first.
+        info.memory_total_gb = 16;
+        let mut recs = Vec::new();
+        eval_min_slab_ratio_at(
+            &info,
+            &mut recs,
+            param.to_str().unwrap(),
+            mode_on.to_str().unwrap(),
+        );
+        assert!(recs.is_empty(), "small memory still skips the rule");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -9367,6 +11037,54 @@ mod tests {
     }
 
     #[test]
+    fn test_core_mem_max_reasons_name_the_explicit_buffer_cap() {
+        // net.core.rmem_max/wmem_max bound an explicit setsockopt(SO_RCVBUF /
+        // SO_SNDBUF) request (sock_setsockopt clamps it with sysctl_*mem_max),
+        // while TCP's automatic tuning is capped by tcp_rmem[2] / tcp_wmem[2]
+        // (tcp_rcv_space_adjust / tcp_sndbuf_expand). The core maxima cannot
+        // unlock the triples, so the reason must not claim that they do.
+        let mut info = make_test_info();
+        info.network = vec![crate::detect::NetInfo {
+            name: "eth0".to_string(),
+            speed_mbps: 10000,
+        }];
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_core_mem_max_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rmem = dir.join("rmem_max");
+        let wmem = dir.join("wmem_max");
+        std::fs::write(&rmem, "212992\n").unwrap();
+        std::fs::write(&wmem, "212992\n").unwrap();
+
+        let mut recs = Vec::new();
+        eval_rmem_max_at(&info, &mut recs, rmem.to_str().unwrap());
+        eval_wmem_max_at(&info, &mut recs, wmem.to_str().unwrap());
+        let r = recs
+            .iter()
+            .find(|r| r.param == "net.core.rmem_max")
+            .expect("a 10G host under 16MB gets the recommendation");
+        let w = recs
+            .iter()
+            .find(|r| r.param == "net.core.wmem_max")
+            .expect("a 10G host under 16MB gets the recommendation");
+        assert!(r.reason.contains("SO_RCVBUF"), "{}", r.reason);
+        assert!(w.reason.contains("SO_SNDBUF"), "{}", w.reason);
+        assert!(
+            !r.reason.contains("tcp_rmem 的 max 值不会生效"),
+            "{}",
+            r.reason
+        );
+        assert!(
+            !w.reason.contains("tcp_wmem 的 max 值不会生效"),
+            "{}",
+            w.reason
+        );
+    }
+
+    #[test]
     fn test_ip_nonlocal_bind() {
         let info = make_test_info();
         let mut recs = Vec::new();
@@ -9679,6 +11397,14 @@ mod tests {
         // enabled, so the unsigned reader's fallback 0 made the `== 0` gate
         // report a PID-less core pattern on a host that appends the PID.
         let info = make_test_info();
+        // A file pattern with no %p of its own is where the knob still acts,
+        // so the truthiness cases keep deciding here.
+        let pattern = std::env::temp_dir().join(format!(
+            "ktuner_core_pattern_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&pattern, "core\n").unwrap();
         for (value, expects_rec) in [(-1, false), (0, true), (1, false)] {
             let path = std::env::temp_dir().join(format!(
                 "ktuner_core_uses_pid_{}_{:?}_{value}",
@@ -9687,7 +11413,12 @@ mod tests {
             ));
             std::fs::write(&path, format!("{value}\n")).unwrap();
             let mut recs = Vec::new();
-            let checked = eval_core_uses_pid_at(&info, &mut recs, path.to_str().unwrap());
+            let checked = eval_core_uses_pid_at(
+                &info,
+                &mut recs,
+                path.to_str().unwrap(),
+                pattern.to_str().unwrap(),
+            );
             std::fs::remove_file(&path).ok();
             assert_eq!(checked, 1);
             assert_eq!(
@@ -9701,6 +11432,72 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+        std::fs::remove_file(&pattern).ok();
+    }
+
+    #[test]
+    fn core_uses_pid_needs_a_core_pattern_that_leaves_it_something_to_do() {
+        // fs/coredump.c appends the compatibility `.PID` only under
+        // "if (!ispipe && !pid_in_pattern && core_uses_pid)": a piped pattern
+        // (systemd-coredump) never reaches the filename logic, and a pattern
+        // carrying its own %p already records the pid. On those hosts the
+        // reason's promise is already met, so the rule must stay quiet.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_core_uses_pid_pattern_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, content: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let param = write("core_uses_pid", "0\n");
+        let plain = write("pattern-plain", "core\n");
+        // A literal %p written with an escape: the kernel emits "%p" as text
+        // and still appends .PID, so the knob keeps its job.
+        let escaped = write("pattern-escaped", "core.%%p\n");
+        let with_pid = write("pattern-pid", "core.%p\n");
+        let piped = write(
+            "pattern-pipe",
+            "|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h\n",
+        );
+        let missing = dir.join("pattern-missing");
+
+        let info = make_test_info();
+
+        for pattern in [&with_pid, &piped] {
+            let mut recs = Vec::new();
+            eval_core_uses_pid_at(
+                &info,
+                &mut recs,
+                param.to_str().unwrap(),
+                pattern.to_str().unwrap(),
+            );
+            assert!(
+                recs.is_empty(),
+                "{}: the kernel already records the pid",
+                pattern.display()
+            );
+        }
+
+        for pattern in [&plain, &escaped, &missing] {
+            let mut recs = Vec::new();
+            eval_core_uses_pid_at(
+                &info,
+                &mut recs,
+                param.to_str().unwrap(),
+                pattern.to_str().unwrap(),
+            );
+            assert!(
+                recs.iter().any(|r| r.param == "kernel.core_uses_pid"),
+                "{}: the knob still names the core file",
+                pattern.display()
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -9864,6 +11661,19 @@ mod tests {
         // silently skipped the rule on a host whose secure redirects are on
         // (IN_DEV_SEC_REDIRECTS is an ORCONF truthiness test).
         let info = make_test_info();
+        let conf = std::env::temp_dir().join(format!(
+            "ktuner_secure_redirects_conf_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&conf);
+        for relative in ["all/shared_media", "eth0/shared_media"] {
+            let path = conf.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            // Shared media off so the shared_media gate keeps the knob
+            // reachable and this test still observes the signed read.
+            std::fs::write(&path, "0\n").unwrap();
+        }
         for (value, expects_rec) in [(-1, true), (0, false), (1, true)] {
             let path = std::env::temp_dir().join(format!(
                 "ktuner_secure_redirects_{}_{:?}_{value}",
@@ -9872,7 +11682,7 @@ mod tests {
             ));
             std::fs::write(&path, format!("{value}\n")).unwrap();
             let mut recs = Vec::new();
-            let checked = eval_secure_redirects_at(&info, &mut recs, path.to_str().unwrap());
+            let checked = eval_secure_redirects_at(&info, &mut recs, path.to_str().unwrap(), &conf);
             std::fs::remove_file(&path).ok();
             assert_eq!(checked, 1);
             assert_eq!(
@@ -9890,6 +11700,68 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "0");
             }
         }
+    }
+
+    #[test]
+    fn secure_redirects_advice_needs_shared_media_off() {
+        // __ip_do_redirect() (net/ipv4/route.c) reads IN_DEV_SEC_REDIRECTS only
+        // inside its `if (!IN_DEV_SHARED_MEDIA(in_dev))` branch, and the sysctl
+        // documentation states the override outright — "shared_media ...
+        // Overrides secure_redirects" / "Overridden by shared_media". Shared
+        // media defaults to on and IN_DEV_SHARED_MEDIA is an OR of conf/all
+        // and the device value, so the default host never reaches the branch
+        // and writing secure_redirects cannot change how a redirect is judged.
+        let info = make_test_info();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_secure_redirects_media_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |relative: &str, content: &str| {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let knob = write("all/secure_redirects", "1\n");
+        for interface in ["default", "lo", "eth0"] {
+            write(&format!("{interface}/shared_media"), "0\n");
+        }
+
+        // conf/all keeps shared media on for every interface (ORCONF), so the
+        // per-device zero cannot make secure_redirects reachable.
+        write("all/shared_media", "1\n");
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert!(
+            recs.is_empty(),
+            "no redirect is judged by secure_redirects while shared media is on"
+        );
+
+        // Both halves off on one interface: the kernel reads the knob again.
+        write("all/shared_media", "0\n");
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert_eq!(
+            recs.len(),
+            1,
+            "one interface with shared media off makes the write reachable"
+        );
+        assert_eq!(recs[0].param, "net.ipv4.conf.all.secure_redirects");
+
+        // Every device back on the default leaves nothing reading the knob,
+        // even with conf/all off.
+        for interface in ["default", "lo", "eth0"] {
+            write(&format!("{interface}/shared_media"), "1\n");
+        }
+        let mut recs = Vec::new();
+        eval_secure_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &dir);
+        assert!(
+            recs.is_empty(),
+            "no interface reads secure_redirects once shared media is back on"
+        );
     }
 
     #[test]

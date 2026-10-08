@@ -3,7 +3,7 @@
 //! Defines all input, intermediate, and output structures for Skill metrics computation.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ─── Input / Intermediate Types ──────────────────────────────────────────────
 
@@ -40,7 +40,11 @@ pub struct SkillFirstSeen {
 /// Metric 1 output: per-skill download tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillDownloadMetrics {
-    pub downloads: HashMap<String, SkillFirstSeen>,
+    /// Keyed by skill name. A `BTreeMap` because this is serialised straight into
+    /// the response as a JSON object: a `HashMap`'s iteration order is arbitrary
+    /// and differs between two identical requests, which makes the dashboard's
+    /// tie-break order — and any diff of two responses — unstable.
+    pub downloads: BTreeMap<String, SkillFirstSeen>,
 }
 
 // ─── Metric 2: Skill Load Count ─────────────────────────────────────────────
@@ -48,7 +52,8 @@ pub struct SkillDownloadMetrics {
 /// Metric 2 output: per-skill load count.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillLoadMetrics {
-    pub loads: HashMap<String, u64>,
+    /// Keyed by skill name; ordered for the same reason as `downloads`.
+    pub loads: BTreeMap<String, u64>,
     pub total_loads: u64,
 }
 
