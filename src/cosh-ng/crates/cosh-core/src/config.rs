@@ -663,7 +663,12 @@ fn apply_user_layer(config: &mut CoreConfig, layer: &PartialCoreConfig) {
     apply_common_layers(config, layer, true);
 }
 
-fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path: &std::path::Path) {
+fn apply_project_layer(
+    config: &mut CoreConfig,
+    layer: &PartialCoreConfig,
+    path: &std::path::Path,
+    trusted: bool,
+) {
     if let Some(ref ai) = layer.ai {
         if ai.active_provider.is_some() {
             eprintln!(
@@ -685,7 +690,39 @@ fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path:
             path.display()
         );
     }
-    apply_common_layers(config, layer, false);
+    // The approval policy is the user's sovereignty over the agent, not a
+    // project decision: a checked-out .copilot-shell/config.toml must not
+    // be able to switch the approval system off (`approval_mode = "trust"`
+    // makes classify_tool allow every tool call). User and system layers
+    // keep setting it, and COSH_APPROVAL_MODE stays an explicit user knob.
+    let mut layer = layer.clone();
+    if layer
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.approval_mode.is_some())
+    {
+        eprintln!(
+            "[cosh-core] Warning: ignoring agent.approval_mode from project config {}",
+            path.display()
+        );
+        if let Some(ref mut agent) = layer.agent {
+            agent.approval_mode = None;
+        }
+    }
+    // Project hooks execute shell commands (`sh -c`) at session start and
+    // around every tool call. An untrusted checked-out repository must not
+    // gain code execution that way, so its hook definitions (including the
+    // enabled flag) are dropped; a workspace the user explicitly trusted
+    // via cosh-shell's shared trust store keeps them.
+    if !trusted && layer.hooks.is_some() {
+        eprintln!(
+            "[cosh-core] Warning: ignoring hooks from untrusted project config {} \
+             (trust the project from cosh-shell to enable project hooks)",
+            path.display()
+        );
+        layer.hooks = None;
+    }
+    apply_common_layers(config, &layer, false);
 }
 
 fn apply_ai_preferences(ai: &mut AiConfig, layer: &PartialAiConfig) {
@@ -850,8 +887,12 @@ impl CoreConfig {
         let user_path = config_dir().join("config.toml");
         let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
 
-        let mut config =
-            Self::load_from_paths(Some(&system_path), Some(&user_path), Some(&project_path));
+        let mut config = Self::load_from_paths(
+            Some(&system_path),
+            Some(&user_path),
+            Some(&project_path),
+            crate::config_trust::workspace_trusted_via_shared_store(workspace),
+        );
         config.apply_env_overrides();
         config
     }
@@ -861,7 +902,7 @@ impl CoreConfig {
 
         let user_path = config_dir().join("config.toml");
         let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
-        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None);
+        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None, false);
         config.apply_env_overrides();
         config.apply_bare_isolation();
         config
@@ -876,7 +917,7 @@ impl CoreConfig {
     pub(crate) fn load_gateway_brokered() -> Self {
         let user_path = config_dir().join("config.toml");
         let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
-        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None);
+        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None, false);
         config.apply_env_overrides();
         config.apply_bare_isolation();
         config.mcp = McpConfig::default();
@@ -899,6 +940,7 @@ impl CoreConfig {
         system_path: Option<&std::path::Path>,
         user_path: Option<&std::path::Path>,
         project_path: Option<&std::path::Path>,
+        project_trusted: bool,
     ) -> Self {
         let mut config = CoreConfig::default();
 
@@ -923,7 +965,7 @@ impl CoreConfig {
 
         if let Some(project_path) = project_path {
             if let Some(project) = read_partial_config(project_path) {
-                apply_project_layer(&mut config, &project, project_path);
+                apply_project_layer(&mut config, &project, project_path, project_trusted);
             }
         }
 
@@ -1232,7 +1274,7 @@ mod tests {
         let user = dir.path().join("user.toml");
         std::fs::write(&user, "[hooks]\nenabled = false\n").unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user), None);
+        let config = CoreConfig::load_from_paths(None, Some(&user), None, false);
 
         assert!(!config.hooks.enabled);
         assert_eq!(config.hooks.enabled_override, Some(false));
@@ -1262,12 +1304,15 @@ mod tests {
             )
             .unwrap();
 
+            // The project row runs trusted: project hooks require the
+            // workspace to be in the shared trust store, which the
+            // untrusted case pins in its own test below.
             for paths in [
-                (Some(path.as_path()), None, None),
-                (None, Some(path.as_path()), None),
-                (None, None, Some(path.as_path())),
+                (Some(path.as_path()), None, None, false),
+                (None, Some(path.as_path()), None, false),
+                (None, None, Some(path.as_path()), true),
             ] {
-                let config = CoreConfig::load_from_paths(paths.0, paths.1, paths.2);
+                let config = CoreConfig::load_from_paths(paths.0, paths.1, paths.2, paths.3);
                 for with_extension in [false, true] {
                     let mut system = HookSystem::from_config(&config.hooks);
                     if with_extension {
@@ -1304,7 +1349,7 @@ mod tests {
         let project = dir.path().join("project.toml");
         std::fs::write(&project, "[hooks]\nenabled = false\n").unwrap();
 
-        let config = CoreConfig::load_from_paths(None, None, Some(&project));
+        let config = CoreConfig::load_from_paths(None, None, Some(&project), true);
 
         assert!(!config.hooks.enabled);
         assert_eq!(config.hooks.enabled_override, None);
@@ -1318,10 +1363,55 @@ mod tests {
         std::fs::write(&user, "[hooks]\nenabled = false\n").unwrap();
         std::fs::write(&project, "[hooks]\nenabled = true\n").unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user), Some(&project));
+        let config = CoreConfig::load_from_paths(None, Some(&user), Some(&project), true);
 
         assert!(config.hooks.enabled);
         assert_eq!(config.hooks.enabled_override, Some(false));
+    }
+
+    #[test]
+    fn project_layer_cannot_set_approval_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(&user, "[agent]\napproval_mode = \"auto\"\n").unwrap();
+        std::fs::write(
+            &project,
+            "[agent]\napproval_mode = \"trust\"\nmax_turns = 7\n",
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user), Some(&project), true);
+
+        // The user layer's policy stands; the project layer's trust
+        // escalation is dropped even for a trusted workspace (the approval
+        // policy is the user's decision, not the project's), while its
+        // non-security agent fields still apply.
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Auto);
+        assert_eq!(config.agent.max_turns, 7);
+    }
+
+    #[test]
+    fn untrusted_project_hooks_are_dropped_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &project,
+            "[hooks]\nenabled = true\n[[hooks.SessionStart]]\nname = 'probe'\ncommand = 'true'\n",
+        )
+        .unwrap();
+
+        // A checked-out config the user never trusted cannot register hook
+        // commands; a workspace from the shared trust store keeps them.
+        let untrusted = CoreConfig::load_from_paths(None, None, Some(&project), false);
+        assert!(untrusted.hooks.session_start.is_empty());
+
+        let trusted = CoreConfig::load_from_paths(None, None, Some(&project), true);
+        assert_eq!(trusted.hooks.session_start.len(), 1);
+        assert_eq!(
+            trusted.hooks.session_start[0].name.as_deref(),
+            Some("probe")
+        );
     }
 
     #[test]
@@ -1346,7 +1436,7 @@ mod tests {
         std::fs::write(&system, "[agent]\napproval_mode = \"trust\"\n").unwrap();
         std::fs::write(&user, "[agent]\napproval_mode = \"invalid\"\n").unwrap();
 
-        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), None);
+        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), None, false);
 
         assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
     }
@@ -1399,7 +1489,7 @@ max_tool_calls_per_turn = 20
                     format!("[session.compaction]\n{field} = {bad}\n"),
                 )
                 .unwrap();
-                let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+                let config = CoreConfig::load_from_paths(None, None, Some(&project_path), false);
                 let compaction = &config.session.compaction;
                 assert!(
                     compaction.trigger_ratio.is_finite()
@@ -1425,7 +1515,7 @@ max_tool_calls_per_turn = 20
             "[session.compaction]\ntrigger_ratio = 0.5\nemergency_ratio = 0.8\ntarget_ratio = 0.2\n",
         )
         .unwrap();
-        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path), false);
         assert_eq!(config.session.compaction.trigger_ratio, 0.5);
         assert_eq!(config.session.compaction.emergency_ratio, 0.8);
         assert_eq!(config.session.compaction.target_ratio, 0.2);
@@ -1442,7 +1532,7 @@ max_tool_calls_per_turn = 20
             "[session.compaction]\ntrigger_ratio = 0.9\nemergency_ratio = 0.2\ntarget_ratio = 0.95\n",
         )
         .unwrap();
-        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path), false);
         assert_eq!(
             config.session.compaction.trigger_ratio,
             DEFAULT_TRIGGER_RATIO
@@ -1469,7 +1559,8 @@ max_tool_calls_per_turn = 20
         // The higher-priority project layer touches only the target ratio.
         std::fs::write(&project_path, "[session.compaction]\ntarget_ratio = 0.2\n").unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let config =
+            CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path), false);
         let compaction = &config.session.compaction;
         // The project layer must not have reset the user-layer fields.
         assert!(!compaction.enabled);
@@ -1499,7 +1590,8 @@ max_tool_calls_per_turn = 20
         )
         .unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let config =
+            CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path), false);
         let compaction = &config.session.compaction;
         // The project layer's explicit value wins over the user layer's.
         assert_eq!(compaction.preserve_recent_runs, 9);
@@ -1672,7 +1764,7 @@ security_token = "manual-token"
         )
         .unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None, false);
         let resolved = config.resolve_provider();
         let persisted = std::fs::read_to_string(&user_path).unwrap();
 
@@ -1840,7 +1932,8 @@ active_model = "project-model"
         )
         .unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let config =
+            CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path), false);
         let resolved = config.resolve_provider();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("dashscope"));
@@ -1882,7 +1975,7 @@ active_model = "project-model"
         )
         .unwrap();
 
-        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None, false);
         config.apply_bare_isolation();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("user-provider"));
@@ -1916,7 +2009,7 @@ auth_source = "ecs_ram_role"
         )
         .unwrap();
 
-        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path), false);
         assert!(config.ai.active_provider.is_none());
         assert!(config.ai.providers.is_empty());
         assert_eq!(config.ai.active_model.as_deref(), Some("project-model"));
@@ -1944,7 +2037,8 @@ command = "project-server"
         )
         .unwrap();
 
-        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let config =
+            CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path), false);
         assert!(config.mcp.servers.contains_key("user"));
         assert!(!config.mcp.servers.contains_key("untrusted"));
     }
@@ -1982,7 +2076,7 @@ api_key = "sk-user"
         )
         .unwrap();
 
-        let config = CoreConfig::load_from_paths(Some(&system_path), Some(&user_path), None);
+        let config = CoreConfig::load_from_paths(Some(&system_path), Some(&user_path), None, false);
         let provider = config.ai.providers.get("shared").unwrap();
 
         assert_eq!(provider.provider_type.as_deref(), Some("openai_compat"));
@@ -2006,7 +2100,7 @@ sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
 "#,
         )
         .unwrap();
-        let mut config = CoreConfig::load_from_paths(None, Some(&path), None);
+        let mut config = CoreConfig::load_from_paths(None, Some(&path), None, false);
         let response = crate::auth::AuthResponse {
             provider_id: "aliyun".to_string(),
             provider_type: None,
@@ -2018,7 +2112,8 @@ sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
         };
         crate::auth::apply_auth_credentials(&mut config, &response).unwrap();
         persist_config_to_dir(&config, tmp.path()).unwrap();
-        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None).resolve_provider();
+        let reloaded =
+            CoreConfig::load_from_paths(None, Some(&path), None, false).resolve_provider();
         assert_eq!(
             reloaded.sysom_endpoint,
             "https://sysom.cn-shanghai.aliyuncs.com"
@@ -2058,7 +2153,8 @@ output_language = "zh-CN"
         )
         .unwrap();
 
-        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let mut config =
+            CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path), false);
         config.ai.active_provider = Some("dashscope".to_string());
         persist_config_to_dir(&config, &user_dir).unwrap();
 
@@ -2104,7 +2200,8 @@ api_key = "sk-user"
         )
         .unwrap();
 
-        let mut config = CoreConfig::load_from_paths(Some(&system_path), Some(&user_path), None);
+        let mut config =
+            CoreConfig::load_from_paths(Some(&system_path), Some(&user_path), None, false);
         config.ai.active_provider = Some("system-provider".to_string());
         persist_config_to_dir(&config, &user_dir).unwrap();
 
@@ -2150,7 +2247,7 @@ approval_mode = "balanced"
         )
         .unwrap();
 
-        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None, false);
         config.user_ai.active_provider = Some("new-provider".to_string());
         config.user_ai.providers.clear();
         let provider = ProviderConfig {
@@ -2216,7 +2313,7 @@ approval_mode = "balanced"
         )
         .unwrap();
 
-        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None, false);
         config.user_ai.active_provider = Some("new-provider".to_string());
         config.user_ai.providers.clear();
         let provider = ProviderConfig {
