@@ -229,3 +229,84 @@ fn categorized_source_supports_flat_reads_writes_and_sync() {
 
     handle.unmount().expect("unmount categorized source");
 }
+
+/// kongche-jbw P2 on #7742: `mkdir <mount>/.skillfs-inbox/notes` loses the
+/// duplicate-name collision to the categorized `apple/notes` owner (the
+/// placeholder is dropped, the apple entry retained) — but `rmdir` of that
+/// empty inbox candidate then removed the store key by bare leaf name, so
+/// the retained apple skill vanished from the live store although its
+/// manifest was untouched; a fresh scan restored it. Removal must verify
+/// the candidate owns the stored source before deleting the key.
+#[test]
+fn inbox_loser_rmdir_keeps_the_categorized_owner() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let owner_md = source.path().join("apple/notes/SKILL.md");
+    std::fs::create_dir_all(owner_md.parent().expect("owner dir")).expect("owner skill dir");
+    std::fs::write(
+        &owner_md,
+        "---\nname: notes\ndescription: categorized owner\n---\nowner body\n",
+    )
+    .expect("owner SKILL.md");
+
+    let mut initial_store = SkillStore::new();
+    initial_store.load_from_directory(source.path(), &ParseConfig::default());
+    let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+    assert_eq!(
+        store.read().get("notes").expect("owner entry").source_path,
+        owner_md
+    );
+
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        store.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount");
+
+    // Wait for the mount to serve the discovered owner before mutating.
+    let served = mountpoint.path().join("skills/notes/SKILL.md");
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(&served).is_ok()
+        }),
+        "mount never served the discovered owner"
+    );
+
+    // mkdir the same-leaf inbox candidate: its placeholder loses the
+    // collision, so the categorized owner keeps the key.
+    let inbox_candidate = mountpoint.path().join(".skillfs-inbox/notes");
+    std::fs::create_dir(&inbox_candidate).expect("mkdir inbox candidate");
+    assert!(
+        store.read().get("notes").is_some(),
+        "the categorized owner must survive the inbox candidate's mkdir"
+    );
+    assert_eq!(
+        store
+            .read()
+            .get("notes")
+            .expect("retained owner")
+            .source_path,
+        owner_md,
+        "the categorized owner keeps the key after the inbox mkdir"
+    );
+
+    // rmdir the empty candidate: it never owned the key, so the retained
+    // owner must survive exactly as a fresh scan would re-discover it.
+    std::fs::remove_dir(&inbox_candidate).expect("rmdir inbox candidate");
+    let retained = store.read().get("notes").cloned();
+    assert!(
+        retained.is_some(),
+        "rmdir of a losing inbox candidate must not drop the retained owner"
+    );
+    assert_eq!(
+        retained.expect("retained owner").source_path,
+        owner_md,
+        "the retained owner's manifest is untouched and keeps the key"
+    );
+}

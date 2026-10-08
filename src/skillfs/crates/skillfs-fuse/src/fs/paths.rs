@@ -89,6 +89,38 @@ impl SkillFs {
         }
     }
 
+    /// The in-place mount's `/proc/self/fd/{n}` spelling of the source
+    /// root, when the pre-opened dirfd exists.
+    pub(super) fn source_alias_root(&self) -> Option<PathBuf> {
+        self.source_dirfd.as_ref().map(|fd| {
+            use std::os::unix::io::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        })
+    }
+
+    /// Rewrite a physical path's in-place fd alias back to the canonical
+    /// source-root spelling.
+    ///
+    /// Write-path I/O addresses the source through [`Self::source_base`]
+    /// (the pre-opened `/proc/self/fd/{n}` dirfd) so it bypasses the FUSE
+    /// over-mount, but the store keys and compares entries by
+    /// `source_path`, and the initial scan records the real source-root
+    /// spelling. Inserting the fd spelling would make one manifest look
+    /// like two different sources: the duplicate-name rule would compare
+    /// `/home/.../SKILL.md` against `/proc/self/fd/N/SKILL.md` and drop
+    /// or steal the post-write refresh by alias ordering, so the live
+    /// store would diverge from a fresh discovery scan. Store identity
+    /// and ordering always use the canonical spelling; only the I/O keeps
+    /// the fd alias.
+    pub(super) fn canonical_source_spelling(&self, physical: &Path) -> PathBuf {
+        if let Some(alias) = self.source_alias_root() {
+            if let Ok(rest) = physical.strip_prefix(&alias) {
+                return self.source.join(rest);
+            }
+        }
+        physical.to_path_buf()
+    }
+
     /// Resolve the live directory used by flat installer-authorized I/O.
     pub(super) fn flat_live_dir(&self, skill_name: &str, kind: FlatLiveDirKind) -> PathBuf {
         match kind {

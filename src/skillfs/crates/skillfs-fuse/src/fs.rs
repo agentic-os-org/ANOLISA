@@ -28,7 +28,7 @@ use crate::security::{
     SkillMetaProtectionPolicy, StagingMatcher, TrustedWriterConfig, default_identity_resolver,
     lifecycle::is_reserved_lifecycle_name,
 };
-use crate::sync::{SyncEvent, spawn_sync_worker};
+use crate::sync::{SourceAlias, SyncEvent, spawn_sync_worker};
 
 mod callbacks;
 mod discover;
@@ -208,10 +208,20 @@ impl SkillFs {
             None
         };
 
-        // Spawn the background sync worker.
+        // Spawn the background sync worker. In in-place mode the
+        // worker's re-parse I/O keeps addressing the source through the
+        // fd alias, while the entries it inserts carry the canonical
+        // source-root spelling (see `SourceAlias`).
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
         let sync_store = store.clone();
-        spawn_sync_worker(sync_rx, sync_store);
+        let sync_alias = source_dirfd.as_ref().map(|fd| {
+            use std::os::unix::io::AsRawFd;
+            SourceAlias::new(
+                PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())),
+                source.clone(),
+            )
+        });
+        spawn_sync_worker(sync_rx, sync_store, sync_alias);
 
         let fs = Self {
             mountpoint,
