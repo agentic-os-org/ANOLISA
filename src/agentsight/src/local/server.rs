@@ -577,14 +577,22 @@ pub async fn run_server(
     });
 
     let server = HttpServer::new(move || {
+        // Same-origin only: the embedded dashboard is served by this very
+        // server, so no legitimate consumer needs a foreign origin — while
+        // `allow_any_origin` let any visited web page read every response of
+        // this token-less server.
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin_fn(crate::http_origin::cors_allows_origin)
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
             .allowed_headers(vec!["Content-Type"])
             .max_age(3600);
 
         App::new()
             .wrap(cors)
+            // This server has no token layer; reject browser cross-origin
+            // calls before any data endpoint runs. Local non-browser callers
+            // and the dashboard's own same-origin calls are untouched.
+            .wrap(crate::http_origin::CrossOriginGate)
             .app_data(local_state.clone())
             .app_data(optimize_data.clone())
             // Trajectory collection API (static paths before the dynamic segment)

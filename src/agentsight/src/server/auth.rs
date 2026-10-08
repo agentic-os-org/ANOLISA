@@ -508,14 +508,23 @@ where
             return Box::pin(async move { Ok(response) });
         }
 
-        // If auth is disabled, pass through immediately.
-        if !self.auth.enabled {
+        // If auth is disabled, pass through immediately — but a disabled token
+        // layer must not turn the API into a cross-origin data source for
+        // visited web pages: only requests that are not browser cross-origin
+        // calls keep the convenience opening. CLI tools and the dashboard's
+        // own same-origin calls carry no foreign Origin.
+        if !self.auth.enabled && !crate::http_origin::request_is_cross_origin(&req) {
             let fut = self.service.call(req);
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
 
-        // Localhost (loopback) requests bypass authentication.
-        if is_loopback {
+        // Localhost (loopback) requests bypass authentication — under the same
+        // condition: a loopback address is not an authorization boundary for
+        // web content, and browsers attach an `Origin` header to every
+        // cross-origin request, so a foreign web page falls through to the
+        // normal credential checks while local non-browser callers keep the
+        // bypass.
+        if is_loopback && !crate::http_origin::request_is_cross_origin(&req) {
             let fut = self.service.call(req);
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
@@ -1062,6 +1071,109 @@ mod tests {
         assert_eq!(response.status(), 401);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn middleware_loopback_bypass_requires_a_same_origin_caller() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_loopback_origin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+        // A browser cross-origin call from a visited web page: the loopback
+        // bypass must not apply, and without a token the request is refused.
+        let foreign = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .insert_header(("Host", "127.0.0.1:7396"))
+            .insert_header(("Origin", "https://attacker.example"))
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, foreign).await;
+        assert_eq!(
+            response.status(),
+            401,
+            "a foreign web page must not keep the loopback bypass"
+        );
+
+        // The dashboard's own same-origin call keeps the bypass.
+        let same_origin = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .insert_header(("Host", "127.0.0.1:7396"))
+            .insert_header(("Origin", "http://127.0.0.1:7396"))
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, same_origin).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "a same-origin dashboard call keeps the loopback bypass"
+        );
+
+        // Local non-browser callers (no Origin header) keep the bypass.
+        let local = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, local).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "a local non-browser caller keeps the loopback bypass"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn middleware_disabled_auth_still_refuses_cross_origin_browsers() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: false },
+            Path::new("/tmp"),
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+
+        // Auth disabled: a local non-browser caller still passes.
+        let local = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+            .to_request();
+        let response = actix_web::test::call_service(&app, local).await;
+        assert_eq!(response.status(), 200);
+
+        // Auth disabled: a foreign web page is still refused — disabling the
+        // token layer must not turn the API into a cross-origin data source.
+        let foreign = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .insert_header(("Host", "127.0.0.1:7396"))
+            .insert_header(("Origin", "https://attacker.example"))
+            .peer_addr(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                12345,
+            ))
+            .to_request();
+        let response = actix_web::test::call_service(&app, foreign).await;
+        assert_eq!(response.status(), 401);
     }
 
     #[actix_web::test]
