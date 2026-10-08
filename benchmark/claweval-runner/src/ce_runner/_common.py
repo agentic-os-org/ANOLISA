@@ -223,7 +223,9 @@ def init_config_defaults():
 
 def load_task_yaml(task_yaml: str) -> dict:
     with open(task_yaml) as f:
-        return yaml.safe_load(f)
+        # yaml.safe_load returns None for an empty / comment-only document;
+        # normalise to {} so every consumer can call .get() safely.
+        return yaml.safe_load(f) or {}
 
 
 def load_config(config_path: str) -> dict:
