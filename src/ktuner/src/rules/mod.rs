@@ -3702,19 +3702,62 @@ fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
         return 1;
     }
     let current = read_sysctl_u64(path);
-    if current == 0 {
-        let recommended = DIRTY_BYTES_TARGET;
-        recs.push(Recommendation {
-            param: "vm.dirty_bytes".to_string(),
-            current_value: "0".to_string(),
-            recommended_value: recommended.to_string(),
-            reason: format!("大内存服务器 ({} GB) 使用 dirty_ratio 百分比会导致脏页过多、IO 突刺，改用固定字节限制更平稳", info.memory_total_gb),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
-    }
+    let ratio_path = "/proc/sys/vm/dirty_ratio";
+    let ratio = if std::path::Path::new(ratio_path).exists() {
+        read_sysctl_u64(ratio_path)
+    } else {
+        0
+    };
+    dirty_bytes_recommendation(info.memory_total_gb, current, ratio, recs);
     1
+}
+
+/// Value-driven core of the dirty-bytes rule, separated so tests can force
+/// both branches of the twin read on any host (the sysctls are read from the
+/// live /proc, which a test cannot control) — the same split
+/// `dirty_background_bytes_recommendation` and `overcommit_ratio_recommendation`
+/// already use for their twins.
+///
+/// `vm.dirty_bytes` and `vm.dirty_ratio` are mutually exclusive: writing one
+/// zeroes the other (v6.6 mm/page-writeback.c:518-544 — `dirty_ratio_handler`
+/// clears `vm_dirty_bytes` on every changed write, `dirty_bytes_handler`
+/// clears `vm_dirty_ratio`), and vm.rst's dirty_bytes section states the pair
+/// outright: "dirty_bytes is the counterpart of dirty_ratio. Only one of them
+/// may be specified at a time. [...] the other appears as 0 when read."
+///
+/// `dirty_bytes == 0` therefore does not only mean "nothing is configured":
+/// it also reads 0 on a host whose administrator deliberately pinned a low
+/// `dirty_ratio` (that write is what zeroed the bytes twin). Recommending the
+/// bytes form there is not the percentage-vs-bytes improvement the reason
+/// promises — the write would silently disable the pinned ratio and replace
+/// it with [`DIRTY_BYTES_TARGET`], the exact twin clearing the rollback
+/// ledger has to record when ktuner itself writes one of these pairs. The
+/// sibling rule (`dirty_background_bytes_recommendation`) already refuses the
+/// switch while the ratio twin holds a deliberate low value
+/// (`bytes == 0 && ratio > 5`); this rule applies the same guard.
+fn dirty_bytes_recommendation(
+    memory_total_gb: u64,
+    bytes: u64,
+    ratio: u64,
+    recs: &mut Vec<Recommendation>,
+) {
+    // A ratio at or below the family's percentage floor is a deliberate low
+    // tuning (the latency-sensitive target of `eval_dirty_ratio` is 5, and
+    // `eval_dirty_background_ratio_at` uses the same 5 floor); the switch may
+    // only replace a percentage that is actually high.
+    if bytes != 0 || ratio <= 5 {
+        return;
+    }
+    let recommended = DIRTY_BYTES_TARGET;
+    recs.push(Recommendation {
+        param: "vm.dirty_bytes".to_string(),
+        current_value: "0".to_string(),
+        recommended_value: recommended.to_string(),
+        reason: format!("大内存服务器 ({} GB) 使用 dirty_ratio 百分比会导致脏页过多、IO 突刺，改用固定字节限制更平稳", memory_total_gb),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    });
 }
 
 /// Whether a fork-heavy server workload runs here: the web servers and
@@ -9584,6 +9627,38 @@ mod tests {
             rec.is_none(),
             "Should not recommend dirty_bytes for small RAM"
         );
+    }
+
+    #[test]
+    fn dirty_bytes_stays_quiet_while_a_pinned_ratio_holds_the_limit() {
+        // A >=64GB host whose administrator pinned vm.dirty_ratio reads
+        // vm.dirty_bytes as 0, because the kernel zeroes the twin on every
+        // changed ratio write (v6.6 mm/page-writeback.c:527) — vm.rst:
+        // "the other appears as 0 when read". That 0 is the DISABLED
+        // counterpart, not "nothing configured": the ratio in force is the
+        // administrator's, and the bytes write would replace it with
+        // DIRTY_BYTES_TARGET — the opposite of what the rule's reason
+        // promises. The advice must not fire.
+        let mut recs = Vec::new();
+        dirty_bytes_recommendation(256, 0, 3, &mut recs);
+        assert!(
+            recs.is_empty(),
+            "a pinned dirty_ratio of 3 holds the limit, so the zero dirty_bytes is disabled, not unconfigured: {recs:?}"
+        );
+
+        // The same zero bytes with the kernel-default 20 ratio is the
+        // "nothing configured" case the rule exists for, and still fires.
+        let mut recs = Vec::new();
+        dirty_bytes_recommendation(256, 0, 20, &mut recs);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].param, "vm.dirty_bytes");
+        assert_eq!(recs[0].current_value, "0");
+        assert_eq!(recs[0].recommended_value, "268435456");
+
+        // A host already on the bytes form has nothing to switch away from.
+        let mut recs = Vec::new();
+        dirty_bytes_recommendation(256, 512 * 1024 * 1024, 0, &mut recs);
+        assert!(recs.is_empty(), "the bytes form already governs: {recs:?}");
     }
 
     #[test]
