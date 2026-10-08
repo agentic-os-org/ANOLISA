@@ -620,3 +620,54 @@ fn test_dashscope_native_multimodal_image_tokens_pipeline() {
         "native responses carry no model, so it must be backfilled from the request"
     );
 }
+
+#[test]
+fn test_sse_line_endings_keep_anthropic_billed_usage() {
+    for ending in ["\n", "\r\n", "\r"] {
+        let request = common::make_anthropic_request_bytes("claude-test", "hello");
+        let start = r#"{"type":"message_start","message":{"id":"msg_line_endings","model":"claude-test","usage":{"input_tokens":120,"output_tokens":0,"cache_creation_input_tokens":30,"cache_read_input_tokens":40}}}"#;
+        let delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":240}}"#;
+        let chunks = vec![
+            (5300, 0xE200, 1, request, "claude"),
+            (
+                5300,
+                0xE200,
+                0,
+                common::make_openai_sse_response_headers(),
+                "claude",
+            ),
+            (
+                5300,
+                0xE200,
+                0,
+                format!("event: message_start{ending}data: {start}{ending}{ending}").into_bytes(),
+                "claude",
+            ),
+            (
+                5300,
+                0xE200,
+                0,
+                format!("event: message_delta{ending}data: {delta}{ending}{ending}").into_bytes(),
+                "claude",
+            ),
+            (
+                5300,
+                0xE200,
+                0,
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec(),
+                "claude",
+            ),
+        ];
+        let analysis = run_analysis(chunks.clone());
+        let record = expect_token_record(&analysis);
+        assert_eq!(record.input_tokens, 120, "{ending:?}");
+        assert_eq!(record.output_tokens, 240, "{ending:?}");
+        assert_eq!(record.cache_creation_tokens, Some(30), "{ending:?}");
+        assert_eq!(record.cache_read_tokens, Some(40), "{ending:?}");
+        assert_eq!(record.total_tokens(), 430, "{ending:?}");
+        let semantic = run_pipeline(chunks);
+        let call = expect_llm_call(&semantic);
+        let usage = call.token_usage.as_ref().expect("billed usage");
+        assert_eq!(usage.total_tokens, 430, "{ending:?}");
+    }
+}
