@@ -3590,10 +3590,23 @@ fn fork_server_present(info: &SystemInfo) -> bool {
         || info.has_process("apache2")
         || info.has_process("postgres")
         || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP fork-server shape
+        // as mysqld; the mariadbd sweep (#6360/#6363/#6424) did not reach
+        // this predicate.
+        || info.has_process("mariadbd")
 }
 
 fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_child_runs_first";
+    eval_sched_child_runs_first_at(info, recs, "/proc/sys/kernel/sched_child_runs_first")
+}
+
+/// Path-injectable form of [`eval_sched_child_runs_first`] (the `eval_*_at`
+/// idiom) so the signed read is assertable against a temp file.
+fn eval_sched_child_runs_first_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -3601,7 +3614,7 @@ fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>
         return 1;
     }
     if let Some(rec) =
-        sched_child_runs_first_recommendation(read_sysctl_u64(path), &info.kernel_version)
+        sched_child_runs_first_recommendation(read_sysctl_i64(path), &info.kernel_version)
     {
         recs.push(rec);
     }
@@ -3610,8 +3623,16 @@ fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>
 
 /// Emit the `kernel.sched_child_runs_first` recommendation for an already-read
 /// value; split from the file probe so the version gate is testable anywhere.
+///
+/// The knob is a plain `proc_dointvec` int with no min/max (`kernel/sysctl.c`),
+/// so `-1` is a legal, persistent value; its only consumer is a truthiness test
+/// (`kernel/sched/fair.c`: `if (sysctl_sched_child_runs_first && ...)`), so any
+/// nonzero value — including `-1` — means the child runs first and the rule
+/// must fire. `read_sysctl_i64` preserves the sign; the unsigned reader parsed
+/// `"-1"` to `Err` and fell back to `0` (the already-optimal value), silencing
+/// the rule on exactly the host where the COW copies keep happening.
 fn sched_child_runs_first_recommendation(
-    current: u64,
+    current: i64,
     kernel_version: &str,
 ) -> Option<Recommendation> {
     // Linux 6.6 merged EEVDF: commit e8f331bcc2 ("sched/smp: Use lag to
@@ -9345,12 +9366,56 @@ mod tests {
     }
 
     #[test]
+    fn sched_child_runs_first_signed_read_fires_on_minus_one() {
+        // The knob is a plain proc_dointvec int (no min/max), so -1 is a
+        // legal value consumed as truthiness by kernel/sched/fair.c. The
+        // unsigned reader parsed "-1" to Err -> 0 (already-optimal) and the
+        // rule went silent on exactly the host where COW copies keep
+        // happening. The signed read must preserve -1 and fire.
+        let path = std::env::temp_dir().join(format!("ktuner-sched-child-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("1", true), ("0", false)] {
+            std::fs::write(&path, value).unwrap();
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: "mariadbd".to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_sched_child_runs_first_at(&info, &mut recs, path_str);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "kernel.sched_child_runs_first");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: recommendation presence"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn fork_server_present_covers_the_apache_names() {
         // The rule's gate, driven directly: whether a server name opens the
         // gate is pure, while the live sysctl read inside the rule is not.
         // Debian/Ubuntu run Apache as `apache2`; RHEL's `httpd` is the same
         // server, and the gate must open under both names.
-        for name in ["nginx", "httpd", "apache2", "postgres", "mysqld"] {
+        for name in [
+            "nginx",
+            "httpd",
+            "apache2",
+            "postgres",
+            "mysqld",
+            "mariadbd",
+            "mariadbd: writer",
+        ] {
             let mut info = make_test_info();
             info.processes = vec![ProcessInfo {
                 name: name.to_string(),
