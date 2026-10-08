@@ -2804,7 +2804,11 @@ fn eval_tcp_window_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 /// the knob is u8 (`proc_dou8vec_minmax`, no extra1/extra2), where
 /// negatives are rejected at write time; the signed reader keeps the
 /// truthiness contract correct on both registrations.
-fn eval_tcp_window_scaling_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+fn eval_tcp_window_scaling_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -3189,7 +3193,11 @@ fn eval_sched_min_granularity_at(
 }
 
 fn eval_icmp_echo_ignore_broadcasts(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    eval_icmp_echo_ignore_broadcasts_at(info, recs, "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts")
+    eval_icmp_echo_ignore_broadcasts_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts",
+    )
 }
 
 /// Path-injectable form of [`eval_icmp_echo_ignore_broadcasts`] (the
@@ -11898,7 +11906,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn tcp_option_bools_read_truthiness_signed() {
