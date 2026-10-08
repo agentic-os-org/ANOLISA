@@ -933,4 +933,17 @@ describe("handleRollback — numAncestors", () => {
     expect(r.isError).toBe(false);
     expect(mockManager.rollback).toHaveBeenCalledWith(undefined, 2, false);
   });
+  it("update workspace rejects line breaks", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const r = await handleConfig(
+      "update",
+      "workspace",
+      "/tmp/legit\n* * * * * touch /tmp/pwned",
+    );
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("single-line");
+    expect(pluginState.resolvedConfig!.workspace).toBe("/ws");
+    expect(migrateSpy).not.toHaveBeenCalled();
+    migrateSpy.mockRestore();
+  });
 });

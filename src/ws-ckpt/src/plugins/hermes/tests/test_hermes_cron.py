@@ -1,5 +1,6 @@
 """Tests for hermes cron module."""
 
+import pytest
 from unittest.mock import MagicMock, patch, call
 
 from hermes.cron import (
@@ -281,3 +282,37 @@ class TestListInstalled:
     @patch("hermes.cron._read_crontab", return_value=None)
     def test_read_failure(self, _):
         assert CrontabManager.list_installed("/ws") == []
+
+
+class TestCronLineBreakGuard:
+    """CrontabManager must fail closed before touching the crontab."""
+
+    @pytest.mark.parametrize("line_break", ["\n", "\r"])
+    @patch("hermes.cron.os.close")
+    @patch("hermes.cron.os.open", return_value=99)
+    @patch("hermes.cron.fcntl.flock")
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab")
+    def test_sync_fails_closed_on_newline_workspace(
+        self, mock_read, mock_write, _flock, _open, _close, line_break
+    ):
+        result = CrontabManager.sync(
+            f"/tmp/legit{line_break}* * * * * touch /tmp/pwned", ["0 * * * *"]
+        )
+        assert result is False
+        mock_read.assert_not_called()
+        mock_write.assert_not_called()
+
+    @pytest.mark.parametrize("line_break", ["\n", "\r"])
+    @patch("hermes.cron.os.close")
+    @patch("hermes.cron.os.open", return_value=99)
+    @patch("hermes.cron.fcntl.flock")
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab")
+    def test_sync_fails_closed_on_newline_schedule(
+        self, mock_read, mock_write, _flock, _open, _close, line_break
+    ):
+        result = CrontabManager.sync("/ws", [f"*{line_break}* * * * *"])
+        assert result is False
+        mock_read.assert_not_called()
+        mock_write.assert_not_called()

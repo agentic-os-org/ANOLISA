@@ -4,6 +4,7 @@ import { join } from "path";
 import { runCrontab } from "./commands.js";
 
 const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
+const LINE_BREAK_RE = /[\n\r]/;
 const LOCK_DIR = join(tmpdir(), "ws-ckpt-cron.lock");
 
 export function validateCronExpr(expr: string): boolean {
@@ -123,6 +124,11 @@ export function parseSchedulesUpdate(value: string, current: string[]): ParseRes
 export class CrontabManager {
   static async sync(workspace: string, schedules: string[]): Promise<boolean> {
     return withLock(async () => {
+      // Fail closed: never touch the crontab when an interpolated value
+      // could split a line (see buildCronLine).
+      if (LINE_BREAK_RE.test(workspace) || schedules.some((s) => LINE_BREAK_RE.test(s))) {
+        return false;
+      }
       const lines = await readCrontab();
       if (lines === null) return false;
       const kept = lines.filter((l) => !matchesWorkspace(l, workspace));

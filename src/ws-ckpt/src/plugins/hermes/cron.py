@@ -142,6 +142,12 @@ class CrontabManager:
     @staticmethod
     def sync(workspace: str, schedules: List[str]) -> bool:
         def _do():
+            # Fail closed: never touch the crontab when an interpolated
+            # value could split a line (see _build_cron_line).
+            if "\n" in workspace or "\r" in workspace or any(
+                "\n" in s or "\r" in s for s in schedules
+            ):
+                return False
             lines = _read_crontab()
             if lines is None:
                 return False

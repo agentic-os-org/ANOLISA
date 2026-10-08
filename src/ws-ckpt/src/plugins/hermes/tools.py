@@ -546,6 +546,11 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         if not value:
             return _err("workspace requires a path value")
         new_path = str(value).strip()
+        if "\n" in new_path or "\r" in new_path:
+            # The workspace path is interpolated into crontab lines; a
+            # line break would install everything after it as an
+            # independent cron entry (see cron.py _build_cron_line).
+            return _err("workspace must be a single-line path without line breaks")
         # Refuse when the session cwd is inside the NEW workspace: ws-ckpt
         # replaces the workspace inode, so every ws-ckpt tool call from this
         # session would then be refused by the same guard — switching the
