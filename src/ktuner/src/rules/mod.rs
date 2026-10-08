@@ -1572,11 +1572,27 @@ fn eval_tcp_no_metrics_save_at(
 }
 
 fn eval_tcp_mtu_probing(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_mtu_probing";
+    eval_tcp_mtu_probing_at(info, recs, "/proc/sys/net/ipv4/tcp_mtu_probing")
+}
+
+/// Path-injectable form of [`eval_tcp_mtu_probing`] (the `eval_*_at` idiom)
+/// so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: through v5.10 net/ipv4/sysctl_net_ipv4.c
+/// registered tcp_mtu_probing as a plain `proc_dointvec` int with no
+/// min/max, and the v5.14+ u8 conversion still registers it without
+/// `extra1`/`extra2` bounds, so -1 (and, on the u8 knob, 2) is a legal
+/// value. Its consumer is a truthiness test (net/ipv4/tcp_timer.c:
+/// `if (!READ_ONCE(net->ipv4.sysctl_tcp_mtu_probing))` skips the
+/// black-hole probe; only the documented always-probe mode checks `> 1`),
+/// so -1 means the probe is armed. The unsigned reader parsed "-1" to Err
+/// and fell back to 0 — the *disabled* value — so the `== 0` gate invented
+/// a PMTU black-hole finding on a host whose probe is already armed.
+fn eval_tcp_mtu_probing_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_mtu_probing".to_string(),
@@ -2745,11 +2761,26 @@ fn eval_shmmax_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str)
 }
 
 fn eval_tcp_timestamps(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_timestamps";
+    eval_tcp_timestamps_at(info, recs, "/proc/sys/net/ipv4/tcp_timestamps")
+}
+
+/// Path-injectable form of [`eval_tcp_timestamps`] (the `eval_*_at` idiom)
+/// so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: through v5.10 the knob was a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), and
+/// the v5.14+ u8 registration still has no `extra1`/`extra2` bounds, so -1
+/// (and 2 on the u8 knob) is a legal value. The consumer is a truthiness
+/// test (net/ipv4/tcp_output.c: `if (likely(READ_ONCE(...sysctl_tcp_timestamps) && !*md5))`,
+/// same shape in tcp_input.c), so -1 means timestamps are on. The unsigned
+/// reader parsed "-1" to Err and fell back to 0 — the *off* value — so the
+/// `== 0` gate invented a "timestamps off" finding on a host whose
+/// timestamps are on.
+fn eval_tcp_timestamps_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_timestamps".to_string(),
@@ -2766,11 +2797,30 @@ fn eval_tcp_timestamps(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 }
 
 fn eval_tcp_window_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_window_scaling";
+    eval_tcp_window_scaling_at(info, recs, "/proc/sys/net/ipv4/tcp_window_scaling")
+}
+
+/// Path-injectable form of [`eval_tcp_window_scaling`] (the `eval_*_at`
+/// idiom) so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: through v5.10 the knob was a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), and
+/// the v5.14+ u8 registration still has no `extra1`/`extra2` bounds, so -1
+/// (and 2 on the u8 knob) is a legal value. The consumer is a truthiness
+/// test (net/ipv4/tcp_output.c: `if (likely(READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_window_scaling)))`,
+/// same shape in tcp_input.c), so -1 means scaling is on. The unsigned
+/// reader parsed "-1" to Err and fell back to 0 — the *off* value — so the
+/// `== 0` gate invented a "window scaling off" finding on a -1 host and
+/// recommended enabling what was already enabled.
+fn eval_tcp_window_scaling_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_window_scaling".to_string(),
@@ -2807,11 +2857,25 @@ fn eval_tcp_ecn(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 }
 
 fn eval_tcp_sack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_sack";
+    eval_tcp_sack_at(info, recs, "/proc/sys/net/ipv4/tcp_sack")
+}
+
+/// Path-injectable form of [`eval_tcp_sack`] (the `eval_*_at` idiom) so the
+/// signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: through v5.10 the knob was a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), and
+/// the v5.14+ u8 registration still has no `extra1`/`extra2` bounds, so -1
+/// (and 2 on the u8 knob) is a legal value. The consumers are truthiness
+/// tests (net/ipv4/tcp_input.c: `!estab && READ_ONCE(net->ipv4.sysctl_tcp_sack)`,
+/// same shape in tcp_output.c), so -1 means SACK is on. The unsigned reader
+/// parsed "-1" to Err and fell back to 0 — the *off* value — so the
+/// `== 0` gate invented a "SACK off" finding on a host whose SACK is on.
+fn eval_tcp_sack_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_sack".to_string(),
@@ -3135,12 +3199,35 @@ fn eval_sched_min_granularity_at(
     1
 }
 
-fn eval_icmp_echo_ignore_broadcasts(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts";
-    if !std::path::Path::new(path).exists() {
+fn eval_icmp_echo_ignore_broadcasts(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_icmp_echo_ignore_broadcasts_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts",
+    )
+}
+
+/// Path-injectable form of [`eval_icmp_echo_ignore_broadcasts`] (the
+/// `eval_*_at` idiom) so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: through v5.10 the knob was a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), so -1
+/// is a legal, persistent value there (the v5.14+ u8 registration bounds it
+/// to [0,1], where negatives are rejected at write time). Its consumer is a
+/// truthiness test (net/ipv4/icmp.c: `READ_ONCE(net->ipv4.sysctl_icmp_echo_ignore_broadcasts)`
+/// guards the broadcast answer), so -1 means broadcast echoes are already
+/// ignored. The unsigned reader parsed "-1" to Err and fell back to 0 —
+/// the *answering* value — so the `== 0` gate invented a Smurf finding on a
+/// host that already ignores broadcast echoes.
+fn eval_icmp_echo_ignore_broadcasts_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.icmp_echo_ignore_broadcasts".to_string(),
@@ -3175,12 +3262,27 @@ fn eval_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommendation>) 
     1
 }
 
-fn eval_tcp_rfc1337(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_rfc1337";
-    if !std::path::Path::new(path).exists() {
+fn eval_tcp_rfc1337(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_tcp_rfc1337_at(info, recs, "/proc/sys/net/ipv4/tcp_rfc1337")
+}
+
+/// Path-injectable form of [`eval_tcp_rfc1337`] (the `eval_*_at` idiom) so
+/// the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: through v5.10 the knob was a plain
+/// `proc_dointvec` int with no min/max (net/ipv4/sysctl_net_ipv4.c), and
+/// the v5.14+ u8 registration still has no `extra1`/`extra2` bounds, so -1
+/// (and 2 on the u8 knob) is a legal value. Its consumer is an inverted
+/// truthiness test (net/ipv4/tcp_minisocks.c: `if (!READ_ONCE(twsk_net(tw)->ipv4.sysctl_tcp_rfc1337))`
+/// — 0 lets a forged RST kill the TIME_WAIT socket), so -1 keeps the
+/// protection. The unsigned reader parsed "-1" to Err and fell back to 0 —
+/// the *vulnerable* value — so the `== 0` gate invented a vulnerability
+/// finding on a -1 host that already keeps its TIME_WAIT sockets.
+fn eval_tcp_rfc1337_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_rfc1337".to_string(),
@@ -11857,6 +11959,52 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+    }
+
+    #[test]
+    fn tcp_icmp_truthiness_rules_do_not_invent_findings_on_minus_one() {
+        // Six knobs registered as a plain proc_dointvec int through v5.10
+        // (and as a bounds-less u8 since v5.14) whose only consumers are
+        // truthiness tests: -1 (and 2 on the u8 knob) means enabled. The
+        // unsigned reader collapsed "-1" to the fallback 0 — the disabled
+        // value — so every "== 0" gate below invented a finding on a host
+        // that already has the feature on.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_tcp_icmp_truthiness_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_str = path.to_str().unwrap();
+        let info = make_test_info();
+        type RuleAt = fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize;
+        let rules: [(&str, RuleAt); 6] = [
+            ("net.ipv4.tcp_mtu_probing", eval_tcp_mtu_probing_at),
+            ("net.ipv4.tcp_timestamps", eval_tcp_timestamps_at),
+            ("net.ipv4.tcp_window_scaling", eval_tcp_window_scaling_at),
+            ("net.ipv4.tcp_sack", eval_tcp_sack_at),
+            (
+                "net.ipv4.icmp_echo_ignore_broadcasts",
+                eval_icmp_echo_ignore_broadcasts_at,
+            ),
+            ("net.ipv4.tcp_rfc1337", eval_tcp_rfc1337_at),
+        ];
+        for (value, expects_rec) in [("-1", false), ("2", false), ("1", false), ("0", true)] {
+            std::fs::write(&path, value).unwrap();
+            for (param, run) in rules {
+                let mut recs = Vec::new();
+                run(&info, &mut recs, path_str);
+                let rec = recs.iter().find(|r| r.param == param);
+                assert_eq!(
+                    rec.is_some(),
+                    expects_rec,
+                    "value={value}: {param} recommendation presence"
+                );
+                if let Some(rec) = rec {
+                    assert_eq!(rec.recommended_value, "1");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
