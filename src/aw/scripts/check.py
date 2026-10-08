@@ -145,6 +145,7 @@ def check_inventory() -> None:
         ("aw-provider", "admission"),
         ("aw-exec", "execution"),
         ("aw-host", "host"),
+        ("aw-provider-sec-core", "provider"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
@@ -157,6 +158,7 @@ def check_inventory() -> None:
 def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and Rust source sizes explicit."""
     allowed = {
+        "aw-provider-sec-core": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"},
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},

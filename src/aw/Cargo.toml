@@ -6,6 +6,7 @@ members = [
     "crates/aw-exec",
     "crates/aw-host",
     "crates/aw-provider",
+    "crates/aw-provider-sec-core",
 ]
 resolver = "2"
 

@@ -52,7 +52,11 @@ OS calls and kernel-stuck processes do not have a hard realtime bound. The
 caller must not reap this library's children or configure automatic SIGCHLD
 reaping. Error PIDs are diagnostic identifiers and must not be used for later
 signals after the call returns. On unwinding, Drop attempts a group kill and a
-nonblocking reap; forced termination of the calling process cannot run cleanup.
+nonblocking reap. Linux also arms `PR_SET_PDEATHSIG(SIGKILL)` before exec and
+checks for parent death during setup, so a nested transport does not leave its
+immediate command running when its owning thread dies. Privilege-changing execs
+can clear this signal. Forced termination still prevents verified group cleanup
+and does not extend the signal to arbitrary descendants.
 
 Normal completion also terminates remaining members of the command group. This
 transport is for commands whose children share the invocation's bounded lifetime;

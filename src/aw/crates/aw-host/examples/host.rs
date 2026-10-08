@@ -11,9 +11,13 @@ use std::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 3 || !matches!(args[1].as_str(), "tool.before" | "tool.after") {
-        return Err("usage: host CONFIG tool.before|tool.after TOOL_NAME".into());
+    if !(3..=4).contains(&args.len()) || !matches!(args[1].as_str(), "tool.before" | "tool.after") {
+        return Err("usage: host CONFIG tool.before|tool.after TOOL_NAME [INPUT_JSON]".into());
     }
+    let input = match args.get(3) {
+        Some(input) => serde_json::from_str(input)?,
+        None => json!({"path": "example.txt"}),
+    };
     let bytes = std::fs::read(&args[0])?;
     let cancelled = AtomicBool::new(false);
     // Synthetic capabilities exercise composition; they certify no Agent version.
@@ -41,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event = host.event(json!({
         "name": args[1], "agent": {"adapter": "qoder", "binding_id": "qoder", "instance_id": null},
         "session_id": null,
-        "tool": {"name": args[2], "native_name": args[2], "call_id": null, "input": {"path": "example.txt"},
+        "tool": {"name": args[2], "native_name": args[2], "call_id": null, "input": input,
                  "result": if args[1] == "tool.after" { json!({"example": true}) } else { json!(null) }},
         "native": {}
     }), Instant::now() + Duration::from_secs(5), &cancelled)?;

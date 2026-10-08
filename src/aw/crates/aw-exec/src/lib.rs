@@ -123,7 +123,9 @@ pub enum Error {
 /// scheduling. They must leave child reaping to this function (no competing
 /// wait or automatic SIGCHLD reaping). This is process hygiene, not a sandbox:
 /// descendants can escape the group, and kernel-blocked calls are not hard
-/// realtime bounded. A forcibly terminated caller cannot perform cleanup.
+/// realtime bounded. Linux kills the immediate child if its owning thread dies;
+/// a forcibly terminated caller still cannot verify or clean up descendants.
+/// Privilege-changing executables can clear that parent-death signal.
 ///
 /// # Errors
 /// Returns typed errors for cancellation, deadline, stream limits, spawn/pipe

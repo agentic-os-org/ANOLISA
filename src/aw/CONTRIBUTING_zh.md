@@ -52,6 +52,7 @@ Ubuntu 24.04。范围判断与完整验证分别执行：
 | `aw-core` | 通过可信运行时端口执行计划；依赖 `aw-contracts` |
 | `aw-exec` | Linux 有界命令传输与所属进程组清理；独立于 Provider 协议 |
 | `aw-host` | 组合配置、Provider 准入和有界传输，提供本地准备与调用；依赖 `aw-config`、`aw-provider` 和 `aw-exec` |
+| `aw-provider-sec-core` | 具体 Provider 二进制，通过 `aw-exec` 调用公开 sec-core CLI，不依赖 sec-core crate |
 
 框架接入由这些库之外的组件负责；进程执行属于 `aw-exec`。
 Provider 消息解析和离线准入保留在 `aw-provider`；`aw-host` 负责它们的执行边界，
@@ -66,6 +67,7 @@ Provider 消息解析和离线准入保留在 `aw-provider`；`aw-host` 负责�
 
 ```bash
 cargo test --locked -p aw-host
+cargo test --locked -p aw-provider-sec-core
 ```
 
 这些测试使用本地 fixture 进程检查准备、请求绑定、失败报告、共享截止时间、取消和

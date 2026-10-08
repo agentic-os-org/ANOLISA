@@ -32,6 +32,15 @@ Try the [local Host example](docs/design/provider-host.md#local-example) with th
 sample policy. It uses synthetic tool events and does not launch an Agent,
 install Hooks or persist audit records.
 
+## sec-core Provider
+
+The Linux `aw-provider-sec-core` binary maps configured tool inputs to the public
+`agent-sec-cli scan-code` command. It supplies candidate before-tool observe/block
+and after-tool observation through the AW Provider protocol. It requires an
+existing sec-core CLI and daemon; no AW code is installed inside sec-core.
+See the [sec-core Provider guide](../../docs/user-guide/en/user-entrypoint/aw-sec-core.md)
+for source builds, configuration and a local Host example.
+
 ## Core embedding
 
 `aw-core` provides `Core::prepare` and `Core::execute`, trusted Host/Clock/Journal

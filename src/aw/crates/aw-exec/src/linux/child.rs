@@ -21,7 +21,25 @@ pub(super) struct OwnedChild {
 
 impl OwnedChild {
     pub(super) fn spawn(spec: &CommandSpec) -> Result<Self, Error> {
-        let child = Command::new(&spec.program)
+        let parent = std::process::id();
+        let mut command = Command::new(&spec.program);
+        // Nested Provider transports have separate process groups. Kill their
+        // immediate command if the owning thread dies before cleanup can run.
+        // SAFETY: the post-fork callback uses only async-signal-safe syscalls
+        // and constructs an OS error; it takes no locks and does not allocate.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // Close the race where the parent died before prctl.
+                if libc::getppid() as u32 != parent {
+                    libc::_exit(127);
+                }
+                Ok(())
+            });
+        }
+        let child = command
             .args(&spec.args)
             .current_dir(&spec.cwd)
             .env_clear()

@@ -25,7 +25,8 @@ this configuration. Earlier experiments do not establish support in this version
 | Try a local Provider with synthetic tool events | ✅ Source example | The Host runs discovery, private-configuration validation and bounded invocation; no Agent is launched |
 | Start or attach an Agent through AW | ❌ Planned | The daemon and product CLI are not available yet |
 | Run Providers before and after native tools | ❌ Planned | Each framework needs its adapter and effect validation |
-| Apply sec-core rules to block tools or redact results | ❌ Planned | Requires a sec-core Provider, supported effects and proof that the Agent uses the response |
+| Evaluate sec-core code-scan verdicts through a local Provider | ✅ Source binary | [Configure the CLI bridge](aw-sec-core.md); returns candidate effects using the existing sec-core CLI and daemon |
+| Apply sec-core rules to block tools or redact results | ❌ Planned | Requires supported native effects and proof that the Agent uses the response; result redaction remains unimplemented |
 | View applied policy and persistent audit records | ❌ Planned | The service will maintain these records |
 | Install AW and generate a default configuration | ❌ Planned | The starter file is copied manually today |
 | Request user approval or enforce policy below native Hooks | ❌ Later work | Active `ask` steps are currently rejected; OS enforcement is not provided |

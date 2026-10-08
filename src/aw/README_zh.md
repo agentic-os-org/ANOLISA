@@ -29,6 +29,14 @@ cargo run --locked -p aw-config --example validate -- crates/aw-config/examples/
 可以通过[本地 Host 示例](docs/design/provider-host_zh.md#本地示例)运行样例策略。
 示例使用合成工具事件，不启动 Agent、不安装 Hook，也不持久写入审计记录。
 
+## sec-core Provider
+
+Linux 二进制 `aw-provider-sec-core` 将配置中选定的工具输入传给公开的
+`agent-sec-cli scan-code` 命令，通过 AW Provider 协议返回工具前 observe/block
+候选效果和工具后观察。它依赖已有 sec-core CLI 与 daemon，无需向 sec-core
+安装 AW 代码。源码构建、配置和本地 Host 示例见
+[sec-core Provider 指南](../../docs/user-guide/zh/user-entrypoint/aw-sec-core.md)。
+
 ## 嵌入 Core
 
 `aw-core` 提供 `Core::prepare`、`Core::execute`、可信 Host/Clock/Journal 端口，
