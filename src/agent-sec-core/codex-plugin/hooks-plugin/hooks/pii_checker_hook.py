@@ -316,6 +316,11 @@ def main() -> None:
         scan_result = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         return  # fail-open on parse error
+    if not isinstance(scan_result, dict):
+        # A non-object scan result (null, array, string, number) carries no
+        # verdict or findings; the qwen/qoder/cosh siblings and the hermes
+        # in-process capability all degrade this shape to fail-open.
+        return  # fail-open on non-object scan result
 
     # 6. Mode-based output
     verdict = _safe_text(scan_result.get("verdict")) or "pass"

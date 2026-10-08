@@ -233,6 +233,18 @@ class TestFailOpen:
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
 
+    @pytest.mark.parametrize(
+        "non_object", ["null", '[{"verdict": "deny"}]', '"deny"', "7"]
+    )
+    def test_cli_non_object_json_allows(self, mock_cli, non_object):
+        # A scan result that parses as JSON but is not an object carries no
+        # verdict or findings; the hook must degrade to fail-open (empty
+        # stdout = allow) instead of crashing, matching the qwen/qoder/cosh
+        # siblings and the hermes in-process capability.
+        env = mock_cli(output=non_object, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
+        assert output == {}
+
 
 class TestTextExtraction:
     """Verify text extraction for different hook events."""
