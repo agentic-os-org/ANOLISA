@@ -272,6 +272,13 @@ pub fn validate_request(
         });
     }
 
+    // This validates the *executing* process — the pipeline must run as root,
+    // which the direct CLI path guarantees through `privilege::is_root` and
+    // the helper path through `handle_serve`'s `require_root`. It cannot and
+    // must not validate the CLI caller: `EnvService::detect` observes the
+    // daemon's own UID here, so the check can never fire for helper-routed
+    // requests. Caller authorization belongs to the daemon's dispatch layer,
+    // which sees the kernel-authenticated peer via `is_operation_allowed`.
     if env.uid != 0 {
         return Err(OsbaseInstallError::InvalidRequest {
             reason: "osbase requires root (uid=0); re-run with sudo".to_string(),
