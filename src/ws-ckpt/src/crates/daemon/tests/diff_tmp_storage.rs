@@ -331,3 +331,63 @@ async fn recover_reports_temp_snapshots_the_sweep_failed_to_delete() {
         "restored contents came from the subvolume"
     );
 }
+
+/// recover must not report paths it actually deleted: when the internal
+/// temp directory contains a plain file, the sweep refuses to touch it and
+/// reports it, so the teardown afterwards must keep it too — every leftover
+/// the response lists has to still be on disk, and the per-ws directory
+/// itself is reported when it survives because it is not empty (the same
+/// remove_dir-only contract the bootstrap sweep and diff path follow).
+#[tokio::test]
+async fn recover_keeps_the_leftovers_it_reports() {
+    let _guard = shim_lock().await;
+    let _shim = FakeBtrfs::install(false);
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = BtrfsBaseBackend::new(tmp.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+    let data_root = tmp.path().join("ws-ckpt-data");
+    let subvol = data_root.join("ws-1");
+    std::fs::create_dir_all(&subvol).unwrap();
+    std::fs::write(subvol.join("payload"), b"payload").unwrap();
+    std::fs::create_dir_all(data_root.join("snapshots").join("ws-1")).unwrap();
+    let original = tmp.path().join("original");
+    std::os::unix::fs::symlink(&subvol, &original).unwrap();
+    let ws_tmp_dir = data_root.join(DIFF_TMP_DIR_NAME).join("ws-1");
+    std::fs::create_dir_all(&ws_tmp_dir).unwrap();
+    let stale = ws_tmp_dir.join("a1b2c3");
+    std::fs::create_dir_all(&stale).unwrap();
+    let stray = ws_tmp_dir.join("stray.bin");
+    std::fs::write(&stray, b"stray").unwrap();
+
+    let leftovers = backend
+        .recover_workspace("ws-1", original.to_str().unwrap())
+        .await
+        .expect("recover must succeed");
+
+    assert!(
+        leftovers.contains(&stray.display().to_string()),
+        "the refused file must be reported, got {leftovers:?}"
+    );
+    assert!(
+        leftovers.contains(&ws_tmp_dir.display().to_string()),
+        "the per-ws temp dir that survives must be reported, got {leftovers:?}"
+    );
+    for path in &leftovers {
+        assert!(
+            std::path::Path::new(path).exists(),
+            "reported leftover {path} must still exist on disk"
+        );
+    }
+    assert!(
+        stray.is_file(),
+        "the sweep's refusal must survive the directory teardown"
+    );
+    assert_eq!(
+        std::fs::read(&stray).unwrap(),
+        b"stray".as_slice(),
+        "the refused file must be untouched"
+    );
+    assert!(
+        original.join("payload").is_file(),
+        "workspace contents were restored"
+    );
+}

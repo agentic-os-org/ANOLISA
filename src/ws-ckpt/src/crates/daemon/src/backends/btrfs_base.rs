@@ -388,14 +388,17 @@ impl StorageBackend for BtrfsBaseBackend {
         // 5. Remove the workspace's internal diff temp directory. recover
         //    holds the same workspace mutation lock as diff, so nothing here
         //    can be a live temp snapshot; leftovers sweep first, then the
-        //    directory itself goes away.
+        //    directory itself goes away — but only when empty: a plain
+        //    remove_dir keeps the entries the sweep refused to touch (they
+        //    are already reported as leftovers), so the warning never lists
+        //    a path this teardown deleted.
         let diff_tmp_dir = self
             .data_root
             .join(btrfs_common::DIFF_TMP_DIR_NAME)
             .join(ws_id);
         let mut temp_leftovers =
             btrfs_common::sweep_diff_tmp_dir(&diff_tmp_dir, &self.data_root).await;
-        match tokio::fs::remove_dir_all(&diff_tmp_dir).await {
+        match tokio::fs::remove_dir(&diff_tmp_dir).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
