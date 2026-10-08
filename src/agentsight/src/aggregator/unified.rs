@@ -62,6 +62,17 @@ impl Aggregator {
         }
     }
 
+    /// Set the HTTP/1 header cap the connection aggregator applies when it
+    /// re-parses header blocks (interim 1xx chains, byte-assembly path).
+    ///
+    /// Threads `AgentsightConfig::max_headers` to the last two parse sites
+    /// that do not go through [`crate::parser::Parser`]; the cap is clamped
+    /// to at least one, like the parser's own clamp.
+    pub fn with_http_max_headers(mut self, max_headers: usize) -> Self {
+        self.http.set_max_headers(max_headers);
+        self
+    }
+
     /// Process a parsed message
     ///
     /// Returns aggregated results when complete units are formed.

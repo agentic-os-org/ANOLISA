@@ -138,8 +138,11 @@ impl ToChromeTraceEvent for ParsedRequest {
     fn to_chrome_trace_events(&self) -> Vec<ChromeTraceEvent> {
         let ts_us = ns_to_us(self.source_event.timestamp_ns);
 
-        // Minimum duration: 10ms = 10,000 microseconds
-        const MIN_DUR_US: u64 = 10_000;
+        // Duration floor so near-instantaneous requests stay visible in trace
+        // viewers. This is the configured `min_duration_us` knob (published
+        // process-wide by `AgentSight::new`); the previous hard-coded 10 000
+        // was a frozen copy of the knob's default.
+        let min_dur_us = crate::config::min_duration_us();
 
         let event = ChromeTraceEvent::complete(
             format!("{} {}", self.method, self.path),
@@ -147,7 +150,7 @@ impl ToChromeTraceEvent for ParsedRequest {
             self.source_event.pid,
             self.source_event.tid as u64,
             ts_us,
-            MIN_DUR_US,
+            min_dur_us,
         )
         .with_trace_args(self);
 

@@ -188,6 +188,11 @@ pub struct HttpConnectionAggregator {
     idle_snapshotted: LruCache<ConnectionId, ()>,
     /// Maximum bytes buffered per connection (request body or compressed SSE).
     max_body_bytes: usize,
+    /// Maximum HTTP/1 headers accepted per message when the aggregator
+    /// re-parses header blocks (interim 1xx chains and the byte-assembly
+    /// path). Mirrors `AgentsightConfig::max_headers` so a raised cap
+    /// applies to every HTTP/1 header parse, not only the first one.
+    max_headers: usize,
     /// Idle timeout before a connection state is forcibly dropped.
     idle_timeout: Duration,
     /// Cumulative automatic eviction count for diagnostics.
@@ -230,6 +235,7 @@ impl HttpConnectionAggregator {
             last_activity: LruCache::new(cap),
             idle_snapshotted: LruCache::new(cap),
             max_body_bytes: max_body_bytes.max(1024),
+            max_headers: crate::config::DEFAULT_MAX_HEADERS,
             idle_timeout,
             eviction_count: 0,
         }
@@ -238,6 +244,19 @@ impl HttpConnectionAggregator {
     /// Current per-connection body buffer cap.
     pub fn max_body_bytes(&self) -> usize {
         self.max_body_bytes
+    }
+
+    /// Set the HTTP/1 header cap for the aggregator's re-parse sites.
+    ///
+    /// Clamped to at least one, matching [`crate::parser::http::HttpParser::with_max_headers`]:
+    /// a zero cap would reject every header block outright.
+    pub fn set_max_headers(&mut self, max_headers: usize) {
+        self.max_headers = max_headers.max(1);
+    }
+
+    /// Current HTTP/1 header cap for the aggregator's re-parse sites.
+    pub fn max_headers(&self) -> usize {
+        self.max_headers
     }
 
     /// Insert connection state, logging if an unrelated entry is evicted by LRU.
@@ -770,7 +789,10 @@ impl HttpConnectionAggregator {
             let mut event = (*response.source_event).clone();
             event.buf = response.body().to_vec();
             event.len = event.buf.len() as u32;
-            match HttpParser::new().parse(Rc::new(event.clone())) {
+            // Re-parse the response that follows an interim 1xx with the same
+            // configured header cap as the first parse, so a raised
+            // `max_headers` is not silently reverted to the default here.
+            match HttpParser::with_max_headers(self.max_headers).parse(Rc::new(event.clone())) {
                 Ok(ParsedHttpMessage::Response(next)) => response = next,
                 _ => return self.process_response_bytes(&event),
             }
@@ -1596,6 +1618,88 @@ mod tests {
             assert!(pair.response.sse_events.is_empty());
         } else {
             panic!("Expected HttpComplete result");
+        }
+    }
+
+    /// `AgentsightConfig::max_headers` must also govern the aggregator's
+    /// byte-assembly re-parse: a response that arrives as raw bytes on a
+    /// pending-request connection is parsed by `PendingResponse::parsed_headers`,
+    /// which used to hard-code `HttpParser::new()` (the default 64 cap). A
+    /// raised cap must let a wide-header response complete its pair instead of
+    /// being discarded as "invalid response headers".
+    #[test]
+    fn byte_assembled_response_honours_configured_max_headers() {
+        fn wide_response_bytes(count: usize) -> Vec<u8> {
+            let mut data = String::from("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n");
+            for i in 0..count {
+                data.push_str(&format!("X-Header-{i}: v{i}\r\n"));
+            }
+            data.push_str("\r\n");
+            data.into_bytes()
+        }
+
+        fn pending_request(aggregator: &mut HttpConnectionAggregator, rw: i32) {
+            let event = Rc::new(SslEvent {
+                rw,
+                len: 42,
+                buf: b"GET /api/test HTTP/1.1\r\n\r\n".to_vec(),
+                ..(*create_mock_ssl_event(4321, 0x2000)).clone()
+            });
+            aggregator.process_request(ParsedRequest {
+                method: "GET".to_string(),
+                path: "/api/test".to_string(),
+                version: 11,
+                headers: HashMap::new(),
+                body_offset: 0,
+                body_len: 0,
+                source_event: event,
+                reassembled_body: None,
+            });
+        }
+
+        // 100 headers exceed the default cap of 64.
+        let wide_buf = wide_response_bytes(100);
+        let read_event = SslEvent {
+            rw: 0,
+            len: wide_buf.len() as u32,
+            buf: wide_buf,
+            ..(*create_mock_ssl_event(4321, 0x2000)).clone()
+        };
+
+        // Default cap: the byte-assembly re-parse rejects the wide header
+        // block, so the pair never completes.
+        let mut default_cap = HttpConnectionAggregator::new();
+        assert_eq!(default_cap.max_headers(), 64);
+        pending_request(&mut default_cap, 1);
+        assert!(
+            default_cap.process_raw_body_data(&read_event).is_none(),
+            "the default 64 cap must reject a 100-header response"
+        );
+
+        // A raised cap lets the same bytes complete the request/response pair.
+        let mut raised = HttpConnectionAggregator::new();
+        raised.set_max_headers(128);
+        assert_eq!(raised.max_headers(), 128);
+        pending_request(&mut raised, 1);
+        match raised.process_raw_body_data(&read_event) {
+            Some(AggregatedResult::HttpComplete(pair)) => {
+                assert_eq!(pair.request.method, "GET");
+                assert_eq!(pair.response.status_code(), 200);
+                assert_eq!(
+                    pair.response.parsed.headers.len(),
+                    101,
+                    "content-length plus 100 wide headers must be retained"
+                );
+                assert_eq!(
+                    pair.response
+                        .parsed
+                        .headers
+                        .get("x-header-99")
+                        .map(String::as_str),
+                    Some("v99")
+                );
+            }
+            other => panic!("expected HttpComplete, got {other:?}"),
         }
     }
 

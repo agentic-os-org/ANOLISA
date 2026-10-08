@@ -183,7 +183,11 @@ impl PendingResponse {
     }
 
     /// Parse a bounded complete header block, preserving its first timestamp.
-    pub(super) fn parsed_headers(&self) -> Result<Option<ParsedResponse>> {
+    ///
+    /// `max_headers` is the caller's configured HTTP/1 header cap
+    /// (`AgentsightConfig::max_headers`) so assembled responses are held to
+    /// the same cap as the ones the parser accepted whole.
+    pub(super) fn parsed_headers(&self, max_headers: usize) -> Result<Option<ParsedResponse>> {
         let Self::Headers(event) = self else {
             return Ok(None);
         };
@@ -196,7 +200,7 @@ impl PendingResponse {
         if end + 4 > MAX_RESPONSE_HEADERS {
             bail!("response headers exceed {MAX_RESPONSE_HEADERS} bytes");
         }
-        match HttpParser::new().parse(Rc::clone(event))? {
+        match HttpParser::with_max_headers(max_headers).parse(Rc::clone(event))? {
             ParsedHttpMessage::Response(response) => Ok(Some(response)),
             _ => bail!("invalid response headers"),
         }
@@ -336,7 +340,7 @@ impl HttpConnectionAggregator {
                 // no-op fallback of `process_raw_body_data`, silently dropping
                 // the prompt. Keep the pending body state instead.
                 if matches!(
-                    assembly.parsed_headers(),
+                    assembly.parsed_headers(self.max_headers),
                     Ok(Some(ref response)) if is_informational(response.status_code)
                 ) {
                     self.insert(
@@ -357,7 +361,7 @@ impl HttpConnectionAggregator {
                 return None;
             }
         };
-        match assembly.parsed_headers() {
+        match assembly.parsed_headers(self.max_headers) {
             Ok(Some(response)) => {
                 drop(assembly);
                 if let Some(request) = request {

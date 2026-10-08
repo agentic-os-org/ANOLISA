@@ -731,6 +731,11 @@ impl AgentSight {
         // the drain fallback at its call site.
         crate::tokenizer::configure_global_tokenizer(config.features.tokenizer_cache_size);
 
+        // Publish the configured HTTP trace-event duration floor before any
+        // aggregated result can be exported to the Chrome trace file; the
+        // exporters read it via `crate::config::min_duration_us()`.
+        crate::config::set_min_duration_us(config.min_duration_us);
+
         // Create analyzer with tokenizer if configured
         let analyzer = match config
             .tokenizer_path
@@ -958,8 +963,14 @@ impl AgentSight {
 
         Ok(AgentSight {
             probes,
-            parser: Parser::new(),
-            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits),
+            // The configured header cap governs which HTTP/1 messages the
+            // parser accepts; messages beyond the cap fall to the raw-data
+            // path instead of being parsed. The aggregator gets the same cap
+            // so its re-parse sites (1xx chains, byte assembly) never hold
+            // assembled messages to a limit the parser already accepted.
+            parser: Parser::with_max_headers(config.max_headers),
+            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits)
+                .with_http_max_headers(config.max_headers),
             analyzer,
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
