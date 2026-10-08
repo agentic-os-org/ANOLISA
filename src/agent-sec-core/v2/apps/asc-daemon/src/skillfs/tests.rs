@@ -508,19 +508,7 @@ async fn public_socket_authenticates_notify_and_keeps_v2_requests_separate() {
         ordinary_dispatcher(application),
         Some(bridge.clone()),
     ));
-    assert_eq!(
-        dispatcher
-            .dispatch_timeout(br#"{"method":"action.skill_sec","params":{"command":"scan"}}"#),
-        Some(Duration::from_secs(60))
-    );
-    assert_eq!(
-        dispatcher.dispatch_timeout(br#"{"method":"action.code_scan","params":{}}"#),
-        None
-    );
-    assert_eq!(
-        dispatcher.dispatch_timeout(br#"{"type":"auth.init"}"#),
-        None
-    );
+    assert_dispatch_timeouts(&dispatcher);
     let socket = fixture.directory.path().join("daemon.sock");
     let bound = BoundUnixSocket::bind(&socket, 0o666).unwrap();
     let server = UnixService::new(
@@ -588,6 +576,26 @@ async fn public_socket_authenticates_notify_and_keeps_v2_requests_separate() {
     tokio::task::spawn_blocking(move || worker.shutdown().unwrap())
         .await
         .unwrap();
+}
+
+fn assert_dispatch_timeouts(dispatcher: &SkillFsDispatcher) {
+    assert_eq!(
+        dispatcher
+            .dispatch_timeout(br#"{"method":"action.skill_sec","params":{"command":"scan"}}"#),
+        Some(Duration::from_secs(60))
+    );
+    assert_eq!(
+        dispatcher.dispatch_timeout(br#"{"method":"action.code_scan","params":{}}"#),
+        None
+    );
+    assert_eq!(
+        dispatcher.dispatch_timeout(br#"{"method":"action.code_scan","params":{"mode":"llm"}}"#),
+        Some(Duration::from_secs(91))
+    );
+    assert_eq!(
+        dispatcher.dispatch_timeout(br#"{"type":"auth.init"}"#),
+        None
+    );
 }
 
 fn assert_notify_contract(inputs: &Fixture, path: &Path) {

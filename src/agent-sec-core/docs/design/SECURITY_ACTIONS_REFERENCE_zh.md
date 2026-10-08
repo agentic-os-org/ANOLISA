@@ -329,8 +329,17 @@ regex rules 当前可能只产生 pass/warn，但 deny 是 custom/LLM rule 的�
 | error verdict | false | 1 | `CodeScanError` |
 | unsupported language | false | 1 | `ErrUnsupportedLang`，data 为空 |
 
-stdout 是 data 的 JSON。`AGENT_SEC_OLLAMA_MODEL` 选择 LLM model（默认 `warden`）；模型
-service backend/base URL/timeout 使用共享 model-service 配置。
+stdout 是 data 的 JSON。`AGENT_SEC_OLLAMA_MODEL` 选择 LLM model（未设置时默认 `warden`）；模型
+service backend/base URL/timeout 使用共享 model-service 配置。LLM mode 的 daemon 与 CLI deadline
+按照该请求 timeout 预留一次模型检查、一次 chat 及一次 chat 重试的完整预算，不能以固定短
+期限截断已配置的本地推理。
+
+`llm` 模式先按与 regex 相同的规则拒绝空/纯空白 `code`，不会因模型可用性改变该
+结果。其后检查本地模型并以 `temperature=0`、`seed=42` 请求 JSON chat；模型输出只接受
+`PASS` 或 `DENY`（JSON 或仅含一个 verdict token 的文本）。`DENY` 映射为成功的 `warn`
+结果和 `llm-judge` finding；无法判定的输出产生 `error` verdict，summary 保留最多 120
+个字符的原始输出上下文。模型不可用或请求失败同样是 `error` verdict，不是 daemon
+protocol error。
 
 ## 8. `prompt_scan`
 

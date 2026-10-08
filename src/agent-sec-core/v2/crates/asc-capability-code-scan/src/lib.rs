@@ -10,6 +10,7 @@ mod errors;
 mod executor;
 mod extractor;
 mod findings;
+mod llm;
 mod rules;
 mod scanner;
 

@@ -222,7 +222,7 @@ mod tests {
         Arc::new(ActionService::new(
             ActionRuntime::new(
                 ActionId::CodeScan,
-                CodeScanExecutor,
+                CodeScanExecutor::default(),
                 CodeScanAuditProjector,
                 audit_finalizer(sink.clone()),
             ),

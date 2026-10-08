@@ -45,9 +45,8 @@ fn unknown_source() -> String {
 ///
 /// `rules`, when present, narrows the active rule set to the listed ids; a
 /// missing value runs the whole set for the language. `mode` selects the
-/// engine and defaults to `regex`; the daemon build carries only the regex
-/// engine, so `llm` returns an engine-unavailable verdict rather than failing
-/// the request.
+/// engine and defaults to `regex`; `llm` uses the configured local model and
+/// returns a completed error verdict when that model cannot serve the scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodeScanParams {

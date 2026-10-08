@@ -142,13 +142,20 @@ fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
 impl RequestDispatcher for DaemonDispatcher {
     fn dispatch_timeout(&self, payload: &[u8]) -> Option<std::time::Duration> {
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
-        // Prompt scanning waits on a local L2 model call whose own budget
-        // defaults to 30s (`AGENT_SEC_MODEL_SERVICE_TIMEOUT`), so the family
-        // needs a dispatch budget that outlives the slowest configured scan.
+        // Prompt Scanner retains its existing fixed local-model budget.
         if request.method == method::ACTION_PROMPT_SCAN
             || request.method == method::ACTION_PROMPT_SCAN_WARMUP
         {
             return Some(std::time::Duration::from_secs(35));
+        }
+        if request.method == method::ACTION_CODE_SCAN
+            && request
+                .params
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                == Some("llm")
+        {
+            return Some(asc_model_client::code_scan_budget());
         }
         if request.method != method::ACTION_SKILL_SEC {
             return None;

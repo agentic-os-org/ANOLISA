@@ -120,6 +120,9 @@ impl Cli {
                 .timeout_ms
                 .unwrap_or(if arguments.command.is_scan_prompt() {
                     120_000
+                } else if arguments.command.is_llm_code_scan() {
+                    u32::try_from(asc_model_client::code_scan_budget().as_millis())
+                        .unwrap_or(u32::MAX)
                 } else if arguments.command.is_skill_sec() {
                     60_000
                 } else {
@@ -364,6 +367,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn llm_code_scan_uses_the_model_compatible_default_deadline() {
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/run/asc.sock",
+                "scan-code",
+                "--code",
+                "echo hello",
+                "--mode",
+                "llm",
+            ],
+            None,
+        )
+        .expect("LLM scan parses");
+        assert_eq!(cli.timeout(), asc_model_client::code_scan_budget());
     }
 
     #[test]

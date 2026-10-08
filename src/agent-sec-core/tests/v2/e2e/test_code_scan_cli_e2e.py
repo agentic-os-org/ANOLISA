@@ -31,7 +31,7 @@ def test_scan_code_error_results_remain_parseable_on_stdout(daemon) -> None:
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["verdict"] == "error"
-    assert payload["summary"] == "scan error: LLM model not available"
+    assert payload["summary"] == "scan error: model 'warden' not available"
 
 
 def test_scan_code_rejects_empty_input_before_contacting_the_daemon(cli) -> None:

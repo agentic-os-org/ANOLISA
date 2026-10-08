@@ -87,6 +87,10 @@ impl Command {
         matches!(self, Self::ScanCode(_))
     }
 
+    pub(crate) fn is_llm_code_scan(&self) -> bool {
+        matches!(self, Self::ScanCode(command) if command.is_llm_mode())
+    }
+
     pub(crate) const fn pii_format(&self) -> Option<PiiOutputFormat> {
         match self {
             Self::ScanPii(command) => Some(command.format),

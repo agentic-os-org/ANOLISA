@@ -359,6 +359,31 @@ async fn malformed_parameters_are_rejected_as_invalid_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_mode_rejects_blank_input_before_model_lookup() {
+    // This is intentionally independent of the host's Ollama state. V1 rejects
+    // blank input before selecting its LLM engine, and the daemon must preserve
+    // that response at the public socket boundary.
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({
+            "method": "action.code_scan",
+            "params": {"code": " \n\t", "language": "bash", "mode": "llm"}
+        }),
+    )
+    .await;
+    assert_eq!(response["result"]["ok"], json!(false), "{response}");
+    assert_eq!(response["result"]["verdict"], json!("error"), "{response}");
+    assert_eq!(
+        response["result"]["summary"],
+        json!("scan error: empty input code"),
+        "{response}"
+    );
+    assert_eq!(response["result"]["elapsed_ms"], json!(0), "{response}");
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_result_carries_the_full_v1_field_contract() {
     let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
     let response = support::request_json(

@@ -144,7 +144,7 @@ fn controlled_actions(
         ActionService::new(
             ActionRuntime::new(
                 ActionId::CodeScan,
-                asc_capability_code_scan::CodeScanExecutor,
+                asc_capability_code_scan::CodeScanExecutor::default(),
                 asc_capability_code_scan::CodeScanAuditProjector,
                 finalizer.clone(),
             ),

@@ -310,7 +310,7 @@ mod tests {
             ActionService::new(
                 ActionRuntime::new(
                     ActionId::CodeScan,
-                    CodeScanExecutor,
+                    CodeScanExecutor::default(),
                     CodeScanAuditProjector,
                     finalizer.clone(),
                 ),

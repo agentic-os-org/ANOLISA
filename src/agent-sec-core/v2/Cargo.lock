@@ -130,6 +130,7 @@ version = "0.13.2"
 dependencies = [
  "asc-action-runtime",
  "asc-action-types",
+ "asc-model-client",
  "fancy-regex",
  "serde",
  "serde_json",
@@ -213,6 +214,7 @@ dependencies = [
  "asc-daemon-protocol",
  "asc-daemon-service",
  "asc-foundation-types",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
  "asc-pap-repository-memory",
@@ -319,6 +321,7 @@ dependencies = [
  "asc-daemon-core",
  "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-model-client",
  "asc-observability",
  "asc-pap",
  "asc-pap-repository-memory",

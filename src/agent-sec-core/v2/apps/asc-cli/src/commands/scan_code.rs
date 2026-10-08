@@ -20,6 +20,11 @@ pub(crate) struct ScanCodeCommand {
 }
 
 impl ScanCodeCommand {
+    /// Whether this invocation uses Code Scanner's local-model engine.
+    pub(crate) fn is_llm_mode(&self) -> bool {
+        self.mode == "llm"
+    }
+
     /// Builds the request sent to the code-scan Action handler.
     pub(crate) fn request(&self) -> Result<DaemonRequest, InputError> {
         if self.code.trim().is_empty() {
