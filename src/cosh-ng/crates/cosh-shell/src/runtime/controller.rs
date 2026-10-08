@@ -283,11 +283,20 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         return Some(capture);
     }
 
-    if let Some(capture) = pending_question_capture(state) {
+    // The auth panel outranks a pending agent question: while a field —
+    // possibly a secret one, masked by TextQuestion{secret} — is being
+    // filled, a concurrently arriving UserQuestion must not steal the
+    // capture. The raw-input layer replaces the active capture for a new
+    // CaptureInput without a session-mark refresh, so a question that
+    // preempted mid-typing would render the remaining secret bytes as
+    // plain free text on the question card (and route the trailing Enter
+    // to the question as the answer). The question stays queued and takes
+    // the capture once auth completes.
+    if let Some(capture) = crate::auth::runtime::pending_auth_capture(state) {
         return Some(capture);
     }
 
-    if let Some(capture) = crate::auth::runtime::pending_auth_capture(state) {
+    if let Some(capture) = pending_question_capture(state) {
         return Some(capture);
     }
 

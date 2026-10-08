@@ -124,6 +124,74 @@ fn manual_prepare_mode_is_not_an_ecs_challenge() {
 }
 
 #[test]
+fn auth_capture_outranks_a_pending_question_during_secret_entry() {
+    use crate::raw_input::RawInputCapture;
+    use crate::runtime::controller::pending_card_capture;
+    use crate::types::{
+        AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
+        QuestionSelectionMode,
+    };
+
+    let mut state = InlineState::default();
+
+    // A pending agent question with free text — before the fix this took
+    // the capture ahead of the auth panel.
+    let events = vec![GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::UserQuestion {
+            run_id: "run-test".to_string(),
+            provider_request_id: Some("provider-question".to_string()),
+            question: "Choose".to_string(),
+            options: Vec::new(),
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        },
+        reason: "display".to_string(),
+        display_text: String::new(),
+        auto_execute: false,
+    }];
+    crate::question::runtime::record_user_questions(
+        &mut state,
+        &events,
+        crate::agent::run::AgentRunOrigin::Standard,
+        Some("owner"),
+    );
+    assert!(crate::question::runtime::has_pending_question(&state));
+
+    // Auth is filling a secret field (partially typed).
+    let mut auth = slash_auth_state(&["dashscope"], SysomMenu::on_manual());
+    auth.phase = AuthPhase::FillingField;
+    auth.providers[0].fields = vec![AuthFieldInfo {
+        name: "api_key".to_string(),
+        label: "API Key".to_string(),
+        hint: None,
+        secret: true,
+        required: true,
+        placeholder: None,
+    }];
+    auth.field_input = "sk-typed-so-far".to_string();
+    state.auth.state = Some(auth);
+
+    // The auth panel owns the capture: the masked secret field must not be
+    // preempted by the question card, whose free-text input renders what
+    // the user types in plain text.
+    assert!(matches!(
+        pending_card_capture(&state),
+        Some(RawInputCapture::TextQuestion { secret, .. }) if secret
+    ));
+
+    // Once auth completes, the queued question takes the capture.
+    state.auth.state = None;
+    assert!(matches!(
+        pending_card_capture(&state),
+        Some(RawInputCapture::Question {
+            allow_free_text, ..
+        }) if allow_free_text
+    ));
+}
+
+#[test]
 fn sysom_shortcut_requires_name_for_an_existing_aliyun_type() {
     let mut auth = slash_auth_state(
         &["dashscope", "openai_compat", "aliyun"],
