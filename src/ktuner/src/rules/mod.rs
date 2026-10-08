@@ -485,6 +485,12 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     // eval_dirty_ratio, the readahead rule, the classify gate) and MongoDB's
     // production notes ask for THP to be off outright; etcd is the
     // coordination store of the same cache family redis/memcached belong to.
+    // oracle is the one OLTP database is_database_present already counts for
+    // the IPC gates; its own Linux guidance asks for THP off outright too
+    // (MOS 1557478.1 "Disabling Transparent Hugepages", and the 19c
+    // installation guide's pre-install step of the same name): khugepaged's
+    // collapse/split stalls are exactly the latency spikes this rule heads
+    // off, so a host running it must not be left on always.
     let is_latency_sensitive = info.has_process("redis-server")
         || info.has_process("memcached")
         || info.has_process("postgres")
@@ -493,6 +499,7 @@ fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
         || info.has_process("mariadbd")
         || info.has_process("mongod")
         || info.has_process("clickhouse")
+        || info.has_process("oracle")
         || info.has_process("etcd");
 
     if is_latency_sensitive && info.sysctl.thp_enabled == "always" {
@@ -7770,6 +7777,25 @@ mod tests {
             recs.iter().all(|r| !r.param.contains("hugepage")),
             "a streaming workload is not latency-sensitive"
         );
+    }
+
+    #[test]
+    fn test_thp_with_oracle() {
+        // oracle is the one OLTP database is_database_present already counts
+        // that this latency list skipped - the same cross-gate hole mongod
+        // and etcd closed here. Oracle's own Linux guidance asks for THP off
+        // (MOS 1557478.1), so an always THP host running it must get the
+        // madvise recommendation.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "oracle".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        let thp_rec = recs
+            .iter()
+            .find(|r| r.param.contains("hugepage"))
+            .unwrap_or_else(|| panic!("oracle must get the THP recommendation"));
+        assert_eq!(thp_rec.recommended_value, "madvise");
     }
 
     #[test]
