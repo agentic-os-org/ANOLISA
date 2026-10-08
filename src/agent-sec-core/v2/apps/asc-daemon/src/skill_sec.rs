@@ -28,6 +28,11 @@ struct Settings {
     state_dir: PathBuf,
     #[serde(default)]
     managed_skill_dirs: Vec<ManagedSkillDir>,
+    /// Restrict non-root callers to the managed Skills they own (the
+    /// directory's filesystem owner, or the uid an authenticated SkillFS
+    /// mount is bound to). Off keeps the phase-one access contract.
+    #[serde(default)]
+    require_skill_ownership: bool,
     #[serde(default)]
     scanners: Vec<ScannerConfig>,
     #[serde(default)]
@@ -42,7 +47,14 @@ fn default_state() -> PathBuf {
 
 pub(super) fn start(
     config: Option<&Path>,
-) -> Result<(Arc<SkillSecService>, Option<SkillFsConfig>), StartupError> {
+) -> Result<
+    (
+        Arc<SkillSecService>,
+        Option<SkillFsConfig>,
+        bool,
+    ),
+    StartupError,
+> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(StartupError::RootRequired);
     }
@@ -55,6 +67,7 @@ pub(super) fn start(
             Err(StartupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Settings {
                 state_dir: default_state(),
                 managed_skill_dirs: Vec::new(),
+                require_skill_ownership: false,
                 scanners: Vec::new(),
                 parsers: BTreeMap::new(),
                 skillfs: None,
@@ -77,7 +90,7 @@ pub(super) fn start(
         },
         ScannerRegistry::new(settings.scanners, settings.parsers)?,
     )?);
-    Ok((service, settings.skillfs))
+    Ok((service, settings.skillfs, settings.require_skill_ownership))
 }
 
 fn read_settings(path: &Path) -> Result<Settings, StartupError> {

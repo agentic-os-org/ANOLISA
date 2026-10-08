@@ -27,7 +27,20 @@ pub(super) struct Resolver {
 
 impl Resolver {
     pub fn manages(&self, identity: &SkillIdentity) -> bool {
-        self.mounts.iter().any(|mount| {
+        self.mount_for(identity).is_some()
+    }
+
+    /// The uid the authenticated mount containing this identity is bound to.
+    ///
+    /// Returns `None` for identities outside every configured mount, so
+    /// per-skill ownership isolation fails closed for them instead of
+    /// guessing from the filesystem.
+    pub fn owner_uid(&self, identity: &SkillIdentity) -> Option<u32> {
+        self.mount_for(identity).map(|mount| mount.peer_uid)
+    }
+
+    fn mount_for(&self, identity: &SkillIdentity) -> Option<&Mount> {
+        self.mounts.iter().find(|mount| {
             [&mount.canonical_root, &mount.live_root]
                 .iter()
                 .any(|root| {

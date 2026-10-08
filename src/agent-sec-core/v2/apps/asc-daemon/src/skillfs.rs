@@ -184,6 +184,9 @@ impl SkillEnvironment for Environment {
     fn manages(&self, identity: &SkillIdentity) -> bool {
         self.resolver.manages(identity)
     }
+    fn owner_uid(&self, identity: &SkillIdentity) -> Option<u32> {
+        self.resolver.owner_uid(identity)
+    }
     fn resolve(
         &self,
         identity: &SkillIdentity,

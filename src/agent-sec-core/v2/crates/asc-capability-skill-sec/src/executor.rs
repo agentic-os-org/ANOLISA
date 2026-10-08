@@ -27,6 +27,17 @@ pub trait SkillEnvironment: Send + Sync {
         false
     }
 
+    /// The uid authorized to operate this identity through an authenticated
+    /// mapping, when the environment tracks one.
+    ///
+    /// Used only when the deployment enabled per-skill ownership isolation:
+    /// a `SkillFS` mount is bound to its configured peer uid, so that uid —
+    /// not the backing directory's filesystem owner — is the operator.
+    /// Returns `None` for identities the environment does not manage.
+    fn owner_uid(&self, _identity: &crate::SkillIdentity) -> Option<u32> {
+        None
+    }
+
     /// Optional integration health, independent of the last business result.
     fn status(&self) -> Option<Value> {
         None
@@ -52,6 +63,11 @@ impl SkillEnvironment for DirectSkillEnvironment {
 pub struct SkillSecExecutor {
     service: Arc<SkillSecService>,
     environment: Arc<dyn SkillEnvironment>,
+    /// Whether non-root callers may only operate Skills they own. Off keeps
+    /// the documented phase-one contract (every local caller may operate
+    /// every managed Skill); on implements the per-user isolation the
+    /// maintainers' TODO calls for.
+    require_ownership: bool,
 }
 
 impl SkillSecExecutor {
@@ -60,6 +76,7 @@ impl SkillSecExecutor {
         Self {
             service,
             environment: Arc::new(DirectSkillEnvironment),
+            require_ownership: false,
         }
     }
 
@@ -70,33 +87,74 @@ impl SkillSecExecutor {
         self
     }
 
-    fn allowed(&self, identity: &crate::SkillIdentity) -> bool {
-        self.service
+    /// Restricts non-root callers to the Skills they own.
+    ///
+    /// Root and daemon-owned background work (startup recovery, the worker's
+    /// discovery) stay unrestricted; local callers keep access to their own
+    /// directories, including `SkillFS` mounts bound to their uid.
+    #[must_use]
+    pub fn with_require_skill_ownership(mut self, require: bool) -> Self {
+        self.require_ownership = require;
+        self
+    }
+
+    fn allowed(&self, identity: &crate::SkillIdentity, caller_uid: u32) -> bool {
+        let managed = self
+            .service
             .config
             .managed_skill_dirs
             .iter()
             .any(|pattern| pattern.contains(identity))
-            || self.environment.manages(identity)
+            || self.environment.manages(identity);
+        if !managed {
+            return false;
+        }
+        if !self.require_ownership || caller_uid == 0 {
+            return true;
+        }
+        // Per-skill isolation: only the authenticated mount's bound uid (for
+        // mounted Skills) or the directory's filesystem owner (for ordinary
+        // managed directories) may operate the Skill. Both fail closed when
+        // the owner cannot be established.
+        if self.environment.manages(identity) {
+            self.environment
+                .owner_uid(identity)
+                .is_some_and(|owner| owner == caller_uid)
+        } else {
+            directory_owner_uid(identity.path()).is_some_and(|owner| owner == caller_uid)
+        }
     }
 
     /// Discovers authorized ordinary Skills and registered mounts without traversing FUSE.
     /// Shared by aggregate commands and the daemon's asynchronous startup scan.
     ///
+    /// `caller_uid` is the kernel-authenticated caller (0 for daemon-owned
+    /// background discovery); with ownership isolation on, only the Skills
+    /// that caller may operate are returned.
+    ///
     /// # Errors
     /// Reports invalid or unreadable configured roots, corrupt registration and expired deadlines.
-    pub fn discover(&self, deadline: Instant) -> Result<Vec<crate::SkillIdentity>, SkillSecError> {
+    pub fn discover(
+        &self,
+        caller_uid: u32,
+        deadline: Instant,
+    ) -> Result<Vec<crate::SkillIdentity>, SkillSecError> {
         let mut skills: std::collections::BTreeSet<_> = self
             .service
             .managed_skills()?
             .into_iter()
-            .filter(|identity| self.allowed(identity))
+            .filter(|identity| self.allowed(identity, caller_uid))
             .collect();
         for pattern in &self.service.config.managed_skill_dirs {
             // Mounted Skills are discovered by authenticated notifications, never by traversing FUSE.
             if !self.environment.manages(&pattern.root) {
-                skills.extend(crate::discovery::discover(pattern, deadline, |id| {
-                    self.environment.manages(id)
-                })?);
+                skills.extend(
+                    crate::discovery::discover(pattern, deadline, |id| {
+                        self.environment.manages(id)
+                    })?
+                    .into_iter()
+                    .filter(|identity| self.allowed(identity, caller_uid)),
+                );
             }
         }
         Ok(skills.into_iter().collect())
@@ -123,7 +181,7 @@ impl SkillSecExecutor {
         // Validate caller paths before discovery or resolution performs any target I/O.
         let mut identities = command.identities(&[])?;
         for identity in &identities {
-            if !self.allowed(identity) {
+            if !self.allowed(identity, request.caller_uid) {
                 return Err(SkillSecError::ScopeDenied(identity.clone()));
             }
         }
@@ -145,7 +203,7 @@ impl SkillSecExecutor {
                 | SkillSecCommand::Check { all: true, .. }
                 | SkillSecCommand::Status { .. }
         ) {
-            managed.extend(self.discover(deadline)?);
+            managed.extend(self.discover(request.caller_uid, deadline)?);
         }
         identities.extend(managed);
         identities.sort();
@@ -153,7 +211,7 @@ impl SkillSecExecutor {
         for identity in &identities {
             // Only root can finish an already authorized, private rotation intent after reconfiguration.
             // Registration alone never grants this exception to a new operation.
-            if !self.allowed(identity)
+            if !self.allowed(identity, request.caller_uid)
                 && !recovery
                     .as_ref()
                     .is_some_and(|skills| skills.contains(identity))
@@ -449,6 +507,26 @@ fn required_root(roots: &[SkillRoot]) -> Result<&SkillRoot, SkillSecError> {
         .ok_or_else(|| SkillSecError::Invalid("Skill root is required".into()))
 }
 
+/// The filesystem owner of one ordinary managed Skill directory.
+///
+/// Returns `None` when the directory cannot be inspected, so per-skill
+/// ownership isolation fails closed instead of trusting an unowned path.
+#[cfg(unix)]
+fn directory_owner_uid(path: &std::path::Path) -> Option<u32> {
+    std::fs::metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .map(|metadata| {
+            use std::os::unix::fs::MetadataExt as _;
+            metadata.uid()
+        })
+}
+
+#[cfg(not(unix))]
+fn directory_owner_uid(_path: &std::path::Path) -> Option<u32> {
+    None
+}
+
 fn critical(value: &Value) -> bool {
     matches!(
         value["status"].as_str(),
@@ -553,7 +631,7 @@ impl Drop for Admission<'_> {
 mod tests {
     use super::*;
     use crate::service::tests::{deadline, fixture, uninitialized_fixture};
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct RejectingEnvironment(AtomicUsize);
@@ -957,6 +1035,154 @@ mod tests {
             ),
             Some("drifted")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_isolation_restricts_direct_skills_to_their_owner() {
+        let (_temporary, service, root) = fixture();
+        // The fixture directory belongs to whoever runs the tests, so the
+        // contrast caller is derived from the real owner instead of assuming
+        // a specific test uid.
+        let owner = std::fs::metadata(&root.io_dir).unwrap().uid();
+        let foreign = owner.wrapping_add(1);
+        let command = || SkillSecCommand::Certify {
+            skill_dir: root.identity.clone(),
+            scanner: "fixture".into(),
+            scanner_version: None,
+            findings: json!([]),
+        };
+        let control = ExecutionControl {
+            deadline: deadline(),
+            cancelled: false,
+        };
+        let isolated = SkillSecExecutor::new(service.clone()).with_require_skill_ownership(true);
+
+        // The owner may still operate their own Skill.
+        let owner_call = isolated.execute(
+            &control,
+            &SkillSecRequest {
+                command: command(),
+                caller_uid: owner,
+            },
+        );
+        assert!(owner_call.success, "{owner_call:?}");
+
+        // A foreign non-root caller is refused before any business side effect.
+        let denied = isolated.execute(
+            &control,
+            &SkillSecRequest {
+                command: command(),
+                caller_uid: foreign,
+            },
+        );
+        assert_eq!(denied.error_type, "PermissionDenied", "{denied:?}");
+
+        // Root stays unrestricted.
+        let root_call = isolated.execute(
+            &control,
+            &SkillSecRequest {
+                command: command(),
+                caller_uid: 0,
+            },
+        );
+        assert!(root_call.success, "{root_call:?}");
+
+        // With isolation off, the documented phase-one contract is unchanged:
+        // every local caller may operate every managed Skill.
+        let phase_one = SkillSecExecutor::new(service.clone());
+        let anyone = phase_one.execute(
+            &control,
+            &SkillSecRequest {
+                command: command(),
+                caller_uid: foreign,
+            },
+        );
+        assert!(anyone.success, "{anyone:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_isolation_filters_discovery_to_owned_skills() {
+        let (_temporary, service, root) = fixture();
+        let owner = std::fs::metadata(&root.io_dir).unwrap().uid();
+        let executor = SkillSecExecutor::new(service).with_require_skill_ownership(true);
+
+        let included = executor.discover(owner, deadline()).unwrap();
+        assert!(
+            included.contains(&root.identity),
+            "the owner's Skill must stay discoverable: {included:?}"
+        );
+        let excluded = executor.discover(owner.wrapping_add(1), deadline()).unwrap();
+        assert!(
+            !excluded.contains(&root.identity),
+            "a foreign caller must not discover another user's Skill: {excluded:?}"
+        );
+    }
+
+    #[test]
+    fn ownership_isolation_honors_authenticated_mount_owners() {
+        struct OwnedEnvironment(SkillRoot);
+        impl SkillEnvironment for OwnedEnvironment {
+            fn manages(&self, identity: &crate::SkillIdentity) -> bool {
+                identity == &self.0.identity
+            }
+            fn owner_uid(&self, identity: &crate::SkillIdentity) -> Option<u32> {
+                self.manages(identity).then_some(1001)
+            }
+            fn resolve(
+                &self,
+                identity: &crate::SkillIdentity,
+                deadline: Instant,
+            ) -> Result<SkillRoot, SkillSecError> {
+                check_deadline(deadline)?;
+                assert_eq!(identity, &self.0.identity);
+                Ok(self.0.clone())
+            }
+        }
+        let (_temporary, mut service, physical) = uninitialized_fixture();
+        Arc::get_mut(&mut service)
+            .unwrap()
+            .config
+            .managed_skill_dirs
+            .clear();
+        let identity =
+            crate::SkillIdentity::new(physical.io_dir.with_file_name("source-alias")).unwrap();
+        let root = SkillRoot::resolved(identity.clone(), physical.io_dir).unwrap();
+        // The mount is bound to uid 1001; the backing directory happens to
+        // belong to the test runner, so the authenticated binding — not the
+        // filesystem owner — must decide.
+        let executor = SkillSecExecutor::new(service)
+            .with_environment(Arc::new(OwnedEnvironment(root)))
+            .with_require_skill_ownership(true);
+        let control = ExecutionControl {
+            deadline: deadline(),
+            cancelled: false,
+        };
+        let command = SkillSecCommand::Certify {
+            skill_dir: identity,
+            scanner: "custom".into(),
+            scanner_version: None,
+            findings: json!([]),
+        };
+
+        let owner = executor.execute(
+            &control,
+            &SkillSecRequest {
+                command: command.clone(),
+                caller_uid: 1001,
+            },
+        );
+        assert!(owner.success, "{owner:?}");
+
+        let foreign = executor.execute(
+            &control,
+            &SkillSecRequest {
+                command,
+                caller_uid: 1002,
+            },
+        );
+        assert_eq!(foreign.error_type, "PermissionDenied", "{foreign:?}");
     }
 
     #[test]

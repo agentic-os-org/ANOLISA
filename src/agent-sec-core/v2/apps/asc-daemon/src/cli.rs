@@ -14,6 +14,11 @@ Without --socket, uses nonempty $AGENT_SEC_DAEMON_SOCKET or /run/agent-sec-core/
 Root is always authorized. --policy-admin-uid adds an administrator at startup.\n\
 Repeat this option for multiple UIDs; omitted means root only.\n\
 --skillsec-config selects a root-owned JSON configuration file.\n\
+--socket-mode selects 0600, 0660 or 0666 (default 0666).\n\
+A mode tighter than 0666 admits fewer callers: 0660 keeps the socket's owning\n\
+group, 0600 keeps root only. The SkillFS notify client accepts only the\n\
+root-owned 0755/0666 public endpoint shape, so use a tighter mode only when\n\
+no SkillFS mount is configured.\n\
 PAP state is process-local until durable Repository integration lands.\n\
 PII rules: --pii-rules <ABSOLUTE_PATH>, default /etc/agent-sec/pii-checker/rules.yaml.\n\
 Rules are compiled at startup; restart to apply updates.\n";
@@ -70,6 +75,7 @@ impl Cli {
         let mut arguments = arguments.into_iter().map(Into::into);
         let _program = arguments.next();
         let mut socket_path = None;
+        let mut socket_mode = None;
         let mut command_seen = false;
         let mut policy_admin_uids = BTreeSet::new();
         let mut pii_rules = None;
@@ -92,6 +98,14 @@ impl Cli {
                     return Err(CliError::MissingSocketValue);
                 }
                 socket_path = Some(PathBuf::from(value));
+                continue;
+            }
+            if argument == OsStr::new("--socket-mode") {
+                if socket_mode.is_some() {
+                    return Err(CliError::RepeatedSocketMode);
+                }
+                let value = arguments.next().ok_or(CliError::InvalidSocketMode)?;
+                socket_mode = Some(parse_socket_mode(&value)?);
                 continue;
             }
             let inline_rules = argument
@@ -160,8 +174,13 @@ impl Cli {
             return Err(CliError::RelativeSocket);
         }
         let mut bootstrap = BootstrapConfig::new(socket_path);
-        // The host service accepts local users; embedders retain a private default.
-        bootstrap.socket_mode = 0o666;
+        // The host service accepts local users; embedders retain a private
+        // default. The mode is now an explicit deployment choice instead of an
+        // unconditional 0666: per-skill ownership isolation (see the
+        // `requireSkillOwnership` setting) is what bounds what those callers
+        // may operate, and deployments without SkillFS mounts or local users
+        // can tighten the endpoint further.
+        bootstrap.socket_mode = socket_mode.unwrap_or(0o666);
         Ok(ParseOutcome::Serve(Box::new(Self {
             bootstrap,
             policy_admin_uids,
@@ -177,6 +196,20 @@ fn parse_admin_uid(value: &OsStr) -> Result<u32, CliError> {
         return Err(CliError::InvalidAdminUid);
     }
     value.parse::<u32>().map_err(|_| CliError::InvalidAdminUid)
+}
+
+/// Parses one `--socket-mode` value: exactly 0600, 0660 or 0666.
+///
+/// The transport additionally rejects modes without owner read/write or with
+/// execute bits; fixing the three documented values here keeps the deployment
+/// surface predictable (and matches the stale-socket recovery modes).
+fn parse_socket_mode(value: &OsStr) -> Result<u32, CliError> {
+    match value.to_str() {
+        Some("0600") => Ok(0o600),
+        Some("0660") => Ok(0o660),
+        Some("0666") => Ok(0o666),
+        _ => Err(CliError::InvalidSocketMode),
+    }
 }
 
 /// Invalid daemon command-line input.
@@ -206,6 +239,12 @@ pub enum CliError {
     /// Supplying multiple socket paths is ambiguous.
     #[error("--socket may be specified only once")]
     RepeatedSocket,
+    /// Supplying the socket mode more than once is ambiguous.
+    #[error("--socket-mode may be specified only once")]
+    RepeatedSocketMode,
+    /// The socket mode must be one of the three documented values.
+    #[error("--socket-mode must be 0600, 0660 or 0666")]
+    InvalidSocketMode,
     /// The service framework rejects relative daemon endpoints.
     #[error("--socket must be an absolute path")]
     RelativeSocket,
@@ -255,6 +294,62 @@ mod tests {
                 Err(expected)
             );
         }
+    }
+
+    #[test]
+    fn socket_mode_is_an_explicit_deployment_choice() {
+        // Default stays 0666: the documented public shape the SkillFS notify
+        // client accepts and the multi-user CLI depends on.
+        let ParseOutcome::Serve(default) =
+            Cli::parse_from(["agent-sec-daemon", "--socket", "/run/asc.sock"]).unwrap()
+        else {
+            panic!("expected daemon invocation");
+        };
+        assert_eq!(default.bootstrap.socket_mode, 0o666);
+        // Each documented value is accepted, in both argument spellings.
+        for (mode, expected) in [("0600", 0o600), ("0660", 0o660), ("0666", 0o666)] {
+            let ParseOutcome::Serve(configured) = Cli::parse_from(
+                ["agent-sec-daemon", "--socket", "/run/asc.sock", "--socket-mode"]
+                    .into_iter()
+                    .chain([mode]),
+            )
+            .unwrap()
+            else {
+                panic!("expected daemon invocation");
+            };
+            assert_eq!(configured.bootstrap.socket_mode, expected);
+        }
+        // Anything else — decimal 660, a 0o prefix, an unknown mode, a missing
+        // value, or a repetition — is rejected.
+        for arguments in [
+            vec!["--socket-mode", "660"],
+            vec!["--socket-mode", "0o660"],
+            vec!["--socket-mode", "0777"],
+            vec!["--socket-mode", "0644"],
+            vec!["--socket-mode", ""],
+            vec!["--socket-mode"],
+        ] {
+            assert_eq!(
+                Cli::parse_from(
+                    ["agent-sec-daemon", "--socket", "/run/asc.sock"]
+                        .into_iter()
+                        .chain(arguments)
+                ),
+                Err(CliError::InvalidSocketMode)
+            );
+        }
+        assert_eq!(
+            Cli::parse_from([
+                "agent-sec-daemon",
+                "--socket",
+                "/run/asc.sock",
+                "--socket-mode",
+                "0660",
+                "--socket-mode",
+                "0666",
+            ]),
+            Err(CliError::RepeatedSocketMode)
+        );
     }
 
     #[test]

@@ -122,6 +122,26 @@ fn startup_retries_unfinished_rotation_and_only_cleans_up_committed_rotation() {
 }
 
 #[test]
+fn settings_parse_the_ownership_isolation_flag() {
+    let settings: Settings = serde_json::from_str(
+        r#"{"stateDir":"/var/lib/agent-sec/skillsec","managedSkillDirs":[],"requireSkillOwnership":true}"#,
+    )
+    .unwrap();
+    assert!(settings.require_skill_ownership);
+
+    // Absent means off: the phase-one access contract stays the default.
+    let absent: Settings =
+        serde_json::from_str(r#"{"stateDir":"/var/lib/agent-sec/skillsec"}"#).unwrap();
+    assert!(!absent.require_skill_ownership);
+
+    // The settings file is camelCase with unknown fields denied, so a
+    // snake_case key is a configuration error rather than a silent no-op.
+    assert!(
+        serde_json::from_str::<Settings>(r#"{"require_skill_ownership":true}"#).is_err()
+    );
+}
+
+#[test]
 fn startup_finalizes_preparation_failures_once_and_continues_with_the_next_skill() {
     use asc_capability_skill_sec::executor::{SkillEnvironment, SkillSecExecutor};
     struct Environment(&'static str);
