@@ -828,15 +828,35 @@ fn eval_protected_links(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_accept_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/accept_redirects";
+    eval_accept_redirects_at(info, recs, "/proc/sys/net/ipv4/conf/all/accept_redirects")
+}
+
+/// Path-injectable form of [`eval_accept_redirects`] (the `eval_*_at` idiom)
+/// so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED and gated on the kernel's own truthiness:
+/// `devinet_conf_proc` (net/ipv4/devinet.c) routes the
+/// `conf/all/accept_redirects` entry through a plain `proc_dointvec` on an
+/// int slot of `struct ipv4_devconf` with no min/max, so -1 is a legal,
+/// persistent value, and `IN_DEV_RX_REDIRECTS` (include/linux/inetdevice.h)
+/// consumes it through `IN_DEV_ORCONF` — a truthiness test: any nonzero
+/// value accepts redirects. The old `== 1` gate skipped a -1 host — and
+/// every other nonzero value — so the security rule stayed silent on
+/// exactly the hosts that accept ICMP redirects.
+fn eval_accept_redirects_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    // Any nonzero value accepts redirects, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.accept_redirects".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "接受 ICMP 重定向可被用于中间人攻击，服务器通常不需要此功能".to_string(),
             confidence: Confidence::High,
@@ -2150,7 +2170,10 @@ fn any_interface_forwards(conf_root: &std::path::Path) -> bool {
     };
     for entry in entries.filter_map(|entry| entry.ok()) {
         let forwarding = entry.path().join("forwarding");
-        if read_sysctl_u64(&forwarding.to_string_lossy()) != 0 {
+        // The forwarding slot is the plain proc_dointvec int behind
+        // ctl_forward_entry (no bounds), and IN_DEV_FORWARD is a truthiness
+        // test — read it signed so a -1 interface counts as forwarding.
+        if read_sysctl_i64(&forwarding.to_string_lossy()) != 0 {
             return true;
         }
     }
@@ -2195,11 +2218,25 @@ fn eval_perf_event_paranoid_at(
 }
 
 fn eval_rp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/default/rp_filter";
+    eval_rp_filter_at(info, recs, "/proc/sys/net/ipv4/conf/default/rp_filter")
+}
+
+/// Path-injectable form of [`eval_rp_filter`] (the `eval_*_at` idiom) so the
+/// signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: the `default/rp_filter` entry sits in the same
+/// `devinet_conf_proc` plain `proc_dointvec` int slot with no min/max as the
+/// `all` template (net/ipv4/devinet.c), so -1 is a legal value, and
+/// `IN_DEV_RPFILTER` (include/linux/inetdevice.h), read by
+/// `__fib_validate_source` (net/ipv4/fib_frontend.c), is a truthiness test:
+/// a nonzero value arms the source validation. The unsigned reader parsed
+/// "-1" to Err and fell back to 0 — the *disabled* value — so the `== 0`
+/// gate invented a finding on a host whose validation is fully armed.
+fn eval_rp_filter_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.rp_filter".to_string(),
@@ -3463,12 +3500,35 @@ fn eval_icmp_echo_ignore_broadcasts_at(
     1
 }
 
-fn eval_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/accept_source_route";
-    if !std::path::Path::new(path).exists() {
+fn eval_accept_source_route(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_accept_source_route_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/all/accept_source_route",
+    )
+}
+
+/// Path-injectable form of [`eval_accept_source_route`] (the `eval_*_at`
+/// idiom) so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: `conf/all/accept_source_route` sits in the
+/// `devinet_conf_proc` plain `proc_dointvec` int slot with no min/max
+/// (net/ipv4/devinet.c), so -1 is a legal, persistent value, and
+/// `IN_DEV_ACCEPT_SOURCE_ROUTE` (include/linux/inetdevice.h) consumes it as
+/// a truthiness test — any nonzero value accepts source-routed packets.
+/// The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the security finding was missed on exactly the
+/// hosts that accept source routing.
+fn eval_accept_source_route_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value accepts source routing, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.accept_source_route".to_string(),
@@ -3638,12 +3698,34 @@ fn eval_mmap_min_addr(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
     1
 }
 
-fn eval_default_accept_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/default/accept_redirects";
-    if !std::path::Path::new(path).exists() {
+fn eval_default_accept_redirects(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_default_accept_redirects_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/default/accept_redirects",
+    )
+}
+
+/// Path-injectable form of [`eval_default_accept_redirects`] (the
+/// `eval_*_at` idiom) so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: `conf/default/accept_redirects` sits in the
+/// same `devinet_conf_proc` plain `proc_dointvec` int slot with no min/max
+/// as the `all` template (net/ipv4/devinet.c), so -1 is a legal value, and
+/// `IN_DEV_RX_REDIRECTS` is a truthiness test — any nonzero value accepts
+/// redirects on interfaces created after boot. The unsigned reader parsed
+/// "-1" to Err and fell back to 0 — the *disabled* value — so the finding
+/// was missed on the template that arms future interfaces.
+fn eval_default_accept_redirects_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value accepts redirects, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.accept_redirects".to_string(),
@@ -3658,12 +3740,35 @@ fn eval_default_accept_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendati
     1
 }
 
-fn eval_default_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/default/accept_source_route";
-    if !std::path::Path::new(path).exists() {
+fn eval_default_accept_source_route(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_default_accept_source_route_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/conf/default/accept_source_route",
+    )
+}
+
+/// Path-injectable form of [`eval_default_accept_source_route`] (the
+/// `eval_*_at` idiom) so the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: `conf/default/accept_source_route` sits in the
+/// same `devinet_conf_proc` plain `proc_dointvec` int slot with no min/max
+/// (net/ipv4/devinet.c), so -1 is a legal value, and
+/// `IN_DEV_ACCEPT_SOURCE_ROUTE` is a truthiness test — any nonzero value
+/// accepts source-routed packets on interfaces created after boot. The
+/// unsigned reader parsed "-1" to Err and fell back to 0 — the *disabled*
+/// value — so the finding was missed on the template that arms future
+/// interfaces.
+fn eval_default_accept_source_route_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    // Any nonzero value accepts source routing, so -1 must not read as 0.
+    let current = read_sysctl_i64(path);
     if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.default.accept_source_route".to_string(),
@@ -3742,12 +3847,26 @@ fn challenge_ack_limit_recommendation(current: u64) -> Option<Recommendation> {
     })
 }
 
-fn eval_rp_filter_all(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/rp_filter";
-    if !std::path::Path::new(path).exists() {
+fn eval_rp_filter_all(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_rp_filter_all_at(info, recs, "/proc/sys/net/ipv4/conf/all/rp_filter")
+}
+
+/// Path-injectable form of [`eval_rp_filter_all`] (the `eval_*_at` idiom) so
+/// the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: `conf/all/rp_filter` sits in the same
+/// `devinet_conf_proc` plain `proc_dointvec` int slot with no min/max as the
+/// `default` template (net/ipv4/devinet.c), so -1 is a legal value, and
+/// `IN_DEV_RPFILTER` is a truthiness test (`__fib_validate_source`,
+/// net/ipv4/fib_frontend.c): a nonzero value arms the source validation for
+/// every interface. The unsigned reader parsed "-1" to Err and fell back to
+/// 0 — the *disabled* value — so the `== 0` gate invented a finding on a
+/// host whose validation is fully armed.
+fn eval_rp_filter_all_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.rp_filter".to_string(),
@@ -5152,14 +5271,28 @@ fn eval_tcp_thin_linear_timeouts(info: &SystemInfo, recs: &mut Vec<Recommendatio
 }
 
 fn eval_arp_notify(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/conf/all/arp_notify";
-    if !std::path::Path::new(path).exists() {
+    eval_arp_notify_at(info, recs, "/proc/sys/net/ipv4/conf/all/arp_notify")
+}
+
+/// Path-injectable form of [`eval_arp_notify`] (the `eval_*_at` idiom) so
+/// the signed read is assertable against a temp file.
+///
+/// The value is read SIGNED: `conf/all/arp_notify` sits in the same
+/// `devinet_conf_proc` plain `proc_dointvec` int slot with no min/max as the
+/// other devconf booleans (net/ipv4/devinet.c), so -1 is a legal value, and
+/// `IN_DEV_ARP_NOTIFY` is an `IN_DEV_MAXCONF` truthiness test consumed by
+/// net/ipv4/arp.c — any nonzero value makes the host send gratuitous ARP on
+/// link change. The unsigned reader parsed "-1" to Err and fell back to 0 —
+/// the *disabled* value — so the `== 0` gate invented a finding on a host
+/// that already sends notifications.
+fn eval_arp_notify_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
     if arp_tuning_skipped(info.network.len(), has_bond()) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.conf.all.arp_notify".to_string(),
@@ -13349,6 +13482,227 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+    }
+
+    #[test]
+    fn devconf_redirect_rules_read_truthiness_signed() {
+        // devinet_conf_proc's int slot has no min/max, so -1 is a legal,
+        // persistent value and IN_DEV_RX_REDIRECTS consumes it as a truthiness
+        // test. The unsigned reader collapsed "-1" to the fallback 0 — the
+        // disabled value — so the finding was missed, and the old "== 1" gate
+        // on the `all` template skipped every other nonzero value alike.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_devconf_redirects_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_str = path.to_str().unwrap();
+        let info = make_test_info();
+        for (value, expects_rec) in [("-1", true), ("2", true), ("1", true), ("0", false)] {
+            std::fs::write(&path, value).unwrap();
+            for (param, run) in [
+                (
+                    "net.ipv4.conf.all.accept_redirects",
+                    eval_accept_redirects_at
+                        as fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize,
+                ),
+                (
+                    "net.ipv4.conf.default.accept_redirects",
+                    eval_default_accept_redirects_at
+                        as fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize,
+                ),
+            ] {
+                let mut recs = Vec::new();
+                run(&info, &mut recs, path_str);
+                let rec = recs.iter().find(|r| r.param == param);
+                assert_eq!(
+                    rec.is_some(),
+                    expects_rec,
+                    "value={value}: {param} recommendation presence"
+                );
+                if let Some(rec) = rec {
+                    assert_eq!(
+                        rec.current_value, value,
+                        "current must be what the kernel holds"
+                    );
+                    assert_eq!(rec.recommended_value, "0");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn devconf_source_route_rules_read_truthiness_signed() {
+        // Same registration, same truthiness consumer
+        // (IN_DEV_ACCEPT_SOURCE_ROUTE): -1 accepts source-routed packets and
+        // must be flagged, not read as the fallback 0.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_devconf_source_route_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_str = path.to_str().unwrap();
+        let info = make_test_info();
+        for (value, expects_rec) in [("-1", true), ("2", true), ("0", false)] {
+            std::fs::write(&path, value).unwrap();
+            for (param, run) in [
+                (
+                    "net.ipv4.conf.all.accept_source_route",
+                    eval_accept_source_route_at
+                        as fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize,
+                ),
+                (
+                    "net.ipv4.conf.default.accept_source_route",
+                    eval_default_accept_source_route_at
+                        as fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize,
+                ),
+            ] {
+                let mut recs = Vec::new();
+                run(&info, &mut recs, path_str);
+                let rec = recs.iter().find(|r| r.param == param);
+                assert_eq!(
+                    rec.is_some(),
+                    expects_rec,
+                    "value={value}: {param} recommendation presence"
+                );
+                if let Some(rec) = rec {
+                    assert_eq!(
+                        rec.current_value, value,
+                        "current must be what the kernel holds"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn devconf_rp_filter_rules_do_not_invent_findings_on_minus_one() {
+        // IN_DEV_RPFILTER is a truthiness test: a nonzero value arms the
+        // source validation. The unsigned reader collapsed "-1" to the
+        // fallback 0 — the disabled value — so the "is it off" gates
+        // invented a hardening finding on a host whose validation is
+        // already fully armed.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_devconf_rp_filter_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path_str = path.to_str().unwrap();
+        let info = make_test_info();
+        for (value, expects_rec) in [("-1", false), ("2", false), ("1", false), ("0", true)] {
+            std::fs::write(&path, value).unwrap();
+            for (param, run) in [
+                (
+                    "net.ipv4.conf.default.rp_filter",
+                    eval_rp_filter_at as fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize,
+                ),
+                (
+                    "net.ipv4.conf.all.rp_filter",
+                    eval_rp_filter_all_at
+                        as fn(&SystemInfo, &mut Vec<Recommendation>, &str) -> usize,
+                ),
+            ] {
+                let mut recs = Vec::new();
+                run(&info, &mut recs, path_str);
+                let rec = recs.iter().find(|r| r.param == param);
+                assert_eq!(
+                    rec.is_some(),
+                    expects_rec,
+                    "value={value}: {param} recommendation presence"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn arp_notify_minus_one_already_notifies() {
+        // IN_DEV_ARP_NOTIFY is a truthiness test consumed by net/ipv4/arp.c;
+        // -1 sends the gratuitous ARP already, so reading it as the fallback
+        // 0 invented a finding on a notifying host. The multi-NIC gate needs
+        // two interfaces and no bond, so the 0 case is asserted only when
+        // that gate lets the rule run.
+        let mut info = make_test_info();
+        info.network = vec![
+            NetInfo {
+                name: "eth0".to_string(),
+                speed_mbps: 10000,
+            },
+            NetInfo {
+                name: "eth1".to_string(),
+                speed_mbps: 10000,
+            },
+        ];
+        let bonded = has_bond();
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_arp_notify_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        for (value, expects_rec) in [("-1", false), ("1", false), ("0", !bonded)] {
+            std::fs::write(&path, value).unwrap();
+            let mut recs = Vec::new();
+            eval_arp_notify_at(&info, &mut recs, path.to_str().unwrap());
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.conf.all.arp_notify");
+            assert_eq!(
+                rec.is_some(),
+                expects_rec,
+                "value={value}: only 0 leaves gratuitous ARP off"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn any_interface_forwards_reads_minus_one_as_forwarding() {
+        // The forwarding template behind ctl_forward_entry is a plain
+        // proc_dointvec int (no bounds) and IN_DEV_FORWARD is a truthiness
+        // test, so a -1 interface forwards. The unsigned reader collapsed it
+        // to 0, the whole tree read as non-forwarding, and both
+        // send_redirects rules went quiet on exactly the host where
+        // redirects can be sent.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_any_forwards_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("conf");
+        let knob = dir.join("send_redirects");
+        std::fs::write(&knob, "1\n").unwrap();
+
+        // Every interface at 0: nothing forwards.
+        for iface in ["all", "default", "lo", "eth0"] {
+            let p = conf.join(iface).join("forwarding");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "0\n").unwrap();
+        }
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_send_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &conf);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.conf.all.send_redirects"),
+            "a non-forwarding tree cannot send redirects"
+        );
+
+        // One interface at -1: the tree forwards, and the enabled
+        // send_redirects knob must be flagged.
+        std::fs::write(conf.join("eth0").join("forwarding"), "-1\n").unwrap();
+        let mut recs = Vec::new();
+        eval_send_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &conf);
+        let rec = recs
+            .iter()
+            .find(|r| r.param == "net.ipv4.conf.all.send_redirects")
+            .expect("a -1 forwarding interface makes redirects sendable");
+        assert_eq!(rec.current_value, "1");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
