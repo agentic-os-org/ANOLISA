@@ -117,7 +117,12 @@ class SkillLedgerWorkerClient:
             process.stdin.write(frame)
             await process.stdin.drain()
             line = await process.stdout.readline()
-        except (BrokenPipeError, ConnectionError, OSError) as exc:
+        except (BrokenPipeError, ConnectionError, OSError, ValueError) as exc:
+            # ValueError stays for the READ side: a decoding or shutdown-time
+            # ValueError from readline() is a faulty-worker condition that the
+            # transport classification must route into the kill-and-restart
+            # recovery. The write side can no longer raise it — request
+            # serialization happens before the spawn, above.
             raise SkillLedgerWorkerTransportError(
                 self._transport_message(f"worker communication failed: {exc}")
             ) from exc
