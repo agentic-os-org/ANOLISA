@@ -53,6 +53,9 @@ mod readonly_interceptor_tests;
 #[cfg(test)]
 #[path = "tools/readonly_rules/traversal_tests.rs"]
 mod readonly_traversal_tests;
+#[cfg(test)]
+#[path = "tools/readonly_rules/write_primitives_tests.rs"]
+mod readonly_write_primitives_tests;
 #[path = "shell_host/public.rs"]
 pub mod shell_host;
 #[allow(dead_code)]
