@@ -156,10 +156,17 @@ pub(super) async fn preview_agent_protection(
             true,
         );
     };
-    let root = query.directory.as_deref().unwrap_or(&workspace);
-    let root = match root.canonicalize() {
-        Ok(root) if root.is_dir() => root,
-        _ => {
+    let root = match protection_scan_root(query.directory.as_deref(), &workspace) {
+        Ok(root) => root,
+        Err(ProtectionRootError::WorkspaceUnavailable) => {
+            return error_response(
+                actix_web::http::StatusCode::CONFLICT,
+                "workspace_unavailable",
+                "agent workspace is unavailable",
+                true,
+            );
+        }
+        Err(ProtectionRootError::NotADirectory) => {
             return error_response(
                 actix_web::http::StatusCode::BAD_REQUEST,
                 "invalid_protection_directory",
@@ -167,15 +174,23 @@ pub(super) async fn preview_agent_protection(
                 false,
             );
         }
+        Err(ProtectionRootError::FilesystemRoot) => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "unsafe_protection_directory",
+                "protection directory cannot be the filesystem root",
+                false,
+            );
+        }
+        Err(ProtectionRootError::OutsideWorkspace) => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "unauthorized_protection_directory",
+                "protection directory must stay inside the agent workspace",
+                false,
+            );
+        }
     };
-    if root == Path::new("/") {
-        return error_response(
-            actix_web::http::StatusCode::BAD_REQUEST,
-            "unsafe_protection_directory",
-            "protection directory cannot be the filesystem root",
-            false,
-        );
-    }
     // Run the recursive filesystem scan on the blocking pool so a large or slow
     // directory never ties up an async Actix worker. HOME is only a fallback for
     // an empty default-workspace scan; an explicit directory remains authoritative.
@@ -201,6 +216,55 @@ pub(super) async fn preview_agent_protection(
         mode: PolicyMode::Audit,
         max_trusted_endpoints: 1,
     })
+}
+
+/// Why a requested protection-scan root was rejected.
+#[derive(Debug, PartialEq, Eq)]
+enum ProtectionRootError {
+    /// The agent workspace could not be resolved, so no boundary exists to enforce.
+    WorkspaceUnavailable,
+    /// The requested path is missing, or exists but is not a directory.
+    NotADirectory,
+    /// The requested path is the filesystem root.
+    FilesystemRoot,
+    /// The requested path resolves outside the agent workspace.
+    OutsideWorkspace,
+}
+
+/// Validates the protection-scan root for one agent.
+///
+/// `candidate` is the caller-supplied `directory` query parameter; `None` scans
+/// the agent's own workspace. An explicit directory must resolve *inside* the
+/// workspace: this preview answers with full sensitive-file paths, loopback
+/// requests reach it without a token, and permissive CORS lets a visited web
+/// page read the response — so an unbounded `directory` would enumerate
+/// credential-file paths anywhere on the machine the server can read. Both
+/// sides are canonicalized before comparison, so a symlinked workspace alias
+/// and an in-workspace symlink that points outside are both judged by their
+/// resolved location.
+fn protection_scan_root(
+    candidate: Option<&Path>,
+    workspace: &Path,
+) -> Result<PathBuf, ProtectionRootError> {
+    let root = candidate.unwrap_or(workspace);
+    let root = root
+        .canonicalize()
+        .map_err(|_| ProtectionRootError::NotADirectory)?;
+    if !root.is_dir() {
+        return Err(ProtectionRootError::NotADirectory);
+    }
+    if root == Path::new("/") {
+        return Err(ProtectionRootError::FilesystemRoot);
+    }
+    if candidate.is_some() {
+        let boundary = workspace
+            .canonicalize()
+            .map_err(|_| ProtectionRootError::WorkspaceUnavailable)?;
+        if !root.starts_with(&boundary) {
+            return Err(ProtectionRootError::OutsideWorkspace);
+        }
+    }
+    Ok(root)
 }
 
 fn is_active_credential_binding(binding: &Binding, pid: u32) -> bool {
@@ -421,7 +485,14 @@ fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if path.is_dir() {
+            // Classify by the entry's own type, never by following a symlink:
+            // a link planted inside the scan root can point anywhere on the
+            // filesystem, and `path.is_dir()`/`path.is_file()` would happily
+            // walk or read through it, widening the bounded scan.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 if !matches!(
                     name.as_ref(),
                     ".git"
@@ -440,7 +511,7 @@ fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<
                 ) {
                     visit(&path, depth + 1, max_depth, visited, out);
                 }
-            } else if path.is_file() && is_sensitive_file(name.as_ref()) {
+            } else if file_type.is_file() && is_sensitive_file(name.as_ref()) {
                 out.push(path.to_string_lossy().into_owned());
             }
         }
@@ -1143,6 +1214,112 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn protection_scan_root_bounds_explicit_directories_to_the_workspace() {
+        let base = std::env::temp_dir().join(format!("agentsight-boundary-{}", Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        let nested = workspace.join("nested");
+        let outside = base.join("outside");
+        fs::create_dir_all(&nested).expect("workspace fixture");
+        fs::create_dir_all(&outside).expect("outside fixture");
+
+        // The default scan root stays the agent's own workspace.
+        assert_eq!(
+            protection_scan_root(None, &workspace),
+            Ok(workspace.canonicalize().expect("canonical workspace"))
+        );
+        // Explicit directories inside the workspace are accepted, including
+        // the workspace itself.
+        assert_eq!(
+            protection_scan_root(Some(&nested), &workspace),
+            Ok(nested.canonicalize().expect("canonical nested"))
+        );
+        assert_eq!(
+            protection_scan_root(Some(&workspace), &workspace),
+            Ok(workspace.canonicalize().expect("canonical workspace"))
+        );
+
+        // A directory outside the workspace is refused.
+        assert_eq!(
+            protection_scan_root(Some(&outside), &workspace),
+            Err(ProtectionRootError::OutsideWorkspace)
+        );
+        // A symlink planted inside the workspace but resolving outside is
+        // judged by its resolved location, not by where the link lives.
+        let escape = workspace.join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).expect("escape symlink fixture");
+        assert_eq!(
+            protection_scan_root(Some(&escape), &workspace),
+            Err(ProtectionRootError::OutsideWorkspace)
+        );
+
+        // Missing paths, regular files and the filesystem root keep their
+        // established error classes.
+        assert_eq!(
+            protection_scan_root(Some(&base.join("missing")), &workspace),
+            Err(ProtectionRootError::NotADirectory)
+        );
+        let file = workspace.join("SKILL.md");
+        fs::write(&file, b"docs").expect("file fixture");
+        assert_eq!(
+            protection_scan_root(Some(&file), &workspace),
+            Err(ProtectionRootError::NotADirectory)
+        );
+        assert_eq!(
+            protection_scan_root(Some(Path::new("/")), &workspace),
+            Err(ProtectionRootError::FilesystemRoot)
+        );
+
+        // When the workspace itself cannot be resolved there is no boundary to
+        // enforce, so an explicit directory fails closed.
+        assert_eq!(
+            protection_scan_root(Some(&outside), &base.join("vanished")),
+            Err(ProtectionRootError::WorkspaceUnavailable)
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_sensitive_files_does_not_follow_directory_symlinks() {
+        let base = std::env::temp_dir().join(format!("agentsight-walk-{}", Uuid::new_v4()));
+        let root = base.join("root");
+        let nested = root.join("nested");
+        let outside = base.join("outside");
+        fs::create_dir_all(&nested).expect("nested fixture");
+        fs::create_dir_all(&outside).expect("outside fixture");
+        fs::write(root.join(".env"), b"SECRET=1").expect("root env fixture");
+        fs::write(nested.join("id_rsa"), b"key").expect("nested key fixture");
+        fs::write(outside.join(".env"), b"SECRET=2").expect("outside env fixture");
+        // A link inside the scan root pointing at a directory outside it must
+        // not widen the walk: recursing through it would enumerate the outside
+        // tree's credential-shaped files.
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("link fixture");
+
+        let found = discover_sensitive_files(&root, 5, 64);
+
+        assert!(
+            found
+                .iter()
+                .any(|p| p.ends_with("/.env") && p.contains("root")),
+            "the root .env should be found, got {found:?}"
+        );
+        assert!(
+            found.iter().any(|p| p.ends_with("id_rsa")),
+            "the nested key should be found, got {found:?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|p| p.contains("link") || p.contains("outside")),
+            "a symlinked directory must not be followed, got {found:?}"
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn validates_process_home_from_proc_metadata() {
         let root = std::env::temp_dir().join(format!("agentsight-proc-{}", Uuid::new_v4()));
         let proc_root = root.join("proc");
@@ -1469,6 +1646,31 @@ mod tests {
         assert_eq!(explicit.status(), StatusCode::OK);
         let explicit_body: serde_json::Value = awtest::read_body_json(explicit).await;
         assert_eq!(explicit_body["source_paths"], serde_json::json!([]));
+
+        // An explicit directory outside the agent's workspace is refused: this
+        // preview lists sensitive-file paths and loopback requests reach it
+        // without a token, so an unbounded directory would enumerate
+        // credentials anywhere the server can read.
+        let outside = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!(
+                    "/api/enforcement/agent-protection/{fallback_pid}?directory={}",
+                    canonical_process_home.display()
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(outside.status(), StatusCode::BAD_REQUEST);
+        let outside_body: serde_json::Value = awtest::read_body_json(outside).await;
+        assert_eq!(
+            outside_body["error"]["code"], "unauthorized_protection_directory",
+            "a directory outside the workspace must not be scanned: {outside_body}"
+        );
+        assert!(
+            !outside_body.to_string().contains("HOME_SECRET"),
+            "no file paths from the refused directory may leak: {outside_body}"
+        );
 
         // A path that exists but is not a directory is not the filesystem
         // root: the preview must name the real failure.
