@@ -6703,6 +6703,11 @@ fn is_database_present(info: &SystemInfo) -> bool {
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database.
         || info.has_process("mariadbd")
         || info.has_process("oracle")
+        // MongoDB and ClickHouse are databases in every sibling gate
+        // (eval_swappiness, eval_thp, eval_dirty_ratio, eval_readahead)
+        // but were missing from this shared memory-oriented predicate.
+        || info.has_process("mongod")
+        || info.has_process("clickhouse")
 }
 
 /// Pure core of the `vm.overcommit_ratio` rule: a strict-mode
@@ -6916,7 +6921,19 @@ mod tests {
         );
 
         // Real database servers, including role-prefixed worker comms.
-        for name in ["postgres", "postgres: writer", "mysqld", "oracle"] {
+        // mongod and clickhouse are databases in every sibling gate
+        // (eval_swappiness, eval_thp, eval_dirty_ratio, eval_readahead)
+        // but were missing from this shared predicate.
+        for name in [
+            "postgres",
+            "postgres: writer",
+            "mysqld",
+            "oracle",
+            "mongod",
+            "mongod: shard",
+            "clickhouse",
+            "clickhouse: writer",
+        ] {
             assert!(
                 is_database_present(&info_with(&[name])),
                 "{name} is a database"
