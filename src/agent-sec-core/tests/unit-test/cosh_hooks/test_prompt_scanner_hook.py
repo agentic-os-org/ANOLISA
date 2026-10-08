@@ -199,6 +199,24 @@ class TestCoshHookSubprocess:
         output = self._run_hook({"session_id": "abc"})
         assert output["decision"] == "allow"
 
+    @pytest.mark.parametrize(
+        "payload",
+        ['["not", "an", "object"]', '"a string"', "42", "null"],
+    )
+    def test_non_object_payload_allows(self, payload):
+        """Valid JSON that is not an object must fail-open like malformed JSON."""
+        proc = subprocess.run(
+            [sys.executable, _COSH_HOOK],
+            input=payload,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+        )
+        assert proc.returncode == 0, f"Hook stderr: {proc.stderr}"
+        output = json.loads(proc.stdout)
+        assert output["decision"] == "allow"
+
     def test_injects_trace_context_into_scan_prompt_command(self, monkeypatch, capsys):
         captured = {}
 
