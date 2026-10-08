@@ -3246,6 +3246,26 @@ mod tests {
         assert_eq!(e.path, "/proc/sys/vm/swappiness");
     }
 
+    /// Acquire the exclusive lock on `fd`, retrying while it is briefly
+    /// unavailable.
+    ///
+    /// The CI runners' overlay filesystem can lag a released flock behind
+    /// the closing `drop` (#6527), so a single-shot `LOCK_EX | LOCK_NB`
+    /// probe of the release flakes under load. The property under test is
+    /// exclusion while held and release on drop, not release visibility
+    /// within one scheduler tick, so retry for a short bounded window
+    /// before reporting the acquire result.
+    fn acquire_exclusive_with_retry(fd: std::os::unix::io::RawFd) -> i32 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 || std::time::Instant::now() > deadline {
+                return rc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn test_ledger_lock_excludes_a_second_descriptor() {
         // The guard must actually hold an exclusive flock: a second open file
@@ -3278,10 +3298,58 @@ mod tests {
             Some(libc::EWOULDBLOCK)
         );
         drop(guard);
-        let rc = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let rc = acquire_exclusive_with_retry(second.as_raw_fd());
         assert_eq!(rc, 0, "acquire after drop must succeed");
         unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_UN) };
         drop(second);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A held-over second lock is what the runners' lagging flock release
+    /// looks like to the acquiring side after the guard drops (#6527), so
+    /// the acquire must retry past it and win once the holdover descriptor
+    /// closes.
+    #[test]
+    fn test_ledger_lock_acquire_tolerates_a_brief_holdover() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_ledger_holdover_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("rollback.json");
+        let guard = lock_ledger_at(ledger.to_str().unwrap()).unwrap();
+        drop(guard);
+
+        // The holdover: a descriptor that re-acquires the just-released
+        // lock and keeps it for a moment, exactly the window the lagging
+        // release leaves visible to the next acquire.
+        let (acquired, held) = std::sync::mpsc::channel();
+        let holdover = std::thread::spawn(move || {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(format!("{}.lock", ledger.to_str().unwrap()))
+                .expect("open holdover lock");
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            acquired.send(rc).expect("signal holdover acquire");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+        assert_eq!(held.recv().unwrap(), 0, "holdover must acquire");
+
+        let second = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join("rollback.json.lock"))
+            .unwrap();
+        let rc = acquire_exclusive_with_retry(second.as_raw_fd());
+        assert_eq!(rc, 0, "acquire must outlast the holdover");
+
+        unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_UN) };
+        drop(second);
+        holdover.join().unwrap();
         fs::remove_dir_all(&dir).ok();
     }
 
