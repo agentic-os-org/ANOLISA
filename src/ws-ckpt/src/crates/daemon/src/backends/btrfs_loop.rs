@@ -203,13 +203,14 @@ impl StorageBackend for BtrfsLoopBackend {
     }
 
     async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
-        btrfs_common::ensure_not_internal_snapshot_id(snapshot_id)?;
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let ws_subvol = self.mount_path.join(ws_id);
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         btrfs_common::create_snapshot(&ws_subvol, &snap_path, true).await
     }
 
     async fn rollback(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<PathBuf> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let ws_path = self.mount_path.join(ws_id);
         let tmp_path = self.mount_path.join(format!("{}.rollback-tmp", ws_id));
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
@@ -253,6 +254,7 @@ impl StorageBackend for BtrfsLoopBackend {
     }
 
     async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         btrfs_common::delete_subvolume_space_aware(&snap_path, &self.mount_path).await
     }
@@ -341,6 +343,22 @@ impl StorageBackend for BtrfsLoopBackend {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
+        // 5. Remove the workspace's internal diff temp directory. recover
+        //    holds the same workspace mutation lock as diff, so nothing here
+        //    can be a live temp snapshot; leftovers sweep first, then the
+        //    directory itself goes away.
+        let diff_tmp_dir = self
+            .mount_path
+            .join(btrfs_common::DIFF_TMP_DIR_NAME)
+            .join(ws_id);
+        btrfs_common::sweep_diff_tmp_dir(&diff_tmp_dir, &self.mount_path).await;
+        if let Err(e) = tokio::fs::remove_dir_all(&diff_tmp_dir).await {
+            warn!(
+                "failed to remove internal diff temp dir {:?}: {}",
+                diff_tmp_dir, e
+            );
+        }
+
         // The backup can contain files absent from an interrupted migration.
         // Leave it intact; the manager archives it and reports the new location.
 
@@ -353,14 +371,21 @@ impl StorageBackend for BtrfsLoopBackend {
         from: &str,
         to: Option<&str>,
     ) -> anyhow::Result<Vec<DiffEntry>> {
+        btrfs_common::ensure_snapshot_id_is_single_component(from)?;
+        if let Some(id) = to {
+            btrfs_common::ensure_snapshot_id_is_single_component(id)?;
+        }
         let snap_base = self.snapshots_dir.join(ws_id);
         let snap_from = snap_base.join(from);
         match to {
             Some(id) => btrfs_common::diff_between_snapshots(&snap_from, &snap_base.join(id)).await,
             None => {
                 let live = self.data_root().join(ws_id);
-                btrfs_common::diff_against_live(&snap_from, &live, &snap_base, &self.mount_path)
-                    .await
+                let tmp_dir = self
+                    .data_root()
+                    .join(btrfs_common::DIFF_TMP_DIR_NAME)
+                    .join(ws_id);
+                btrfs_common::diff_against_live(&snap_from, &live, &tmp_dir, &self.mount_path).await
             }
         }
     }
@@ -377,6 +402,7 @@ impl StorageBackend for BtrfsLoopBackend {
     }
 
     async fn fork(&self, ws_id: &str, snapshot_id: &str, new_ws_id: &str) -> anyhow::Result<()> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         let new_ws_path = self.mount_path.join(new_ws_id);
         btrfs_common::create_snapshot(&snap_path, &new_ws_path, false).await
@@ -547,6 +573,22 @@ impl StorageBackend for BtrfsLoopBackend {
         tokio::fs::create_dir_all(&snapshots_dir)
             .await
             .context("Failed to create snapshots directory")?;
+
+        // Internal diff temp storage lives at <mount>/.diff-tmp/<ws-id>/,
+        // outside snapshots/ so no recovery scan can ever index a crash
+        // leftover as a phantom snapshot. Sweep leftovers from a previous
+        // daemon run before any request can start a diff, and surface
+        // legacy-named .diff-tmp-* snapshots for manual handling instead of
+        // deleting them.
+        let diff_tmp_root = self.mount_path.join(btrfs_common::DIFF_TMP_DIR_NAME);
+        if let Err(e) = tokio::fs::create_dir_all(&diff_tmp_root).await {
+            warn!(
+                "failed to create internal diff temp root {:?}: {:#}",
+                diff_tmp_root, e
+            );
+        }
+        btrfs_common::sweep_diff_tmp_root(&diff_tmp_root, &self.mount_path).await;
+        btrfs_common::warn_legacy_diff_tmp_snapshots(&self.snapshots_dir).await;
 
         // Startup awaits bootstrap before rebuilding workspace watchers.
         self.recover_interrupted_rollbacks().await?;
@@ -1371,6 +1413,29 @@ mod tests {
         reconcile_img_size, BtrfsLoopBackend,
     };
     use ws_ckpt_common::{DaemonConfig, SNAPSHOTS_DIR};
+
+    /// Unsafe snapshot ids are refused before any path is constructed: the
+    /// legacy IPC path forwards ids without upstream validation, and
+    /// `Path::join` normalizes `./` components away, so the backend must
+    /// check the shape of the id itself.
+    #[tokio::test]
+    async fn create_snapshot_rejects_unsafe_ids() {
+        use ws_ckpt_common::backend::StorageBackend;
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = BtrfsLoopBackend::new(tmp.path().to_path_buf(), tmp.path().join("img"));
+        for (bad, expected) in [
+            ("../escape", "single path component"),
+            ("./.diff-tmp-backup", "single path component"),
+            ("a/b", "single path component"),
+            (".", "must not be '.' or '..'"),
+        ] {
+            let err = backend
+                .create_snapshot("ws-abc123", bad)
+                .await
+                .expect_err("unsafe ids must be rejected");
+            assert!(err.to_string().contains(expected), "{bad}: {err:#}");
+        }
+    }
 
     const GB: u64 = 1024 * 1024 * 1024;
 
