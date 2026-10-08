@@ -938,19 +938,26 @@ fn looks_like_path(token: &str) -> bool {
 /// path arguments masked, digits masked. `rg foo src/a.rs` and `rg foo src/b.rs`
 /// collapse to one signature, while `cargo test` stays distinct from `cargo build`.
 fn normalize_cmd(cmd: &str) -> String {
-    let head = cmd
+    let segments: Vec<&str> = cmd
         .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split('|'))
+        .flat_map(|s| s.split(';'))
+        .collect();
+    // A leading `cd <dir>` only locates the working tree; the action identity
+    // lives in the command after it. Taking the first segment verbatim merged
+    // every `cd /repo && …` call into one `cd <path>` signature — exactly the
+    // collapse of distinct actions the axis is documented to avoid.
+    let mut index = 0;
+    while segments[index]
+        .split_whitespace()
         .next()
-        .unwrap_or(cmd)
-        .split("||")
-        .next()
-        .unwrap_or(cmd)
-        .split('|')
-        .next()
-        .unwrap_or(cmd)
-        .split(';')
-        .next()
-        .unwrap_or(cmd);
+        .is_some_and(|token| token.eq_ignore_ascii_case("cd"))
+        && index + 1 < segments.len()
+    {
+        index += 1;
+    }
+    let head = segments[index];
     let masked: Vec<String> = head
         .split_whitespace()
         .take(6)
@@ -1866,6 +1873,43 @@ mod tests {
         // Only the first pipeline segment matters for the action's identity.
         let piped = normalize_action_sig(&call("Bash", json!({"command": "cargo test | tail -5"})));
         assert_eq!(test, piped);
+    }
+
+    /// A leading `cd <dir>` only locates the working tree. The first segment
+    /// used to become the whole signature, so `cd /repo && cargo test` and
+    /// `cd /repo && cargo build` collapsed into the same `cd <path>` axis —
+    /// the exact merge the signature is documented to avoid, and the one that
+    /// hid most real recurrence in agent traces where cd-prefixed compounds
+    /// are the norm.
+    #[test]
+    fn action_sig_skips_leading_cd_segments() {
+        let test =
+            normalize_action_sig(&call("Bash", json!({"command": "cd /repo && cargo test"})));
+        let build =
+            normalize_action_sig(&call("Bash", json!({"command": "cd /repo && cargo build"})));
+        assert_ne!(
+            test, build,
+            "commands after a leading cd must stay distinct"
+        );
+        assert_eq!(test, "Bash:cargo test");
+        assert_eq!(build, "Bash:cargo build");
+
+        // The directory itself is not part of the action's identity.
+        let elsewhere =
+            normalize_action_sig(&call("Bash", json!({"command": "cd /other && cargo test"})));
+        assert_eq!(test, elsewhere);
+
+        // A bare cd remains its own action.
+        let lone = normalize_action_sig(&call("Bash", json!({"command": "cd /repo"})));
+        assert_eq!(lone, "Bash:cd <path>");
+
+        // Chained cds still reach the real command, and pipelines keep their
+        // first non-cd segment.
+        let chained = normalize_action_sig(&call(
+            "Bash",
+            json!({"command": "cd /a && cd /b && cargo test | tail"}),
+        ));
+        assert_eq!(chained, test);
     }
 
     #[test]
