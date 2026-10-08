@@ -62,6 +62,17 @@ def _run_hook(tool_response: object, tool_name: str = "Bash") -> subprocess.Comp
     )
 
 
+def _run_raw_hook(payload: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+
 class CodexResponseDiagnosticsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="test_codex_diagnostics_")
@@ -112,6 +123,26 @@ class CodexResponseDiagnosticsTest(unittest.TestCase):
         self.assertNotIn("[tokenless:compressed]", context)
         self.assertNotIn("updatedMCPToolOutput", hook_output)
         self.assertNotIn("suppressOutput", output)
+
+    def test_non_object_payload_passes_through_silently(self) -> None:
+        """Valid JSON that is not an object must take the silent skip path.
+
+        The docstring promises every error path exits successfully with empty
+        stdout, and the sibling schema hook already treats this input class as
+        a recognised one.
+        """
+        for payload in (
+            '[{"stdout": "bash: foo: command not found"}]',
+            '"a string"',
+            "42",
+            "null",
+            "true",
+        ):
+            with self.subTest(payload=payload):
+                result = _run_raw_hook(payload)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("Traceback", result.stderr)
 
     def test_unclassified_failure_passes_through(self) -> None:
         result = _run_hook(
