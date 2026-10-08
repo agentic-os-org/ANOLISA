@@ -480,13 +480,20 @@ fn eval_swappiness(
 }
 
 fn eval_thp(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    // Databases and caches whose latency profile THP's collapse/split stalls
+    // hurt. mongod sits in every sibling db list (eval_swappiness,
+    // eval_dirty_ratio, the readahead rule, the classify gate) and MongoDB's
+    // production notes ask for THP to be off outright; etcd is the
+    // coordination store of the same cache family redis/memcached belong to.
     let is_latency_sensitive = info.has_process("redis-server")
         || info.has_process("memcached")
         || info.has_process("postgres")
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
         || info.has_process("mariadbd")
-        || info.has_process("clickhouse");
+        || info.has_process("mongod")
+        || info.has_process("clickhouse")
+        || info.has_process("etcd");
 
     if is_latency_sensitive && info.sysctl.thp_enabled == "always" {
         recs.push(Recommendation {
@@ -7472,6 +7479,35 @@ mod tests {
         let thp_rec = recs.iter().find(|r| r.param.contains("hugepage"));
         assert!(thp_rec.is_some());
         assert_eq!(thp_rec.unwrap().recommended_value, "madvise");
+    }
+
+    #[test]
+    fn test_thp_with_mongod_and_etcd() {
+        // mongod is a database in every sibling list (swappiness, dirty_ratio,
+        // classify) and MongoDB's production notes ask for THP off outright;
+        // etcd is the coordination store of the same cache family. Both must
+        // get the always->madvise recommendation; a streaming workload must not.
+        for name in ["mongod", "etcd"] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let recs = evaluate(&info).unwrap().recommendations;
+            let thp_rec = recs
+                .iter()
+                .find(|r| r.param.contains("hugepage"))
+                .unwrap_or_else(|| panic!("{name} must get the THP recommendation"));
+            assert_eq!(thp_rec.recommended_value, "madvise");
+        }
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "kafka".to_string(),
+        }];
+        let recs = evaluate(&info).unwrap().recommendations;
+        assert!(
+            recs.iter().all(|r| !r.param.contains("hugepage")),
+            "a streaming workload is not latency-sensitive"
+        );
     }
 
     #[test]
