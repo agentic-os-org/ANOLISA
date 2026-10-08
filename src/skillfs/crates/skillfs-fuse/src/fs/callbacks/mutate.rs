@@ -9,7 +9,9 @@ use skillfs_core::{parser, store::adopt_directory_name};
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::{PathType, is_hermes_management_path, is_skill_discover_path};
+use crate::path::{
+    PathType, hermes_nested_sync_eligible, is_hermes_management_path, is_skill_discover_path,
+};
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{
@@ -1427,6 +1429,40 @@ impl SkillFs {
                             // candidate's rename must leave the retained
                             // owner in place.
                             if self.store_entry_backs_manifest(skill_name, &old_physical) {
+                                self.store.write().remove(skill_name);
+                            }
+                        }
+                        // Hermes nested manifests: a rename onto a nested
+                        // SKILL.md path re-parses it; a rename away drops
+                        // the leaf entry. The drop stays identity-gated —
+                        // the store keys nested skills by leaf, so another
+                        // category (or a categorized flat source) may own
+                        // the same key (the directory-rename arm's
+                        // discipline above).
+                        if let PathType::NestedSkillMd {
+                            category,
+                            skill_name,
+                            ..
+                        } = &new_type
+                        {
+                            if hermes_nested_sync_eligible(category, skill_name) {
+                                self.send_sync(SyncEvent::Reparse {
+                                    skill_name: skill_name.clone(),
+                                    source_path: new_physical.clone(),
+                                    max_skill_size: self.max_skill_size,
+                                });
+                            }
+                        }
+                        if let PathType::NestedSkillMd {
+                            category,
+                            skill_name,
+                        } = &old_type
+                        {
+                            let chain = vec![category.clone(), skill_name.clone()];
+                            if self.rename_source_backs_store_entry(
+                                skill_name,
+                                RenameSourceIdentity::ExactChain(&chain),
+                            ) {
                                 self.store.write().remove(skill_name);
                             }
                         }

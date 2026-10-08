@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path};
+use crate::path::{PathType, hermes_nested_sync_eligible, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, fchownat_leaf, fstatat_leaf, openat_leaf, utimensat_leaf};
@@ -280,6 +280,25 @@ impl SkillFs {
                         self.send_sync(SyncEvent::Reparse {
                             skill_name: skill_name.clone(),
                             source_path: self.inbox_skill_dir(skill_name).join("SKILL.md"),
+                            max_skill_size: self.max_skill_size,
+                        });
+                    }
+                }
+                // Hermes nested manifests live in the same store (keyed by
+                // their leaf name, like the categorized loader inserts
+                // them), so a nested SKILL.md write needs the same
+                // re-parse a flat one enqueues.
+                if let PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } = &path_type
+                {
+                    if hermes_nested_sync_eligible(category, skill_name) {
+                        self.send_sync(SyncEvent::Reparse {
+                            skill_name: skill_name.clone(),
+                            source_path: self
+                                .hermes_skill_physical_dir(category, skill_name)
+                                .join("SKILL.md"),
                             max_skill_size: self.max_skill_size,
                         });
                     }
@@ -681,6 +700,24 @@ impl SkillFs {
                 } = &path_type
                 {
                     if relative_path == Path::new("SKILL.md") {
+                        self.send_sync(SyncEvent::Reparse {
+                            skill_name: skill_name.clone(),
+                            source_path: physical.clone(),
+                            max_skill_size: self.max_skill_size,
+                        });
+                    }
+                }
+                // Hermes nested manifest creation must teach the store the
+                // new leaf entry, mirroring the flat create above — but
+                // hidden working copies stay out of the store exactly
+                // like discovery.
+                if let PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                    ..
+                } = &path_type
+                {
+                    if hermes_nested_sync_eligible(category, skill_name) {
                         self.send_sync(SyncEvent::Reparse {
                             skill_name: skill_name.clone(),
                             source_path: physical.clone(),
@@ -1409,6 +1446,23 @@ impl SkillFs {
                             source_path: physical.clone(),
                             max_skill_size: self.max_skill_size,
                         });
+                    }
+                    // Hermes nested SKILL.md truncate re-parses too (the
+                    // store keys the leaf entry), hidden working copies
+                    // excepted like discovery.
+                    if let PathType::NestedSkillMd {
+                        ref category,
+                        ref skill_name,
+                        ..
+                    } = path_type
+                    {
+                        if hermes_nested_sync_eligible(category, skill_name) {
+                            self.send_sync(SyncEvent::Reparse {
+                                skill_name: skill_name.clone(),
+                                source_path: physical.clone(),
+                                max_skill_size: self.max_skill_size,
+                            });
+                        }
                     }
                     // D1.3-demo: truncate is the only setattr
                     // mutation that materially changes file content,
