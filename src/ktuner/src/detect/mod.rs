@@ -508,17 +508,83 @@ fn cgroup_v1_limit_kb_from_content(raw: &str) -> u64 {
 }
 
 fn read_cgroup_cpu_limit_cores() -> u64 {
-    // cgroup v2: cpu.max holds "<quota> <period>", quota "max" = no limit.
-    if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/cpu.max") {
-        return cgroup_v2_cpu_max_cores(&s);
+    let self_cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    cgroup_cpu_limit_cores_from(Path::new("/sys/fs/cgroup"), &self_cgroup)
+}
+
+// CPU bandwidth is constrained by both the process's cgroup and its ancestors.
+// A readable unlimited v2 chain must not fall through to an unrelated v1 tree;
+// an absent v2 CPU controller on a hybrid hierarchy must allow v1 fallback.
+fn cgroup_cpu_limit_cores_from(root: &Path, self_cgroup: &str) -> u64 {
+    if let Some(rel) = cgroup_v2_relative_path(self_cgroup) {
+        if let Some(cores) = cpu_chain_limit(root, &rel, true) {
+            return cores;
+        }
     }
-    // cgroup v1: the quota and the period live in two files.
-    let quota = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us");
-    let period = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us");
-    if let (Ok(quota), Ok(period)) = (quota, period) {
-        return cgroup_v1_cfs_cores(&quota, &period);
+    let cpu_rel = self_cgroup.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        fields.next()?;
+        let controllers = fields.next()?;
+        let rel = fields.next()?;
+        controllers.split(',').any(|c| c == "cpu").then_some(rel)
+    });
+    // The common v1 layouts mount cpu alone or together with cpuacct.
+    let v1_roots = [
+        root.join("cpu"),
+        root.join("cpu,cpuacct"),
+        root.join("cpuacct,cpu"),
+    ];
+    if let Some(rel) = cpu_rel {
+        for cpu_root in &v1_roots {
+            if let Some(cores) = cpu_chain_limit(cpu_root, rel, false) {
+                return cores;
+            }
+        }
     }
-    0
+    // Preserve the root approximation when membership cannot be followed.
+    if let Some(cores) = cpu_chain_limit(root, "/", true) {
+        return cores;
+    }
+    v1_roots
+        .iter()
+        .find_map(|r| cpu_chain_limit(r, "/", false))
+        .unwrap_or(0)
+}
+
+fn cpu_chain_limit(root: &Path, rel: &str, v2: bool) -> Option<u64> {
+    // Namespace-relative parent components must never walk above this mount.
+    let rel = Path::new(rel.trim_start_matches('/'));
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let mut dir = root.join(rel);
+    let mut best = 0;
+    let mut saw_files = false;
+    loop {
+        let cores = if v2 {
+            fs::read_to_string(dir.join("cpu.max"))
+                .ok()
+                .map(|s| cgroup_v2_cpu_max_cores(&s))
+        } else {
+            fs::read_to_string(dir.join("cpu.cfs_quota_us"))
+                .ok()
+                .zip(fs::read_to_string(dir.join("cpu.cfs_period_us")).ok())
+                .map(|(quota, period)| cgroup_v1_cfs_cores(&quota, &period))
+        };
+        if let Some(cores) = cores {
+            saw_files = true;
+            if cores > 0 && (best == 0 || cores < best) {
+                best = cores;
+            }
+        }
+        if dir == root || !dir.pop() {
+            break;
+        }
+    }
+    saw_files.then_some(best)
 }
 
 /// cgroup v2 cpu.max content → whole cores, 0 for the "max" (no-limit)
@@ -2490,3 +2556,7 @@ mod tests {
         assert!(!cmdline_names_helper("java\0-jar".split('\0')));
     }
 }
+
+#[cfg(test)]
+#[path = "cpu_hierarchy_tests.rs"]
+mod cpu_hierarchy_tests;
