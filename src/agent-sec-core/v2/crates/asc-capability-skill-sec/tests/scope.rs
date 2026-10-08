@@ -173,7 +173,7 @@ impl SkillEnvironment for NeverResolve {
 }
 
 #[test]
-fn all_explicit_business_commands_reject_outside_scope_before_resolution_or_side_effects() {
+fn explicit_mutating_and_stateful_commands_reject_outside_scope_before_resolution() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
     let allowed = skill(base.join("allowed"));
@@ -185,7 +185,6 @@ fn all_explicit_business_commands_reject_outside_scope_before_resolution_or_side
     for command in [
         json!({"command":"scan","skillDir":outside}),
         json!({"command":"certify","skillDir":outside,"scanner":"fixture","findings":[]}),
-        json!({"command":"analyze","skillDir":outside}),
         json!({"command":"check","skillDir":outside}),
         json!({"command":"audit","skillDir":outside}),
         json!({"command":"show","skillDir":outside}),
@@ -211,6 +210,22 @@ fn all_explicit_business_commands_reject_outside_scope_before_resolution_or_side
     assert!(!outside.join(".skill-meta").exists());
     assert!(!allowed.join(".skill-meta").exists());
     assert!(!output.exists());
+}
+
+#[test]
+fn analyze_allows_an_explicit_unmanaged_skill_without_writing_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let allowed = skill(base.join("allowed"));
+    let outside = skill(base.join("outside"));
+    let executor = SkillSecExecutor::new(service(&base, &[allowed]));
+
+    let outcome = run(&executor, json!({"command":"analyze","skillDir":outside}));
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!base.join("state/signing-key.pk8").exists());
+    assert!(!base.join("state/managed-skills.json").exists());
+    assert!(!outside.join(".skill-meta").exists());
 }
 
 #[test]

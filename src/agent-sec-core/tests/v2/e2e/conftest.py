@@ -198,6 +198,12 @@ def _terminate(process: subprocess.Popen) -> str:
     return stderr or ""
 
 
+@pytest.fixture(autouse=True)
+def isolate_daemon_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevents the CI bootstrap daemon's storage from leaking into test daemons."""
+    monkeypatch.delenv("AGENT_SEC_DATA_DIR", raising=False)
+
+
 @pytest.fixture
 def cli():
     """Returns a runner for ``agent-sec-cli`` with no implicit ``--socket``."""
