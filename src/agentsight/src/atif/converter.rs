@@ -296,7 +296,11 @@ fn build_agent_metadata(events: &[TraceEventDetail], parsed: &[Option<LLMCall>])
 
     Agent {
         name,
-        version: "1.0.0".to_string(),
+        // The trace records no agent version, so the export states the
+        // schema's own fallback (`Agent::default_version`) rather than
+        // asserting a number nothing measured — the ATIF viewer renders this
+        // field as the observed agent's version.
+        version: "unknown".to_string(),
         model_name,
         tool_definitions,
         extra: None,
@@ -928,6 +932,20 @@ pub(crate) mod tests {
             ),
             call_event(2, 3_000_000_000, None, Some(replayed_response), None),
         ]
+    }
+
+    /// A trace carries no agent version, so the export must not assert one.
+    ///
+    /// The shared schema's own fallback for an absent version is `unknown`
+    /// (`Agent::default_version`), and the collector's exporter uses the same
+    /// word when its events carry none. The ATIF viewer renders this field as
+    /// the agent's version, so the literal "1.0.0" told every reader that the
+    /// observed agent was version 1.0.0 — a fact nothing measured.
+    #[test]
+    fn exported_agent_version_is_unknown_when_the_trace_carries_none() {
+        let doc = convert_session_to_atif("session-1", two_call_chain()).unwrap();
+
+        assert_eq!(doc.agent.version, "unknown");
     }
 
     #[test]

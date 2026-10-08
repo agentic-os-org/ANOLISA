@@ -436,3 +436,5 @@ The same numbers appear on the Dashboard's Skill Metrics page.
 ## Benchmark artifacts
 
 Running `scripts/benchmark/campaign/aggregate_report.py --campaign <campaign.json> --results <results>` also exports UTF-8 `run-inventory.csv`. It contains every discovered formal `runs/**/run-result.json` across smoke, capacity, matrix, soak, recovery and fault scenarios, sorted by relative artifact path. Columns retain run settings, harness exit code, verdict, JSON arrays of missing/failed gates, and `result_path`; absent optional values stay empty. Archived incomplete runs are outside this inventory. Existing summary reports and source artifacts are preserved.
+
+Resource reports accept either plain CSV or gzip CSV via `render_report.py --metrics <file.csv.gz>`. Campaign recovery evidence uses `measurement/metrics.csv`, falling back to `measurement/metrics.csv.gz` only when the plain file is absent. Compression preserves the same columns and calculations; corrupt compressed input remains an error.

@@ -119,9 +119,12 @@ def resource_samples(run_path: Path, field: str) -> list[tuple[float, float]]:
     """Read one process or internal metric from the recovery CSV."""
     path = run_path.parent / "measurement" / "metrics.csv"
     if not path.exists():
+        path = path.with_suffix(path.suffix + ".gz")
+    if not path.exists():
         return []
     samples = []
-    with path.open(encoding="utf-8", newline="") as handle:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, mode="rt", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             sample_time = timestamp(row.get("timestamp"))
             value = finite_float(row.get(field))
@@ -367,6 +370,21 @@ def fault_outcome(
     return {"verdict": verdict, "missing": missing, "failed": failed}
 
 
+def confirmation_verdicts(evidence: object, level: int) -> list[str]:
+    """Verdict strings a capacity result recorded for one QPS level.
+
+    The confirmation map comes from the capacity probe's own result file:
+    a non-object map, a non-list entry, or non-string verdicts are
+    incomplete evidence and read as no verdicts. Reading them as `str`
+    would silently pass `"PASSPASSPASS"` as three passes through
+    ``str.count``'s substring semantics.
+    """
+    entries = evidence.get(str(level)) if isinstance(evidence, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, str)]
+
+
 def audit_campaign(
     campaign_data: dict[str, Any],
     items: list[tuple[Path, dict[str, Any]]],
@@ -392,15 +410,19 @@ def audit_campaign(
         if not isinstance(maximum, int) or failure != maximum + resolution:
             issues.append(f"{version} capacity lacks an adjacent failed QPS")
             continue
+        # The confirmation map comes from the capacity probe's own result
+        # file, so an unusable shape is incomplete evidence — the audit's
+        # contract is to enumerate every blocking reason, never to raise.
+        # A non-list entry must also not fall through to str.count, whose
+        # substring semantics would count "PASSPASSPASS" as three passes.
         evidence = value.get("confirmation", {})
-        if evidence.get(str(maximum), []).count("PASS") < required_confirmations:
+        passes = confirmation_verdicts(evidence, maximum)
+        fails = confirmation_verdicts(evidence, failure)
+        if passes.count("PASS") < required_confirmations:
             issues.append(f"{version} capacity pass confirmation is incomplete")
-        if evidence.get(str(failure), []).count("FAIL") < required_confirmations:
+        if fails.count("FAIL") < required_confirmations:
             issues.append(f"{version} capacity fail confirmation is incomplete")
-        if (
-            len(evidence.get(str(maximum), [])) < confirmations
-            or len(evidence.get(str(failure), [])) < confirmations
-        ):
+        if len(passes) < confirmations or len(fails) < confirmations:
             issues.append(f"{version} capacity repetitions are incomplete")
 
     maxima = [

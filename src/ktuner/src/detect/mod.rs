@@ -365,17 +365,114 @@ fn effective_memory_gb(host_kb: u64, cgroup_kb: u64) -> u64 {
 }
 
 fn read_cgroup_memory_limit_kb() -> u64 {
-    // cgroup v2
-    if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/memory.max") {
-        return cgroup_v2_limit_kb(&s);
-    }
-    // cgroup v1
-    if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        if let Ok(bytes) = s.trim().parse::<u64>() {
-            return cgroup_v1_limit_kb(bytes);
+    let self_cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    cgroup_memory_limit_kb_from(Path::new("/sys/fs/cgroup"), &self_cgroup)
+}
+
+/// The memory limit that binds a process: the smallest real limit from its
+/// own cgroup up to the mount root, 0 when nothing on that chain limits
+/// memory.
+///
+/// The root file alone is not the process's limit. Limits are inherited — a
+/// child cgroup can never exceed its ancestors — so the binding limit is the
+/// minimum over the chain: a systemd unit with `MemoryMax=4G` on a 64 GB
+/// host, or a `--memory 2g` container run with host-shared cgroup
+/// namespaces, keeps its deeper `memory.max` while the root file still reads
+/// `max`. Reading only the root file made `effective_memory_gb` — the one
+/// number every memory-scaled rule consumes — report the host's RAM for a
+/// process that actually gets 4 GB, so dirty-page, watermark and huge-page
+/// sizing all mis-scaled.
+///
+/// `root` is the cgroup filesystem root (`/sys/fs/cgroup`) and
+/// `self_cgroup` the process's `/proc/self/cgroup` content; both are
+/// parameters so the navigation is testable against a synthetic tree.
+fn cgroup_memory_limit_kb_from(root: &Path, self_cgroup: &str) -> u64 {
+    // cgroup v2: the "0::<path>" line. Preferred over v1, mirroring the
+    // root-file order, but only when the chain actually offers memory.max —
+    // a hybrid host delegates the memory controller to v1, so the v2 walk
+    // finds no file at all and must not answer "no limit" from that.
+    if let Some(rel) = cgroup_v2_relative_path(self_cgroup) {
+        if let Some(kb) = chain_limit_kb(root, &rel, "memory.max", cgroup_v2_limit_kb) {
+            return kb;
         }
     }
-    0
+    // cgroup v1: the line of the memory controller, walked under the
+    // controller's own mount (`/sys/fs/cgroup/memory`).
+    if let Some(rel) = cgroup_v1_relative_path(self_cgroup) {
+        if let Some(kb) = chain_limit_kb(
+            &root.join("memory"),
+            &rel,
+            "memory.limit_in_bytes",
+            cgroup_v1_limit_kb_from_content,
+        ) {
+            return kb;
+        }
+    }
+    // No navigable /proc/self/cgroup (unreadable, or a layout the walks
+    // cannot follow): the root files remain the best approximation — the
+    // pre-existing behaviour.
+    if let Some(kb) = chain_limit_kb(root, "/", "memory.max", cgroup_v2_limit_kb) {
+        return kb;
+    }
+    chain_limit_kb(
+        &root.join("memory"),
+        "/",
+        "memory.limit_in_bytes",
+        cgroup_v1_limit_kb_from_content,
+    )
+    .unwrap_or(0)
+}
+
+/// Pure /proc/self/cgroup parsing: the relative cgroup path of the unified
+/// (v2) hierarchy line `0::<path>`, when present.
+fn cgroup_v2_relative_path(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(str::to_string)
+}
+
+/// Pure /proc/self/cgroup parsing: the relative cgroup path of the v1 line
+/// for the memory controller (`<hierarchy>:<controllers>:<path>`), when
+/// present. The controller list decides, so the v2 line (empty controller
+/// field) and other controllers' lines never match.
+fn cgroup_v1_relative_path(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let hierarchy = fields.next()?;
+        let controllers = fields.next()?;
+        let path = fields.next()?;
+        if !hierarchy.is_empty() && controllers.split(',').any(|c| c == "memory") {
+            Some(path.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Walk the cgroup chain from `rel` up to `root`, reading `file` at every
+/// level; the effective limit is the smallest real limit seen, because a
+/// child can never exceed its ancestors. Levels with no limit (the v2 `max`
+/// sentinel, the v1 unlimited constant, unparsable content) are skipped.
+/// `None` when no level of the chain offers the file at all, so the caller
+/// can fall back to the next hierarchy.
+fn chain_limit_kb(root: &Path, rel: &str, file: &str, parse: fn(&str) -> u64) -> Option<u64> {
+    let mut dir = root.join(rel.trim_start_matches('/'));
+    let mut saw_limit_file = false;
+    let mut best: u64 = 0;
+    loop {
+        if let Ok(content) = fs::read_to_string(dir.join(file)) {
+            saw_limit_file = true;
+            let kb = parse(&content);
+            if kb > 0 && (best == 0 || kb < best) {
+                best = kb;
+            }
+        }
+        if dir == root || !dir.pop() {
+            break;
+        }
+    }
+    saw_limit_file.then_some(best)
 }
 
 /// cgroup v2 memory.max content → KB, 0 for the "max" (no-limit) sentinel or
@@ -398,6 +495,16 @@ fn cgroup_v1_limit_kb(bytes: u64) -> u64 {
     } else {
         0
     }
+}
+
+/// cgroup v1 `memory.limit_in_bytes` content → KB, 0 at/above the 1<<62
+/// "unlimited" sentinel (v1 reports a huge constant rather than "max") — the
+/// content-reading form of [`cgroup_v1_limit_kb`].
+fn cgroup_v1_limit_kb_from_content(raw: &str) -> u64 {
+    raw.trim()
+        .parse::<u64>()
+        .map(cgroup_v1_limit_kb)
+        .unwrap_or(0)
 }
 
 fn read_cgroup_cpu_limit_cores() -> u64 {
@@ -1323,6 +1430,145 @@ mod tests {
         // Garbage on either side is not a limit.
         assert_eq!(cgroup_v1_cfs_cores("garbage", "100000\n"), 0);
         assert_eq!(cgroup_v1_cfs_cores("200000\n", "garbage"), 0);
+    }
+
+    #[test]
+    fn cgroup_v2_relative_path_reads_the_unified_line() {
+        // The v2 line may sit among v1 lines; the path after "0::" is the
+        // process's own cgroup, relative to the mount root.
+        assert_eq!(
+            cgroup_v2_relative_path("11:blkio:/init.scope\n0::/system.slice/ktuner.service\n")
+                .as_deref(),
+            Some("/system.slice/ktuner.service")
+        );
+        // A container with a private cgroup namespace sits at the root.
+        assert_eq!(cgroup_v2_relative_path("0::/\n").as_deref(), Some("/"));
+        // No unified line -> None.
+        assert_eq!(cgroup_v2_relative_path("11:memory:/init.scope\n"), None);
+        assert_eq!(cgroup_v2_relative_path(""), None);
+    }
+
+    #[test]
+    fn cgroup_v1_relative_path_reads_the_memory_controller_line() {
+        let content =
+            "10:cpu,cpuacct:/user.slice\n11:memory:/system.slice/db.service\n0::/init.scope\n";
+        assert_eq!(
+            cgroup_v1_relative_path(content).as_deref(),
+            Some("/system.slice/db.service")
+        );
+        // The controller list decides: other controllers' lines and the v2
+        // line (empty controller field) are not the memory line.
+        assert_eq!(
+            cgroup_v1_relative_path("10:cpu,cpuacct:/user.slice\n"),
+            None
+        );
+        assert_eq!(cgroup_v1_relative_path("0::/init.scope\n"), None);
+        assert_eq!(cgroup_v1_relative_path(""), None);
+    }
+
+    /// A synthetic cgroup filesystem: one `memory.max` per relative path.
+    fn cgroup_tree(entries: &[(&str, &str)]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ktuner_cgroup_tree_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for (rel, content) in entries {
+            let dir = root.join(rel.trim_start_matches('/'));
+            fs::create_dir_all(&dir).expect("create cgroup dir");
+            fs::write(dir.join("memory.max"), content).expect("write memory.max");
+        }
+        root
+    }
+
+    #[test]
+    fn cgroup_limit_honours_a_nested_limit() {
+        // A systemd unit with MemoryMax=4G on a host whose root and slice
+        // set no limit: the root file reads "max", and only the unit's own
+        // cgroup names the 4 GB that actually binds the process.
+        let root = cgroup_tree(&[
+            ("", "max\n"),
+            ("system.slice", "max\n"),
+            ("system.slice/ktuner.service", "4294967296\n"),
+        ]);
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "0::/system.slice/ktuner.service\n"),
+            4 * 1024 * 1024,
+            "the unit's own 4 GB limit must bind, not the root's max"
+        );
+        // A container with a private cgroup namespace sits at the root and
+        // keeps seeing exactly the root's value (no limit here).
+        assert_eq!(cgroup_memory_limit_kb_from(&root, "0::/\n"), 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cgroup_limit_takes_the_smallest_ancestor_limit() {
+        // Limits inherit: an ancestor capped at 2 GB binds a child capped at
+        // 4 GB, and a pod's 4 GB sandbox binds deeper cgroups.
+        let root = cgroup_tree(&[
+            ("", "max\n"),
+            ("system.slice", "2147483648\n"),
+            ("system.slice/app.service", "4294967296\n"),
+            ("kubepods", "8589934592\n"),
+            ("kubepods/pod123", "4294967296\n"),
+            ("kubepods/pod123/abc", "max\n"),
+        ]);
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "0::/system.slice/app.service\n"),
+            2 * 1024 * 1024
+        );
+        // Deeper than the sandbox limit, with no own limit: the walk stops at
+        // the first real limit on the way up.
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "0::/kubepods/pod123/abc\n"),
+            4 * 1024 * 1024
+        );
+        // A cgroup path deeper than anything in the tree still walks up.
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "0::/system.slice/app.service/child\n"),
+            2 * 1024 * 1024
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cgroup_limit_falls_back_to_v1_and_then_root_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ktuner_cgroup_v1_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        // Pure v1 layout: the memory controller is mounted at root/memory
+        // and there is no unified-hierarchy memory.max anywhere.
+        let v1_leaf = root.join("memory/system.slice/db.service");
+        fs::create_dir_all(&v1_leaf).expect("create v1 cgroup dir");
+        fs::write(v1_leaf.join("memory.limit_in_bytes"), b"2147483648\n").expect("write limit");
+        fs::write(
+            root.join("memory/memory.limit_in_bytes"),
+            b"9223372036854775807\n", // v1's unlimited sentinel at the root
+        )
+        .expect("write root limit");
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "11:memory:/system.slice/db.service\n"),
+            2 * 1024 * 1024,
+            "the v1 memory line must navigate to its own cgroup's limit"
+        );
+
+        // No /proc/self/cgroup information at all: the root files decide,
+        // exactly as before the chain walk existed.
+        fs::write(root.join("memory.max"), b"4294967296\n").expect("write v2 root limit");
+        assert_eq!(cgroup_memory_limit_kb_from(&root, ""), 4 * 1024 * 1024);
+
+        // Nothing readable anywhere -> 0 (no limit known).
+        let empty = cgroup_tree(&[]);
+        assert_eq!(cgroup_memory_limit_kb_from(&empty, "0::/deep/chain\n"), 0);
+        assert_eq!(cgroup_memory_limit_kb_from(&empty, ""), 0);
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&empty).ok();
     }
 
     #[test]

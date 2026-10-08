@@ -446,18 +446,22 @@ fn cmd_fix(param: &str) -> Result<i32> {
             "parameter {param} is dangerous to write at runtime, persist to /etc/sysctl.d instead"
         );
     }
-    let fix_outcome = tuner::apply_one(rec)?;
+    let fix = tuner::apply_one(rec)?;
     let (_, eval_after) = gather()?;
     let mut output = json!({
         "fixed": param,
-        "previous": rec.current_value,
+        // The original the ledger recorded under the transaction lock — the
+        // value `ktuner rollback` restores. The gathered rec.current_value
+        // can be stale (the knob moved between gather and apply), and
+        // reporting it here contradicted the ledger and `rollback --list`.
+        "previous": fix.recorded_previous,
         // What the kernel actually took — equals the recommendation unless
         // the kernel clamped/normalized the write (#4160).
-        "applied": fix_outcome.effective,
+        "applied": fix.outcome.effective,
         "score_after": eval_after.score(),
         "remaining": eval_after.recommendations.len(),
     });
-    if fix_outcome.clamped {
+    if fix.outcome.clamped {
         output["requested"] = json!(rec.recommended_value);
         output["note"] = json!("内核实际生效值与推荐值不同（已按实际生效值记录并持久化，可回滚）");
     }

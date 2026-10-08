@@ -464,6 +464,45 @@ def test_load_expected_skips_malformed_optional_status(tmp_path: Path) -> None:
     assert successful == {"metric-then-malformed", "valid-later"}
 
 
+def test_load_expected_skips_malformed_optional_data(tmp_path: Path) -> None:
+    """A malformed optional ``data`` envelope contributes no success evidence.
+
+    ``data`` and its ``tags`` are optional load-generator metadata whose shape
+    is not guaranteed: a list, string or null value raised AttributeError from
+    ``.get`` and aborted the whole read, so every later request ID was lost and
+    the comparison failed with a traceback instead of reporting the run. A
+    non-dict value must contribute no evidence while the top-level request ID,
+    the ``tags.request_id`` fallback and the success metrics keep working.
+    """
+    rows = [
+        {"request_id": "bad-data-list", "data": []},
+        {"request_id": "bad-data-null", "data": None},
+        {"request_id": "bad-data-string", "data": "200"},
+        {"data": {"tags": []}},
+        {"data": {"tags": "request_id=tags-id"}},
+        {"data": {"tags": {"request_id": "tags-id"}}},
+        {
+            "request_id": "metric-then-malformed",
+            "metric": "benchmark_http_success",
+            "data": {"value": 1},
+        },
+        {"request_id": "valid-later", "data": {"status": 204}},
+    ]
+    path = tmp_path / "malformed-data.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    expected, successful = validate_results.load_expected(path)
+    assert expected == {
+        "bad-data-list",
+        "bad-data-null",
+        "bad-data-string",
+        "tags-id",
+        "metric-then-malformed",
+        "valid-later",
+    }
+    assert successful == {"metric-then-malformed", "valid-later"}
+
+
 @pytest.mark.parametrize(
     ("status", "expected_success"),
     [
@@ -2012,6 +2051,69 @@ def test_aggregate_rows_deltas_and_partial_reports(tmp_path: Path) -> None:
     assert (tmp_path / "performance-comparison.csv").exists()
 
 
+def test_report_writers_survive_malformed_artifacts(tmp_path: Path) -> None:
+    """The fault and regression writers must tolerate the artifact shapes the
+    evidence gates tolerate: a malformed entry renders a placeholder instead
+    of raising and losing the whole report."""
+    run_path = tmp_path / "fault-run" / "run-result.json"
+    measurement = run_path.parent / "measurement"
+    measurement.mkdir(parents=True)
+    measurement.joinpath("fault-results.json").write_text(
+        json.dumps(
+            {
+                "outcomes": {
+                    "invalid_json": 3,
+                    "oversized_input": {"sent": True},
+                    "token_accuracy": {"handled": 2},
+                },
+                "server_healthy_after": True,
+                "process_alive_after": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    items = [
+        (
+            run_path,
+            {
+                "scenario": "fault",
+                "version": "baseline",
+                "summary": complete_summary(),
+            },
+        )
+    ]
+    results_by_version = aggregate_report.write_fault(
+        tmp_path,
+        items,
+        campaign_data(tmp_path)["fault"],
+        campaign_data(tmp_path)["thresholds"],
+    )
+    report = (tmp_path / "fault-report.md").read_text(encoding="utf-8")
+    assert "baseline" in report
+    assert "| 2 |" in report, "the usable case renders its counter total"
+    assert report.count("| — |") >= 2, "unusable cases render placeholders"
+    assert results_by_version["baseline"]["verdict"] == "INCONCLUSIVE"
+
+    (tmp_path / "regression.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {"command": "cargo test", "exit_code": 0},
+                    {"command": "cargo fmt", "exit_code": True},
+                    {"exit_code": 1},
+                    "cargo clippy",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    aggregate_report.write_regression(tmp_path)
+    report = (tmp_path / "regression-report.md").read_text(encoding="utf-8")
+    assert "`cargo test`" in report
+    assert "PASS" in report
+    assert report.count("| — | — | — |") == 3, "unusable checks render placeholders"
+
+
 def test_final_report_summarizes_headline_improvements(tmp_path: Path) -> None:
     items = []
     expected = {
@@ -2172,6 +2274,36 @@ def test_regression_runner_records_command_result(tmp_path: Path) -> None:
     assert read_json["checks"][0]["exit_code"] == 0
     assert read_json["full"] is False
     assert read_json["cargo_jobs"] is None
+
+
+def test_regression_runner_records_a_launch_failure(tmp_path: Path) -> None:
+    """An unrunnable check is recorded as a failure instead of aborting the run.
+
+    A missing executable is the canonical case here (the runner builds its
+    cargo checks from a toolchain path, and `rustup` absent means nothing
+    launches): `subprocess.run` raises before any record is appended, no
+    handler exists at the call site, and `write_report` runs only after the
+    first check — so the whole regression died with a traceback, wrote no
+    ``regression.json`` and skipped every later gate, the opposite of the
+    runner's preserve-all-logs contract.
+    """
+    checks: list[dict[str, object]] = []
+    missing = tmp_path / "definitely-not-a-real-tool"
+    log_path = tmp_path / "missing.log"
+
+    status = run_regression.run_check([str(missing)], tmp_path, log_path, checks)
+
+    assert status != 0
+    assert len(checks) == 1
+    assert checks[0]["exit_code"] != 0
+    assert checks[0]["command"] == str(missing)
+    # The failure evidence is preserved in the check's own log.
+    assert str(missing) in log_path.read_text(encoding="utf-8")
+    # The record is serializable, so a run that starts with an unrunnable check
+    # still publishes its report.
+    run_regression.write_report(tmp_path / "regression.json", checks)
+    published = json.loads((tmp_path / "regression.json").read_text())
+    assert published["checks"][0]["exit_code"] != 0
 
 
 def test_regression_progress_reports_coverage_and_log_path(

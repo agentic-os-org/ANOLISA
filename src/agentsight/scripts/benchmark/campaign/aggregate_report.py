@@ -409,6 +409,26 @@ def write_recovery(
     return outcomes
 
 
+def fault_case_total(entry: object) -> int | None:
+    """Total repetitions of one fault case, when its counters are usable.
+
+    Mirrors the verdict-side classification in
+    ``campaign_evidence.fault_outcome``: a case entry must be an object of
+    non-negative integer counters, and booleans are not counts. Anything
+    else is unusable evidence and renders as a placeholder instead of
+    raising on the collector's own output.
+    """
+    if not isinstance(entry, dict):
+        return None
+    counters = entry.values()
+    if not all(
+        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        for count in counters
+    ):
+        return None
+    return sum(counters)
+
+
 def write_fault(
     results: Path,
     items: list[tuple[Path, dict[str, Any]]],
@@ -431,11 +451,18 @@ def write_fault(
         found = True
         fault = read_json(path)
         outcome = campaign_evidence.fault_outcome(run_path, run, settings, thresholds)
-        results_by_version[run["version"]] = outcome
+        # The verdict above already tolerates unusable artifact shapes; the
+        # table must too: `outcomes` entries that are not counter objects
+        # render a placeholder instead of raising.
+        version = str(run.get("version", "?"))
+        results_by_version[version] = outcome
         summary = run.get("summary", {})
-        for name, outcomes in fault.get("outcomes", {}).items():
+        outcomes = fault.get("outcomes")
+        outcomes = outcomes if isinstance(outcomes, dict) else {}
+        for name, entry in outcomes.items():
+            total = fault_case_total(entry)
             lines.append(
-                f"| {run['version']} | {name} | {sum(outcomes.values())} | "
+                f"| {version} | {name} | {total if total is not None else '—'} | "
                 f"{fault.get('server_healthy_after')} | {fault.get('process_alive_after')} | "
                 f"{ratio_display(nested(summary, 'http_success_rate'))}/"
                 f"{ratio_display(nested(summary, 'trace_completeness'))} | "
@@ -452,6 +479,7 @@ def write_regression(results: Path) -> dict[str, Any]:
     path = results / "regression.json"
     regression = read_json(path) if path.exists() else {}
     checks = regression.get("checks", [])
+    checks = checks if isinstance(checks, list) else []
     lines = [
         "# AgentSight 回归测试报告",
         "",
@@ -459,9 +487,21 @@ def write_regression(results: Path) -> dict[str, Any]:
         "| --- | ---: | --- |",
     ]
     for check in checks:
+        # A check that is not an object of a string command and an integer
+        # exit code is unusable evidence: render a placeholder row instead
+        # of raising and losing every other check in the report.
+        command = check.get("command") if isinstance(check, dict) else None
+        exit_code = check.get("exit_code") if isinstance(check, dict) else None
+        if (
+            not isinstance(command, str)
+            or not isinstance(exit_code, int)
+            or isinstance(exit_code, bool)
+        ):
+            lines.append("| — | — | — |")
+            continue
         lines.append(
-            f"| `{check['command']}` | {check['exit_code']} | "
-            f"{'PASS' if check['exit_code'] == 0 else 'FAIL'} |"
+            f"| `{command}` | {exit_code} | "
+            f"{'PASS' if exit_code == 0 else 'FAIL'} |"
         )
     if not checks:
         lines.append("| — | — | NOT EXECUTED |")
