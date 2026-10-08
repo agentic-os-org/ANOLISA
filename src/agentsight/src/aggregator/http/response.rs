@@ -371,9 +371,12 @@ impl ToChromeTraceEvent for AggregatedResponse {
         let ts_us = ns_to_us(self.start_timestamp_ns());
         let dur_us = ns_to_us(self.duration_ns());
 
-        // Minimum duration: 10ms = 10,000 microseconds
-        const MIN_DUR_US: u64 = 10_000;
-        let dur_us = dur_us.max(MIN_DUR_US);
+        // Duration floor so short responses stay visible in trace viewers.
+        // This is the configured `min_duration_us` knob (published process-wide
+        // by `AgentSight::new`); the previous hard-coded 10 000 was a frozen
+        // copy of the knob's default. Real durations longer than the floor are
+        // emitted unchanged — the floor lifts, it never truncates.
+        let dur_us = dur_us.max(crate::config::min_duration_us());
 
         let event = ChromeTraceEvent::complete(
             format!("{} {}", self.parsed.status_code, self.parsed.reason),
@@ -621,6 +624,70 @@ mod latency_tests {
         ]);
 
         assert_eq!(response.first_output_timestamp_ns(), None);
+    }
+
+    /// `AgentsightConfig::min_duration_us` must govern the duration floor of
+    /// the HTTP/1 Chrome trace events. All three exporters (`ParsedRequest`,
+    /// `ParsedResponse`, `AggregatedResponse`) used to freeze the knob's
+    /// default (10 000 µs) in private constants, so a configured value never
+    /// reached them. All floor mutations happen inside this single test so the
+    /// process-wide global cannot race a parallel test.
+    #[test]
+    fn min_duration_floor_is_configurable_for_http_trace_events() {
+        use crate::chrome_trace::ToChromeTraceEvent;
+        use crate::parser::http::ParsedRequest;
+
+        let saved = crate::config::min_duration_us();
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: ssl_event("", 1_000),
+            reassembled_body: None,
+        };
+        let parsed_response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: ssl_event("", 1_000),
+        };
+        // `response_with_sse_events` starts at timestamp 10 ns; a completion
+        // timestamp of 10 + 5 ms gives a 5 ms real duration, below every floor
+        // used here, and 10 + 100 ms gives one above them.
+        let mut short = response_with_sse_events(vec![]);
+        short.completion_timestamp_ns = Some(10 + 5_000_000);
+        let mut long = response_with_sse_events(vec![]);
+        long.completion_timestamp_ns = Some(10 + 100_000_000);
+
+        // A configured floor (42 ms) reaches all three exporters.
+        crate::config::set_min_duration_us(42_000);
+        assert_eq!(request.to_chrome_trace_events()[0].dur, Some(42_000));
+        assert_eq!(
+            parsed_response.to_chrome_trace_events()[0].dur,
+            Some(42_000)
+        );
+        assert_eq!(
+            short.to_chrome_trace_events()[0].dur,
+            Some(42_000),
+            "a 5 ms real duration must be lifted to the configured floor"
+        );
+        // The floor lifts but never truncates: a real 100 ms duration is
+        // emitted unchanged.
+        assert_eq!(long.to_chrome_trace_events()[0].dur, Some(100_000));
+
+        // A zero config is clamped to 1 µs instead of an invisible
+        // zero-duration complete event.
+        crate::config::set_min_duration_us(0);
+        assert_eq!(request.to_chrome_trace_events()[0].dur, Some(1));
+
+        crate::config::set_min_duration_us(saved);
     }
 
     /// Gemini streamGenerateContent streams its answer as

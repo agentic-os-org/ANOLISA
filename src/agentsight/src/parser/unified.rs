@@ -44,6 +44,18 @@ impl Parser {
         }
     }
 
+    /// Create a new parser with a custom HTTP/1 header cap.
+    ///
+    /// Threads `AgentsightConfig::max_headers` into the HTTP/1 parser; the
+    /// other sub-parsers keep their defaults.
+    pub fn with_max_headers(max_headers: usize) -> Self {
+        Parser {
+            http_parser: HttpParser::with_max_headers(max_headers),
+            http2_parser: Http2Parser::new(),
+            sse_parser: SseParser::new(),
+        }
+    }
+
     /// Parse SSL event into messages
     //
     /// Returns parsed HTTP Request/Response or SSE Events.
@@ -294,6 +306,44 @@ mod tests {
             result.messages[0],
             ParsedMessage::SseEvent(ref e) if e.is_done()
         ));
+    }
+
+    /// `AgentsightConfig::max_headers` must reach the HTTP/1 parser through
+    /// `Parser::with_max_headers`. With the default cap (64), a response
+    /// carrying 100 headers is rejected by `httparse` and falls through to the
+    /// raw-data path; a raised cap parses it as a proper response.
+    #[test]
+    fn parser_with_max_headers_parses_wide_header_messages() {
+        let count = 100;
+        let mut data = String::from("HTTP/1.1 200 OK\r\n");
+        for i in 0..count {
+            data.push_str(&format!("X-Header-{i}: v{i}\r\n"));
+        }
+        data.push_str("\r\n");
+
+        let default_result =
+            Parser::new().parse_ssl_event(make_ssl_event(data.clone().into_bytes()));
+        assert!(
+            matches!(
+                default_result.messages.as_slice(),
+                [ParsedMessage::RawData(_)]
+            ),
+            "100 headers exceed the default 64 cap, so the message must fall to \
+             RawData, got {:?}",
+            default_result.messages
+        );
+
+        let raised =
+            Parser::with_max_headers(128).parse_ssl_event(make_ssl_event(data.into_bytes()));
+        assert!(
+            matches!(
+                raised.messages.as_slice(),
+                [ParsedMessage::Response(r)] if r.headers.len() == count
+            ),
+            "a raised cap must parse the message as a response retaining all \
+             {count} headers, got {:?}",
+            raised.messages
+        );
     }
 
     #[test]
