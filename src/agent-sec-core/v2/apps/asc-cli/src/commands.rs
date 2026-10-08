@@ -3,6 +3,7 @@
 mod binding;
 mod capabilities;
 mod common;
+mod events;
 mod observability;
 mod policy;
 mod scan_code;
@@ -16,6 +17,7 @@ use clap::Subcommand;
 
 use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
+pub use self::events::EventsCommand;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -45,6 +47,8 @@ pub(crate) enum Command {
     ScanPii(ScanPiiCommand),
     /// Scan a prompt for injection or jailbreak attempts.
     ScanPrompt(ScanPromptCommand),
+    /// List the caller's own security events from the daemon.
+    Events(EventsCommand),
     /// Manage Skill scanning, signatures, history and activation.
     #[command(subcommand)]
     SkillLedger(skill_ledger::SkillLedgerCommand),
@@ -61,11 +65,20 @@ impl Command {
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
             Self::ScanPii(command) => command.request(),
+            Self::Events(command) => command.request(),
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
             Self::Capabilities(_) => Err(InputError::LocalCommand),
             Self::SkillLedger(command) => command.request(),
+        }
+    }
+
+    /// Returns the events command when this invocation queries events.
+    pub(crate) const fn events(&self) -> Option<&EventsCommand> {
+        match self {
+            Self::Events(command) => Some(command),
+            _ => None,
         }
     }
 

@@ -125,7 +125,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let (finalizer, durable_sinks) = match event_finalizer(telemetry) {
+    let (finalizer, durable_sinks, query_source) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
             telemetry.report(&format!(
@@ -183,12 +183,14 @@ async fn run(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
+    let mut dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions);
+    if let Some(source) = query_source {
+        dispatcher = dispatcher.with_security_queries(source);
+    }
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
-        DaemonDispatcher::new(pap, policy_for_handler, actions).with_observability(
-            asc_daemon_core::ObservabilityService::new(Arc::new(sinks::ObservabilitySinkAdapter(
-                Arc::clone(&durable_sinks.observability),
-            ))),
-        ),
+        dispatcher.with_observability(asc_daemon_core::ObservabilityService::new(Arc::new(
+            sinks::ObservabilitySinkAdapter(Arc::clone(&durable_sinks.observability)),
+        ))),
         skillfs.clone(),
     ));
 
@@ -353,19 +355,40 @@ fn stop_background_jobs(
 
 fn event_finalizer(
     telemetry: &asc_observability::TelemetryRuntime,
-) -> Result<(Finalizer, sinks::DurableSinks), asc_event_sink::SinkError> {
+) -> Result<
+    (
+        Finalizer,
+        sinks::DurableSinks,
+        Option<asc_daemon_handler::SqliteEventQuerySource>,
+    ),
+    asc_event_sink::SinkError,
+> {
     let (jsonl_path, sqlite_path) = daemon_security_event_paths()?;
     let observability_sinks = Arc::new(asc_event_sink::ConfiguredObservabilitySinks::new(
         jsonl_path.with_file_name("observability.jsonl"),
         sqlite_path.with_file_name("observability.db"),
     ));
-    let sinks = Arc::new(ConfiguredSecurityEventSinks::new(jsonl_path, sqlite_path));
+    let sinks = Arc::new(ConfiguredSecurityEventSinks::new(
+        jsonl_path,
+        sqlite_path.clone(),
+    ));
     sinks.warm_sqlite()?;
     if let Err(error) = sinks.warm_jsonl() {
         telemetry.report(&format!(
             "agent-sec-daemon: warning: JSONL security event log unavailable: {error}"
         ));
     }
+    // The `sec.*` query family reads the same database the writers use. If
+    // its read-only handle cannot open even though the writer warmed, the
+    // daemon keeps serving scans and rejects queries with `unavailable`
+    // rather than guessing at another database.
+    let query_source = asc_daemon_handler::SqliteEventQuerySource::new(&sqlite_path)
+        .map_err(|error| {
+            telemetry.report(&format!(
+                "agent-sec-daemon: warning: security event queries unavailable: {error}"
+            ));
+        })
+        .ok();
     Ok((
         Finalizer::new(
             Arc::new(EventSinkAdapter::new(Arc::clone(&sinks))),
@@ -380,6 +403,7 @@ fn event_finalizer(
             security: sinks,
             observability: observability_sinks,
         },
+        query_source,
     ))
 }
 

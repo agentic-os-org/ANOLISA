@@ -12,6 +12,7 @@ use crate::action::CodeScanHandler;
 use crate::pap::PapHandler;
 use crate::pii::PiiScanHandler;
 use crate::prompt_scan::PromptScanHandler;
+use crate::query::SecurityQueryHandler;
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
@@ -20,6 +21,7 @@ pub struct DaemonDispatcher {
     pii_scan: PiiScanHandler,
     skill_sec: crate::skill_sec::SkillSecHandler,
     prompt_scan: PromptScanHandler,
+    queries: SecurityQueryHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
     observability: Option<asc_daemon_core::ObservabilityService>,
 }
@@ -28,7 +30,10 @@ impl DaemonDispatcher {
     /// Composes PAP dispatch with trusted server authorization policy.
     ///
     /// The role is process-owned configuration. It is never decoded from the
-    /// request or inferred from caller-supplied attribution.
+    /// request or inferred from caller-supplied attribution. The `sec.*`
+    /// query family starts unbound and rejects every call until
+    /// [`Self::with_security_queries`] binds a store, so a composition root
+    /// cannot accidentally serve queries from a wrong database.
     pub fn new(
         application: impl PolicyAdministration + 'static,
         principal_policy: Arc<dyn PrincipalPolicy>,
@@ -40,6 +45,7 @@ impl DaemonDispatcher {
             pii_scan: PiiScanHandler::new(Arc::clone(&actions)),
             skill_sec: crate::skill_sec::SkillSecHandler::new(Arc::clone(&actions)),
             prompt_scan: PromptScanHandler::new(actions),
+            queries: SecurityQueryHandler::unconfigured(),
             principal_policy,
             observability: None,
         }
@@ -49,6 +55,16 @@ impl DaemonDispatcher {
     #[must_use]
     pub fn with_observability(mut self, service: asc_daemon_core::ObservabilityService) -> Self {
         self.observability = Some(service);
+        self
+    }
+
+    /// Binds the `sec.*` query family to one security-event query source.
+    #[must_use]
+    pub fn with_security_queries(
+        mut self,
+        source: impl crate::query::SecurityEventQueries + 'static,
+    ) -> Self {
+        self.queries = SecurityQueryHandler::new(source);
         self
     }
 
@@ -117,6 +133,10 @@ impl DaemonDispatcher {
             ),
             MethodId::Pap(method) => {
                 self.pap
+                    .handle(request_id, &principal, method, request.params)
+            }
+            MethodId::Query(method) => {
+                self.queries
                     .handle(request_id, &principal, method, request.params)
             }
             MethodId::Action(method) => match method {

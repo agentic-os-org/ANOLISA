@@ -326,7 +326,13 @@ fn real_sinks_persist_private_events_and_fail_independently_of_scanning() {
         }
         if !fail_sqlite {
             let reader = SqliteEventReader::new(&sqlite).unwrap();
-            let records = reader.query(&EventFilters::default(), 10, 0);
+            // The runtime stamps the invocation's caller uid (1201) on the event.
+            let records = reader.query(
+                &EventFilters::default(),
+                &asc_persistence_sqlite::QueryScope::Owner(caller().uid),
+                10,
+                0,
+            );
             assert_eq!(records.len(), 1);
             persisted.extend(records);
             reader.close();

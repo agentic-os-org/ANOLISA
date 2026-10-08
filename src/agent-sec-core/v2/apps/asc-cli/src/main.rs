@@ -157,7 +157,11 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if let Some(format) = cli.pii_format() {
+    if let Some(events) = cli.events() {
+        events
+            .render(&response, &mut io::stdout().lock(), &mut io::stderr())
+            .map_err(RunError::Output)
+    } else if let Some(format) = cli.pii_format() {
         render_pii_scan(
             &response,
             format,

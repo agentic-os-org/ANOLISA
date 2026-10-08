@@ -14,8 +14,10 @@ mod observability;
 mod pap;
 mod pii;
 mod prompt_scan;
+mod query;
 mod rejection;
 mod skill_sec;
 
 pub use dispatcher::DaemonDispatcher;
+pub use query::{SecurityEventQueries, SecurityQueryHandler, SqliteEventQuerySource};
 pub use rejection::JsonRejectionEncoder;

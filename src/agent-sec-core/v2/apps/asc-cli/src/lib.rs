@@ -14,7 +14,9 @@ use asc_daemon_protocol::DaemonRequest;
 use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
 use commands::Command;
-pub use commands::{CapabilitiesCommand, PiiOutputFormat, PromptScanPlan, ScanPromptInputError};
+pub use commands::{
+    CapabilitiesCommand, EventsCommand, PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
+};
 
 /// Parsed invocation for one CLI command.
 #[derive(Debug)]
@@ -230,6 +232,11 @@ impl Cli {
     pub const fn is_scan_prompt(&self) -> bool {
         self.command.is_scan_prompt()
     }
+
+    /// The events query command, or `None` for another command.
+    pub const fn events(&self) -> Option<&EventsCommand> {
+        self.command.events()
+    }
 }
 
 /// Resolves the daemon endpoint from the option, then the environment.
@@ -277,6 +284,9 @@ pub enum InputError {
     /// Invalid `SkillSec` business input.
     #[error("SkillSec input: {0}")]
     SkillSec(String),
+    /// Invalid `events` query input; the message is user-facing wording.
+    #[error("Error: {0}")]
+    Events(String),
     /// Analyze retains its structured bad-input result.
     #[error("{message}")]
     AnalyzeInput {
@@ -320,7 +330,7 @@ impl InputError {
     #[must_use]
     pub const fn is_usage_hint(&self) -> bool {
         match self {
-            Self::EmptyCode => true,
+            Self::EmptyCode | Self::Events(_) => true,
             Self::ScanPrompt(error) => error.is_usage_hint(),
             Self::PiiRead(_)
             | Self::Observability(_)

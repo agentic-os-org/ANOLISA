@@ -9,7 +9,8 @@ use crate::BootstrapConfig;
 
 const HELP: &str = "Usage: agent-sec-daemon [serve] [--socket <ABSOLUTE_PATH>] [--policy-admin-uid <UID>]...\n\
 \n\
-Runs the AgentSecCore V2 UDS service with PAP administration methods.\n\
+Runs the AgentSecCore V2 UDS service with PAP administration, action\n\
+capability and owner-scoped security-event query methods.\n\
 Without --socket, uses nonempty $AGENT_SEC_DAEMON_SOCKET or /run/agent-sec-core/daemon.sock.\n\
 Root is always authorized. --policy-admin-uid adds an administrator at startup.\n\
 Repeat this option for multiple UIDs; omitted means root only.\n\

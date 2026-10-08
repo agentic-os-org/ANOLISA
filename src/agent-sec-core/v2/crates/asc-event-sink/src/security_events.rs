@@ -46,8 +46,10 @@ mod tests {
 
     fn sqlite_ids(path: &Path) -> Vec<String> {
         let reader = SqliteEventReader::new(path).expect("reader");
+        // The test-support events carry this process's uid, whatever it is.
+        let scope = asc_persistence_sqlite::QueryScope::Owner(event("scope-probe").uid);
         reader
-            .query_default_page(&EventFilters::default())
+            .query_default_page(&EventFilters::default(), &scope)
             .into_iter()
             .map(|event| event.event_id)
             .collect()

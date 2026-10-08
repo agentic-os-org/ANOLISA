@@ -18,6 +18,9 @@ tracing.workspace = true
 asc-daemon-core = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-daemon-service = { workspace = true }
+asc-persistence-sqlite = { workspace = true }
+asc-security-events = { workspace = true }
+asc-sqlite-kernel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -27,7 +30,6 @@ asc-capability-pii-scan = { workspace = true }
 asc-capability-skill-sec = { workspace = true }
 asc-capability-code-scan.workspace = true
 asc-capability-prompt-scan.workspace = true
-asc-security-events.workspace = true
 asc-action-runtime = { workspace = true, features = ["testing"] }
 
 tempfile = { workspace = true }

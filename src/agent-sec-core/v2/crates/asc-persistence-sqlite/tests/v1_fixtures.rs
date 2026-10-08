@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use asc_observability::OBSERVABILITY_SQLITE_SCHEMA_VERSION;
+use asc_persistence_sqlite::QueryScope;
 use asc_persistence_sqlite::observability::OBSERVABILITY_TABLES;
 use asc_persistence_sqlite::security_events::{
     EventFilters, SECURITY_EVENTS_TABLES, SecurityEventsMigrator, SqliteEventReader,
@@ -201,8 +202,35 @@ fn row_projection(event: &SecurityEvent) -> Value {
 }
 
 fn read_all(path: &Path) -> Value {
+    // The rows oracle compares every row regardless of owner: convergence is a
+    // schema property, while the repository's reads intentionally serve one
+    // owner scope at a time (issue #6608). Read one page per owner present and
+    // merge, restoring the repository's newest-first order.
+    let uids: Vec<u32> = {
+        let conn = Connection::open(path).expect("open fixture");
+        let mut statement = conn
+            .prepare("SELECT DISTINCT uid FROM security_events")
+            .expect("prepare uid query");
+        statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query uids")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read uids")
+            .into_iter()
+            .map(|uid| u32::try_from(uid).expect("fixture uid fits u32"))
+            .collect()
+    };
     let reader = SqliteEventReader::new(path).expect("reader");
-    let events = reader.query(&EventFilters::default(), 1_000_000, 0);
+    let mut events = Vec::new();
+    for uid in uids {
+        events.extend(reader.query(
+            &EventFilters::default(),
+            &QueryScope::Owner(uid),
+            1_000_000,
+            0,
+        ));
+    }
+    events.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
     Value::Array(events.iter().map(row_projection).collect())
 }
 
