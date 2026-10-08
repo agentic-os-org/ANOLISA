@@ -181,6 +181,9 @@ def analyze_traces(
     ),
     output: Path = typer.Option(Path("./output"), "--output", "-o", help="Output root directory"),
     trim_ratio: float = typer.Option(0.1, "--trim-ratio", help="Tail trim ratio for trimmed means"),
+    instance_id: str | None = typer.Option(
+        None, "--instance-id", "-i", help="Exact comma-separated instance IDs for CSV analysis; default: all traces"
+    ),
     openclaw_profiles_dir: Path | None = typer.Option(
         None,
         "--openclaw-profiles-dir",
@@ -196,6 +199,7 @@ def analyze_traces(
             trace_root=trace_root,
             output=output,
             trim_ratio=trim_ratio,
+            instance_id=instance_id,
             openclaw_profiles_dir=openclaw_profiles_dir,
             start=start,
             end=end,

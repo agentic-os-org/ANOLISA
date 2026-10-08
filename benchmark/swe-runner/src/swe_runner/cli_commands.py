@@ -204,6 +204,7 @@ def analyze_traces_command(
     start: str | None,
     end: str,
     run_metadata: Path | None,
+    instance_id: str | None = None,
 ) -> TraceAnalysisCommandResult:
     """Collect available traces and export analysis CSV files."""
     analyze_output = command_output_dir(output, ANALYZE_TRACES_OUTPUT_SUBDIR)
@@ -221,6 +222,7 @@ def analyze_traces_command(
         trace_root=effective_trace_root,
         output_dir=analyze_output,
         trim_ratio=trim_ratio,
+        instance_ids=instance_id.split(",") if instance_id is not None else None,
     )
     return TraceAnalysisCommandResult(
         recorded_trace_count=len(trace_files) if trace_files is not None else None,

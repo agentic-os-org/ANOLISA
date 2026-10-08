@@ -409,6 +409,19 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Use `--instance-id/-i` to restrict all CSV views to exact comma-separated instance
+IDs. Selection uses the trace file's parent directory, retains every trace of
+each requested instance and deduplicates repeated IDs; surrounding whitespace is
+ignored. Every requested ID must have a trace in the analysis input. Empty or
+unknown selections fail before CSV output changes, and unselected trace JSON is
+not parsed. Existing CSV detail files are refreshed to represent the selected
+view. Collection/time/metadata behavior is unchanged; selection is applied during
+analysis after any collection. Without the option, all input instances remain.
+
+```bash
+swe-runner analyze-traces --trace-root ./traces --instance-id django__django-12345,sympy__sympy-54321
+```
+
 Analyze existing traces:
 
 ```bash
@@ -440,6 +453,7 @@ swe-runner analyze-traces \
 | `--trace-root` | `<output>/analyze-traces/traces` | Trace JSON root directory |
 | `--output, -o` | `./output` | Output root |
 | `--trim-ratio` | `0.1` | Tail trim ratio, in `[0, 0.5)` |
+| `--instance-id, -i` | none | Exact comma-separated instance IDs for all CSV views |
 | `--openclaw-profiles-dir` | inferred from `--run-metadata` | OpenClaw local profiles directory |
 | `--start` | none | Trace collection window start, ISO-8601 or epoch |
 | `--end` | `now` | Trace collection window end |

@@ -84,12 +84,14 @@ def write_trace_analysis_csvs(
     trace_root: str | Path,
     output_dir: str | Path,
     trim_ratio: float = 0.1,
+    instance_ids: list[str] | None = None,
 ) -> tuple[Path, Path]:
     """Write trace summary CSVs plus a separate detailed trace metrics CSV."""
     per_trace_rows, per_instance_rows = analyze_trace_files(
         trace_root,
         trim_ratio=trim_ratio,
         include_metrics=True,
+        instance_ids=instance_ids,
     )
 
     output_path = Path(output_dir)

@@ -93,6 +93,23 @@ def _iter_selected_trace_files(trace_files: list[Path]) -> Iterator[tuple[str, P
         yield trace_file.parent.name, trace_file
 
 
+def _select_instance_files(
+    files: Iterator[tuple[str, Path]], instance_ids: list[str] | None
+) -> Iterator[tuple[str, Path]]:
+    if instance_ids is None:
+        return files
+    if not instance_ids or any(not isinstance(iid, str) or not iid.strip() for iid in instance_ids):
+        raise ExtractionError("Instance selection requires non-empty instance IDs")
+    requested = list(dict.fromkeys(iid.strip() for iid in instance_ids))
+    discovered = list(files)
+    available = {iid for iid, _ in discovered}
+    missing = [iid for iid in requested if iid not in available]
+    if missing:
+        raise ExtractionError(f"No trace files found for instance IDs: {', '.join(missing)}")
+    selected = set(requested)
+    return (item for item in discovered if item[0] in selected)
+
+
 def _json_counter_value(value: Any) -> str:
     if not isinstance(value, dict):
         return "{}"
@@ -121,6 +138,7 @@ def analyze_trace_files(
     trim_ratio: float = 0.1,
     trace_files: list[Path] | None = None,
     include_metrics: bool = False,
+    instance_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, str | int]], list[dict[str, str | int]]]:
     """Analyze trace JSON files and return per-trace and per-instance rows."""
     if not 0 <= trim_ratio < 0.5:
@@ -130,6 +148,7 @@ def analyze_trace_files(
     grouped_rows: dict[str, list[dict[str, str | int]]] = {}
 
     file_iter = _iter_selected_trace_files(trace_files) if trace_files is not None else _iter_trace_files(trace_root)
+    file_iter = _select_instance_files(file_iter, instance_ids)
 
     for instance_id, trace_file in file_iter:
         try:

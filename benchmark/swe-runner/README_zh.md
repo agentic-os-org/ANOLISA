@@ -399,6 +399,17 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+使用 `--instance-id/-i` 可将全部 CSV 视图限定为逗号分隔的指定实例 ID。
+选择依据 trace 文件的父目录，保留每个实例的全部 trace；重复 ID 会去重，
+两端空白会被忽略。每个指定 ID 都必须在分析输入中有 trace。空选择或未知 ID
+会在修改 CSV 输出前报错，未选中的 trace JSON 不会被解析。既有 CSV 明细文件
+会刷新为本次选中视图。收集、时间窗口和 metadata 行为不变；选择在收集完成后的
+分析阶段应用。不传该选项时仍保留全部输入实例。
+
+```bash
+swe-runner analyze-traces --trace-root ./traces --instance-id django__django-12345,sympy__sympy-54321
+```
+
 分析已有 trace：
 
 ```bash
@@ -430,6 +441,7 @@ swe-runner analyze-traces \
 | `--trace-root` | `<output>/analyze-traces/traces` | trace JSON 根目录 |
 | `--output, -o` | `./output` | 输出根目录 |
 | `--trim-ratio` | `0.1` | 截尾平均比例，范围 `[0, 0.5)` |
+| `--instance-id, -i` | 无 | 限定全部 CSV 视图的指定实例 ID，以逗号分隔 |
 | `--openclaw-profiles-dir` | 根据 `--run-metadata` 推导 | OpenClaw local profiles 目录 |
 | `--start` | 无 | 补录窗口开始时间，ISO-8601 或 epoch |
 | `--end` | `now` | 补录窗口结束时间 |
