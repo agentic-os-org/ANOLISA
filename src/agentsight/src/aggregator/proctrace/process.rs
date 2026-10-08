@@ -14,21 +14,33 @@ use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, next_flow_id, ns
 /// the output the audit/trace consumers read.
 pub(crate) const MAX_RETAINED_PROCESS_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// Append `data` up to the shared per-stream cap, returning the dropped byte count.
-fn append_capped(buffer: &mut Vec<u8>, data: &[u8]) -> usize {
-    let remaining = MAX_RETAINED_PROCESS_OUTPUT_BYTES.saturating_sub(buffer.len());
-    let mut take = data.len().min(remaining);
-    // Back off to a UTF-8 character boundary: `String::from_utf8_lossy`
-    // converts the retained bytes into the chrome-trace stdout/stderr
-    // fields, and a mid-character cut produces a trailing U+FFFD replacement
-    // glyph that corrupts the last line of the trace payload.
-    if take > 0 && take < data.len() {
-        while take > 0 && (data[take] & 0xC0) == 0x80 {
-            take -= 1;
+/// Append a bounded prefix, returning bytes discarded from this stream.
+fn append_capped(buffer: &mut Vec<u8>, data: &[u8], capped: &mut bool) -> usize {
+    if *capped {
+        return data.len();
+    }
+    let take = data
+        .len()
+        .min(MAX_RETAINED_PROCESS_OUTPUT_BYTES.saturating_sub(buffer.len()));
+    buffer.extend_from_slice(&data[..take]);
+    let mut removed = 0;
+    if buffer.len() == MAX_RETAINED_PROCESS_OUTPUT_BYTES {
+        // Stop retaining after the first cut, even if backing off leaves room:
+        // later bytes would splice unrelated output across a discarded gap.
+        *capped = true;
+        // Inspect the combined tail, since a UTF-8 sequence may start in an
+        // earlier event. Keep incomplete tails below the cap for the next event
+        // to complete; keep genuinely invalid bytes for the existing lossy read.
+        if let Some(start) = buffer.iter().rposition(|b| b & 0xC0 != 0x80) {
+            if let Err(error) = std::str::from_utf8(&buffer[start..]) {
+                if error.error_len().is_none() {
+                    removed = buffer.len() - start;
+                    buffer.truncate(start);
+                }
+            }
         }
     }
-    buffer.extend_from_slice(&data[..take]);
-    data.len() - take
+    data.len() - take + removed
 }
 
 /// Aggregated process data for a specific PID
@@ -52,6 +64,9 @@ pub struct AggregatedProcess {
     pub stdout_data: Vec<u8>,
     /// Collected stderr data, capped at [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub stderr_data: Vec<u8>,
+    // Each stream freezes independently once retention reaches its cap.
+    stdout_capped: bool,
+    stderr_capped: bool,
     /// Whether this aggregation is complete (process exited)
     pub is_complete: bool,
     /// First timestamp when this process was seen (nanoseconds)
@@ -76,6 +91,8 @@ impl AggregatedProcess {
             args: None,
             stdout_data: Vec::new(),
             stderr_data: Vec::new(),
+            stdout_capped: false,
+            stderr_capped: false,
             is_complete: false,
             start_timestamp_ns: timestamp_ns,
             end_timestamp_ns: timestamp_ns,
@@ -112,8 +129,8 @@ impl AggregatedProcess {
     pub fn add_stdout(&mut self, data: &[u8], timestamp_ns: u64) {
         // Only the chunk that crosses the cap logs; a chatty process must not
         // produce one warning per event for the rest of its life.
-        let was_full = self.stdout_data.len() >= MAX_RETAINED_PROCESS_OUTPUT_BYTES;
-        let dropped = append_capped(&mut self.stdout_data, data);
+        let was_full = self.stdout_capped;
+        let dropped = append_capped(&mut self.stdout_data, data, &mut self.stdout_capped);
         if dropped > 0 && !was_full {
             log::debug!(
                 "add_stdout(pid={}): output capped at {MAX_RETAINED_PROCESS_OUTPUT_BYTES} bytes",
@@ -125,8 +142,8 @@ impl AggregatedProcess {
 
     /// Add stderr data, retaining at most [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub fn add_stderr(&mut self, data: &[u8], timestamp_ns: u64) {
-        let was_full = self.stderr_data.len() >= MAX_RETAINED_PROCESS_OUTPUT_BYTES;
-        let dropped = append_capped(&mut self.stderr_data, data);
+        let was_full = self.stderr_capped;
+        let dropped = append_capped(&mut self.stderr_data, data, &mut self.stderr_capped);
         if dropped > 0 && !was_full {
             log::debug!(
                 "add_stderr(pid={}): output capped at {MAX_RETAINED_PROCESS_OUTPUT_BYTES} bytes",
@@ -455,3 +472,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "output_cap_tests.rs"]
+mod output_cap_tests;

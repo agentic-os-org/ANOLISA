@@ -435,3 +435,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "raw_output_tests.rs"]
+mod raw_output_tests;

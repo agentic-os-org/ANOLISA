@@ -190,6 +190,13 @@ tool to the next LLM request carrying the matching tool result. Gaps not covered
 a matched Tool Call are returned as `idle`; unmatched Tool Calls are not assigned a fabricated end
 timestamp.
 
+## Process output in Chrome traces
+
+For an aggregated process lifecycle, Chrome Trace output retains the beginning of stdout and
+stderr, at most 64 KiB per stream. Once a stream reaches that limit, its later output is omitted;
+the other stream can continue up to its own limit. If the limit cuts through a UTF-8 character,
+the incomplete tail is omitted. Other invalid bytes use lossy text decoding.
+
 ## Prometheus metrics
 
 ```bash

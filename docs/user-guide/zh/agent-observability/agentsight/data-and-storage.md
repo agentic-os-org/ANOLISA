@@ -174,6 +174,12 @@ Session 资源归因：同一个共享 Agent 进程可能同时服务多个 Sess
 Tool Call 区间从产生工具请求的 LLM 响应结束开始，到携带对应工具结果的下一次 LLM 请求开始为止。未被
 LLM 调用或已匹配 Tool Call 覆盖的间隙会返回为 `idle`；无法匹配结果的 Tool Call 不会虚构结束时间。
 
+## Chrome Trace 中的进程输出
+
+对于聚合的进程生命周期，Chrome Trace 只保留 stdout 和 stderr 的开头内容，每条流最多 64 KiB。
+任一流达到上限后，其后续输出不再保留；另一条流仍可继续保留到自己的上限。若上限截断 UTF-8 字符，
+则舍弃不完整的尾部。其他无效字节沿用有损文本解码。
+
 ## Prometheus 指标
 
 ```bash
