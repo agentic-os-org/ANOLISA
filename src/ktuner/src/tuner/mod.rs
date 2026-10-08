@@ -236,18 +236,40 @@ pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     })
 }
 
+/// The value a parameter currently holds, read the way every other consumer
+/// reads it. sysfs option lists (`block/*/scheduler`,
+/// `transparent_hugepage/*`) render every choice and bracket the ACTIVE one,
+/// so the value is that token — the same reading the rules store as a
+/// recommendation's `current`. Multi-value sysctls (`net.ipv4.tcp_rmem`,
+/// `kernel.sem`) are separated by TABs in the file, while the rules publish
+/// them through read_sysctl_string's single-space join, so the fields are
+/// collapsed here too. The `why` fallback, the ledger's original
+/// ([`read_previous`]) and the read-back's effective value all render through
+/// this one reader, so no surface can disagree with another about the same
+/// knob's value: publishing the raw line flipped the format of `current`
+/// exactly when the recommendation disappeared (the system became optimal),
+/// and the ledger recorded the TAB-separated original that `fix` printed and
+/// `rollback --list` republished while `why` kept the single-space form.
+pub fn active_value(value: &str) -> String {
+    let trimmed = value.trim();
+    let active = trimmed
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+        .unwrap_or(trimmed);
+    active.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 // Recommendations are gathered before locking and may describe an older
 // state. Capture a writable original only after the transaction owns the lock.
 fn read_previous(param: &str) -> Result<String> {
     let path = param_to_path(param);
     let value = fs::read_to_string(&path)
         .with_context(|| format!("read original value from {path} before applying"))?;
-    let trimmed = value.trim();
-    Ok(trimmed
-        .split_whitespace()
-        .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
-        .unwrap_or(trimmed)
-        .to_string())
+    // The original must reach the ledger in the canonical single-space form
+    // every other consumer publishes: the kernel renders multi-value sysctls
+    // TAB-separated, and a raw `previous` made `fix`'s output and
+    // `rollback --list` disagree with `why`'s `current` about the same knob.
+    Ok(active_value(&value))
 }
 
 // Write-only tunables (mode 0200, e.g. vm.drop_caches / vm.compact_memory)
@@ -472,7 +494,11 @@ fn classify_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
     let read_tokens: Vec<&str> = readback_trimmed.split_whitespace().collect();
     if rec_tokens == read_tokens {
         return ReadbackVerdict::Verified {
-            effective: readback_trimmed.to_string(),
+            // The canonical single-space form, not the kernel's TAB-separated
+            // rendering: `effective` becomes the ledger's `applied`, the
+            // `fix` output and the sysctl.d line, and every other surface
+            // publishes the collapsed form (see [`active_value`]).
+            effective: read_tokens.join(" "),
         };
     }
     if rec_tokens.len() == 1 && read_tokens.len() > 1 && read_tokens.first() == rec_tokens.first() {
@@ -486,7 +512,9 @@ fn classify_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
         };
     }
     ReadbackVerdict::Clamped {
-        effective: readback_trimmed.to_string(),
+        // Collapsed like the exact-match arm: a clamped multi-value read-back
+        // (kernel.sem-style) is recorded in the canonical single-space form.
+        effective: read_tokens.join(" "),
     }
 }
 
@@ -3875,6 +3903,60 @@ mod tests {
             ReadbackVerdict::Verified {
                 effective: "bbr".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_exact_effective_keeps_the_canonical_format() {
+        // The kernel renders multi-value sysctls TAB-separated
+        // (proc_dointvec joins net.ipv4.tcp_rmem / kernel.sem fields with
+        // \t), while every reading consumer publishes the single-space form:
+        // read_sysctl_string for a recommendation's `current`, and — since
+        // the `why` fallback fix — the same collapse there. `effective` is
+        // what the ledger records as `applied`, what `fix` prints, what
+        // `rollback --list` shows and what sysctl.d persists, so it must
+        // hold the same canonical format instead of the raw tab line.
+        assert_eq!(
+            classify_readback("4096 87380 16777216", "4096\t87380\t16777216"),
+            ReadbackVerdict::Verified {
+                effective: "4096 87380 16777216".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_readback_clamped_effective_keeps_the_canonical_format() {
+        // A clamped multi-value read-back (kernel.sem-style quadruple where
+        // the kernel settled a field differently) is recorded the same way:
+        // the ledger's `applied` and the persistence line must carry the
+        // canonical single-space rendering, not the kernel's TAB separators.
+        assert_eq!(
+            classify_readback("250 32000 100 128", "250\t32000\t100\t999"),
+            ReadbackVerdict::Clamped {
+                effective: "250 32000 100 999".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_read_previous_records_the_canonical_multi_value_format() {
+        // `read_previous` is where the ledger's `previous` comes from (and
+        // `fix` prints it verbatim, `rollback --list` republishes it). The
+        // kernel renders net.ipv4.tcp_rmem TAB-separated, so without the
+        // collapse the same knob's value flips format between `why`'s
+        // `current` ("4096 131072 6291456") and the ledger's `previous`
+        // ("4096\t131072\t6291456") — the same instability the `why`
+        // fallback fix removed for its own two branches. Skipped on test
+        // hosts without the file (non-Linux).
+        let path = "/proc/sys/net/ipv4/tcp_rmem";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let original = read_previous("net.ipv4.tcp_rmem").expect("tcp_rmem is readable");
+        assert_eq!(
+            original,
+            original.split_whitespace().collect::<Vec<_>>().join(" "),
+            "the ledger original must hold the canonical single-space form"
         );
     }
 

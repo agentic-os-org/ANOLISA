@@ -486,25 +486,13 @@ fn cmd_why(param: &str) -> Result<i32> {
 }
 
 /// The value a parameter currently holds, read the way every other consumer
-/// reads it. sysfs option lists (`block/*/scheduler`, `transparent_hugepage/*`)
-/// render every choice and bracket the ACTIVE one, so the value is that
-/// token — the same reading the rules store as a recommendation's `current`,
-/// the ledger records as an original, and `classify_readback` verifies a
-/// write against. Multi-value sysctls (`net.ipv4.tcp_rmem`, `kernel.sem`) are
-/// separated by TABs in the file, while the rules publish them through
-/// read_sysctl_string's single-space join, so the fields are collapsed here
-/// too. Publishing the raw line flipped the format of `current` exactly when
-/// the recommendation disappeared (the system became optimal), for both
-/// shapes: an agent polling `why` saw `"madvise"` turn into
-/// `"always [madvise] never"`, and `"4096 131072 6291456"` turn into
-/// `"4096\t131072\t6291456"`.
+/// reads it: the shared [`tuner::active_value`] — the same reading the rules
+/// store as a recommendation's `current`, the ledger now records as an
+/// original, and `classify_readback` returns as the effective value. Keeping
+/// one implementation in the library is what makes the claim true: a second
+/// copy here would drift the moment either side learned a new file shape.
 fn active_value(value: &str) -> String {
-    let trimmed = value.trim();
-    let active = trimmed
-        .split_whitespace()
-        .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
-        .unwrap_or(trimmed);
-    active.split_whitespace().collect::<Vec<_>>().join(" ")
+    tuner::active_value(value)
 }
 
 fn why_with(
