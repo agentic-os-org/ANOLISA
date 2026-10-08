@@ -474,7 +474,8 @@ def audit_campaign(
                         f"{version} matrix {qps} QPS rep {repetition} is missing"
                     )
                 elif (
-                    runs[0].get("duration_seconds") != matrix["duration_seconds"]
+                    runs[0].get("qps") != qps
+                    or runs[0].get("duration_seconds") != matrix["duration_seconds"]
                     or runs[0].get("warmup_seconds") != matrix["warmup_seconds"]
                     or runs[0].get("evaluation", {}).get("verdict") != "PASS"
                 ):

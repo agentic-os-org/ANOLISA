@@ -1046,6 +1046,7 @@ def test_campaign_audit_accepts_only_complete_formal_evidence(
                             "scenario": "matrix",
                             "version": version,
                             "label": f"qps-{qps}",
+                            "qps": qps,
                             "repetition": repetition,
                             "duration_seconds": 900,
                             "warmup_seconds": 180,
