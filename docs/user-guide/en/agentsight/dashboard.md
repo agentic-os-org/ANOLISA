@@ -25,7 +25,7 @@ Token authentication is on by default.
 
 | Access path | What is required |
 |---|---|
-| `http://127.0.0.1:7396` from the same host | Read-only page requests normally skip authentication; API exceptions apply |
+| `http://127.0.0.1:7396` (or `localhost`) from the same host | Read-only page requests normally skip authentication; API exceptions apply |
 | `http://<host>:7396` from elsewhere | The Dashboard token, as `?token=<TOKEN>` in the URL, as `Authorization: Bearer <TOKEN>`, or typed into the login form |
 
 Saved Tokenless record lists require the Dashboard credential even on loopback. This changes
@@ -34,6 +34,14 @@ metadata access control; the existing page, login flow and statistics calculatio
 `GET /api/preferences?llm=true` also requires the Dashboard credential on loopback because it uses
 the server-saved LLM credential. Rule-only preference queries, `/api/preferences/export`, and
 `/api/preferences/turns` keep their existing access behavior.
+
+Loopback access is only a location shortcut for local, non-browser callers and the dashboard's own
+same-origin calls. A browser page loaded from a *different* origin inherits neither this shortcut
+nor the auth-disabled pass-through: protected Linux API endpoints return `401` without a valid
+credential, while the token-less local viewer returns `403 cross_origin_forbidden`. A page whose
+`Origin` and `Host` merely match each other is not trusted either — the `Host` must name the
+loopback endpoint itself, so a DNS-rebound domain or a reverse-proxy public name in front of a
+loopback server does not inherit the loopback shortcut.
 
 ![Dashboard login screen](../../../images/agentsight/en/dashboard-login.png)
 
@@ -52,7 +60,10 @@ An invalid-token message means the server rejected the token; check it with the 
 A connection-error message can also mean the server or a reverse proxy returned an HTTP error.
 Check that AgentSight is running and reachable, then retry the login.
 
-To turn authentication off — only sensible on a trusted internal network:
+To turn authentication off — only sensible on a trusted internal network, and only for direct
+loopback use; with authentication disabled, browser calls that arrive through a reverse proxy or
+under a non-loopback `Host` are rejected rather than served, so a token-less public binding no
+longer exposes the data to visited web pages:
 
 ```json
 { "server": { "auth": { "enabled": false } } }

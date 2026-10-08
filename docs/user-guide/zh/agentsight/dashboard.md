@@ -24,7 +24,7 @@ sudo agentsight serve --host 0.0.0.0 --port 7396
 
 | 访问方式 | 需要什么 |
 |---|---|
-| 本机访问 `http://127.0.0.1:7396` | 只读页面请求通常免认证；部分 API 仍需要凭据 |
+| 本机访问 `http://127.0.0.1:7396`（或 `localhost`） | 只读页面请求通常免认证；部分 API 仍需要凭据 |
 | 从其他机器访问 `http://<host>:7396` | 需要 Dashboard 令牌：URL 上带 `?token=<TOKEN>`、请求头 `Authorization: Bearer <TOKEN>`，或在登录框里输入 |
 
 已保存的 Tokenless 记录列表即使从 loopback 访问也需要 Dashboard 凭据。这项变更约束
@@ -33,6 +33,11 @@ sudo agentsight serve --host 0.0.0.0 --port 7396
 `GET /api/preferences?llm=true` 会使用服务端保存的 LLM 凭据，因此即使从 loopback 访问也需要
 Dashboard 凭据。规则模式偏好查询、`/api/preferences/export` 和 `/api/preferences/turns`
 的现有访问行为不变。
+
+回环免认证只是给本地非浏览器调用方和 Dashboard 自身同源调用的位置捷径。从**其他源**加载的
+浏览器页面不会继承这一捷径或关闭认证后的直通：Linux 上受保护 API 在没有有效凭据时返回 `401`，
+无令牌本地查看器则返回 `403 cross_origin_forbidden`。`Origin` 与 `Host` 恰好一致也不受信任——
+`Host` 必须命名回环端点本身，因此 DNS 重绑定域名或反向代理的公网名字不会继承回环捷径。
 
 ![Dashboard 登录页](../../../images/agentsight/zh/dashboard-login.png)
 
@@ -48,7 +53,9 @@ sudo agentsight dashboard --no-open
 无效令牌提示表示服务器拒绝了该令牌，请用上面的命令核对。连接错误提示也可能表示服务器或反向代理
 返回了 HTTP 错误。请确认 AgentSight 正在运行且可以访问，然后重试登录。
 
-关闭认证——只在可信内网这样做：
+关闭认证——只在可信内网、且只在本机直接回环访问时这样做；关闭认证后，经反向代理到达或
+`Host` 不是回环端点的浏览器调用会被直接拒绝而不是放行，因此无令牌的公网绑定不再把数据暴露给
+访问到的网页：
 
 ```json
 { "server": { "auth": { "enabled": false } } }
