@@ -130,16 +130,103 @@ pub fn operation_type(req: &HelperRequest) -> OperationType {
 
 // ─── White-list validation ──────────────────────────────────────────────────
 
-/// Check whether the given operation is allowed for the specified UID.
+/// Privilege required by one operation class.
 ///
-/// The white-list is the enum itself — any operation that can be deserialized
-/// from the wire is considered valid.  `Shutdown` is restricted to root
-/// (uid 0) only.
-pub fn is_operation_allowed(op: OperationType, uid: u32) -> bool {
+/// Every [`OperationType`] is classified explicitly so that an operation added
+/// to the enum tomorrow must pick a class here (the compiler enforces it)
+/// instead of silently inheriting "allowed for every peer" through a catch-all
+/// match arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationPrivilege {
+    /// Read-only queries any connected peer may issue.
+    AnyPeer,
+    /// Operations that stop or reconfigure the service itself.
+    RootOnly,
+    /// System-mutating operations (package install/remove, service
+    /// registration, snapshot/restore). Root may always issue them; other
+    /// callers only when the deployment delegated that authority through the
+    /// group that owns the service socket.
+    RootOrDelegated,
+}
+
+/// Returns the privilege class of one operation.
+#[must_use]
+pub fn operation_privilege(op: OperationType) -> OperationPrivilege {
     match op {
-        OperationType::Shutdown => uid == 0,
-        _ => true,
+        OperationType::Handshake
+        | OperationType::SystemStatus
+        | OperationType::OsbaseList
+        | OperationType::OsbaseStatus => OperationPrivilege::AnyPeer,
+        OperationType::Shutdown => OperationPrivilege::RootOnly,
+        OperationType::OsbaseInstall
+        | OperationType::OsbaseRemove
+        | OperationType::OsbaseUninstall
+        | OperationType::OsbaseSetDefault
+        | OperationType::OsbaseDoctor
+        | OperationType::WsCkptSnapshot
+        | OperationType::WsCkptRestore => OperationPrivilege::RootOrDelegated,
     }
+}
+
+/// Check whether the given operation is allowed for the authenticated peer.
+///
+/// `delegated_gid` is the group that owns the service socket — the same group
+/// the kernel enforces (including supplementary groups) at `connect()` time.
+/// The daemon re-validates it here so that authorization does not depend solely
+/// on the socket's filesystem mode, which any later privileged action could
+/// relax; `None` disables delegation and leaves mutating operations root-only.
+///
+/// Read-only queries stay available to every connected peer, and `Shutdown`
+/// stays root-only, exactly as before.
+pub fn is_operation_allowed(
+    op: OperationType,
+    peer: &anolisa_platform::ipc::PeerCredential,
+    delegated_gid: Option<u32>,
+) -> bool {
+    match operation_privilege(op) {
+        OperationPrivilege::AnyPeer => true,
+        OperationPrivilege::RootOnly => peer.uid == 0,
+        OperationPrivilege::RootOrDelegated => {
+            peer.uid == 0 || delegated_gid.is_some_and(|gid| peer_holds_delegated_group(peer, gid))
+        }
+    }
+}
+
+/// Human-readable privilege requirement of one operation, for denial
+/// messages.
+///
+/// Derived from the operation's class and the delegation state so the text
+/// never claims the peer's current standing should have worked: a delegated
+/// member refused `Shutdown` is told root is required, not that its group
+/// membership should suffice, and a mutation refused while delegation is
+/// disabled is not pointed at a group that authorizes nothing.
+#[must_use]
+pub fn privilege_requirement(op: OperationType, delegated_gid: Option<u32>) -> String {
+    match operation_privilege(op) {
+        OperationPrivilege::AnyPeer => "any connected peer".to_string(),
+        OperationPrivilege::RootOnly => "root".to_string(),
+        OperationPrivilege::RootOrDelegated => match delegated_gid {
+            Some(gid) => format!("root or membership in the delegated helper group (gid {gid})"),
+            None => "root".to_string(),
+        },
+    }
+}
+
+/// Whether the authenticated peer holds the delegated group.
+///
+/// `SO_PEERCRED` reports only the primary gid, while membership granted with
+/// `usermod -aG` is supplementary — those arrive in
+/// [`anolisa_platform::ipc::PeerCredential::groups`], snapshotted by the
+/// kernel from the connector's credential at `connect()` time. No
+/// `/proc/<pid>` lookup happens here: the stored numeric PID can be recycled
+/// while the connection stays open, and a later lookup — even UID-filtered —
+/// reads the replacement process's groups, not the connector's, because two
+/// processes under one UID can hold different group sets.
+fn peer_holds_delegated_group(
+    peer: &anolisa_platform::ipc::PeerCredential,
+    delegated_gid: u32,
+) -> bool {
+    peer.gid == delegated_gid || peer.groups.contains(&delegated_gid)
 }
 
 // ─── Rate limiter ───────────────────────────────────────────────────────────
@@ -225,11 +312,179 @@ mod tests {
 
     #[test]
     fn whitelist_shutdown_requires_root() {
-        assert!(!is_operation_allowed(OperationType::Shutdown, 1000));
-        assert!(is_operation_allowed(OperationType::Shutdown, 0));
-        // Non-shutdown operations allowed for any uid
-        assert!(is_operation_allowed(OperationType::OsbaseList, 1000));
-        assert!(is_operation_allowed(OperationType::SystemStatus, 65534));
+        // A synthetic peer without a delegated group in its snapshot.
+        let peer = |uid: u32| anolisa_platform::ipc::PeerCredential {
+            uid,
+            gid: 1000,
+            pid: -1,
+            groups: Vec::new(),
+        };
+        assert!(is_operation_allowed(
+            OperationType::Shutdown,
+            &peer(0),
+            Some(4242)
+        ));
+        assert!(is_operation_allowed(
+            OperationType::Shutdown,
+            &peer(0),
+            None
+        ));
+        assert!(!is_operation_allowed(
+            OperationType::Shutdown,
+            &peer(1000),
+            Some(4242)
+        ));
+        assert!(!is_operation_allowed(
+            OperationType::Shutdown,
+            &peer(1000),
+            None
+        ));
+        // Read-only operations allowed for any uid
+        assert!(is_operation_allowed(
+            OperationType::OsbaseList,
+            &peer(1000),
+            None
+        ));
+        assert!(is_operation_allowed(
+            OperationType::SystemStatus,
+            &peer(65534),
+            None
+        ));
+        assert!(is_operation_allowed(
+            OperationType::Handshake,
+            &peer(65534),
+            None
+        ));
+        assert!(is_operation_allowed(
+            OperationType::OsbaseStatus,
+            &peer(65534),
+            None
+        ));
+    }
+
+    #[test]
+    fn whitelist_classifies_every_operation() {
+        use OperationPrivilege::*;
+        let cases = [
+            (OperationType::Handshake, AnyPeer),
+            (OperationType::SystemStatus, AnyPeer),
+            (OperationType::OsbaseList, AnyPeer),
+            (OperationType::OsbaseStatus, AnyPeer),
+            (OperationType::Shutdown, RootOnly),
+            (OperationType::OsbaseInstall, RootOrDelegated),
+            (OperationType::OsbaseRemove, RootOrDelegated),
+            (OperationType::OsbaseUninstall, RootOrDelegated),
+            (OperationType::OsbaseSetDefault, RootOrDelegated),
+            (OperationType::OsbaseDoctor, RootOrDelegated),
+            (OperationType::WsCkptSnapshot, RootOrDelegated),
+            (OperationType::WsCkptRestore, RootOrDelegated),
+        ];
+        for (op, expected) in cases {
+            assert_eq!(operation_privilege(op), expected, "misclassified {op:?}");
+        }
+    }
+
+    #[test]
+    fn mutating_operations_require_root_or_the_delegated_group() {
+        let root = anolisa_platform::ipc::PeerCredential {
+            uid: 0,
+            gid: 0,
+            pid: -1,
+            groups: Vec::new(),
+        };
+        let outsider = anolisa_platform::ipc::PeerCredential {
+            uid: 1000,
+            gid: 1000,
+            // This test process does not hold the synthetic delegated group.
+            pid: std::process::id() as i32,
+            groups: Vec::new(),
+        };
+        let primary_member = anolisa_platform::ipc::PeerCredential {
+            uid: 1000,
+            gid: 4242,
+            pid: -1,
+            groups: Vec::new(),
+        };
+        // Membership granted before connecting: captured in the kernel's
+        // connect-time SO_PEERGROUPS snapshot.
+        let supplementary_member = anolisa_platform::ipc::PeerCredential {
+            uid: 1000,
+            gid: 1000,
+            pid: -1,
+            groups: vec![27, 4242],
+        };
+        // The connector's snapshot lacks the group even though a same-uid
+        // process may hold it by now — the fd-transfer/PID-reuse shape. The
+        // white-list must follow the snapshot, never live process state.
+        let stale_connection = anolisa_platform::ipc::PeerCredential {
+            uid: 1000,
+            gid: 1000,
+            pid: std::process::id() as i32,
+            groups: vec![27],
+        };
+        let mutations = [
+            OperationType::OsbaseInstall,
+            OperationType::OsbaseRemove,
+            OperationType::OsbaseUninstall,
+            OperationType::OsbaseSetDefault,
+            OperationType::OsbaseDoctor,
+            OperationType::WsCkptSnapshot,
+            OperationType::WsCkptRestore,
+        ];
+        for op in mutations {
+            // Root is always authorized, with or without a delegated group.
+            assert!(is_operation_allowed(op, &root, None), "root {op:?}");
+            assert!(is_operation_allowed(op, &root, Some(4242)), "root {op:?}");
+            // A non-root peer outside the delegated group is refused — the
+            // previous catch-all white-list answered true here.
+            assert!(
+                !is_operation_allowed(op, &outsider, Some(4242)),
+                "outsider {op:?}"
+            );
+            // With no delegation configured, only root may mutate.
+            assert!(
+                !is_operation_allowed(op, &primary_member, None),
+                "undelegated member {op:?}"
+            );
+            // Membership through the primary gid delegates the operation.
+            assert!(
+                is_operation_allowed(op, &primary_member, Some(4242)),
+                "primary-gid member {op:?}"
+            );
+            // Membership through the connect-time supplementary snapshot
+            // delegates it too.
+            assert!(
+                is_operation_allowed(op, &supplementary_member, Some(4242)),
+                "supplementary member {op:?}"
+            );
+            // But a supplementary group the connector lacked at connect time
+            // must not authorize the stale connection, however the peer's
+            // process credentials evolved afterwards.
+            assert!(
+                !is_operation_allowed(op, &stale_connection, Some(4242)),
+                "stale connection {op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn denial_messages_state_the_actual_requirement() {
+        use crate::system_helper::privilege_requirement as req;
+        // Root-only operations never advertise the delegated group, however
+        // strong the caller's membership: a delegated member refused
+        // Shutdown must not be told its standing should have worked.
+        assert_eq!(req(OperationType::Shutdown, Some(4242)), "root");
+        assert_eq!(req(OperationType::Shutdown, None), "root");
+        // Mutations mention the delegated group only while delegation is
+        // actually armed.
+        assert_eq!(
+            req(OperationType::OsbaseInstall, Some(4242)),
+            "root or membership in the delegated helper group (gid 4242)"
+        );
+        assert_eq!(req(OperationType::WsCkptRestore, None), "root");
+        // Read-only queries are never denied, so their text is only a
+        // fallback for internal misuse, but it must not lie either.
+        assert_eq!(req(OperationType::OsbaseList, None), "any connected peer");
     }
 
     #[test]
