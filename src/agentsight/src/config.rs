@@ -754,14 +754,29 @@ fn extract_rules(parsed: &JsonFullConfig) -> (Vec<CmdlineRule>, Vec<HttpsRule>, 
     (cmdline_rules, https_rules, http_targets)
 }
 
+/// One leading UTF-8 BOM (U+FEFF), as `read_to_string` decodes it. Windows
+/// editors saving as "UTF-8 with BOM" prefix the file with the mark, and
+/// serde_json rejects it at offset 0 — degrading a perfectly valid config to
+/// "invalid": the tracer fell back to embedded defaults (the user's cmdline
+/// rules silently not traced), the schema auto-upgrade froze the file on its
+/// old version, and the hot-reload watcher dropped its signal. The SSE
+/// reader already ignores exactly one leading BOM at a known stream start
+/// (the WHATWG parsing rule `sse_prefix` implements); the JSON config
+/// boundaries take the same one-mark rule, so a marked config parses as the
+/// config it is. Only the first mark is the format's: a second one is data
+/// and still fails the parse.
+fn strip_leading_bom(content: &str) -> &str {
+    content.strip_prefix('\u{feff}').unwrap_or(content)
+}
+
 /// Parse a JSON config string into cmdline rules, https rules, and http targets.
 ///
 /// This is the shared parser for both the config file and FFI's `load_config()`.
 pub fn parse_json_rules(
     json: &str,
 ) -> Result<(Vec<CmdlineRule>, Vec<HttpsRule>, Vec<HttpTarget>), String> {
-    let parsed: JsonFullConfig =
-        serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
+    let parsed: JsonFullConfig = serde_json::from_str(strip_leading_bom(json))
+        .map_err(|e| format!("JSON parse error: {e}"))?;
     Ok(extract_rules(&parsed))
 }
 
@@ -786,6 +801,12 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read existing config at {path:?}"))?;
+    // One leading BOM is the editor's mark, not the config's content (see
+    // [`strip_leading_bom`]). Strip it before the validity probe so a
+    // BOM-prefixed config takes the same valid/invalid decision — and the
+    // same schema upgrade — as its unmarked twin, instead of being frozen
+    // as "invalid" while the load falls back to embedded defaults.
+    let content = strip_leading_bom(&content);
 
     // If the file is not valid JSON at all, leave it untouched so the caller's
     // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
@@ -794,11 +815,11 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // *valid* JSON whose schema_version is outdated; silently overwriting an
     // invalid file masks the parse error and breaks the documented fallback
     // contract (see issue #1502).
-    if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+    if serde_json::from_str::<serde_json::Value>(content).is_err() {
         return Ok(());
     }
 
-    let on_disk_version = extract_schema_version(&content);
+    let on_disk_version = extract_schema_version(content);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
         return Ok(());
@@ -1312,8 +1333,11 @@ impl AgentsightConfig {
     ///
     /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
-        let mut parsed: JsonFullConfig =
-            serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
+        // The --config and FFI `load_config()` entry point: one leading BOM
+        // (see [`strip_leading_bom`]) must not fail the whole load and leave
+        // the tracer on embedded defaults without the user's rules.
+        let mut parsed: JsonFullConfig = serde_json::from_str(strip_leading_bom(json))
+            .map_err(|e| format!("JSON parse error: {e}"))?;
 
         // Warn if the config's schema_version is older than expected. By this
         // point ensure_default_agents_config should have already upgraded stale
@@ -1618,7 +1642,10 @@ pub fn parse_runtime_sls_path(json: &str) -> Option<Option<String>> {
         #[serde(default)]
         runtime: Option<JsonRuntime>,
     }
-    let parsed: Partial = serde_json::from_str(json).ok()?;
+    // One leading BOM is stripped like every other JSON config boundary (see
+    // [`strip_leading_bom`]), or a marked file's hot-reload signal would
+    // read as "no change" and an SLS pause/re-activation would be dropped.
+    let parsed: Partial = serde_json::from_str(strip_leading_bom(json)).ok()?;
     let rt = parsed.runtime?;
     let path = rt.sls_logtail_path?;
     let trimmed = path.trim();
@@ -2095,6 +2122,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_json_rules_tolerates_one_leading_bom() {
+        // A Windows editor saving the config as UTF-8-with-BOM prefixes the
+        // file with U+FEFF, and serde_json rejects the mark at offset 0 —
+        // which used to degrade the whole config to "invalid": the tracer
+        // fell back to embedded defaults (custom cmdline rules lost, a warn
+        // log the only trace) and `discover` answered from the built-ins.
+        // The SSE reader already ignores one leading BOM at a known stream
+        // start; the JSON config boundaries take the same one-mark rule.
+        let json =
+            "\u{feff}{\"cmdline\":{\"allow\":[{\"rule\":[\"node\"],\"agent_name\":\"Kept\"}]}}";
+        let (cmdline_rules, _, _) = parse_json_rules(json).unwrap();
+        assert_eq!(cmdline_rules.len(), 1);
+        assert_eq!(cmdline_rules[0].agent_name, Some("Kept".to_string()));
+        // Only the FIRST mark is whitespace-of-the-format: a second one is
+        // data and must still fail the parse.
+        assert!(parse_json_rules("\u{feff}\u{feff}{}").is_err());
+    }
+
+    #[test]
+    fn parse_runtime_sls_path_tolerates_one_leading_bom() {
+        // The config watcher parses the same file for its hot-reload signal;
+        // a BOM used to turn the signal into "no change" (None), silently
+        // dropping an SLS pause/re-activation.
+        let json = "\u{feff}{\"runtime\":{\"sls_logtail_path\":\"/var/log/filebeat\"}}";
+        assert_eq!(
+            parse_runtime_sls_path(json),
+            Some(Some("/var/log/filebeat".to_string()))
+        );
+    }
+
+    #[test]
     fn test_parse_json_rules_empty_rule_skipped() {
         let json = r#"{"cmdline":{"allow":[{"rule":[],"agent_name":"Skipped"},{"rule":["node"],"agent_name":"Kept"}]}}"#;
         let (cmdline_rules, _, _) = parse_json_rules(json).unwrap();
@@ -2510,6 +2568,17 @@ mod tests {
         assert!(!config.server_auth.enabled);
     }
 
+    #[test]
+    fn load_from_json_tolerates_one_leading_bom() {
+        // The --config / FFI load_config entry point: a BOM-prefixed config
+        // used to fail the whole load ("JSON parse error") and the tracer
+        // continued on embedded defaults without the user's rules.
+        let json = "\u{feff}{\"server\":{\"auth\":{\"enabled\":false}}}";
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.server_auth.enabled);
+    }
+
     // ── schema_version / config upgrade ─────────────────────────────────
 
     /// Helper: create a unique temp dir under std env temp.
@@ -2583,6 +2652,26 @@ mod tests {
         assert_eq!(
             extract_schema_version(&content),
             Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_upgrades_a_bom_prefixed_stale_config() {
+        // A BOM must not demote a valid-but-stale config to "invalid": the
+        // validity probe used to reject the mark at offset 0, so the schema
+        // auto-upgrade skipped the file and left it frozen on the old
+        // schema_version forever (load then also failed, falling back to
+        // embedded defaults). Stripped of the one mark it is the stale config
+        // it is, and takes the normal backup-and-upgrade path.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        std::fs::write(&path, "\u{feff}{\"cmdline\": {\"allow\": []}}").unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION),
+            "a BOM-prefixed stale config must be upgraded, not frozen"
         );
     }
 
