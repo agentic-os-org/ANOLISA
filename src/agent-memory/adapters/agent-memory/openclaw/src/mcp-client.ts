@@ -214,26 +214,50 @@ export class McpStdioClient {
 
     const env = buildChildEnv(process.env, pluginEnv);
 
-    this.proc = spawn(this.config.binaryPath, ["serve"], {
+    const child = spawn(this.config.binaryPath, ["serve"], {
       stdio: ["pipe", "pipe", "pipe"],
       env,
       detached: false,
     });
+    this.proc = child;
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
+    // Counts at most one respawn attempt per spawned child, shared by the
+    // 'exit' and 'error' handlers so a child that emits both is not counted
+    // twice. Without this, a spawn failure (missing binary, EACCES) never
+    // reaches the cap: Node fires 'error' but not 'exit' for it, every tool
+    // call retried a doomed spawn forever, and the decisive "gave up" state
+    // that surfaces the configuration problem never engaged.
+    let crashCounted = false;
+    const countCrash = (detail: string) => {
+      if (this.deliberateStop || crashCounted) return;
+      crashCounted = true;
+      this.respawnAttempts++;
+      if (this.respawnAttempts >= MAX_RESPAWN_ATTEMPTS) {
+        this.giveUp = true;
+        console.error(
+          `[agent-memory] failed to start or crashed ${this.respawnAttempts} times; will not respawn further. Last failure: ${detail}.`,
+        );
+      } else {
+        console.error(
+          `[agent-memory] child failed (${detail}); will respawn on next tool call (attempt ${this.respawnAttempts + 1}/${MAX_RESPAWN_ATTEMPTS})`,
+        );
+      }
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => {
       this.handleData(chunk.toString("utf8"));
     });
 
-    this.proc.stderr?.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       this.appendStderr(chunk.toString("utf8"));
     });
 
-    this.proc.on("exit", (code, signal) => {
-      this.handleExit(code, signal);
+    child.on("exit", (code, signal) => {
+      this.handleExit(code, signal, countCrash);
     });
 
-    this.proc.on("error", (err) => {
-      this.handleError(err);
+    child.on("error", (err) => {
+      this.handleError(err, countCrash);
     });
   }
 
@@ -417,8 +441,12 @@ export class McpStdioClient {
   }
 
   /** Handle child process exit: reject all pending calls. The next
-   * `ensureStarted()` will respawn unless we've crossed the cap. */
-  private handleExit(code: number | null, signal: string | null): void {
+   *  `ensureStarted()` will respawn unless we've crossed the cap. */
+  private handleExit(
+    code: number | null,
+    signal: string | null,
+    countCrash: (detail: string) => void,
+  ) {
     this.initialized = false;
     this.proc = null;
     this.flushStderr();
@@ -435,23 +463,11 @@ export class McpStdioClient {
 
     // Count this as a crash if the exit was unexpected. SIGTERM /
     // SIGKILL from `stop()` are deliberate and don't count.
-    if (!this.deliberateStop) {
-      this.respawnAttempts++;
-      if (this.respawnAttempts >= MAX_RESPAWN_ATTEMPTS) {
-        this.giveUp = true;
-        console.error(
-          `[agent-memory] crashed ${this.respawnAttempts} times; will not respawn further. Last exit code=${code}, signal=${signal}.`,
-        );
-      } else {
-        console.error(
-          `[agent-memory] child exited (code=${code}, signal=${signal}); will respawn on next tool call (attempt ${this.respawnAttempts + 1}/${MAX_RESPAWN_ATTEMPTS})`,
-        );
-      }
-    }
+    countCrash(`exit code=${code ?? "unknown"}, signal=${signal ?? "none"}`);
     this.deliberateStop = false;
   }
 
-  private handleError(err: Error): void {
+  private handleError(err: Error, countCrash: (detail: string) => void) {
     this.initialized = false;
     this.proc = null;
     this.flushStderr();
@@ -460,6 +476,10 @@ export class McpStdioClient {
       this.pending.delete(id);
       pending.reject(new Error(`agent-memory process error: ${err.message}`));
     }
+
+    // A spawn failure is a crash for the purposes of the respawn bound.
+    countCrash(`error: ${err.message}`);
+    this.deliberateStop = false;
   }
 
   private deliberateStop = false;

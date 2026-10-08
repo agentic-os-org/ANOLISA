@@ -117,4 +117,45 @@ describe("McpStdioClient", () => {
       await client.stop();
     }
   });
+
+  it("spawn failures count toward the respawn cap and give up", async () => {
+    // MAX_RESPAWN_ATTEMPTS is 3 in mcp-client.ts. Node reports a failed
+    // spawn via the 'error' event ('exit' never fires), so a spawn failure
+    // must count toward the same bound as a crash — otherwise a missing
+    // binary makes every tool call retry a doomed spawn forever and the
+    // decisive "gave up" state never engages.
+    const client = new McpStdioClient(cfg);
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      let gaveUp = false;
+      // A couple of extra rounds beyond the cap; each round leaves time for
+      // the async 'error' event to land before the next lazy-start attempt.
+      for (let i = 0; i < 3 + 2 && !gaveUp; i++) {
+        try {
+          await client.callTool("memory_search", { query: "x" });
+          assert.fail("expected callTool to reject");
+        } catch (err) {
+          gaveUp = /gave up/.test((err as Error).message);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.ok(
+        gaveUp,
+        `spawn failures must count toward the respawn cap and reach the \
+"gave up" state; observed console errors: ${errors.join(" | ")}`,
+      );
+      // Once given up, the client must refuse without spawning again.
+      await assert.rejects(
+        client.callTool("memory_search", { query: "x" }),
+        /gave up/,
+      );
+    } finally {
+      console.error = originalError;
+      await client.stop();
+    }
+  });
 });
