@@ -2,7 +2,7 @@ use anyhow::Context;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ==================== Default Constants ====================
 
@@ -124,6 +124,32 @@ pub fn init_logging(verbose: bool, log_path: Option<&str>) {
 
 pub fn verbose() -> bool {
     VERBOSE.load(Ordering::SeqCst)
+}
+
+// ==================== Global Probe Poll Timeout ====================
+
+/// Process-wide ring-buffer poll timeout for the probe poll threads,
+/// applied by `AgentSight::new` from `AgentsightConfig::poll_timeout_ms`.
+///
+/// The poll threads (`Probes::run`, `ProcTrace::run`, `SslSniff::run`) are
+/// spawned from code that cannot see the config object, so the knob is
+/// published through this global — the same pattern the verbose flag uses.
+/// The timeout bounds how long one `rb.poll()` blocks, i.e. how quickly a
+/// poll thread notices its stop flag.
+static POLL_TIMEOUT_MS: AtomicU64 = AtomicU64::new(DEFAULT_POLL_TIMEOUT_MS);
+
+/// Publish the configured ring-buffer poll timeout (milliseconds).
+///
+/// Clamped to at least one millisecond: a zero timeout makes every
+/// `rb.poll()` return immediately, so `drive_poll_loop` degenerates into a
+/// non-blocking busy loop that spins a core while the tracer runs.
+pub fn set_poll_timeout_ms(ms: u64) {
+    POLL_TIMEOUT_MS.store(ms.max(1), Ordering::SeqCst);
+}
+
+/// Current ring-buffer poll timeout (milliseconds).
+pub fn poll_timeout_ms() -> u64 {
+    POLL_TIMEOUT_MS.load(Ordering::SeqCst)
 }
 
 // ==================== FFI Rule Configuration ====================
@@ -1019,7 +1045,11 @@ pub struct AgentsightConfig {
     // --- Probe Configuration ---
     /// Optional UID filter for process tracing
     pub target_uid: Option<u32>,
-    /// Poll timeout for ring buffer polling (milliseconds)
+    /// Poll timeout for ring buffer polling (milliseconds). Bounds how long
+    /// one `rb.poll()` blocks in every probe poll thread, i.e. how quickly a
+    /// poll thread notices its stop flag. Applied process-wide at startup via
+    /// [`crate::config::set_poll_timeout_ms`]; a zero value is clamped to 1 ms
+    /// (a non-blocking poll would busy-spin).
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
@@ -1896,6 +1926,32 @@ mod tests {
         // verbose() reads from global static; default should be false
         // Note: other tests might have set it, so just check it doesn't panic
         let _ = verbose();
+    }
+
+    /// `AgentsightConfig::poll_timeout_ms` is published process-wide by
+    /// `AgentSight::new` and read by every probe poll thread, so the global
+    /// must round-trip a configured value and clamp the degenerate zero
+    /// (a non-blocking poll turns `drive_poll_loop` into a busy spin). All
+    /// mutations happen inside this single test so the process-wide global
+    /// cannot race a parallel test.
+    #[test]
+    fn poll_timeout_round_trips_and_clamps_zero() {
+        let saved = poll_timeout_ms();
+
+        set_poll_timeout_ms(250);
+        assert_eq!(poll_timeout_ms(), 250);
+
+        set_poll_timeout_ms(1);
+        assert_eq!(poll_timeout_ms(), 1, "one millisecond is a legal value");
+
+        set_poll_timeout_ms(0);
+        assert_eq!(
+            poll_timeout_ms(),
+            1,
+            "a zero poll timeout would busy-spin the poll threads"
+        );
+
+        set_poll_timeout_ms(saved);
     }
 
     #[test]

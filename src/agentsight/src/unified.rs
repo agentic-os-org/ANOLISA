@@ -473,6 +473,12 @@ impl AgentSight {
             }
         }
 
+        // Publish the configured ring-buffer poll timeout before any probe
+        // poll thread can spawn (`Probes::run` below, and the standalone
+        // `ProcTrace::run` / `SslSniff::run` paths read the same global); the
+        // poll threads read it via `crate::config::poll_timeout_ms()`.
+        crate::config::set_poll_timeout_ms(config.poll_timeout_ms);
+
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes = Probes::new_with_cgroup_filter(

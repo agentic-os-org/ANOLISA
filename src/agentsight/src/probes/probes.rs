@@ -29,8 +29,6 @@ use super::tcpsniff::TcpSniff;
 use super::udpdns::{RawUdpDnsEvent, UdpDns};
 use crate::config::TcpTarget;
 
-const POLL_TIMEOUT_MS: u64 = 100;
-
 /// Snapshot of the probe event channel's byte accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelWatermarks {
@@ -531,10 +529,16 @@ impl Probes {
             .context("failed to add shared ring buffer")?;
         let rb = rb_builder.build().context("failed to build ring buffer")?;
 
+        // Read the configured poll timeout on this thread before spawning so
+        // the poller observes exactly the value `AgentSight::new` published
+        // (crate::config::set_poll_timeout_ms), not whatever the global holds
+        // when the thread happens to get scheduled.
+        let poll_timeout = Duration::from_millis(crate::config::poll_timeout_ms());
+
         let handle = thread::Builder::new()
             .name("probes-poll".into())
             .spawn(move || {
-                let timeout = Duration::from_millis(POLL_TIMEOUT_MS);
+                let timeout = poll_timeout;
                 let outcome = super::drive_poll_loop(timeout, &stop_flag_inner, |timeout| {
                     rb.poll(timeout)
                         .map(|_| ())

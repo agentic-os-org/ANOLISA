@@ -270,6 +270,7 @@ agentsight serve
 | `db_name` | `agentsight.db` | 数据库文件名 |
 | `data_retention_days` | 30 | 数据保留天数（0=不限） |
 | `connection_cache_capacity` | 24 | HTTP 连接 LRU 缓存大小 |
+| `poll_timeout_ms` | 100 | 探针 ring buffer 轮询超时（毫秒），决定轮询线程感知停止标志的最大延迟；0 会被钳制为 1 |
 | `tokenizer_url` | Qwen3.5-27B tokenizer | 默认 tokenizer 下载 URL |
 
 ## Debugging

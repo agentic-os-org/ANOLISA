@@ -44,7 +44,6 @@ use bpf::*;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
-const POLL_TIMEOUT_MS: u64 = 100;
 
 /// How long a global uprobe attachment is trusted before the next matching
 /// process triggers a re-attach. The kernel can deregister uprobe consumers
@@ -681,10 +680,16 @@ impl SslSniff {
             .context("failed to add ring buffer")?;
         let rb = rb_builder.build().context("failed to build ring buffer")?;
 
+        // Read the configured poll timeout on this thread before spawning so
+        // the poller observes exactly the value `AgentSight::new` published
+        // (crate::config::set_poll_timeout_ms), not whatever the global holds
+        // when the thread happens to get scheduled.
+        let poll_timeout = Duration::from_millis(crate::config::poll_timeout_ms());
+
         let handle = thread::Builder::new()
             .name("sslsniff-poll".into())
             .spawn(move || {
-                let timeout = Duration::from_millis(POLL_TIMEOUT_MS);
+                let timeout = poll_timeout;
                 let outcome = super::drive_poll_loop(timeout, &stop_flag_inner, |timeout| {
                     rb.poll(timeout)
                         .map(|_| ())
