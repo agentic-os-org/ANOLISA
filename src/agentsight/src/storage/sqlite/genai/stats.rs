@@ -530,7 +530,12 @@ impl GenAISqliteStore {
         // so grouping on the raw column returned two rows with the same
         // `(bucket_start_ns, model)` key and one total was silently dropped.
         // SQLite resolves the bare column here rather than the output alias,
-        // so the `COALESCE` has to be repeated in the `GROUP BY`.
+        // so the `COALESCE` has to be repeated in the `GROUP BY`. The group
+        // key also collates NOCASE, like every agent-attributed view (the
+        // filter one line up, `list_agent_names`, the latency grouping):
+        // different clients spell the same model with different case
+        // ("gpt-4o" / "GPT-4o"), and case-sensitive grouping split one model
+        // into two series that the dashboard keyed and rendered separately.
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT
@@ -544,7 +549,7 @@ impl GenAISqliteStore {
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
                AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
-             GROUP BY bucket_idx, COALESCE(model, 'unknown')
+             GROUP BY bucket_idx, COALESCE(model, 'unknown') COLLATE NOCASE
              ORDER BY bucket_idx ASC"
             )
         } else {
@@ -559,7 +564,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-             GROUP BY bucket_idx, COALESCE(model, 'unknown')
+             GROUP BY bucket_idx, COALESCE(model, 'unknown') COLLATE NOCASE
              ORDER BY bucket_idx ASC"
             )
         };

@@ -491,6 +491,60 @@ fn test_get_token_timeseries_respects_requested_bucket_count() {
 }
 
 #[test]
+fn test_get_model_timeseries_merges_case_variant_models() {
+    // Every agent-attributed view compares names case-insensitively (COLLATE
+    // NOCASE filters, lowercase grouping keys, #5086/#5272), and the
+    // tokenizer's model mapping lowercases before matching too: different
+    // clients spell the same model with different case ("gpt-4o" and
+    // "GPT-4o"), which must be one series, not two.
+    let path =
+        std::env::temp_dir().join(format!("test_genai_model_case_{}.db", std::process::id()));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns,\
+                   provider, model, input_tokens, output_tokens,\
+                   agent_name, pid, status, event_json\
+                   ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,'complete','{}')";
+        for (call_id, model, out) in [("c1", "gpt-4o", 10_i64), ("c2", "GPT-4o", 25_i64)] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    BASE_NS,
+                    BASE_NS + STEP_NS,
+                    "openai",
+                    model,
+                    100_i64,
+                    out,
+                    "agent-a",
+                    1_i32
+                ],
+            )
+            .unwrap();
+        }
+    }
+    let buckets = store
+        .get_model_timeseries(BASE_NS, BASE_NS + STEP_NS, None, 1)
+        .unwrap();
+    assert_eq!(
+        buckets.len(),
+        1,
+        "case variants must merge into one series, got {:?}",
+        buckets.iter().map(|b| b.model.as_str()).collect::<Vec<_>>()
+    );
+    // Both rows carry input 100 (200) plus outputs 10 and 25 (35); the merged
+    // series must hold the sum of both rows, not one of them.
+    assert_eq!(buckets[0].total_tokens, 235);
+    drop(store);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_model_timeseries_respects_requested_bucket_count() {
     let (store, path) = create_populated_store("mts_bucket_cap");
     let r = store
