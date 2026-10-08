@@ -190,7 +190,12 @@ jobs:
         run: |
           test ! -e /opt/agent-sec && test ! -L /opt/agent-sec
           sudo ln -s "$HOME/.local/lib/anolisa/sec-core" /opt/agent-sec
-          trap 'sudo rm -f /opt/agent-sec' EXIT
+          cosh_hooks=/usr/share/anolisa/extensions/agent-sec-core/hooks
+          test -d "$HOME/.copilot-shell/extensions/agent-sec-core/hooks"
+          test ! -e "$cosh_hooks" && test ! -L "$cosh_hooks"
+          sudo install -d -m 0755 "$(dirname "$cosh_hooks")"
+          sudo ln -s "$HOME/.copilot-shell/extensions/agent-sec-core/hooks" "$cosh_hooks"
+          trap 'sudo rm -f /opt/agent-sec /usr/share/anolisa/extensions/agent-sec-core/hooks' EXIT
           sudo env "PATH=$PATH" "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR" \
             "AGENT_SEC_DATA_DIR=$AGENT_SEC_DATA_DIR" \
             "AGENT_SEC_DAEMON_SOCKET=$AGENT_SEC_DAEMON_SOCKET" \
