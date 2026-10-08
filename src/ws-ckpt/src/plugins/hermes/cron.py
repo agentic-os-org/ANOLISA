@@ -18,6 +18,14 @@ _MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)")
 
 
 def _build_cron_line(workspace: str, schedule: str) -> str:
+    # Crontab parses line by line, so shell quoting alone cannot make an
+    # interpolated value safe: a workspace path carrying a line break
+    # would split the entry and install everything after the break as an
+    # independent, attacker-chosen cron line. Refuse instead of quoting.
+    if "\n" in workspace or "\r" in workspace:
+        raise ValueError("workspace path must not contain line breaks")
+    if "\n" in schedule or "\r" in schedule:
+        raise ValueError("cron schedule must not contain line breaks")
     quoted_ws = "'" + workspace.replace("'", "'\\''") + "'"
     return (
         f"{schedule} /usr/local/bin/ws-ckpt checkpoint -w {quoted_ws}"
@@ -75,6 +83,11 @@ def _match_workspace(line: str, workspace: str) -> bool:
 
 def validate_cron_expr(expr: str) -> bool:
     """Return True if expr looks like a valid 5-field cron expression."""
+    # A crontab is line-based: an expression carrying a line break would
+    # split into a second entry when written, so reject it up front — the
+    # field regex below cannot, because ``\s`` also matches newlines.
+    if "\n" in expr or "\r" in expr:
+        return False
     return bool(_CRON_RE.match(expr.strip()))
 
 
@@ -142,6 +155,12 @@ class CrontabManager:
     @staticmethod
     def sync(workspace: str, schedules: List[str]) -> bool:
         def _do():
+            # Fail closed: never touch the crontab when an interpolated
+            # value could split a line (see _build_cron_line).
+            if "\n" in workspace or "\r" in workspace or any(
+                "\n" in s or "\r" in s for s in schedules
+            ):
+                return False
             lines = _read_crontab()
             if lines is None:
                 return False

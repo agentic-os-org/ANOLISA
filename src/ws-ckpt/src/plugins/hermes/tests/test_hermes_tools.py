@@ -875,3 +875,34 @@ class TestToolsTuple:
             assert isinstance(schema, dict)
             assert callable(handler)
             assert isinstance(emoji, str)
+
+
+class TestWorkspaceLineBreakGuard:
+    """The workspace path is interpolated into crontab lines; a value
+    carrying a line break would install everything after it as an
+    independent cron entry — scheduled code execution as the user."""
+
+    @patch("hermes.cron.CrontabManager.migrate", return_value=[])
+    @patch("hermes.tools._persist_plugin_yaml", return_value=None)
+    @patch("hermes.tools.get_manager")
+    @patch("hermes.tools._require_workspace", return_value=("/old", None))
+    def test_workspace_update_rejects_line_breaks(
+        self, _ws, mock_mgr, _persist, _migrate
+    ):
+        mgr = MagicMock()
+        mgr.config.workspace = "/old"
+        mgr.config.cron_schedules = []
+        mock_mgr.return_value = mgr
+        result = json.loads(
+            handle_ws_ckpt_config(
+                {
+                    "action": "update",
+                    "key": "workspace",
+                    "value": "/tmp/legit\n* * * * * touch /tmp/pwned",
+                }
+            )
+        )
+        assert result["success"] is False
+        assert "single-line" in result["error"]
+        mgr.set_workspace.assert_not_called()
+        _migrate.assert_not_called()

