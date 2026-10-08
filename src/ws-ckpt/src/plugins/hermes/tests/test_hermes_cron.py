@@ -33,6 +33,74 @@ class TestValidateCronExpr:
     def test_complex(self):
         assert validate_cron_expr("*/5 0-12 1,15 * 1-5") is True
 
+    # crontab rejects the whole submitted file when one field is out of
+    # range, so anything the validator lets through must be installable
+    # verbatim (mirrors the OpenClaw plugin's cron.test.ts cases).
+    def test_values_out_of_range(self):
+        assert validate_cron_expr("99 99 99 99 99") is False
+        assert validate_cron_expr("60 * * * *") is False  # minute
+        assert validate_cron_expr("0 24 * * *") is False  # hour
+        assert validate_cron_expr("* * 0 * *") is False  # day of month
+        assert validate_cron_expr("* * 32 * *") is False
+        assert validate_cron_expr("* * * 0 *") is False  # month
+        assert validate_cron_expr("* * * 13 *") is False
+        assert validate_cron_expr("* * * * 8") is False  # weekday
+        assert validate_cron_expr("* * * * 0") is True  # both Sundays
+        assert validate_cron_expr("* * * * 7") is True
+
+    def test_non_cron_tokens(self):
+        assert validate_cron_expr("foo * * * *") is False
+        assert validate_cron_expr("* foo * * *") is False
+        assert validate_cron_expr("* * foo * *") is False
+        assert validate_cron_expr("run midnight every day") is False
+
+    def test_empty_list_items(self):
+        assert validate_cron_expr("1,,2 * * * *") is False
+        assert validate_cron_expr("1, * * * *") is False
+
+    def test_steps(self):
+        assert validate_cron_expr("*/0 * * * *") is False
+        assert validate_cron_expr("*/x * * * *") is False
+        assert validate_cron_expr("1-30/0 * * * *") is False
+        assert validate_cron_expr("/5 * * * *") is False  # bare step, no base
+        assert validate_cron_expr("5/15 * * * *") is False  # scalar step: crontab(5) wants a range or star
+        assert validate_cron_expr("*/15 * * * *") is True
+        assert validate_cron_expr("1-30/2 * * * *") is True
+
+    def test_overlong_numeric_fields(self):
+        # Python 3.11's int() raises ValueError on >4300-digit strings, and
+        # config.load_config() calls this validator from an unguarded list
+        # comprehension: an upgraded-with-garbage entry must be rejected as
+        # invalid, never abort manager/session initialization with an
+        # exception.
+        for field_index in range(5):
+            fields = ["*"] * 5
+            fields[field_index] = "9" * 5000
+            assert validate_cron_expr(" ".join(fields)) is False
+        assert validate_cron_expr("*/" + "9" * 5000 + " * * * *") is False
+
+    def test_bad_ranges(self):
+        assert validate_cron_expr("50-10 * * * *") is False
+        assert validate_cron_expr("1- * * * *") is False
+        assert validate_cron_expr("-5 * * * *") is False
+        assert validate_cron_expr("1--5 * * * *") is False
+
+    def test_names_case_insensitive(self):
+        assert validate_cron_expr("0 0 1 jan *") is True
+        assert validate_cron_expr("0 0 1 JAN-MAR *") is True
+        assert validate_cron_expr("0 0 * * mon-fri") is True
+        assert validate_cron_expr("0 0 * * Sun") is True
+
+    def test_bad_names(self):
+        assert validate_cron_expr("jan * * * *") is False  # numeric-only fields
+        assert validate_cron_expr("* jan * * *") is False
+        assert validate_cron_expr("* * jan * *") is False
+        assert validate_cron_expr("* * * xyz *") is False  # unknown
+        assert validate_cron_expr("* * * * monday") is False
+        assert validate_cron_expr("* * * * xyz") is False
+        assert validate_cron_expr("* * * 1-mar *") is False  # mixed endpoints
+        assert validate_cron_expr("* * * * 1-fri") is False
+
 
 class TestParseSchedulesUpdate:
     def test_add_valid(self):

@@ -3,11 +3,105 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { runCrontab } from "./commands.js";
 
-const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
 const LOCK_DIR = join(tmpdir(), "ws-ckpt-cron.lock");
 
+// `crontab` rejects the *entire* submitted file when a single field is out of
+// range, so a schedule that passes a token-count check but fails cron's own
+// validation ("99 99 99 99 99", "0 25 * * *", "* * 32 * *") permanently
+// bricks every later sync for that workspace: the garbage entry stays in the
+// plugin config (it also passes the load-time filter) and each sync attempt
+// writes a file crontab refuses to install. Validate the real 5-field cron
+// grammar (values, ranges, lists, steps, month/day names) like crontab(5).
+const CRON_FIELD_NAMES: ReadonlyArray<Readonly<Record<string, number>> | undefined> = [
+  undefined,
+  undefined,
+  undefined,
+  {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  },
+  { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 },
+];
+
+const CRON_FIELD_BOUNDS: ReadonlyArray<{ min: number; max: number }> = [
+  { min: 0, max: 59 }, // minute
+  { min: 0, max: 23 }, // hour
+  { min: 1, max: 31 }, // day of month
+  { min: 1, max: 12 }, // month
+  { min: 0, max: 7 }, // day of week (0 and 7 are both Sunday)
+];
+
+/** Parse one comma-separated cron field item: a star, a star with a step,
+ *  a plain value ("5"), a range ("1-6"), a range with a step ("1-30/2"),
+ *  or a name range ("mon-fri"). Returns false for anything crontab would
+ *  reject. (A star-step is written as a star followed by "/15"; it cannot be
+ *  spelled out here because it would terminate this comment.) */
+function isValidCronItem(item: string, fieldIndex: number): boolean {
+  const slash = item.indexOf("/");
+  const base = slash === -1 ? item : item.slice(0, slash);
+  const step = slash === -1 ? undefined : item.slice(slash + 1);
+
+  if (step !== undefined) {
+    // crontab only accepts positive numeric steps.
+    if (!/^\d+$/.test(step) || parseInt(step, 10) < 1) return false;
+  }
+  if (slash !== -1 && base === "") return false;
+
+  if (base === "*") {
+    // "*" with a step is fine; "*" is fine. A bare "*" cannot be a range
+    // endpoint, which the parsing below already guarantees.
+    return true;
+  }
+
+  const bounds = CRON_FIELD_BOUNDS[fieldIndex];
+  const names = CRON_FIELD_NAMES[fieldIndex];
+  const parseEndpoint = (text: string): number | undefined => {
+    if (/^\d+$/.test(text)) {
+      const value = parseInt(text, 10);
+      return value >= bounds.min && value <= bounds.max ? value : undefined;
+    }
+    if (names) {
+      const value = names[text.toLowerCase()];
+      if (value !== undefined && value >= bounds.min && value <= bounds.max) {
+        return value;
+      }
+    }
+    return undefined;
+  };
+
+  const dash = base.indexOf("-");
+  if (dash === -1) {
+    // crontab(5): a step combines with a range or a star, never a scalar —
+    // "5/15" is a scalar step that crontab refuses to install, which would
+    // brick every later whole-file sync for the workspace.
+    if (slash !== -1) return false;
+    return parseEndpoint(base) !== undefined;
+  }
+  const start = base.slice(0, dash);
+  const end = base.slice(dash + 1);
+  // Both endpoints must exist; mixing names and numbers ("1-fri") is not
+  // something crontab documents, so reject it. Wrap-around ranges ("fri-mon")
+  // are rejected as well: write them as an explicit list instead.
+  const startIsName = !/^\d+$/.test(start);
+  const endIsName = !/^\d+$/.test(end);
+  if (start === "" || end === "" || startIsName !== endIsName) return false;
+  const startValue = parseEndpoint(start);
+  const endValue = parseEndpoint(end);
+  return (
+    startValue !== undefined && endValue !== undefined && startValue <= endValue
+  );
+}
+
+function isValidCronField(field: string, fieldIndex: number): boolean {
+  if (field === "") return false;
+  // crontab rejects empty list items (",,", trailing comma).
+  return field.split(",").every((item) => item !== "" && isValidCronItem(item, fieldIndex));
+}
+
 export function validateCronExpr(expr: string): boolean {
-  return CRON_RE.test(expr.trim());
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  return fields.every((field, index) => isValidCronField(field, index));
 }
 
 // Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
