@@ -189,8 +189,8 @@ def _check_api_compat(candidate_dir: str) -> str | None:
     saved = sys.modules.pop("hook_utils", None)
     try:
         import hook_utils as _trial  # type: ignore[import-not-found]
-        missing = [s for s in _HOOK_UTILS_REQUIRED_SYMBOLS
-                   if not hasattr(_trial, s)]
+
+        missing = [s for s in _HOOK_UTILS_REQUIRED_SYMBOLS if not hasattr(_trial, s)]
         if missing:
             _restore_cached_hook_utils(saved)
             return f"API mismatch: missing {', '.join(missing)}"
@@ -209,7 +209,6 @@ def _check_api_compat(candidate_dir: str) -> str | None:
         return f"import failed: {exc}"
     finally:
         sys.path.pop(0)
-
 
 
 def _resolve_hook_utils() -> tuple[str, list[str]]:
@@ -484,8 +483,8 @@ def on_transform_tool_result(
     # Hermes's terminal tool returns a JSON envelope whose `output` field is
     # the model-visible command output. Compress that field so structured JSON
     # produced by the command remains visible to JsonCompressor, then restore
-    # the host envelope below. Other tools already expose their model-bound
-    # result directly and must keep the existing path.
+    # the host envelope below. Failed or stopped calls keep the whole result:
+    # Hermes can put their only diagnostic in `error` while `output` is empty.
     shell_envelope = None
     content = result
     content_origin = _content_origin(tool_name, args)
@@ -494,7 +493,7 @@ def on_transform_tool_result(
     command = None
     if content_origin == "command_output" and isinstance(args, dict):
         command = args.get("command")
-    if tool_name in _SHELL_TOOLS:
+    if protocol_status == "success" and tool_name in _SHELL_TOOLS:
         try:
             parsed_result = json.loads(result)
         except json.JSONDecodeError:
