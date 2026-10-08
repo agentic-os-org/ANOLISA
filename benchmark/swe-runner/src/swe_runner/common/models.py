@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SWEInstance(BaseModel):
@@ -130,6 +130,31 @@ class DatasetConfig(BaseModel):
     filter_regex: str | None = Field(default=None, description="Regex filter for instance IDs")
     slice_range: str | None = Field(default=None, description="Slice string (e.g., '0:5')")
     instance_ids: list[str] | None = Field(default=None, description="Specific instance IDs to run")
+
+    @field_validator("slice_range")
+    @classmethod
+    def validate_slice_range(cls, value: str | None) -> str | None:
+        """Reject malformed slices at construction, not inside get_slice().
+
+        ``--slice abc:def`` used to pass validation and only crash later
+        in filter_instances with a raw int() ValueError traceback.
+        """
+        if value is None:
+            return value
+        parts = value.split(":")
+        if len(parts) > 2:
+            raise ValueError(
+                f"slice_range must look like 'start:end' (e.g. '0:5'), got {value!r}"
+            )
+        for part in parts:
+            if part:
+                try:
+                    int(part)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"slice_range components must be integers, got {value!r}"
+                    ) from exc
+        return value
 
     def get_slice(self) -> tuple[int, int] | None:
         """Parse slice_range string to (start, end) tuple.
