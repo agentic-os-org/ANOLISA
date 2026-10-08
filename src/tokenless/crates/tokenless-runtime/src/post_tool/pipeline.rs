@@ -147,58 +147,82 @@ impl PostToolPipeline {
                 None
             };
         let candidate = if diff_candidate {
-            if let Some(store) = attached_store
-                && let Some(view) = super::diff::render(&request.content)
-            {
-                let write = store
-                    .stash(&request.content)
-                    .map_err(|error| PostToolPipelineError(error.to_string()))?;
-                let hint =
-                    tokenless_ccr::recovery_instruction(&write.key, &request.capabilities.recovery);
-                DomainCandidate {
-                    output: format!("{hint}\n{view}"),
-                    operations: vec![AppliedOperation::DiffReduction],
-                    recoverability: tokenless_compressors::Recoverability::Retrievable,
-                    stash_writes: vec![write],
-                    stash_errors: 0,
-                    unrecoverable_truncations: None,
+            // A failed stash write is a backend failure, not a compressor
+            // failure: degrade to the unchanged candidate and count the
+            // error so the lifecycle surfaces `RuntimeError::StashWrite`,
+            // the taxonomy the JSON, build-log and tabular domains already
+            // use for failed stash writes, instead of failing the whole
+            // PostTool call as `RuntimeError::Pipeline`.
+            let mut stash_errors = 0;
+            let rendered = attached_store
+                .zip(super::diff::render(&request.content))
+                .and_then(|(store, view)| match store.stash(&request.content) {
+                    Ok(write) => Some((view, write)),
+                    Err(_) => {
+                        stash_errors = 1;
+                        None
+                    }
+                });
+            match rendered {
+                Some((view, write)) => {
+                    let hint = tokenless_ccr::recovery_instruction(
+                        &write.key,
+                        &request.capabilities.recovery,
+                    );
+                    DomainCandidate {
+                        output: format!("{hint}\n{view}"),
+                        operations: vec![AppliedOperation::DiffReduction],
+                        recoverability: tokenless_compressors::Recoverability::Retrievable,
+                        stash_writes: vec![write],
+                        stash_errors: 0,
+                        unrecoverable_truncations: None,
+                    }
                 }
-            } else {
-                DomainCandidate {
+                None => DomainCandidate {
                     output: request.content.clone(),
                     operations: Vec::new(),
                     recoverability: tokenless_compressors::Recoverability::Lossless,
                     stash_writes: Vec::new(),
-                    stash_errors: 0,
+                    stash_errors,
                     unrecoverable_truncations: None,
-                }
+                },
             }
         } else if html_candidate {
-            if let Some(store) = attached_store
-                && let Some(view) = HtmlExtractor.render(&request.content)
-            {
-                let write = store
-                    .stash(&request.content)
-                    .map_err(|error| PostToolPipelineError(error.to_string()))?;
-                let hint =
-                    tokenless_ccr::recovery_instruction(&write.key, &request.capabilities.recovery);
-                DomainCandidate {
-                    output: format!("{hint}\n{}", view.output),
-                    operations: vec![AppliedOperation::HtmlExtraction],
-                    recoverability: tokenless_compressors::Recoverability::Retrievable,
-                    stash_writes: vec![write],
-                    stash_errors: 0,
-                    unrecoverable_truncations: None,
+            // Same contract as the diff branch: the stash backend, not the
+            // HTML extractor, owns this failure mode.
+            let mut stash_errors = 0;
+            let rendered = attached_store
+                .zip(HtmlExtractor.render(&request.content))
+                .and_then(|(store, view)| match store.stash(&request.content) {
+                    Ok(write) => Some((view, write)),
+                    Err(_) => {
+                        stash_errors = 1;
+                        None
+                    }
+                });
+            match rendered {
+                Some((view, write)) => {
+                    let hint = tokenless_ccr::recovery_instruction(
+                        &write.key,
+                        &request.capabilities.recovery,
+                    );
+                    DomainCandidate {
+                        output: format!("{hint}\n{}", view.output),
+                        operations: vec![AppliedOperation::HtmlExtraction],
+                        recoverability: tokenless_compressors::Recoverability::Retrievable,
+                        stash_writes: vec![write],
+                        stash_errors: 0,
+                        unrecoverable_truncations: None,
+                    }
                 }
-            } else {
-                DomainCandidate {
+                None => DomainCandidate {
                     output: request.content.clone(),
                     operations: Vec::new(),
                     recoverability: tokenless_compressors::Recoverability::Lossless,
                     stash_writes: Vec::new(),
-                    stash_errors: 0,
+                    stash_errors,
                     unrecoverable_truncations: None,
-                }
+                },
             }
         } else if json_candidate {
             let context = JsonCompressionContext {
@@ -655,6 +679,30 @@ mod tests {
         }
     }
 
+    struct FailingStore;
+
+    impl StashStore for FailingStore {
+        fn stash(&self, _payload: &str) -> Result<StashWrite, StashError> {
+            Err(StashError::Backend("simulated write failure".into()))
+        }
+
+        fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
+            Ok(None)
+        }
+
+        fn len(&self) -> usize {
+            0
+        }
+
+        fn evict_expired(&self) -> Result<usize, StashError> {
+            Ok(0)
+        }
+
+        fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
+            Ok(false)
+        }
+    }
+
     fn request(content: &str) -> PostToolRequest {
         PostToolRequest {
             result_kind: ResultKind::Tool,
@@ -1001,6 +1049,30 @@ mod tests {
                 assert!(run.response.before_tokens - run.response.after_tokens >= 16);
             }
         }
+    }
+
+    #[test]
+    fn diff_stash_failure_degrades_to_unchanged_and_counts_one_error() {
+        // The stash backend, not the diff renderer, fails here (disk full,
+        // read-only state). The pipeline must degrade to the unchanged
+        // candidate and surface the failure through the stash-error counter
+        // — like the JSON, build-log and tabular domains — so the lifecycle
+        // reports RuntimeError::StashWrite instead of failing the whole
+        // PostTool call as RuntimeError::Pipeline.
+        let input = diff_input(100);
+        let mut config = build_log_config();
+        config.diff_compression_enabled = true;
+        let mut req = request(&input);
+        req.content_origin = ContentOrigin::CommandOutput;
+        let store: Arc<dyn StashStore> = Arc::new(FailingStore);
+        let run = PostToolPipeline::run(&req, &config, Some(&store)).unwrap();
+
+        assert_eq!(run.response.output, input);
+        assert_eq!(run.response.disposition, Disposition::NoSavings);
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(run.stash_errors, Some(1));
+        assert_eq!(run.stash_writes, Some(0));
     }
 
     #[test]

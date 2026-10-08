@@ -209,3 +209,26 @@ fn html_renders_a_page_that_opens_with_a_byte_order_mark() {
         plain_run.response.output.split_once('\n').map(|(_, rest)| rest)
     );
 }
+
+#[test]
+fn html_stash_failure_degrades_to_unchanged_and_counts_one_error() {
+    // A failed stash write is a backend failure, not an extractor failure:
+    // the page must pass through unchanged with the failure counted in the
+    // run's stash-error total (the lifecycle turns it into
+    // RuntimeError::StashWrite) instead of failing the whole PostTool call
+    // as RuntimeError::Pipeline.
+    let input = html_input(10);
+    let mut config = build_log_config();
+    config.html_extraction_enabled = true;
+    let mut req = request(&input);
+    req.content_origin = ContentOrigin::CommandOutput;
+    let store: Arc<dyn StashStore> = Arc::new(FailingStore);
+    let run = PostToolPipeline::run(&req, &config, Some(&store)).unwrap();
+
+    assert_eq!(run.response.output, input);
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert!(run.response.applied_operations.is_empty());
+    assert!(run.response.stash_keys.is_empty());
+    assert_eq!(run.stash_errors, Some(1));
+    assert_eq!(run.stash_writes, Some(0));
+}
