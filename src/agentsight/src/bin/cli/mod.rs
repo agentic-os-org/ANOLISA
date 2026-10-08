@@ -90,11 +90,9 @@ pub fn parse_period(s: &str) -> agentsight::TimePeriod {
 /// Calculate nanosecond timestamp for N hours ago
 #[cfg(target_os = "linux")]
 pub fn hours_ago_ns(hours: u64) -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
+    // A pre-epoch realtime clock degrades to 0 (the `epoch_nanos` family
+    // contract) instead of unwrapping the elapsed-time error.
+    let now = agentsight::utils::epoch_nanos(std::time::SystemTime::now());
     // Saturate so an absurd --last (up to u64::MAX) degrades to "everything"
     // (a zero start) instead of overflowing: the nanosecond product leaves u64
     // above ~5.12 million hours, and a debug build aborts on the multiply.

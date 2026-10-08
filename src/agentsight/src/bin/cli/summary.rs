@@ -276,11 +276,9 @@ fn interruption_db_path() -> std::path::PathBuf {
 
 /// Compute (start_ns, end_ns) for the last N hours from now.
 fn time_range_ns(hours: u64) -> (i64, i64) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64;
+    // A pre-epoch realtime clock degrades to 0 (the `epoch_nanos` family
+    // contract) instead of unwrapping the elapsed-time error.
+    let now_ns = agentsight::utils::epoch_nanos(std::time::SystemTime::now()) as i64;
     // Saturate so an absurd --last (up to u64::MAX) degrades to "everything"
     // (start far in the past) instead of overflowing into an inverted/garbage
     // window. Guard the u64->i64 cast first so a value >= 2^63 cannot flip sign.

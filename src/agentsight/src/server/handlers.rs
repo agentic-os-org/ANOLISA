@@ -653,13 +653,13 @@ pub async fn get_timeseries(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Current UNIX time in nanoseconds
+/// Current UNIX time in nanoseconds; 0 if the clock is before the epoch.
+///
+/// Every request that defaults `end_ns` lands here, so a pre-epoch realtime
+/// clock must degrade to 0 (the family contract, see `utils::epoch_nanos`)
+/// instead of unwrapping and taking the handler thread down.
 fn now_ns() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+    crate::utils::epoch_nanos(std::time::SystemTime::now())
 }
 
 // ─── agent-sec Security Observability endpoints ─────────────────────────────
