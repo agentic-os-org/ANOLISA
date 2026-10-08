@@ -48,7 +48,6 @@ pub struct SysctlValues {
     pub dirty_ratio: u64,
     pub dirty_background_ratio: u64,
     pub somaxconn: u64,
-    pub tcp_fastopen: u64,
     pub thp_enabled: String,
 }
 
@@ -822,7 +821,6 @@ fn read_sysctl_values() -> Result<SysctlValues> {
         dirty_ratio: read_sysctl_u64("/proc/sys/vm/dirty_ratio"),
         dirty_background_ratio: read_sysctl_u64("/proc/sys/vm/dirty_background_ratio"),
         somaxconn: read_sysctl_u64("/proc/sys/net/core/somaxconn"),
-        tcp_fastopen: read_sysctl_u64("/proc/sys/net/ipv4/tcp_fastopen"),
         thp_enabled: read_thp_enabled(),
     })
 }
@@ -1339,7 +1337,6 @@ mod tests {
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
                 somaxconn: 128,
-                tcp_fastopen: 0,
                 thp_enabled: "always".to_string(),
             },
             processes: names
@@ -1902,7 +1899,6 @@ mod tests {
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
                 somaxconn: 128,
-                tcp_fastopen: 0,
                 thp_enabled: "always".to_string(),
             },
             processes: vec![

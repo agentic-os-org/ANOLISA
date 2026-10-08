@@ -615,13 +615,44 @@ fn eval_somaxconn(
 }
 
 fn eval_tcp_fastopen(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    if !info.param_exists("/proc/sys/net/ipv4/tcp_fastopen") {
+    eval_tcp_fastopen_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_fastopen",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_fastopen`] (the `eval_*_at` idiom) so
+/// the signed read is assertable against a temp file on any host, listener
+/// or not.
+///
+/// The value is read SIGNED: net/ipv4/sysctl_net_ipv4.c registers
+/// tcp_fastopen as a plain `proc_dointvec` int with no min/max in both v5.10
+/// and v6.6, so `-1` is a legal, persistent whole-word value there — and it
+/// means every flag bit set (client 0x1, server 0x2, the force-on-all-
+/// listeners bit 0x400, ...): passive TFO fully enabled. The unsigned
+/// reader parsed "-1" to `Err` and fell back to `0`, so the completion test
+/// ran on a value the kernel never held and recommended `1027` on a host
+/// whose TFO was already fully on — a write that would also clear every
+/// administrator flag outside the required three. (The neighbouring
+/// `tcp_fastopen_blackhole_timeout_sec` is not affected: its handler is
+/// `proc_tfo_blackhole_detect_timeout` over `proc_dointvec_minmax` with
+/// `.extra1 = SYSCTL_ZERO`, so the kernel itself rejects negative writes
+/// there and the unsigned reader stays correct for it.)
+fn eval_tcp_fastopen_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    if let Some(rec) = tcp_fastopen_recommendation(info.sysctl.tcp_fastopen) {
+    if let Some(rec) = tcp_fastopen_recommendation(read_sysctl_i64(path)) {
         recs.push(rec);
     }
     1
@@ -643,8 +674,14 @@ fn eval_tcp_fastopen(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 /// promised. The value is written as a whole word, so flags the
 /// administrator set (0x4 `TFO_CLIENT_NO_COOKIE`, 0x200
 /// `TFO_SERVER_COOKIE_NOT_REQD`, ...) are kept rather than cleared.
-fn tcp_fastopen_recommendation(current: u64) -> Option<Recommendation> {
-    const REQUIRED: u64 = 0x1 | 0x2 | 0x400;
+///
+/// `current` is i64 because the registration above accepts `-1`: the
+/// completion test `current & REQUIRED == REQUIRED` then recognizes the
+/// every-flag-set host as already done, and the whole-word `current |
+/// REQUIRED` write preserves the administrator's negative flag word
+/// (`-2 | 0x403 == -1`) instead of collapsing it to `1027`.
+fn tcp_fastopen_recommendation(current: i64) -> Option<Recommendation> {
+    const REQUIRED: i64 = 0x1 | 0x2 | 0x400;
     if current & REQUIRED == REQUIRED {
         return None;
     }
@@ -6871,6 +6908,60 @@ mod tests {
     }
 
     #[test]
+    fn tcp_fastopen_minus_one_is_already_fully_enabled() {
+        // -1 is every flag bit set: the plain proc_dointvec registration
+        // (no min/max, v5.10 and v6.6 alike) accepts it as a whole word, and
+        // the kernel treats the host as fully TFO-enabled. The completion
+        // test must see the signed value, not the unsigned fallback 0 that
+        // used to make the rule recommend 1027 — a write that would clear
+        // every administrator flag outside the required three.
+        assert!(tcp_fastopen_recommendation(-1).is_none());
+        // -2 keeps every administrator flag except 0x1; completing it must
+        // set the required three without clearing anything: -2 | 0x403 == -1.
+        let rec = tcp_fastopen_recommendation(-2).expect("-2 is missing the 0x1 flag");
+        assert_eq!(rec.current_value, "-2");
+        assert_eq!(rec.recommended_value, "-1");
+    }
+
+    #[test]
+    fn tcp_fastopen_signed_read_survives_the_file_reader() {
+        // The reader is the defect: read_sysctl_u64 parsed "-1" to Err and
+        // fell back to 0, and the rule recommended enabling what was already
+        // fully enabled. Feeding the path-injectable form a temp file keeps
+        // the branch assertable on any host, listener or not.
+        let path = std::env::temp_dir().join(format!("ktuner-tcp-fastopen-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", false), ("1027", false), ("3", true), ("-2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            eval_tcp_fastopen_at(&info, &mut recs, path_str, true);
+            let rec = recs.iter().find(|r| r.param == "net.ipv4.tcp_fastopen");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: recommendation presence"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "3").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_fastopen_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter().all(|r| r.param != "net.ipv4.tcp_fastopen"),
+            "a host without listeners is not recommended TFO"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn sem_recommendation_only_raises_fields() {
         // Everything at or above the floors: no recommendation.
         assert_eq!(sem_recommendation(&[32000, 1024000000, 500, 32000]), None);
@@ -7460,7 +7551,6 @@ mod tests {
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
                 somaxconn: 128,
-                tcp_fastopen: 1,
                 thp_enabled: "always".to_string(),
             },
             processes: vec![ProcessInfo {
@@ -7537,11 +7627,6 @@ mod tests {
         info.sysctl.dirty_ratio = 10;
         info.sysctl.dirty_background_ratio = 5;
         info.sysctl.somaxconn = 65535;
-        // 0x1|0x2|0x400: client, server, and TFO on every listener without
-        // the TCP_FASTOPEN socket option. 3 (0x1|0x2) is NOT optimal — the
-        // kernel only pre-fills a listener's fastopenq.max_qlen when 0x400 is
-        // set too, so passive TFO silently stays off.
-        info.sysctl.tcp_fastopen = 0x403;
         info.processes = vec![];
         info.network = vec![];
 
@@ -7692,6 +7777,7 @@ mod tests {
             "neigh.default.gc_interval",
             "neigh.default.gc_stale_time",
             "tcp_fastopen_blackhole",
+            "tcp_fastopen",
             "rtsig-max",
             "keys.maxbytes",
             "pipe-max-size",

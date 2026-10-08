@@ -120,7 +120,6 @@ mod tests {
                 dirty_ratio: 20,
                 dirty_background_ratio: 10,
                 somaxconn: 128,
-                tcp_fastopen: 1,
                 thp_enabled: "always".to_string(),
             },
             processes: processes
