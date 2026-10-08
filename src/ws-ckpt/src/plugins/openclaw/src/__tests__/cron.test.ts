@@ -49,6 +49,67 @@ describe("validateCronExpr", () => {
   it("accepts complex expression", () => {
     expect(validateCronExpr("*/5 0-12 1,15 * 1-5")).toBe(true);
   });
+
+  // crontab rejects the whole submitted file when one field is out of range,
+  // so anything the validator lets through must be installable verbatim.
+  it("rejects five fields whose values are out of range", () => {
+    expect(validateCronExpr("99 99 99 99 99")).toBe(false);
+    expect(validateCronExpr("60 * * * *")).toBe(false); // minute
+    expect(validateCronExpr("0 24 * * *")).toBe(false); // hour
+    expect(validateCronExpr("* * 0 * *")).toBe(false); // day of month
+    expect(validateCronExpr("* * 32 * *")).toBe(false);
+    expect(validateCronExpr("* * * 0 *")).toBe(false); // month
+    expect(validateCronExpr("* * * 13 *")).toBe(false);
+    expect(validateCronExpr("* * * * 8")).toBe(false); // weekday (8 is not Sunday)
+    expect(validateCronExpr("* * * * 0")).toBe(true); // both Sunday spellings
+    expect(validateCronExpr("* * * * 7")).toBe(true);
+  });
+
+  it("rejects non-cron tokens in any field", () => {
+    expect(validateCronExpr("foo * * * *")).toBe(false);
+    expect(validateCronExpr("* foo * * *")).toBe(false);
+    expect(validateCronExpr("* * foo * *")).toBe(false);
+    expect(validateCronExpr("run midnight every day")).toBe(false);
+  });
+
+  it("rejects empty list items", () => {
+    expect(validateCronExpr("1,,2 * * * *")).toBe(false);
+    expect(validateCronExpr("1, * * * *")).toBe(false);
+  });
+
+  it("validates steps: positive numeric on stars and ranges only", () => {
+    expect(validateCronExpr("*/0 * * * *")).toBe(false);
+    expect(validateCronExpr("*/x * * * *")).toBe(false);
+    expect(validateCronExpr("1-30/0 * * * *")).toBe(false);
+    expect(validateCronExpr("/5 * * * *")).toBe(false); // bare step, no base
+    expect(validateCronExpr("*/15 * * * *")).toBe(true);
+    expect(validateCronExpr("1-30/2 * * * *")).toBe(true);
+  });
+
+  it("rejects reversed and malformed ranges", () => {
+    expect(validateCronExpr("50-10 * * * *")).toBe(false);
+    expect(validateCronExpr("1- * * * *")).toBe(false);
+    expect(validateCronExpr("-5 * * * *")).toBe(false);
+    expect(validateCronExpr("1--5 * * * *")).toBe(false);
+  });
+
+  it("accepts month and weekday names, case-insensitively", () => {
+    expect(validateCronExpr("0 0 1 jan *")).toBe(true);
+    expect(validateCronExpr("0 0 1 JAN-MAR *")).toBe(true);
+    expect(validateCronExpr("0 0 * * mon-fri")).toBe(true);
+    expect(validateCronExpr("0 0 * * Sun")).toBe(true);
+  });
+
+  it("rejects names in numeric-only fields, unknown and mixed names", () => {
+    expect(validateCronExpr("jan * * * *")).toBe(false);
+    expect(validateCronExpr("* jan * * *")).toBe(false);
+    expect(validateCronExpr("* * jan * *")).toBe(false);
+    expect(validateCronExpr("* * * xyz *")).toBe(false);
+    expect(validateCronExpr("* * * * monday")).toBe(false);
+    expect(validateCronExpr("* * * * xyz")).toBe(false);
+    expect(validateCronExpr("* * * 1-mar *")).toBe(false); // mixed endpoints
+    expect(validateCronExpr("* * * * 1-fri")).toBe(false);
+  });
 });
 
 describe("parseSchedulesUpdate", () => {
