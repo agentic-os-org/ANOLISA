@@ -2950,7 +2950,19 @@ fn eval_netdev_budget(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/busy_poll";
+    eval_busy_poll_at(info, recs, "/proc/sys/net/core/busy_poll")
+}
+
+/// Path-injectable form (the `eval_*_at` idiom) so the gate is assertable
+/// against a temp file on any host. The OLTP databases belong in the
+/// latency-sensitive set: every query is a synchronous network round-trip,
+/// the exact shape `busy_poll` exists for (the blocked reader polls the NIC
+/// instead of taking the interrupt), and they already gate every sibling
+/// latency rule (`eval_thp`, the swappiness/dirty db lists) — a postgres,
+/// MySQL/MariaDB or MongoDB host silently missed the `busy_poll = 50`
+/// advice a redis host on the same kernel got. MariaDB 10.4+ runs as
+/// mariadbd, the same OLTP database as mysqld.
+fn eval_busy_poll_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -2958,6 +2970,11 @@ fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let is_latency_sensitive = info.has_process("redis-server")
         || info.has_process("memcached")
         || info.has_process("nginx")
+        || info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
+        || info.has_process("mongod")
         || info.has_process("clickhouse");
     if is_latency_sensitive && current == 0 {
         recs.push(Recommendation {
@@ -7047,6 +7064,37 @@ mod tests {
         let rec = tcp_fastopen_recommendation(-2).expect("-2 is missing the 0x1 flag");
         assert_eq!(rec.current_value, "-2");
         assert_eq!(rec.recommended_value, "-1");
+    }
+
+    #[test]
+    fn busy_poll_gate_advises_the_oltp_databases() {
+        // #6631: every OLTP query is a synchronous network round-trip —
+        // the shape busy_poll exists for. The databases gate every sibling
+        // latency rule (eval_thp, eval_swappiness) but were missing here,
+        // so a postgres/MariaDB host silently got no busy_poll advice
+        // while a redis host on the same kernel did.
+        let path = std::env::temp_dir().join(format!("ktuner-busy-poll-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for db in ["postgres", "mysqld", "mariadbd", "mongod", "redis-server", "memcached"] {
+            std::fs::write(&path, "0\n").unwrap();
+            let mut recs = Vec::new();
+            eval_busy_poll_at(&info_with_processes(&[db]), &mut recs, path_str);
+            assert!(
+                recs.iter().any(|r| r.param == "net.core.busy_poll"),
+                "{db} is latency-sensitive and must get the busy_poll advice"
+            );
+        }
+        // Controls: a non-latency workload is left alone, and an
+        // already-tuned host gets no write-back advice.
+        std::fs::write(&path, "0\n").unwrap();
+        let mut recs = Vec::new();
+        eval_busy_poll_at(&info_with_processes(&["bash"]), &mut recs, path_str);
+        assert!(!recs.iter().any(|r| r.param == "net.core.busy_poll"));
+        std::fs::write(&path, "50\n").unwrap();
+        let mut recs = Vec::new();
+        eval_busy_poll_at(&info_with_processes(&["postgres"]), &mut recs, path_str);
+        assert!(!recs.iter().any(|r| r.param == "net.core.busy_poll"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
