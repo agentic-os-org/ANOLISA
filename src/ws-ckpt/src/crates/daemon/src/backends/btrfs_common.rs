@@ -1441,17 +1441,23 @@ pub(crate) fn ensure_snapshot_id_is_single_component(snapshot_id: &str) -> Resul
 /// a symlink. Deletion failures warn and keep the entry: the sweep re-runs
 /// on that workspace's next diff and on every bootstrap, so a failed cleanup
 /// is retried instead of being treated as done.
-pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) {
+pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) -> Vec<String> {
+    // Leftover paths the caller must be told about: entries whose
+    // space-aware delete failed, non-directory entries the sweep refuses
+    // to touch, and the directory itself when it cannot even be scanned.
+    // Empty means fully cleaned.
+    let mut leftovers: Vec<String> = Vec::new();
     let mut entries = match tokio::fs::read_dir(tmp_dir).await {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return leftovers,
         Err(error) => {
             warn!(
                 "cannot scan internal diff temp directory {}: {:#}",
                 tmp_dir.display(),
                 error
             );
-            return;
+            leftovers.push(tmp_dir.display().to_string());
+            return leftovers;
         }
     };
     loop {
@@ -1464,7 +1470,8 @@ pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) {
                     tmp_dir.display(),
                     error
                 );
-                return;
+                leftovers.push(tmp_dir.display().to_string());
+                return leftovers;
             }
         };
         let path = entry.path();
@@ -1489,6 +1496,7 @@ pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) {
                  inspect and remove it manually",
                 path.display()
             );
+            leftovers.push(path.display().to_string());
             continue;
         }
         match delete_subvolume_space_aware(&path, fs_root).await {
@@ -1496,14 +1504,19 @@ pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) {
                 "removed temp diff snapshot {} left by an interrupted diff",
                 path.display()
             ),
-            Err(error) => warn!(
-                "failed to remove temp diff snapshot {}: {:#}; will retry on the next \
-                 diff or bootstrap",
-                path.display(),
-                error
-            ),
+            Err(error) => {
+                warn!(
+                    "failed to remove temp diff snapshot {}: {:#}; will retry on the next \
+                     diff or bootstrap",
+                    path.display(),
+                    error
+                );
+                leftovers.push(path.display().to_string());
+            }
         }
     }
+
+    leftovers
 }
 
 /// Bootstrap-time sweep of the whole internal diff temp root.

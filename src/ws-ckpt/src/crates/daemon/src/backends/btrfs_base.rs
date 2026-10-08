@@ -297,7 +297,11 @@ impl StorageBackend for BtrfsBaseBackend {
         btrfs_common::delete_subvolume_space_aware(&snap_path, &self.data_root).await
     }
 
-    async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()> {
+    async fn recover_workspace(
+        &self,
+        ws_id: &str,
+        original_path: &str,
+    ) -> anyhow::Result<Vec<String>> {
         let subvol_path = self.data_root.join(ws_id);
         let snap_base = self.snapshots_dir.join(ws_id);
 
@@ -389,18 +393,24 @@ impl StorageBackend for BtrfsBaseBackend {
             .data_root
             .join(btrfs_common::DIFF_TMP_DIR_NAME)
             .join(ws_id);
-        btrfs_common::sweep_diff_tmp_dir(&diff_tmp_dir, &self.data_root).await;
-        if let Err(e) = tokio::fs::remove_dir_all(&diff_tmp_dir).await {
-            warn!(
-                "failed to remove internal diff temp dir {:?}: {}",
-                diff_tmp_dir, e
-            );
+        let mut temp_leftovers =
+            btrfs_common::sweep_diff_tmp_dir(&diff_tmp_dir, &self.data_root).await;
+        match tokio::fs::remove_dir_all(&diff_tmp_dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(
+                    "failed to remove internal diff temp dir {:?}: {}",
+                    diff_tmp_dir, e
+                );
+                temp_leftovers.push(diff_tmp_dir.display().to_string());
+            }
         }
 
         // The backup can contain files absent from an interrupted migration.
         // Leave it intact; the manager archives it and reports the new location.
 
-        Ok(())
+        Ok(temp_leftovers)
     }
 
     async fn diff(

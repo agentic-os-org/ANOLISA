@@ -111,7 +111,16 @@ pub trait StorageBackend: Send + Sync {
     /// Recover the workspace back to a plain directory (undo init)
     /// - btrfs-base: rsync restore + remove symlink + delete subvolume (no umount loop)
     /// - btrfs-loop: rsync restore + remove symlink + delete subvolume + umount + losetup -d + remove img
-    async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()>;
+    ///
+    /// Returns the internal diff-temp paths that could not be deleted during
+    /// recovery (empty when fully cleaned) so callers can surface them as a
+    /// warning; the entries themselves are already logged and stay for the
+    /// next bootstrap or diff to retry.
+    async fn recover_workspace(
+        &self,
+        ws_id: &str,
+        original_path: &str,
+    ) -> anyhow::Result<Vec<String>>;
 
     /// Compute diff between two snapshots, or between a snapshot and the live workspace.
     async fn diff(

@@ -70,6 +70,35 @@ impl FakeBtrfs {
             saved_path,
         }
     }
+
+    /// Variant whose `subvolume delete` fails for internal diff-temp paths
+    /// (they all live under `.diff-tmp`): the sweep cannot clean them, so
+    /// recover must report the paths that remain instead of only logging.
+    fn install_diff_delete_fails() -> FakeBtrfs {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim = dir.path().join("btrfs");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nif [ \"$1\" = 'subvolume' ] && [ \"$2\" = 'delete' ]; then\n  case \"$3\" in\n    *.diff-tmp*) exit 1 ;;\n    *) rm -rf -- \"$3\" ;;\n  esac\nfi\nexit 0\n",
+        )
+        .expect("write shim");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod shim");
+        let saved_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        FakeBtrfs {
+            _dir: dir,
+            saved_path,
+        }
+    }
 }
 
 impl Drop for FakeBtrfs {
@@ -259,5 +288,46 @@ async fn cleanup_snapshots_batch_refuses_unsafe_ids() {
     assert!(
         outside.exists(),
         "the traversal id must not touch anything outside the snapshot dir"
+    );
+}
+
+/// recover surfaces the internal temp snapshots it could not delete: the
+/// sweep's failure reaches the caller as leftover paths on the success
+/// result, not only as daemon logs (#6198 review point 5). The per-ws
+/// directory itself is also reported when it cannot be emptied, which on
+/// real btrfs happens whenever a leftover subvolume survives the sweep
+/// (a subvolume cannot be removed by the plain recursive delete that
+/// follows); the shim's plain directories always can, so that branch is
+/// production defense rather than something this test can observe.
+#[tokio::test]
+async fn recover_reports_temp_snapshots_the_sweep_failed_to_delete() {
+    let _guard = shim_lock().await;
+    let _shim = FakeBtrfs::install_diff_delete_fails();
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = BtrfsBaseBackend::new(tmp.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+    let data_root = tmp.path().join("ws-ckpt-data");
+    let subvol = data_root.join("ws-1");
+    std::fs::create_dir_all(&subvol).unwrap();
+    std::fs::write(subvol.join("payload"), b"payload").unwrap();
+    std::fs::create_dir_all(data_root.join("snapshots").join("ws-1")).unwrap();
+    let original = tmp.path().join("original");
+    std::os::unix::fs::symlink(&subvol, &original).unwrap();
+    let ws_tmp_dir = data_root.join(DIFF_TMP_DIR_NAME).join("ws-1");
+    let stale = ws_tmp_dir.join("a1b2c3");
+    std::fs::create_dir_all(&stale).unwrap();
+
+    let leftovers = backend
+        .recover_workspace("ws-1", original.to_str().unwrap())
+        .await
+        .expect("recover must succeed");
+
+    assert!(
+        leftovers.contains(&stale.display().to_string()),
+        "the undeletable temp snapshot must be reported, got {leftovers:?}"
+    );
+    assert!(original.is_dir(), "workspace contents were restored");
+    assert!(
+        original.join("payload").is_file(),
+        "restored contents came from the subvolume"
     );
 }

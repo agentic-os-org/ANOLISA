@@ -2169,7 +2169,7 @@ mod tests {
             async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
                 unimplemented!()
             }
-            async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
                 unimplemented!()
             }
             async fn cleanup_snapshots(
@@ -2400,7 +2400,7 @@ mod tests {
         async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
             unimplemented!()
         }
-        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
             unimplemented!()
         }
         async fn diff(

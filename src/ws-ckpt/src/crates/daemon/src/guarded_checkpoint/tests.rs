@@ -100,7 +100,7 @@ impl StorageBackend for TestBackend {
         anyhow::bail!("unused test backend operation")
     }
 
-    async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+    async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("unused test backend operation")
     }
 

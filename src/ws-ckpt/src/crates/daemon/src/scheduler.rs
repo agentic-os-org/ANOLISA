@@ -391,7 +391,7 @@ mod tests {
             std::fs::remove_dir_all(self.snapshots_root.join(ws_id).join(id))?;
             Ok(())
         }
-        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
             unimplemented!()
         }
         async fn diff(
