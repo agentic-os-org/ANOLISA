@@ -797,6 +797,17 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
             // and an UP tunnel was judged a 10 GbE host, and every rule gated
             // on a 10 GbE link then sized its recommendation for a link the
             // machine does not have.
+            // The name prefixes catch the conventional names, but TUNSETIFF
+            // accepts any device name a caller asks for: `ip tuntap add dev
+            // myvpn0`, OpenVPN with an explicit `dev`, and Tailscale's
+            // `tailscale0` (wireguard-go's tun) all still get the driver's
+            // fixed SPEED_10000. The tun driver exposes its own marker for
+            // exactly this: every device it registers carries a `tun_flags`
+            // sysfs attribute (v6.6 drivers/net/tun.c:2720, `tun_dev_attrs`
+            // in `tun_attr_group`), which no other netdev has. Skip on the
+            // marker so a custom-named tunnel cannot masquerade as the host
+            // link either.
+            let is_tun_device = entry.path().join("tun_flags").exists();
             if name == "lo"
                 || name.starts_with("veth")
                 || name.starts_with("br-")
@@ -805,6 +816,7 @@ fn read_network_info_from(net_dir: &Path) -> Result<Vec<NetInfo>> {
                 || name == "bonding_masters"
                 || name.starts_with("tun")
                 || name.starts_with("tap")
+                || is_tun_device
             {
                 continue;
             }
@@ -1921,6 +1933,52 @@ mod tests {
             info.max_net_speed(),
             1000,
             "a tunnel's fixed 10 Gb/s default must not decide the host link speed: {:?}",
+            info.network
+                .iter()
+                .map(|n| (n.name.as_str(), n.speed_mbps))
+                .collect::<Vec<_>>()
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A tun/tap device can be created with any name (TUNSETIFF takes the
+    /// caller's), and every device the tun driver registers still reports the
+    /// fixed SPEED_10000 - Tailscale's `tailscale0` and an explicitly named
+    /// OpenVPN `myvpn0` are the shapes the name prefixes miss. But the driver
+    /// marks its own devices: each one carries a `tun_flags` sysfs attribute
+    /// (v6.6 drivers/net/tun.c:2720), which no other netdev has, so the
+    /// marker must close the hole the prefixes leave.
+    #[test]
+    fn network_info_ignores_a_custom_named_tun_device() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_net_custom_tun_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+
+        // A 1 GbE NIC next to custom-named tunnels (no tun/tap prefix), each
+        // carrying the tun driver's own marker attribute.
+        for (name, speed, is_tun) in [
+            ("eth0", "1000\n", false),
+            ("tailscale0", "10000\n", true),
+            ("myvpn0", "10000\n", true),
+        ] {
+            let iface = dir.join(name);
+            fs::create_dir_all(&iface).expect("create fake interface dir");
+            fs::write(iface.join("speed"), speed).expect("write speed");
+            if is_tun {
+                fs::write(iface.join("tun_flags"), "0x1000\n").expect("write tun_flags");
+            }
+        }
+
+        let mut info = info_with_processes(&[]);
+        info.network = read_network_info_from(&dir).expect("read fake sysfs tree");
+        assert_eq!(
+            info.max_net_speed(),
+            1000,
+            "a custom-named tun device's fixed 10 Gb/s default must not decide the host link speed: {:?}",
             info.network
                 .iter()
                 .map(|n| (n.name.as_str(), n.speed_mbps))
