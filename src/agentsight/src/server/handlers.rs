@@ -2974,6 +2974,12 @@ mod tests {
             format!("/interruptions/session-counts?{window}&resolved=true"),
             format!("/interruptions/conversation-counts?{window}&interruption_type=rate_limit"),
             format!("/interruptions/conversation-counts?{window}&resolved=true"),
+            // `limit` pages the event list, not a whole-window aggregate: an
+            // accepted value used to answer the unbounded aggregate with 200.
+            format!("/interruptions/count?{window}&limit=5"),
+            format!("/interruptions/stats?{window}&limit=5"),
+            format!("/interruptions/session-counts?{window}&limit=5"),
+            format!("/interruptions/conversation-counts?{window}&limit=5"),
             // A supported filter alongside an unsupported one must not hide
             // the unsupported one.
             format!("/interruptions/count?{window}&agent_name=Agent-B&severity=critical"),
@@ -4906,6 +4912,11 @@ fn reject_unknown_interruption_filters(query: &InterruptionQuery) -> Option<Http
 /// unresolved-only breakdowns: accepting `resolved=false` there would make the
 /// equally ignored `resolved=true` look supported while always returning the
 /// unresolved view.
+///
+/// `limit` is rejected for the same reason: the aggregates return whole-window
+/// numbers with no row cap to apply, so an accepted value answered a
+/// paged-looking request with the unbounded aggregate. The list endpoint is
+/// where `limit` pages individual events (default 200, hard cap 1000).
 fn reject_unsupported_interruption_filters(
     query: &InterruptionQuery,
     endpoint: &str,
@@ -4919,6 +4930,9 @@ fn reject_unsupported_interruption_filters(
     }
     if query.resolved.is_some() {
         unsupported.push("resolved");
+    }
+    if query.limit.is_some() {
+        unsupported.push("limit");
     }
     if unsupported.is_empty() {
         return None;
