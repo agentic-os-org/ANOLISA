@@ -229,6 +229,16 @@ def main() -> None:
         warn("failed to read PostToolUse payload. Passing through unchanged.")
         skip()
 
+    if not isinstance(input_data, dict):
+        # A payload that is not a JSON object carries no hook fields; take
+        # the same pass-through path as undecodable input instead of
+        # raising, as the sibling schema hook already does.
+        warn(
+            "PostToolUse payload is not a JSON object. "
+            "Passing through unchanged."
+        )
+        skip()
+
     session_id = input_data.get("session_id", "")
     tool_use_id = resolve_tool_call_id(agent_id, input_data)
     try:

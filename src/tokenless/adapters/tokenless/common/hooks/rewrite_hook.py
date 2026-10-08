@@ -54,6 +54,12 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         skip()
 
+    if not isinstance(input_data, dict):
+        # A payload that is not a JSON object carries no command to
+        # rewrite; take the same silent path as undecodable input instead
+        # of raising, as the sibling schema hook already does.
+        skip()
+
     tool_input = input_data.get("tool_input", {})
     if not isinstance(tool_input, dict):
         skip()
