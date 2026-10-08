@@ -923,6 +923,60 @@ def test_load_samples_skip_unusable_jsonl_records(
     assert campaign_evidence.load_samples(tmp_path / "run") == expected
 
 
+def test_campaign_audit_classifies_malformed_confirmation_evidence() -> None:
+    """Unusable capacity confirmation shapes are incomplete evidence, never a
+    crash — and a string entry must not pass through str.count's substring
+    semantics as three passes."""
+    campaign = {
+        "capacity": {"qps_resolution": 50, "confirm_repetitions": 3},
+        "matrix": {"qps": [], "repetitions": 3},
+        "soak": {"duration_seconds": 14400, "warmup_seconds": 600},
+        "recovery": {
+            "repetitions": 3,
+            "stable_seconds": 600,
+            "overload_seconds": 300,
+            "recover_seconds": 900,
+        },
+        "fault": {"duration_seconds": 300, "warmup_seconds": 180},
+    }
+
+    def capacities_with(confirmation: object) -> dict[str, object]:
+        return {
+            version: {
+                "maximum_sustainable_qps": 100,
+                "first_failed_qps": 150,
+                "safety_limit_reached": False,
+                "boundary_confirmed": True,
+                "confirmation": confirmation,
+            }
+            for version in campaign_evidence.VERSIONS
+        }
+
+    for confirmation in (
+        "confirmed",
+        {"100": {"runs": 3}, "150": ["FAIL"] * 3},
+        {"100": 3, "150": ["FAIL"] * 3},
+        {"100": "PASSPASSPASS", "150": ["FAIL"] * 3},
+    ):
+        issues = campaign_evidence.audit_campaign(
+            campaign, [], capacities_with(confirmation), {}, {}, {}
+        )
+        assert any(
+            "pass confirmation is incomplete" in issue for issue in issues
+        ), f"{confirmation!r} must read as incomplete pass evidence"
+
+    # Control: complete confirmation evidence raises no capacity issue.
+    issues = campaign_evidence.audit_campaign(
+        campaign,
+        [],
+        capacities_with({"100": ["PASS"] * 3, "150": ["FAIL"] * 3}),
+        {},
+        {},
+        {},
+    )
+    assert not any("capacity" in issue for issue in issues)
+
+
 def test_campaign_audit_rejects_partial_evidence() -> None:
     issues = campaign_evidence.audit_campaign(
         {

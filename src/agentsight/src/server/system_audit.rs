@@ -176,6 +176,9 @@ pub(super) async fn cases(
     if let Some(response) = reject_unknown_filter_tokens(&query) {
         return response;
     }
+    if let Some(response) = reject_event_filters_on_cases(&query) {
+        return response;
+    }
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = query.offset.unwrap_or(0).max(0);
     let agent_id = query.agent_id.as_deref();
@@ -196,6 +199,38 @@ pub(super) async fn cases(
         ),
         Err(error) => store_error(error),
     }
+}
+
+/// Reject event filters the correlated-case query cannot apply.
+///
+/// `AuditQuery` is shared by the four read handlers, but `/audit/cases` reads
+/// the `risk_cases` table: `list_cases` and `case_count` take only `agent_id`,
+/// `status` and `blocked`. The event-level fields were accepted and dropped,
+/// so a caller that filtered cases by `event_type`, `policy_id` or a time
+/// window received every case with a 200 — a plausible-looking wrong result,
+/// the shape the interruption aggregates refuse with the same 400.
+fn reject_event_filters_on_cases(query: &AuditQuery) -> Option<HttpResponse> {
+    let unsupported = [
+        ("start_ns", query.start_ns.is_some()),
+        ("end_ns", query.end_ns.is_some()),
+        ("event_type", query.event_type.is_some()),
+        ("result", query.result.is_some()),
+        ("policy_id", query.policy_id.is_some()),
+        ("session_id", query.session_id.is_some()),
+        ("binding_id", query.binding_id.is_some()),
+    ];
+    let unsupported: Vec<&str> = unsupported
+        .iter()
+        .filter_map(|(name, present)| present.then_some(*name))
+        .collect();
+    if unsupported.is_empty() {
+        return None;
+    }
+    Some(bad_request(&format!(
+        "GET /api/audit/cases accepts only agent_id, status, blocked, limit and offset; \
+         {} must be applied on GET /api/audit/events, which filters individual events",
+        unsupported.join(", ")
+    )))
 }
 
 /// Returns one case and its ordered evidence chain.

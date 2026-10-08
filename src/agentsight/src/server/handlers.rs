@@ -3008,6 +3008,56 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// The 400 that rejects a row-level filter names the endpoint the caller
+    /// actually used.
+    ///
+    /// The four aggregates hand the shared rejection helper a hard-coded route,
+    /// and each of those literals named a *different* aggregate: `stats` said
+    /// "GET /api/interruptions/count accepts only ...". The sentence is the
+    /// caller's only instruction for fixing the request, so it has to name the
+    /// endpoint that produced it.
+    #[actix_web::test]
+    async fn interruption_aggregate_rejections_name_their_own_endpoint() {
+        let interruption_path = unique_handler_db("interruptions-reject-endpoint");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_count)
+                .service(interruption_stats)
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        let window = "start_ns=0&end_ns=9223372036854775807";
+        for route in [
+            "/interruptions/count",
+            "/interruptions/stats",
+            "/interruptions/session-counts",
+            "/interruptions/conversation-counts",
+        ] {
+            let resp = awtest::call_service(
+                &app,
+                awtest::TestRequest::get()
+                    .uri(&format!("{route}?{window}&severity=critical"))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{route}");
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            let message = body["message"].as_str().unwrap_or_default();
+            assert!(
+                message.starts_with(&format!("GET /api{route} accepts only")),
+                "{route} must name itself in its rejection, got: {message}"
+            );
+        }
+
+        cleanup_db(&interruption_path);
+    }
+
     /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
     /// makes the default 24 h start wrap into a huge positive bound. The query
     /// then runs on an inverted (always empty) window and still answers 200,
@@ -4956,10 +5006,9 @@ pub async fn interruption_count(
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
-    if let Some(response) = reject_unsupported_interruption_filters(
-        &query,
-        "GET /api/interruptions/conversation-counts",
-    ) {
+    if let Some(response) =
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/count")
+    {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -5021,7 +5070,7 @@ pub async fn interruption_stats(
         return response;
     }
     if let Some(response) =
-        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/count")
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/stats")
     {
         return response;
     }
@@ -5059,7 +5108,7 @@ pub async fn interruption_session_counts(
         return response;
     }
     if let Some(response) =
-        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/stats")
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/session-counts")
     {
         return response;
     }
@@ -5141,9 +5190,10 @@ pub async fn interruption_conversation_counts(
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
-    if let Some(response) =
-        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/session-counts")
-    {
+    if let Some(response) = reject_unsupported_interruption_filters(
+        &query,
+        "GET /api/interruptions/conversation-counts",
+    ) {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
