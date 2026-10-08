@@ -156,7 +156,7 @@ jobs:
             echo "ERROR: V1 Python CLI remains importable after raw installation" >&2
             exit 1
           fi
-          make -C src/agent-sec-core PII_HOOK_LAYOUT=raw test-e2e-rpm-v2
+          make -C src/agent-sec-core PII_HOOK_LAYOUT=raw SKILLSEC_HOOK_LAYOUT=raw test-e2e-rpm-v2
 
       - name: Show daemon log after failure
         if: failure()
