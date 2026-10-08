@@ -1403,13 +1403,17 @@ impl HttpConnectionAggregator {
 
     /// Drain all connections belonging to a specific PID.
     ///
-    /// Returns `(ConnectionId, ConnectionState)` for entries that were in
-    /// `RequestPending` or `SseActive` state.  `Idle` entries are silently
-    /// discarded.  Used by crash detection on `ProcMon::Exit`.
+    /// Returns `(ConnectionId, ConnectionState, continuation bytes)` for
+    /// entries that were in `RequestPending` or `SseActive` state; `Idle`
+    /// entries are silently discarded. The continuation bytes are the SSE
+    /// stream's reassembly buffer — an event split across TLS records has its
+    /// tail only there, so they are handed to the caller instead of being
+    /// dropped with the connection. Used by crash detection on
+    /// `ProcMon::Exit`.
     pub(crate) fn drain_connections_for_pid(
         &mut self,
         pid: u32,
-    ) -> Vec<(ConnectionId, ConnectionState)> {
+    ) -> Vec<(ConnectionId, ConnectionState, Option<Vec<u8>>)> {
         let keys: Vec<ConnectionId> = self
             .connections
             .iter()
@@ -1424,7 +1428,7 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in keys {
             if let Some(state) = self.connections.pop(&key) {
-                self.sse_continuation_buffers.pop(&key);
+                let continuation = self.sse_continuation_buffers.pop(&key);
                 self.sse_read_state.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
@@ -1436,7 +1440,7 @@ impl HttpConnectionAggregator {
                             key.pid,
                             key.ssl_ptr,
                         );
-                        result.push((key, state));
+                        result.push((key, state, continuation));
                     }
                 }
             }
@@ -1456,11 +1460,17 @@ impl HttpConnectionAggregator {
     /// Drain connections whose PID is no longer alive.
     ///
     /// Checks `/proc/{pid}` for each unique PID in the connection pool.
-    /// Returns `(ConnectionId, ConnectionState)` for dead-PID entries that
-    /// were in `RequestPending` or `SseActive` state.  `Idle` entries are
-    /// silently discarded.  This allows the caller to persist orphaned
-    /// in-flight requests before they are lost.
-    pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    /// Returns `(ConnectionId, ConnectionState, continuation bytes)` for
+    /// dead-PID entries that were in `RequestPending` or `SseActive` state;
+    /// `Idle` entries are silently discarded. The continuation bytes are the
+    /// SSE stream's reassembly buffer: the process died mid-read, so an event
+    /// split across TLS records has its tail only there, and the caller can
+    /// still reassemble the terminal usage from it (the normal completion
+    /// path attaches the same bytes through `finish_sse`). This allows the
+    /// caller to persist orphaned in-flight requests before they are lost.
+    pub(crate) fn drain_dead_pid_connections(
+        &mut self,
+    ) -> Vec<(ConnectionId, ConnectionState, Option<Vec<u8>>)> {
         use std::collections::HashSet;
 
         // 1. Collect unique PIDs
@@ -1488,7 +1498,7 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in dead_keys {
             if let Some(state) = self.connections.pop(&key) {
-                self.sse_continuation_buffers.pop(&key);
+                let continuation = self.sse_continuation_buffers.pop(&key);
                 self.sse_read_state.pop(&key);
                 self.last_activity.pop(&key);
                 self.idle_snapshotted.pop(&key);
@@ -1502,7 +1512,7 @@ impl HttpConnectionAggregator {
                             key.pid,
                             key.ssl_ptr,
                         );
-                        result.push((key, state));
+                        result.push((key, state, continuation));
                     }
                 }
             }

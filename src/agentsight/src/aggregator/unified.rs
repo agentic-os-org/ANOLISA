@@ -212,14 +212,18 @@ impl Aggregator {
     pub(crate) fn drain_connections_for_pid(
         &mut self,
         pid: u32,
-    ) -> Vec<(ConnectionId, ConnectionState)> {
+    ) -> Vec<(ConnectionId, ConnectionState, Option<Vec<u8>>)> {
         self.http.drain_connections_for_pid(pid)
     }
 
     /// Drain connections whose PID is no longer alive.
     ///
-    /// Delegates to the HTTP aggregator's dead-PID drain.
-    pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    /// Delegates to the HTTP aggregator's dead-PID drain. Each drained entry
+    /// carries the connection's SSE continuation bytes so the caller can
+    /// reassemble events the stream split across TLS records.
+    pub(crate) fn drain_dead_pid_connections(
+        &mut self,
+    ) -> Vec<(ConnectionId, ConnectionState, Option<Vec<u8>>)> {
         self.http.drain_dead_pid_connections()
     }
 
