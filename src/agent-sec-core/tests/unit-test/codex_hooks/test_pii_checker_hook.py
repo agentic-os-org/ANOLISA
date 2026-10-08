@@ -69,7 +69,16 @@ def _run_hook(input_data, *, env_override=None):
 
 
 _MOCK_CLI_SCRIPT = f"#!{sys.executable}\n" + textwrap.dedent("""\
-    import os, sys
+    import json
+    import os
+    import sys
+
+    stdin_text = sys.stdin.read()
+    capture_path = os.environ.get("_MOCK_CLI_CAPTURE")
+    if capture_path:
+        with open(capture_path, "w", encoding="utf-8") as handle:
+            json.dump({"argv": sys.argv[1:], "stdin": stdin_text}, handle)
+
     output = os.environ.get("_MOCK_CLI_OUTPUT", "")
     rc = int(os.environ.get("_MOCK_CLI_RC", "0"))
     if output:
@@ -86,16 +95,18 @@ def mock_cli(tmp_path):
     cli_script = bin_dir / "agent-sec-cli"
     cli_script.write_text(_MOCK_CLI_SCRIPT)
     cli_script.chmod(cli_script.stat().st_mode | stat.S_IEXEC)
+    capture = tmp_path / "capture.json"
 
     def _make_env(output: str = "", *, rc: int = 0, extra: dict | None = None):
         env = {
             "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
             "_MOCK_CLI_OUTPUT": output,
             "_MOCK_CLI_RC": str(rc),
+            "_MOCK_CLI_CAPTURE": str(capture),
         }
         if extra:
             env.update(extra)
-        return env
+        return env, capture
 
     return _make_env
 
@@ -192,7 +203,7 @@ class TestFailOpen:
         assert output == {}
 
     def test_unknown_hook_event_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT)
+        env, capture = mock_cli(output=_PII_FOUND_RESULT)
         output = _run_hook(
             {"hook_event_name": "SessionStart", "prompt": "hello"},
             env_override=env,
@@ -200,7 +211,7 @@ class TestFailOpen:
         assert output == {}
 
     def test_missing_hook_event_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT)
+        env, capture = mock_cli(output=_PII_FOUND_RESULT)
         output = _run_hook(
             {"prompt": "hello"},
             env_override=env,
@@ -208,7 +219,7 @@ class TestFailOpen:
         assert output == {}
 
     def test_empty_prompt_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT)
+        env, capture = mock_cli(output=_PII_FOUND_RESULT)
         output = _run_hook(
             {"hook_event_name": "UserPromptSubmit", "prompt": ""},
             env_override=env,
@@ -216,7 +227,7 @@ class TestFailOpen:
         assert output == {}
 
     def test_whitespace_prompt_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT)
+        env, capture = mock_cli(output=_PII_FOUND_RESULT)
         output = _run_hook(
             {"hook_event_name": "UserPromptSubmit", "prompt": "   "},
             env_override=env,
@@ -224,21 +235,66 @@ class TestFailOpen:
         assert output == {}
 
     def test_cli_nonzero_exit_allows(self, mock_cli):
-        env = mock_cli(output="", rc=1, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(output="", rc=1, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
 
     def test_cli_invalid_json_allows(self, mock_cli):
-        env = mock_cli(output="not-json", extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(output="not-json", extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
+
+    def test_cli_argv_contract_user_prompt(self, mock_cli):
+        """Pin the agent-sec-cli scan-pii argv contract for UserPromptSubmit.
+
+        The hook must call: scan-pii --stdin --format json --source user_input,
+        prefixed by the injected --trace-context pair. Dropping --stdin or
+        renaming the subcommand makes the real CLI exit non-zero and the hook
+        silently fail-open, so the suite must catch that regression.
+        """
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
+        output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
+        assert output["decision"] == "block"
+        captured = json.loads(capture.read_text(encoding="utf-8"))
+        argv = captured["argv"]
+        assert argv[0] == "--trace-context"
+        json.loads(argv[1])  # trace context must be a JSON payload
+        assert argv[2:] == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--source",
+            "user_input",
+        ]
+        assert captured["stdin"] == _USER_PROMPT_EVENT["prompt"]
+
+    def test_cli_argv_contract_tool_events(self, mock_cli):
+        """Pin the --source value per hook event: tool_input / tool_output."""
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
+        _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
+        captured = json.loads(capture.read_text(encoding="utf-8"))
+        assert captured["argv"][captured["argv"].index("--source") + 1] == "tool_input"
+
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
+        _run_hook(_POST_TOOL_USE_EVENT, env_override=env)
+        captured = json.loads(capture.read_text(encoding="utf-8"))
+        assert captured["argv"][captured["argv"].index("--source") + 1] == "tool_output"
 
 
 class TestTextExtraction:
     """Verify text extraction for different hook events."""
 
     def test_post_tool_use_string_response(self, mock_cli):
-        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {
                 "hook_event_name": "PostToolUse",
@@ -249,7 +305,9 @@ class TestTextExtraction:
         assert output["decision"] == "block"
 
     def test_post_tool_use_dict_response(self, mock_cli):
-        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {
                 "hook_event_name": "PostToolUse",
@@ -260,7 +318,9 @@ class TestTextExtraction:
         assert output["decision"] == "block"
 
     def test_post_tool_use_empty_string_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {"hook_event_name": "PostToolUse", "tool_response": ""},
             env_override=env,
@@ -268,7 +328,9 @@ class TestTextExtraction:
         assert output == {}
 
     def test_post_tool_use_none_response_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {"hook_event_name": "PostToolUse"},
             env_override=env,
@@ -276,7 +338,9 @@ class TestTextExtraction:
         assert output == {}
 
     def test_pre_tool_use_string_input(self, mock_cli):
-        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -287,7 +351,9 @@ class TestTextExtraction:
         assert output["decision"] == "block"
 
     def test_pre_tool_use_dict_input(self, mock_cli):
-        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -298,7 +364,9 @@ class TestTextExtraction:
         assert output["decision"] == "block"
 
     def test_pre_tool_use_empty_string_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {"hook_event_name": "PreToolUse", "tool_input": ""},
             env_override=env,
@@ -306,7 +374,9 @@ class TestTextExtraction:
         assert output == {}
 
     def test_pre_tool_use_none_input_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {"hook_event_name": "PreToolUse"},
             env_override=env,
@@ -317,7 +387,9 @@ class TestTextExtraction:
         # Empty dict serializes to "{}" (non-empty string) but has no PII;
         # the hook must short-circuit and NOT call scan-pii. If it did scan,
         # the mock would return PII and deny mode would block.
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {"hook_event_name": "PreToolUse", "tool_input": {}},
             env_override=env,
@@ -326,7 +398,9 @@ class TestTextExtraction:
 
     def test_pre_tool_use_empty_list_allows(self, mock_cli):
         # Empty list serializes to "[]" — same short-circuit as empty dict.
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(
             {"hook_event_name": "PreToolUse", "tool_input": []},
             env_override=env,
@@ -338,17 +412,23 @@ class TestObserveMode:
     """In observe mode, PII is detected but not blocked."""
 
     def test_pii_in_prompt_not_blocked(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"}
+        )
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
 
     def test_pii_in_tool_output_not_blocked(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"}
+        )
         output = _run_hook(_POST_TOOL_USE_EVENT, env_override=env)
         assert output == {}
 
     def test_pii_in_tool_input_not_blocked(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"}
+        )
         output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
         assert output == {}
 
@@ -429,7 +509,7 @@ class TestUnifiedHookPolicyWarnings:
         expected_risk,
         expected_action,
     ):
-        env = mock_cli(
+        env, capture = mock_cli(
             output=scan_output,
             extra={
                 "PII_CHECKER_HOOK_ENABLED": "true",
@@ -446,7 +526,7 @@ class TestUnifiedHookPolicyWarnings:
         )
 
     def test_block_policy_still_blocks_deny_verdict(self, mock_cli):
-        env = mock_cli(
+        env, capture = mock_cli(
             output=_PII_DENY_RESULT,
             extra={
                 "PII_CHECKER_HOOK_ENABLED": "true",
@@ -473,7 +553,7 @@ class TestDenyMode:
     """Deny mode preserves scanner warn and deny severity."""
 
     def test_pass_verdict_allows(self, mock_cli):
-        env = mock_cli(
+        env, capture = mock_cli(
             output=json.dumps({"verdict": "pass", "findings": []}),
             extra={"PII_CHECKER_MODE": "deny"},
         )
@@ -481,7 +561,7 @@ class TestDenyMode:
         assert output == {}
 
     def test_warn_with_no_findings_allows(self, mock_cli):
-        env = mock_cli(
+        env, capture = mock_cli(
             output=json.dumps({"verdict": "warn", "findings": []}),
             extra={"PII_CHECKER_MODE": "deny"},
         )
@@ -489,12 +569,16 @@ class TestDenyMode:
         assert output == {}
 
     def test_warn_verdict_alerts_user_prompt(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         _assert_warning_output(output)
 
     def test_warn_verdict_alerts_post_tool_use(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(_POST_TOOL_USE_EVENT, env_override=env)
         message = _assert_warning_output(
             output,
@@ -518,7 +602,9 @@ class TestDenyMode:
         ),
     )
     def test_deny_verdict_blocks(self, mock_cli, event_data, expected_action):
-        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(event_data, env_override=env)
         assert output["decision"] == "block"
         assert "1 项高风险敏感信息" in output["reason"]
@@ -528,7 +614,7 @@ class TestDenyMode:
 
     def test_no_raw_pii_in_output(self, mock_cli):
         """Warning output must never contain raw PII content."""
-        env = mock_cli(
+        env, capture = mock_cli(
             output=json.dumps(
                 {
                     "verdict": "warn",
@@ -549,12 +635,14 @@ class TestDenyMode:
         assert "13800138000" not in message
 
     def test_warn_verdict_alerts_pre_tool_use(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"}
+        )
         output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
         _assert_warning_output(output)
 
     def test_unknown_verdict_with_findings_fails_open(self, mock_cli: Any) -> None:
-        env = mock_cli(
+        env, capture = mock_cli(
             output=json.dumps(
                 {
                     "verdict": "unexpected",
@@ -577,7 +665,9 @@ class TestUnknownMode:
     """Unknown mode acts as fail-open."""
 
     def test_unknown_mode_allows(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "banana"})
+        env, capture = mock_cli(
+            output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "banana"}
+        )
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
 
