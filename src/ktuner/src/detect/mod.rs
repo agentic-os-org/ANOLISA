@@ -435,10 +435,15 @@ fn cgroup_v2_relative_path(content: &str) -> Option<String> {
 /// Pure /proc/self/cgroup parsing: the relative cgroup path of the v1 line
 /// for the memory controller (`<hierarchy>:<controllers>:<path>`), when
 /// present. The controller list decides, so the v2 line (empty controller
-/// field) and other controllers' lines never match.
+/// field) and other controllers' lines never match. The line is split into
+/// exactly three fields because the path runs to the end of the line: a
+/// cgroup directory may itself be named with a colon (kernfs only forbids
+/// '/' and '\0' in names), so an unbounded split truncates the membership
+/// at the colon inside the name — the same idiom the CPU membership reader
+/// already uses (`splitn(3, ':')`, cpu_hierarchy).
 fn cgroup_v1_relative_path(content: &str) -> Option<String> {
     content.lines().find_map(|line| {
-        let mut fields = line.split(':');
+        let mut fields = line.splitn(3, ':');
         let hierarchy = fields.next()?;
         let controllers = fields.next()?;
         let path = fields.next()?;
@@ -457,7 +462,16 @@ fn cgroup_v1_relative_path(content: &str) -> Option<String> {
 /// `None` when no level of the chain offers the file at all, so the caller
 /// can fall back to the next hierarchy.
 fn chain_limit_kb(root: &Path, rel: &str, file: &str, parse: fn(&str) -> u64) -> Option<u64> {
-    let mut dir = root.join(rel.trim_start_matches('/'));
+    // Namespace-relative parent components must never walk above this mount
+    // — the same guard cpu_chain_limit carries for the CPU walk.
+    let rel = Path::new(rel.trim_start_matches('/'));
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let mut dir = root.join(rel);
     let mut saw_limit_file = false;
     let mut best: u64 = 0;
     loop {
@@ -1635,6 +1649,91 @@ mod tests {
         assert_eq!(cgroup_memory_limit_kb_from(&empty, ""), 0);
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&empty).ok();
+    }
+
+    #[test]
+    fn cgroup_v1_relative_path_keeps_colons_in_the_path() {
+        // A cgroup directory may itself be named with a colon (kernfs only
+        // forbids '/' and '\0'), and the membership line's path field runs
+        // to the end of the line. An unbounded split truncated the path at
+        // the first colon inside the name, so the walk navigated to an
+        // unrelated directory.
+        assert_eq!(
+            cgroup_v1_relative_path("11:memory:/lxc:web/db\n").as_deref(),
+            Some("/lxc:web/db")
+        );
+        // Multiple colons in the name survive whole as well.
+        assert_eq!(
+            cgroup_v1_relative_path("11:memory:/a:b:c\n").as_deref(),
+            Some("/a:b:c")
+        );
+        // The controller list still decides, colons notwithstanding.
+        assert_eq!(cgroup_v1_relative_path("10:cpu,cpuacct:/lxc:web\n"), None);
+    }
+
+    #[test]
+    fn cgroup_limit_follows_a_colon_named_v1_cgroup() {
+        // The truncated membership walked the wrong chain: a cgroup named
+        // "lxc:web" holding a real 2 GB limit read as its colon-free prefix
+        // "lxc" (an unrelated sibling with an 8 GB limit), so every
+        // memory-scaled rule sized for a host that gets a quarter of what
+        // the process actually has.
+        let root = std::env::temp_dir().join(format!(
+            "ktuner_cgroup_colon_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let leaf = root.join("memory/lxc:web");
+        fs::create_dir_all(&leaf).expect("create colon-named cgroup");
+        fs::write(leaf.join("memory.limit_in_bytes"), b"2147483648\n").expect("write leaf limit");
+        let sibling = root.join("memory/lxc");
+        fs::create_dir_all(&sibling).expect("create colon-prefix sibling");
+        fs::write(sibling.join("memory.limit_in_bytes"), b"8589934592\n").expect("write sibling");
+        fs::write(
+            root.join("memory/memory.limit_in_bytes"),
+            b"9223372036854775807\n", // v1's unlimited sentinel at the root
+        )
+        .expect("write root limit");
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "11:memory:/lxc:web\n"),
+            2 * 1024 * 1024,
+            "the colon-named cgroup's own 2 GB limit must bind"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn chain_limit_kb_refuses_to_walk_above_the_mount() {
+        // Parity with cpu_chain_limit: a membership line whose path carries
+        // a parent component must not let the walk read limit files outside
+        // the mount root it was given.
+        let base = std::env::temp_dir().join(format!(
+            "ktuner_chain_guard_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("root");
+        fs::create_dir_all(&root).expect("create mount root");
+        fs::write(root.join("memory.max"), b"max\n").expect("write root limit");
+        let outside = base.join("escape");
+        fs::create_dir_all(&outside).expect("create outside dir");
+        fs::write(outside.join("memory.max"), b"4294967296\n").expect("write outside limit");
+
+        assert_eq!(
+            chain_limit_kb(&root, "/../escape", "memory.max", cgroup_v2_limit_kb),
+            None,
+            "a parent component must not escape the mount"
+        );
+        // End to end: the v2 walk refuses, no v1 line exists, and the root
+        // approximation answers from the mount root itself.
+        assert_eq!(
+            cgroup_memory_limit_kb_from(&root, "0::/../escape\n"),
+            0,
+            "the escapee file outside the mount must not become the limit"
+        );
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
