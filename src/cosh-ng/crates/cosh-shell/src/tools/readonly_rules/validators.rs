@@ -1,3 +1,5 @@
+use super::evaluator::evaluate_generic;
+use super::specs::{GenericSpec, PathMode};
 use super::{is_bounded_positive_count, is_safe_readonly_path};
 
 pub(super) fn is_readonly_head(tokens: &[String]) -> bool {
@@ -443,6 +445,49 @@ pub(super) fn is_readonly_git_stash(tokens: &[String]) -> bool {
     matches!(tokens[2].as_str(), "list" | "show")
 }
 
+// The UNIQ flag shape as previously shipped in specs/basic.rs, kept
+// verbatim so the custom validator below changes only the operand
+// policy, never the flag or path semantics.
+const UNIQ_GENERIC: GenericSpec = GenericSpec {
+    short_flags: "cduifszw",
+    long_flags: &["--count", "--repeated", "--unique", "--ignore-case"],
+    value_flags: &[],
+    deny_flags: &[],
+    path_mode: PathMode::Optional,
+    bare_number_max: 0,
+};
+
+pub(super) fn is_readonly_uniq(tokens: &[String]) -> bool {
+    // GNU uniq's *second* file operand is the OUTPUT file — `uniq INPUT
+    // OUTPUT` rewrites OUTPUT wholesale — so a two-operand uniq is a
+    // write primitive that must never auto-execute under the readonly
+    // broker. Allow at most the single INPUT operand; flag and path
+    // validation delegate to the shared generic evaluator with the
+    // previously shipped shape. `-f N` and `-w N` carry their values as
+    // separate tokens, so those values are skipped before counting
+    // (value-cluster spellings like `-cf 5` stay conservative: the
+    // cluster does not mark its tail as a value, so a following operand
+    // is counted and the command fails closed).
+    let args = &tokens[1..];
+    let mut operands = 0;
+    let mut only_operands = false;
+    let mut idx = 0;
+    while idx < args.len() {
+        let token = args[idx].as_str();
+        if only_operands {
+            operands += 1;
+        } else if token == "--" {
+            only_operands = true;
+        } else if token == "-f" || token == "-w" {
+            idx += 1;
+        } else if !token.starts_with('-') {
+            operands += 1;
+        }
+        idx += 1;
+    }
+    operands <= 1 && evaluate_generic(args, &UNIQ_GENERIC)
+}
+
 pub(super) fn is_readonly_git_branch(tokens: &[String]) -> bool {
     let args = &tokens[2..];
     if args.is_empty() {
@@ -457,15 +502,18 @@ pub(super) fn is_readonly_git_branch(tokens: &[String]) -> bool {
                 saw_list_mode = true;
                 idx += 1;
             }
+            // --sort/--format only ORDER and RENDER the listing; they do
+            // not turn a positional into a pattern. Without an explicit
+            // list flag a positional stays what git makes it — a branch
+            // name to create, which writes refs — so these options are
+            // neutral here and the positional gate below fails closed.
             "--sort" | "--format" => {
                 if args.get(idx + 1).is_none() {
                     return false;
                 }
-                saw_list_mode = true;
                 idx += 2;
             }
             arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {
-                saw_list_mode = true;
                 idx += 1;
             }
             arg if arg.starts_with('-') => return false,
@@ -479,6 +527,20 @@ pub(super) fn is_readonly_git_branch(tokens: &[String]) -> bool {
     }
 
     true
+}
+
+pub(super) fn is_readonly_git_remote(tokens: &[String]) -> bool {
+    // `git remote` prints the configured remotes and `git remote
+    // -v/--verbose` adds their URLs. Every subcommand form mutates state
+    // (`add`/`set-url`/`remove`/`rename` write .git/config — `set-url`
+    // can repoint a push remote at an attacker-controlled repository) or
+    // contacts a remote (`show`, `prune`, `get-url`), so only the two
+    // listing forms stay readonly.
+    let args = &tokens[2..];
+    args.is_empty()
+        || args
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-v" | "--verbose"))
 }
 
 pub(super) fn is_readonly_git_config(tokens: &[String]) -> bool {
