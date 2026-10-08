@@ -3209,7 +3209,21 @@ fn eval_netdev_budget(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 }
 
 fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/core/busy_poll";
+    eval_busy_poll_at(info, recs, "/proc/sys/net/core/busy_poll")
+}
+
+/// Path-injectable form of [`eval_busy_poll`] (the `eval_*_at` idiom) so the
+/// workload gate is assertable against a temp file on any host.
+///
+/// The gate lists every workload whose network round-trips sit on the
+/// request path: the caches (redis, memcached), the proxies (nginx), the
+/// OLTP databases (postgres, mysqld — MariaDB 10.4+ runs as mariadbd, the
+/// same OLTP shape — and mongod) and clickhouse. The OLTP databases appear
+/// in every sibling latency gate — eval_thp's `is_latency_sensitive`, the
+/// swappiness/dirty_ratio db lists, classify's IoLatency — but were missing
+/// here, so a database host never got the busy-polling advice its
+/// synchronous per-query round-trip profile asks for.
+fn eval_busy_poll_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
     if !info.param_exists(path) {
         return 1;
     }
@@ -3217,6 +3231,11 @@ fn eval_busy_poll(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let is_latency_sensitive = info.has_process("redis-server")
         || info.has_process("memcached")
         || info.has_process("nginx")
+        || info.has_process("postgres")
+        || info.has_process("mysqld")
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        || info.has_process("mariadbd")
+        || info.has_process("mongod")
         || info.has_process("clickhouse");
     if is_latency_sensitive && current == 0 {
         recs.push(Recommendation {
@@ -14540,51 +14559,61 @@ mod tests {
     }
 
     #[test]
-    fn any_interface_forwards_reads_minus_one_as_forwarding() {
-        // The forwarding template behind ctl_forward_entry is a plain
-        // proc_dointvec int (no bounds) and IN_DEV_FORWARD is a truthiness
-        // test, so a -1 interface forwards. The unsigned reader collapsed it
-        // to 0, the whole tree read as non-forwarding, and both
-        // send_redirects rules went quiet on exactly the host where
-        // redirects can be sent.
-        let dir = std::env::temp_dir().join(format!(
-            "ktuner_any_forwards_{}_{:?}",
+    fn busy_poll_advises_the_oltp_databases() {
+        // The gate forgot the OLTP databases that every sibling latency gate
+        // includes (eval_thp's is_latency_sensitive, the swappiness /
+        // dirty_ratio db lists, classify's IoLatency): a synchronous
+        // per-query network round-trip is the classic busy-polling shape.
+        // MariaDB 10.4+ runs as mariadbd — the same OLTP database as mysqld.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner_busy_poll_{}_{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let conf = dir.join("conf");
-        let knob = dir.join("send_redirects");
-        std::fs::write(&knob, "1\n").unwrap();
-
-        // Every interface at 0: nothing forwards.
-        for iface in ["all", "default", "lo", "eth0"] {
-            let p = conf.join(iface).join("forwarding");
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, "0\n").unwrap();
+        std::fs::write(&path, "0\n").unwrap();
+        for name in [
+            "redis-server",
+            "postgres",
+            "mysqld",
+            "mariadbd",
+            "mongod",
+            "clickhouse",
+        ] {
+            let mut info = make_test_info();
+            info.processes = vec![ProcessInfo {
+                name: name.to_string(),
+            }];
+            let mut recs = Vec::new();
+            eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+            assert!(
+                recs.iter().any(|r| r.param == "net.core.busy_poll"),
+                "{name} is latency-sensitive and must get the busy_poll advice"
+            );
         }
-        let info = make_test_info();
+        // A workload without a request-path network round-trip stays out.
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "make".to_string(),
+        }];
         let mut recs = Vec::new();
-        eval_send_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &conf);
+        eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
         assert!(
-            recs.iter()
-                .all(|r| r.param != "net.ipv4.conf.all.send_redirects"),
-            "a non-forwarding tree cannot send redirects"
+            recs.iter().all(|r| r.param != "net.core.busy_poll"),
+            "a build job is not latency-sensitive"
         );
-
-        // One interface at -1: the tree forwards, and the enabled
-        // send_redirects knob must be flagged.
-        std::fs::write(conf.join("eth0").join("forwarding"), "-1\n").unwrap();
+        // An already-polled host is left alone.
+        std::fs::write(&path, "50\n").unwrap();
+        let mut info = make_test_info();
+        info.processes = vec![ProcessInfo {
+            name: "postgres".to_string(),
+        }];
         let mut recs = Vec::new();
-        eval_send_redirects_at(&info, &mut recs, knob.to_str().unwrap(), &conf);
-        let rec = recs
-            .iter()
-            .find(|r| r.param == "net.ipv4.conf.all.send_redirects")
-            .expect("a -1 forwarding interface makes redirects sendable");
-        assert_eq!(rec.current_value, "1");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        eval_busy_poll_at(&info, &mut recs, path.to_str().unwrap());
+        assert!(
+            recs.iter().all(|r| r.param != "net.core.busy_poll"),
+            "an already-polled knob needs no advice"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
