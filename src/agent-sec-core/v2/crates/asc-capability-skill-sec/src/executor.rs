@@ -122,9 +122,12 @@ impl SkillSecExecutor {
         }
         // Validate caller paths before discovery or resolution performs any target I/O.
         let mut identities = command.identities(&[])?;
-        for identity in &identities {
-            if !self.allowed(identity) {
-                return Err(SkillSecError::ScopeDenied(identity.clone()));
+        let analyze = matches!(command, SkillSecCommand::Analyze { .. });
+        if !analyze {
+            for identity in &identities {
+                if !self.allowed(identity) {
+                    return Err(SkillSecError::ScopeDenied(identity.clone()));
+                }
             }
         }
         let recovery =
@@ -150,15 +153,17 @@ impl SkillSecExecutor {
         identities.extend(managed);
         identities.sort();
         identities.dedup();
-        for identity in &identities {
-            // Only root can finish an already authorized, private rotation intent after reconfiguration.
-            // Registration alone never grants this exception to a new operation.
-            if !self.allowed(identity)
-                && !recovery
-                    .as_ref()
-                    .is_some_and(|skills| skills.contains(identity))
-            {
-                return Err(SkillSecError::ScopeDenied(identity.clone()));
+        if !analyze {
+            for identity in &identities {
+                // Only root can finish an already authorized, private rotation intent after reconfiguration.
+                // Registration alone never grants this exception to a new operation.
+                if !self.allowed(identity)
+                    && !recovery
+                        .as_ref()
+                        .is_some_and(|skills| skills.contains(identity))
+                {
+                    return Err(SkillSecError::ScopeDenied(identity.clone()));
+                }
             }
         }
         identities
