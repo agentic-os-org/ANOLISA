@@ -8,7 +8,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -104,6 +104,16 @@ impl DaemonServer {
         fs::set_permissions(&self.socket_path, fs::Permissions::from_mode(0o660))?;
         Self::chgrp_anolisa(std::path::Path::new(&self.socket_path))?;
 
+        // The socket's owning group is the delegation boundary the kernel
+        // already enforces at connect() time (primary and supplementary
+        // groups). Capture it as the authorization reference so the
+        // white-list does not depend solely on the file mode, which any later
+        // privileged action could relax. When chgrp failed (the group does not
+        // exist), the gid is the daemon's own and only root passes.
+        let delegated_gid = fs::metadata(&self.socket_path)
+            .ok()
+            .map(|metadata| metadata.gid());
+
         // Set a non-blocking accept timeout so we can check the shutdown flag.
         listener.set_nonblocking(false)?;
 
@@ -133,6 +143,7 @@ impl DaemonServer {
                             &shutdown,
                             &version,
                             start_time,
+                            delegated_gid,
                         ) {
                             eprintln!("[anolisa-helper] connection error: {e}");
                         }
@@ -167,6 +178,7 @@ fn handle_connection(
     shutdown: &Arc<AtomicBool>,
     version: &str,
     start_time: Instant,
+    delegated_gid: Option<u32>,
 ) -> io::Result<()> {
     let peer = get_peer_credential(&stream)?;
 
@@ -211,6 +223,7 @@ fn handle_connection(
             shutdown,
             version,
             start_time,
+            delegated_gid,
         );
         let duration_ms = op_start.elapsed().as_millis() as u64;
 
@@ -238,6 +251,7 @@ fn handle_connection(
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
 /// Route a validated request to the appropriate handler.
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     req: &HelperRequest,
     peer: &PeerCredential,
@@ -246,6 +260,7 @@ fn dispatch(
     shutdown: &Arc<AtomicBool>,
     version: &str,
     start_time: Instant,
+    delegated_gid: Option<u32>,
 ) -> HelperResponse {
     let op = operation_type(req);
 
@@ -260,11 +275,16 @@ fn dispatch(
         };
     }
 
-    // White-list check.
-    if !is_operation_allowed(op, peer.uid) {
+    // White-list check: every operation is classified explicitly, and the
+    // caller validated here is the kernel-authenticated peer — not merely the
+    // process that managed to connect.
+    if !is_operation_allowed(op, peer, delegated_gid) {
         return HelperResponse::Error {
             code: "PERMISSION_DENIED".to_string(),
-            message: format!("operation {:?} not allowed for uid {}", op, peer.uid),
+            message: format!(
+                "operation {op:?} not allowed for uid {} (requires root or the delegated helper group)",
+                peer.uid
+            ),
         };
     }
 
@@ -623,7 +643,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let start = Instant::now();
 
-        // Non-root user tries shutdown.
+        // Non-root user tries shutdown; delegation never broadens Shutdown.
         let peer = PeerCredential {
             uid: 1000,
             gid: 1000,
@@ -637,6 +657,7 @@ mod tests {
             &shutdown,
             "0.1.0",
             start,
+            Some(1000),
         );
         assert!(
             matches!(resp, HelperResponse::Error { ref code, .. } if code == "PERMISSION_DENIED")
@@ -656,9 +677,106 @@ mod tests {
             &shutdown,
             "0.1.0",
             start,
+            None,
         );
         assert!(matches!(resp, HelperResponse::Success { .. }));
         assert!(shutdown.load(Ordering::Relaxed));
+    }
+
+    /// A non-root peer outside the delegated group must not pass the
+    /// white-list for mutating operations, even though it managed to connect
+    /// to the socket (a relaxed mode, a copied descriptor, or any other path
+    /// past the connect-time ACL). This is the daemon-side caller validation
+    /// that the previous `_ => true` white-list skipped entirely. The request
+    /// uses a reserved-but-unimplemented mutation so nothing executes even if
+    /// the authorization regresses.
+    #[test]
+    fn dispatch_denies_mutations_for_peers_outside_the_delegated_group() {
+        let rate_limiter = Arc::new(Mutex::new(RateLimiter::new(30)));
+        let last_op = Arc::new(Mutex::new(None));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let start = Instant::now();
+        let mutation = HelperRequest::OsbaseRemove {
+            scenario: "beginner".into(),
+            purge: false,
+        };
+
+        // Outsider: non-root, primary gid outside the delegated group, and a
+        // live process (this one) whose supplementary groups do not contain
+        // the synthetic delegated gid either.
+        let outsider = PeerCredential {
+            uid: 1000,
+            gid: 1000,
+            pid: std::process::id() as i32,
+        };
+        let resp = dispatch(
+            &mutation,
+            &outsider,
+            &rate_limiter,
+            &last_op,
+            &shutdown,
+            "0.1.0",
+            start,
+            Some(4242),
+        );
+        assert!(
+            matches!(resp, HelperResponse::Error { ref code, .. } if code == "PERMISSION_DENIED"),
+            "a non-root peer outside the delegated group must be refused: {resp:?}"
+        );
+
+        // Member through the primary gid: the request passes the white-list
+        // and reaches the (unimplemented) handler.
+        let member = PeerCredential {
+            uid: 1000,
+            gid: 4242,
+            pid: std::process::id() as i32,
+        };
+        let resp = dispatch(
+            &mutation,
+            &member,
+            &rate_limiter,
+            &last_op,
+            &shutdown,
+            "0.1.0",
+            start,
+            Some(4242),
+        );
+        assert!(
+            matches!(resp, HelperResponse::Error { ref code, .. } if code == "NOT_IMPLEMENTED"),
+            "a delegated-group member must pass the white-list: {resp:?}"
+        );
+
+        // With no delegation configured, mutating operations are root-only.
+        let resp = dispatch(
+            &mutation,
+            &member,
+            &rate_limiter,
+            &last_op,
+            &shutdown,
+            "0.1.0",
+            start,
+            None,
+        );
+        assert!(
+            matches!(resp, HelperResponse::Error { ref code, .. } if code == "PERMISSION_DENIED"),
+            "without a delegated group only root may mutate: {resp:?}"
+        );
+
+        // Read-only queries stay available to every connected peer.
+        let resp = dispatch(
+            &HelperRequest::OsbaseList { filter: None },
+            &outsider,
+            &rate_limiter,
+            &last_op,
+            &shutdown,
+            "0.1.0",
+            start,
+            None,
+        );
+        assert!(
+            !matches!(resp, HelperResponse::Error { ref code, .. } if code == "PERMISSION_DENIED"),
+            "read-only queries must stay available: {resp:?}"
+        );
     }
 
     #[test]
@@ -681,6 +799,7 @@ mod tests {
             &shutdown,
             "0.1.0",
             start,
+            None,
         );
         match resp {
             HelperResponse::Status {
