@@ -333,3 +333,75 @@ fn document_depth_size_and_alias_expansion_are_bounded() {
         Err(Error::Document { .. })
     ));
 }
+
+/// Replace the `project: platform` scalar of the shipped example with a raw
+/// token, so the digits reach the parser without serde_json having to
+/// represent them first.
+fn with_scalar(token: &str) -> String {
+    const ANCHOR: &str = "        project: platform";
+    let at = EXAMPLE
+        .find(ANCHOR)
+        .expect("example no longer contains the project anchor");
+    let start = at + ANCHOR.len() - "platform".len();
+    let mut text = EXAMPLE.to_string();
+    text.replace_range(start..start + "platform".len(), token);
+    text
+}
+
+#[test]
+fn unrepresentable_integer_literals_are_rejected() {
+    // serde_yaml_ng keeps some integers wider than u64 exactly but rounds
+    // others into floats, so the boundary where precision is lost is not
+    // monotonic in magnitude. Every literal below lands on the rounding side.
+    for number in [
+        "10000000000000000000000000000000000000000",
+        "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "9999999999999999999999999999999999999999",
+        "99999999999999999999999999999999999999999",
+        "-10000000000000000000000000000000000000000",
+    ] {
+        assert!(
+            VALIDATOR
+                .parse(with_scalar(number).as_bytes())
+                .is_err(),
+            "{number} was accepted and rounded"
+        );
+    }
+}
+
+#[test]
+fn representable_numbers_are_preserved_exactly() {
+    // Controls: integers the parser already keeps exactly must survive, and
+    // genuine float spellings are not integers at all.
+    for number in [
+        "0",
+        "-1",
+        "127",
+        "18446744073709551615",
+        "10000000000000000000",
+    ] {
+        VALIDATOR
+            .parse(with_scalar(number).as_bytes())
+            .unwrap_or_else(|error| panic!("{number} was rejected: {error}"));
+    }
+    for number in ["0.25", "1e3", "0.75"] {
+        VALIDATOR
+            .parse(with_scalar(number).as_bytes())
+            .unwrap_or_else(|error| panic!("{number} was rejected: {error}"));
+    }
+
+    let parsed = VALIDATOR
+        .parse(with_scalar("18446744073709551615").as_bytes())
+        .unwrap();
+    assert_eq!(
+        parsed.as_value()["spec"]["providers"]["business"]["config"]["project"],
+        json!(u64::MAX)
+    );
+}
+
+#[test]
+fn large_integers_inside_strings_stay_opaque() {
+    VALIDATOR
+        .parse(with_scalar("\"340282366920938463463374607431768211456\"").as_bytes())
+        .expect("a quoted large integer must stay a string");
+}

@@ -174,5 +174,99 @@ pub(super) fn parse(input: &[u8]) -> Result<Value, Error> {
     if encoded.len() > MAX_DOCUMENT_BYTES {
         return Err(invalid("expanded document exceeds size limit"));
     }
+    if has_rounded_integer(input) {
+        return Err(invalid("integer is outside the supported range"));
+    }
     Ok(value)
+}
+
+/// Report whether `document` contains an integer literal that the YAML parser
+/// silently turned into a float.
+///
+/// serde_yaml_ng keeps integers up to 128 bits exactly but rounds wider ones
+/// into f64, and the two outcomes are not monotonic in magnitude: a 41-digit
+/// literal can be rejected outright while the 40-digit one below is accepted as
+/// `1e+40`. Rejecting on the source spelling rather than on the parsed value
+/// keeps real floats such as `0.75` and `1e3` valid, which inspecting the parsed
+/// `Value` cannot do -- both look like f64 once rounded.
+///
+/// Only unquoted runs are inspected, so a large number inside a string stays
+/// opaque.
+fn has_rounded_integer(document: &str) -> bool {
+    let bytes = document.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'"' || bytes[index] == b'\'' {
+            index = skip_quoted(bytes, index);
+            continue;
+        }
+
+        if !matches!(bytes[index], b'-' | b'+' | b'0'..=b'9') {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        let mut integral = true;
+
+        while index < bytes.len()
+            && matches!(
+                bytes[index],
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E' | b'_'
+            )
+        {
+            if matches!(bytes[index], b'.' | b'e' | b'E') {
+                integral = false;
+            }
+            index += 1;
+        }
+
+        let token = &document[start..index];
+
+        if integral && !fits_supported_integer(token) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Advance past a quoted run, honouring backslash escapes.
+fn skip_quoted(bytes: &[u8], mut index: usize) -> usize {
+    let quote = bytes[index];
+    index += 1;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+
+    index
+}
+
+/// Whether an integer token is exactly representable as i64 or u64.
+fn fits_supported_integer(token: &str) -> bool {
+    let digits = token.strip_prefix(['-', '+']).unwrap_or(token);
+
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+
+    // Strip the sign again so "-0" style tokens still reach the parser.
+    let unsigned = digits.trim_start_matches('0');
+    let significant = unsigned.is_empty() || unsigned == "0";
+
+    if significant {
+        return true;
+    }
+
+    if token.starts_with('-') {
+        token.parse::<i64>().is_ok()
+    } else {
+        token.parse::<u64>().is_ok()
+    }
 }
