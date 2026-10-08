@@ -17,10 +17,15 @@
 from __future__ import annotations
 
 import json
+import stat
+import sys
+import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from swe_runner.agents import get_agent
+import pytest
+
+from swe_runner.agents import AgentTimeoutError, get_agent
 from swe_runner.agents.openclaw.adapter import (
     OpenClawAdapter,
     build_openclaw_agent_id,
@@ -577,3 +582,102 @@ def test_openclaw_adapter_registered() -> None:
     agent = get_agent("openclaw")
     assert isinstance(agent, OpenClawAdapter)
     assert agent.name == "openclaw"
+
+
+def _write_stub_cli(tmp_path: Path, body: str) -> Path:
+    """Write an executable stub ``openclaw`` CLI script for watchdog tests."""
+    stub = tmp_path / "openclaw-stub"
+    stub.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body), encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return stub
+
+
+_STUB_CLI_OWN_BUDGET = """
+    import sys
+    import time
+
+    timeout = int(sys.argv[sys.argv.index("--timeout") + 1])
+    time.sleep(timeout)
+    print("graceful-timeout-output", flush=True)
+    sys.exit(3)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stub CLI requires POSIX exec")
+def test_local_client_watchdog_grace_lets_the_cli_own_timeout_budget_win(tmp_path: Path) -> None:
+    """A CLI that honors its own --timeout budget must not be killed by the watchdog.
+
+    The CLI budget starts counting after process spawn, so a watchdog armed at
+    the same wall-clock value always fires first and discards the CLI's
+    structured timeout output. With a grace margin the CLI finishes its own
+    budget, exits with its own status, and its output is preserved.
+    """
+    stub = _write_stub_cli(tmp_path, _STUB_CLI_OWN_BUDGET)
+
+    outcome = OpenClawClient(profile="profile-1", agent_id="swebench", cli_path=str(stub)).run_prompt(
+        "fix",
+        session_id="session-1",
+        timeout=2,
+        max_steps=0,
+    )
+
+    assert outcome.returncode == 3
+    assert "graceful-timeout-output" in outcome.raw_output
+
+
+_STUB_CLI_HANGS = """
+    import sys
+    import time
+
+    timeout = int(sys.argv[sys.argv.index("--timeout") + 1])
+    print("partial-evidence-before-hang", flush=True)
+    time.sleep(timeout + 600)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stub CLI requires POSIX exec")
+def test_local_client_timeout_error_keeps_captured_partial_output(tmp_path: Path, monkeypatch) -> None:
+    """A wedged CLI's pre-kill output must survive in the timeout error message."""
+    stub = _write_stub_cli(tmp_path, _STUB_CLI_HANGS)
+    # Shrink the grace so the test does not wait out the production margin.
+    monkeypatch.setattr("swe_runner.agents.openclaw.client._TIMEOUT_GRACE_SECONDS", 2)
+
+    with pytest.raises(AgentTimeoutError) as excinfo:
+        OpenClawClient(profile="profile-1", agent_id="swebench", cli_path=str(stub)).run_prompt(
+            "fix",
+            session_id="session-1",
+            timeout=1,
+            max_steps=0,
+        )
+
+    assert "partial-evidence-before-hang" in str(excinfo.value)
+    assert "timed out after 1s" in str(excinfo.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="stub CLI requires POSIX exec")
+def test_local_client_watchdog_grace_is_strictly_larger_than_the_cli_budget(tmp_path: Path) -> None:
+    """The subprocess watchdog timeout must exceed the CLI's own budget."""
+    from swe_runner.agents.openclaw.client import _TIMEOUT_GRACE_SECONDS
+
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs.get("timeout")
+        return CommandResult(args=tuple(cmd), returncode=0, stdout="ok", stderr="")
+
+    with patch("swe_runner.agents.openclaw.client.run_command", side_effect=fake_run_command):
+        OpenClawClient(profile="profile-1", agent_id="swebench").run_prompt(
+            "fix",
+            session_id="session-1",
+            timeout=1200,
+            max_steps=0,
+        )
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    cli_budget = int(cmd[cmd.index("--timeout") + 1])
+    watchdog = captured["timeout"]
+    assert isinstance(watchdog, (int, float))
+    assert watchdog == cli_budget + _TIMEOUT_GRACE_SECONDS
+    assert watchdog > cli_budget
