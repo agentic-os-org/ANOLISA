@@ -51,6 +51,7 @@ impl StatsRecorder {
             "CREATE TABLE IF NOT EXISTS stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
+                timestamp_ns INTEGER,
                 operation TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 source_pid INTEGER,
@@ -153,6 +154,7 @@ impl StatsRecorder {
         // ALTER TABLE instead of relying on error-message string matching,
         // which is fragile across SQLite versions and locales.
         for (col, col_type) in &[
+            ("timestamp_ns", "INTEGER"),
             ("before_output", "TEXT"),
             ("after_output", "TEXT"),
             ("mode", "TEXT"),
@@ -199,6 +201,41 @@ impl StatsRecorder {
             }
         }
         migration.commit()?;
+
+        // Backfill the instant key for rows the migration above just created
+        // the column for (databases written before `timestamp_ns` existed).
+        // The key is derived from the stored text with chrono's full
+        // precision — the same value `record()` persists for new rows — so
+        // legacy rows order identically to freshly written ones. Text that
+        // does not parse keeps the unparseable sentinel and sorts last
+        // ascending, the direction `row_to_record`'s now() substitution has
+        // always kept such rows readable under.
+        let unkeyed: Vec<(i64, String)> = {
+            let mut stmt =
+                conn.prepare("SELECT id, timestamp FROM stats WHERE timestamp_ns IS NULL")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if !unkeyed.is_empty() {
+            let tx = conn.unchecked_transaction()?;
+            {
+                let mut stmt = tx.prepare("UPDATE stats SET timestamp_ns = ?1 WHERE id = ?2")?;
+                for (id, text) in &unkeyed {
+                    stmt.execute(rusqlite::params![Self::instant_key(text), id])?;
+                }
+            }
+            tx.commit()?;
+        }
+        // Composite index so newest-first windows read the newest rows
+        // through a reverse index scan instead of scanning and sorting the
+        // whole persistent history: `id` is the tie-break the window and
+        // report orderings share.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stats_instant ON stats(timestamp_ns, id)",
+            [],
+        )?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -261,16 +298,17 @@ impl StatsRecorder {
 
         conn.execute(
             "INSERT INTO stats (
-                timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
+                timestamp, timestamp_ns, operation, agent_id, source_pid, session_id, tool_use_id,
                 before_chars, before_tokens, after_chars, after_tokens,
                 before_text, after_text,
                 before_output, after_output, mode,
                 stash_writes, stash_errors, stash_size,
                 content_type, content_origin, applied_operations, recoverability, tokenizer_id,
                 unrecoverable_truncations
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 record.timestamp.to_rfc3339(),
+                Self::record_instant_ns(record),
                 record.operation.as_str(),
                 record.agent_id,
                 record.source_pid,
@@ -300,6 +338,33 @@ impl StatsRecorder {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Instant key for stored rfc3339 timestamps that do not parse: sorts
+    /// after every real instant, keeping corrupt rows last in ascending
+    /// order (and first in newest-first windows), where the previous text
+    /// comparison and `row_to_record`'s now() substitution already placed
+    /// them.
+    const UNPARSEABLE_INSTANT_NS: i64 = i64::MAX;
+
+    /// Instant key for a record's typed timestamp: nanoseconds since the
+    /// Unix epoch at the timestamp's full precision — the same value the
+    /// Rust `(instant, id)` comparators in `sort_diff_records` and
+    /// `build_chains` derive, so SQL and Rust orderings agree exactly.
+    fn record_instant_ns(record: &StatsRecord) -> i64 {
+        record
+            .timestamp
+            .timestamp_nanos_opt()
+            .unwrap_or(Self::UNPARSEABLE_INSTANT_NS)
+    }
+
+    /// Instant key for a stored rfc3339 text: parsed at full chrono
+    /// precision, falling back to the unparseable sentinel.
+    fn instant_key(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .ok()
+            .and_then(|dt| dt.timestamp_nanos_opt())
+            .unwrap_or(Self::UNPARSEABLE_INSTANT_NS)
+    }
+
     /// Default limit when no limit is specified — caps memory usage
     /// from unbounded loads while remaining generous for practical use.
     const DEFAULT_LIMIT: usize = 10_000;
@@ -324,7 +389,17 @@ impl StatsRecorder {
 
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM stats ORDER BY timestamp DESC LIMIT ?",
+            // Newest-first by the instant a timestamp denotes, not its text:
+            // rfc3339 strings only sort chronologically while their UTC
+            // offset is constant, so a session spanning an offset change
+            // would otherwise let older-text records displace genuinely
+            // newer ones from a limited window. `timestamp_ns` holds the
+            // instant at nanosecond precision — matching the Rust
+            // comparator exactly (unlike SQLite's date functions, which
+            // only parse to milliseconds) — and `idx_stats_instant` serves
+            // the window through a reverse index scan.
+            "SELECT {} FROM stats \
+             ORDER BY timestamp_ns DESC, id DESC LIMIT ?",
             Self::SELECT_COLS
         ))?;
         let rows = stmt.query_map([n as i64], Self::row_to_record)?;
@@ -375,7 +450,11 @@ impl StatsRecorder {
 
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM stats WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
+            // Same instant ordering as all_records: a limited window must
+            // keep the newest records even when their stored rfc3339 text
+            // spans more than one UTC offset.
+            "SELECT {} FROM stats WHERE session_id = ? \
+             ORDER BY timestamp_ns DESC, id DESC LIMIT ?",
             Self::SELECT_COLS
         ))?;
         let rows = stmt.query_map(rusqlite::params![session_id, n as i64], Self::row_to_record)?;
@@ -430,6 +509,21 @@ impl StatsRecorder {
 
     fn records_for_session_diff(&self, session_id: &str) -> StatsResult<DiffRecords> {
         let conn = self.lock_conn();
+        // Order by the instant a timestamp denotes, not by its text: an
+        // rfc3339 string carries a UTC offset, so a session that spans an
+        // offset change (DST fall-back, travel, a moved machine) persists
+        // text that no longer sorts in chronological order. The link flags
+        // this query computes describe adjacent rows under this ordering,
+        // and `build_chains` re-sorts the same rows by their parsed instant
+        // before consuming the flags — the two orderings must agree or real
+        // compression chains split apart. `timestamp_ns` is that instant in
+        // nanoseconds (derived at write time, or by the open-time backfill
+        // for rows written before the column existed), so the window's
+        // `(timestamp_ns, id)` order matches the Rust comparator exactly —
+        // including sub-millisecond records that SQLite's date functions
+        // would collapse to whole milliseconds. Unparseable timestamps keep
+        // the unparseable sentinel and sort last, preserving the direction
+        // of `row_to_record`'s now() substitution.
         let query = "
             WITH newest AS (
                 SELECT id
@@ -440,14 +534,15 @@ impl StatsRecorder {
             ),
             ordered AS (
                 SELECT
-                    stats.id, stats.timestamp, stats.operation, stats.agent_id,
+                    stats.id, stats.timestamp, stats.timestamp_ns,
+                    stats.operation, stats.agent_id,
                     stats.source_pid, stats.session_id, stats.tool_use_id,
                     stats.before_chars, stats.before_tokens, stats.after_chars,
                     stats.after_tokens, stats.mode, stats.stash_writes,
                     stats.stash_errors, stats.stash_size,
                     LAG(stats.id) OVER (
                         PARTITION BY stats.tool_use_id
-                        ORDER BY stats.timestamp, stats.id
+                        ORDER BY stats.timestamp_ns, stats.id
                     ) AS previous_id
                 FROM stats
                 INNER JOIN newest ON newest.id = stats.id
@@ -497,7 +592,7 @@ impl StatsRecorder {
             FROM ordered
             INNER JOIN stats AS current ON current.id = ordered.id
             LEFT JOIN stats AS previous ON previous.id = ordered.previous_id
-            ORDER BY ordered.timestamp, ordered.id
+            ORDER BY ordered.timestamp_ns, ordered.id
         ";
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map(

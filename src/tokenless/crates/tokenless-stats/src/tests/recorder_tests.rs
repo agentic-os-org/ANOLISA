@@ -13,6 +13,22 @@ fn sample(op: OperationType, mode: CompressionMode, session: &str) -> StatsRecor
         .with_mode(mode)
 }
 
+/// Simulate a row that was written under a different UTC offset (or with a
+/// sub-millisecond timestamp) than this machine's clock would produce today:
+/// rewrite the stored text and keep the derived instant key in sync, exactly
+/// as a recorder running at that time would have persisted both.
+fn rewrite_timestamp(conn: &rusqlite::Connection, id: i64, text: &str) {
+    let ns = chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap()
+        .timestamp_nanos_opt()
+        .unwrap();
+    conn.execute(
+        "UPDATE stats SET timestamp = ?1, timestamp_ns = ?2 WHERE id = ?3",
+        rusqlite::params![text, ns, id],
+    )
+    .unwrap();
+}
+
 #[test]
 fn records_and_reads_mode() {
     let (rec, _dir) = new_recorder();
@@ -228,6 +244,327 @@ fn session_diff_database_linking_matches_record_semantics() {
     assert_eq!(json["chains"][0]["mode"], "dry-run");
     assert_eq!(json["chains"][1]["status"], "linked");
     assert_eq!(json["chains"][1]["stages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn session_diff_links_records_written_across_a_utc_offset_change() {
+    // A session that spans a UTC-offset change (DST fall-back, travel, or a
+    // machine move) persists rfc3339 timestamps whose wall-clock text no
+    // longer sorts in instant order: the -05:00 half of the repeated hour
+    // text-sorts before the earlier -04:00 half. The database-side link
+    // must order by the instant the timestamps denote, not their text, or
+    // the prelinked flags describe a different adjacency than the report
+    // builder iterates and real compression chains split apart.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let first = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("before".to_string(), "middle".to_string());
+    let second = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("middle".to_string(), "after".to_string());
+    let unrelated = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("unrelated".to_string(), "other".to_string());
+    let first_id = rec.record(&first).unwrap();
+    let second_id = rec.record(&second).unwrap();
+    let third_id = rec.record(&unrelated).unwrap();
+
+    // 01:30-04:00 (05:30Z) precedes 01:15-05:00 (06:15Z) in instant order,
+    // but sorts after it lexicographically.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        rewrite_timestamp(&conn, first_id, "2026-11-01T01:30:00.000000-04:00");
+        rewrite_timestamp(&conn, second_id, "2026-11-01T01:15:00.000000-05:00");
+        rewrite_timestamp(&conn, third_id, "2026-11-01T01:45:00.000000-05:00");
+    }
+
+    let records = rec.records_for_diff("dst-session", None).unwrap();
+    let report = crate::diff::session_report(
+        &records,
+        "dst-session",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    let chains = json["chains"].as_array().unwrap();
+
+    assert_eq!(chains.len(), 2, "chains: {chains:?}");
+    let linked = chains
+        .iter()
+        .find(|chain| chain["status"] == "linked")
+        .unwrap_or_else(|| panic!("no linked chain in {chains:?}"));
+    assert_eq!(linked["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        chains
+            .iter()
+            .filter(|chain| chain["status"] == "standalone")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn newest_record_windows_span_a_utc_offset_change() {
+    // A limited newest-first window must keep the records with the latest
+    // instants. Text ordering of rfc3339 timestamps spans offsets by
+    // wall clock only, so during a fall-back the repeated hour's -05:00
+    // text sorts before the earlier -04:00 text and would let an older
+    // record displace a newer one from the window.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let oldest = sample(OperationType::CompressSchema, CompressionMode::Active, "dst-list");
+    let middle = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-list",
+    );
+    let newest = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "dst-list",
+    );
+    let oldest_id = rec.record(&oldest).unwrap();
+    let middle_id = rec.record(&middle).unwrap();
+    let newest_id = rec.record(&newest).unwrap();
+
+    // Instants: oldest 05:30Z, middle 06:15Z, newest 06:45Z; the middle
+    // record's -05:00 text sorts before the oldest record's -04:00 text.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        rewrite_timestamp(&conn, oldest_id, "2026-11-01T01:30:00.000000-04:00");
+        rewrite_timestamp(&conn, middle_id, "2026-11-01T01:15:00.000000-05:00");
+        rewrite_timestamp(&conn, newest_id, "2026-11-01T01:45:00.000000-05:00");
+    }
+
+    let window: Vec<i64> = rec
+        .all_records(Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![newest_id, middle_id]);
+
+    let session_window: Vec<i64> = rec
+        .records_by_session("dst-list", Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(session_window, vec![newest_id, middle_id]);
+}
+
+#[test]
+fn newest_record_windows_separate_submillisecond_timestamps() {
+    // SQLite's date functions only parse timestamps to whole milliseconds,
+    // so a millisecond-collapsed key orders sub-millisecond records by their
+    // insert id instead of their instant. Records get their timestamp when
+    // they are constructed, before the recorder lock serializes the
+    // inserts, so insertion order can differ from instant order: a limited
+    // window must still keep the genuinely newer record, and the diff
+    // window must link the chain in instant order.
+    let (rec, _dir) = new_recorder();
+    let later_instant =
+        chrono::DateTime::parse_from_rfc3339("2026-11-15T01:15:00.000200+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+    let earlier_instant =
+        chrono::DateTime::parse_from_rfc3339("2026-11-15T01:15:00.000100+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+    // Inserted first (lower id) but 100ns later than the second record.
+    let newer = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "subms-session",
+    )
+    .with_tool_use_id("tool-subms")
+    .with_text("middle".to_string(), "after".to_string())
+    .with_timestamp(later_instant);
+    let older = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "subms-session",
+    )
+    .with_tool_use_id("tool-subms")
+    .with_text("before".to_string(), "middle".to_string())
+    .with_timestamp(earlier_instant);
+    let newer_id = rec.record(&newer).unwrap();
+    let older_id = rec.record(&older).unwrap();
+    assert!(newer_id < older_id);
+
+    let window: Vec<i64> = rec
+        .all_records(Some(1))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![newer_id]);
+
+    let session_window: Vec<i64> = rec
+        .records_by_session("subms-session", Some(1))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(session_window, vec![newer_id]);
+
+    let records = rec.records_for_diff("subms-session", None).unwrap();
+    let report = crate::diff::session_report(
+        &records,
+        "subms-session",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    let chains = json["chains"].as_array().unwrap();
+    assert_eq!(chains.len(), 1, "chains: {chains:?}");
+    assert_eq!(chains[0]["status"], "linked");
+    let stages = chains[0]["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0]["record_id"], older_id);
+    assert_eq!(stages[1]["record_id"], newer_id);
+}
+
+#[test]
+fn newest_record_windows_read_through_the_instant_index() {
+    // A limited newest-first window must read the newest rows through
+    // idx_stats_instant instead of scanning the payload-bearing table and
+    // sorting it: the plan for the window's ordering must not fall back to
+    // a temporary b-tree.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    rec.record(&sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "idx-session",
+    ))
+    .unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id FROM stats \
+             ORDER BY timestamp_ns DESC, id DESC LIMIT 20",
+        )
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let plan = plan.join(" | ");
+    assert!(plan.contains("idx_stats_instant"), "plan: {plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "plan: {plan}");
+}
+
+#[test]
+fn opening_a_legacy_database_backfills_the_instant_key() {
+    // Databases written before the instant key existed carry offset-bearing
+    // text with no timestamp_ns column. Opening one derives each key from
+    // the stored text at full chrono precision, so legacy rows order
+    // exactly like rows the recorder writes today, while text that never
+    // parses keeps the unparseable sentinel and still sorts last in
+    // ascending order.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let rec = StatsRecorder::new(&db_path).unwrap();
+    let first_id = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "legacy",
+        ))
+        .unwrap();
+    let second_id = rec
+        .record(&sample(
+            OperationType::CompressSchema,
+            CompressionMode::Active,
+            "legacy",
+        ))
+        .unwrap();
+    let corrupt_id = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "legacy",
+        ))
+        .unwrap();
+    {
+        // A legacy writer had no instant-key column: rewrite only the
+        // stored text and let the reopen backfill derive the keys.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("DROP INDEX idx_stats_instant", []).unwrap();
+        conn.execute("ALTER TABLE stats DROP COLUMN timestamp_ns", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-15T01:30:00.000000-04:00' WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-15T01:15:00.000000-05:00' WHERE id = ?1",
+            [second_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = 'not-a-date' WHERE id = ?1",
+            [corrupt_id],
+        )
+        .unwrap();
+    }
+    drop(rec);
+
+    let rec = StatsRecorder::new(&db_path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (id, text) in [
+            (first_id, "2026-11-15T01:30:00.000000-04:00"),
+            (second_id, "2026-11-15T01:15:00.000000-05:00"),
+        ] {
+            let expected = chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap();
+            let key: i64 = conn
+                .query_row(
+                    "SELECT timestamp_ns FROM stats WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(key, expected, "legacy key for row {id}");
+        }
+        let corrupt_key: i64 = conn
+            .query_row(
+                "SELECT timestamp_ns FROM stats WHERE id = ?1",
+                [corrupt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(corrupt_key, i64::MAX);
+    }
+    // 01:15-05:00 (06:15Z) is newer than 01:30-04:00 (05:30Z); the corrupt
+    // sentinel sorts first in newest-first windows, where the previous text
+    // comparison already placed it.
+    let window: Vec<i64> = rec
+        .all_records(Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![corrupt_id, second_id]);
 }
 
 #[test]

@@ -209,6 +209,13 @@ impl StatsRecord {
         self
     }
 
+    /// Set an explicit timestamp (for callers that backfill records with
+    /// known times instead of the construction-time `Local::now()`)
+    pub fn with_timestamp(mut self, timestamp: DateTime<Local>) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+
     /// Set the source PID
     pub fn with_source_pid(mut self, pid: i64) -> Self {
         self.source_pid = Some(pid);
