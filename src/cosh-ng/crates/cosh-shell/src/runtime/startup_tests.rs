@@ -953,10 +953,13 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
 
 #[test]
 fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
+    // Login startup probes must run under the supervised helper (Pty) so a
+    // profile-started daemon cannot escape the probe as an unmanaged orphan;
+    // the non-login `-lic` Bash probe already established that contract.
     let (_, bash_login) = bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).unwrap();
     assert_eq!(bash_login.len(), 1);
     assert_eq!(bash_login[0].flags, "-lic");
-    assert_eq!(bash_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert_eq!(bash_login[0].io, BootstrapPathProbeIo::Pty);
 
     let (_, zsh_non_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, false, true).unwrap();
     assert_eq!(zsh_non_login.len(), 1);
@@ -965,7 +968,7 @@ fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
     let (_, zsh_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, true, true).unwrap();
     assert_eq!(zsh_login.len(), 1);
     assert_eq!(zsh_login[0].flags, "-lic");
-    assert_eq!(zsh_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert_eq!(zsh_login[0].io, BootstrapPathProbeIo::Pty);
 }
 
 #[test]

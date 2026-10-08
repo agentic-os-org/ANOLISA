@@ -201,10 +201,16 @@ const BASH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[
         io: BootstrapPathProbeIo::Pty,
     },
 ];
+// Login startup probes run under the supervised helper (Pty) for the same
+// reason the non-login Bash plan's `-lic` probe does: login files may start
+// background daemons, and an unsupervised probe leaves them behind as
+// unmanaged orphans on every fresh login. The managed shell re-sources the
+// same files afterwards, so the probe's copies are duplicates that must be
+// reaped, not session-owned processes.
 const BASH_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
     flags: "-lic",
     source: "Bash interactive login startup",
-    io: BootstrapPathProbeIo::Pipes,
+    io: BootstrapPathProbeIo::Pty,
 }];
 const ZSH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
     flags: "-ic",
@@ -214,7 +220,7 @@ const ZSH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
 const ZSH_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
     flags: "-lic",
     source: "Zsh interactive login startup",
-    io: BootstrapPathProbeIo::Pipes,
+    io: BootstrapPathProbeIo::Pty,
 }];
 
 #[derive(Debug)]
