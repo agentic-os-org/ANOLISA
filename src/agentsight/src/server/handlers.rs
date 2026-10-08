@@ -4219,6 +4219,70 @@ mod tests {
         cleanup_db(&db_path);
     }
 
+    /// `granularity` buckets only the hotness trend. The metric-specific
+    /// endpoints render no trend, so an accepted value there was validated
+    /// and then dropped — the same silent drop the interruption aggregates
+    /// reject. They must refuse it with a 400 that points at the endpoints
+    /// that do bucket it.
+    #[actix_web::test]
+    async fn skill_metric_specific_endpoints_reject_granularity() {
+        let db_path = unique_handler_db("skill_metrics_granularity_scope");
+        write_completed_conversation_event(&db_path, "conv-skill-granularity-scope");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(skill_metrics_all)
+                .service(skill_metrics_downloads)
+                .service(skill_metrics_loads)
+                .service(skill_metrics_usage_ratio)
+                .service(skill_metrics_distribution)
+                .service(skill_metrics_hotness),
+        )
+        .await;
+
+        for uri in [
+            "/skill-metrics/downloads?start_ns=0&end_ns=9223372036854775807&granularity=day",
+            "/skill-metrics/loads?start_ns=0&end_ns=9223372036854775807&granularity=day",
+            "/skill-metrics/usage-ratio?start_ns=0&end_ns=9223372036854775807&granularity=week",
+            "/skill-metrics/distribution?start_ns=0&end_ns=9223372036854775807&granularity=week",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} has no hotness trend; granularity must not be accepted there"
+            );
+            let body: serde_json::Value = awtest::read_body_json(response).await;
+            assert_eq!(
+                body["error"], "unsupported_filter",
+                "the 400 must follow the family's error shape: {body}"
+            );
+            assert!(
+                body["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("hotness")),
+                "the 400 must point at the hotness endpoints: {body}"
+            );
+        }
+
+        // Guards: the two endpoints that bucket the trend keep accepting
+        // granularity, and the metric-specific endpoints keep working
+        // without it.
+        for uri in [
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=day",
+            "/skill-metrics/hotness?start_ns=0&end_ns=9223372036854775807&granularity=week",
+            "/skill-metrics/downloads?start_ns=0&end_ns=9223372036854775807",
+            "/skill-metrics/loads?start_ns=0&end_ns=9223372036854775807",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+
+        cleanup_db(&db_path);
+    }
+
     #[actix_web::test]
     async fn storage_backed_handlers_report_database_open_errors() {
         let root = temp_root("handler_open_errors");
@@ -5728,6 +5792,7 @@ pub async fn skill_metrics_all(
         data.genai_store.as_deref(),
         &query,
         crate::skill_metrics::MetricOptions::all(),
+        "GET /api/skill-metrics",
     )
 }
 
@@ -5744,6 +5809,7 @@ pub async fn skill_metrics_downloads(
             downloads: true,
             ..Default::default()
         },
+        "GET /api/skill-metrics/downloads",
     )
 }
 
@@ -5760,6 +5826,7 @@ pub async fn skill_metrics_loads(
             loads: true,
             ..Default::default()
         },
+        "GET /api/skill-metrics/loads",
     )
 }
 
@@ -5776,6 +5843,7 @@ pub async fn skill_metrics_usage_ratio(
             usage_ratio: true,
             ..Default::default()
         },
+        "GET /api/skill-metrics/usage-ratio",
     )
 }
 
@@ -5792,6 +5860,7 @@ pub async fn skill_metrics_distribution(
             distribution: true,
             ..Default::default()
         },
+        "GET /api/skill-metrics/distribution",
     )
 }
 
@@ -5808,6 +5877,7 @@ pub async fn skill_metrics_hotness(
             hotness: true,
             ..Default::default()
         },
+        "GET /api/skill-metrics/hotness",
     )
 }
 
@@ -5830,13 +5900,32 @@ fn reject_unknown_granularity(query: &SkillMetricsQuery) -> Option<HttpResponse>
 }
 
 /// Shared implementation for all skill metrics endpoints.
+///
+/// `endpoint` names the route in rejection messages, so a 400 tells the
+/// caller which request produced it.
 fn compute_skill_metrics_response(
     genai_store: Option<&GenAISqliteStore>,
     query: &SkillMetricsQuery,
     mut options: crate::skill_metrics::MetricOptions,
+    endpoint: &'static str,
 ) -> HttpResponse {
     if let Some(response) = reject_unknown_granularity(query) {
         return response;
+    }
+    // `granularity` buckets only the hotness trend. The metric-specific
+    // endpoints (downloads, loads, usage-ratio, distribution) render no
+    // trend, so an accepted value was validated and then dropped — the same
+    // silent drop the interruption aggregates reject for their row-level
+    // filters. Refuse it and point at the two endpoints that bucket it.
+    if !options.hotness && query.granularity.is_some() {
+        return HttpResponse::BadRequest().json(json!({
+            "error": "unsupported_filter",
+            "message": format!(
+                "{endpoint} has no hotness trend; granularity must be applied on \
+                 GET /api/skill-metrics or GET /api/skill-metrics/hotness, which bucket it"
+            ),
+            "unsupported_filters": ["granularity"],
+        }));
     }
     // Apply granularity from query params; validation above admits only the
     // two documented values, the weekly default stays for an absent one.
