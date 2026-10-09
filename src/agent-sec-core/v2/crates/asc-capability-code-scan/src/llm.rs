@@ -177,17 +177,29 @@ pub(crate) fn initialization_message(error: &ModelServiceError) -> String {
                 py_repr(base_url)
             )
         }
-        ConfigError::InvalidBaseUrl { base_url, reason } => {
-            v1_invalid_url_message(base_url).unwrap_or_else(|| reason.clone())
-        }
+        ConfigError::InvalidBaseUrl { base_url, reason } => v1_invalid_url_message(base_url)
+            .or_else(|| v1_non_loopback_message(base_url))
+            .unwrap_or_else(|| reason.clone()),
         ConfigError::UnsupportedScheme(base_url) | ConfigError::NonLoopbackBaseUrl(base_url) => {
-            format!(
-                "refusing non-loopback model service base_url {}: only a local model service is \
-                 supported, and scanned content must not leave the host",
-                py_repr(base_url)
-            )
+            v1_non_loopback_message(base_url).unwrap_or_else(|| {
+                format!(
+                    "base_url must use http:// or https:// scheme: {}",
+                    py_repr(base_url)
+                )
+            })
         }
     }
+}
+
+fn v1_non_loopback_message(base_url: &str) -> Option<String> {
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return None;
+    }
+    Some(format!(
+        "refusing non-loopback model service base_url {}: only a local model service is supported, \
+         and scanned content must not leave the host",
+        py_repr(base_url)
+    ))
 }
 
 fn v1_invalid_url_message(base_url: &str) -> Option<String> {
@@ -260,6 +272,9 @@ fn py_repr(text: &str) -> String {
 }
 
 fn python_printable(character: char) -> bool {
+    // This workspace's shared Unicode table is newer than Python 3.11's
+    // Unicode 14 table. Keep that repository-wide representation difference
+    // explicit rather than maintaining a second, stale category table here.
     character == ' '
         || !matches!(
             character.general_category_group(),
@@ -475,6 +490,13 @@ mod tests {
                 "An IPv4 address cannot be in brackets",
             ),
             (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://exa mple".to_owned(),
+                    reason: "invalid domain character".to_owned(),
+                },
+                "refusing non-loopback model service base_url 'http://exa mple': only a local model service is supported, and scanned content must not leave the host",
+            ),
+            (
                 ConfigError::NonLoopbackBaseUrl("http://10.0.0.1:11434".to_owned()),
                 non_loopback,
             ),
@@ -498,6 +520,9 @@ mod tests {
             "'\\xad\\u200b\\u202e\\u2028\\ufeff'"
         );
         assert_eq!(py_repr("\u{10000}"), "'𐀀'");
+        // U+11F00 was unassigned in Unicode 14 (Python 3.11) and assigned in
+        // the workspace's newer table; this is the documented table-version edge.
+        assert_eq!(py_repr("\u{11f00}"), "'𑼀'");
     }
 
     struct UnavailableClient;
