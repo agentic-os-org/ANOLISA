@@ -206,7 +206,7 @@ impl SecurityQueryHandler {
         params: &SecQueryParams,
         scope: QueryScope,
     ) -> DaemonResponse {
-        if params.limit.is_some() || params.offset.is_some() {
+        if params.limit.is_some() {
             return invalid_parameters(request_id);
         }
         let Some(group_by) = non_empty(params.group_by.as_deref()) else {
@@ -215,10 +215,13 @@ impl SecurityQueryHandler {
         if !VALID_GROUP_FIELDS.contains(&group_by) {
             return invalid_parameters(request_id);
         }
+        let Ok(offset) = i64::try_from(params.offset.unwrap_or(0)) else {
+            return invalid_parameters(request_id);
+        };
         let Ok(filters) = event_filters(params) else {
             return invalid_parameters(request_id);
         };
-        match source.count_by(group_by, &filters, scope, 0) {
+        match source.count_by(group_by, &filters, scope, offset) {
             Ok(groups) => DaemonResponse::success(
                 request_id,
                 json!({
@@ -295,10 +298,8 @@ fn list_filters(params: &SecQueryParams) -> Result<(EventFilters, u32, i64, bool
 
 /// Builds the repository filter set from the shared v1 parameter names.
 fn event_filters(params: &SecQueryParams) -> Result<EventFilters, ()> {
-    if let Some(result) = non_empty(params.result.as_deref()) {
-        if !EVENT_RESULTS.contains(&result) {
-            return Err(());
-        }
+    if non_empty(params.result.as_deref()).is_some_and(|result| !EVENT_RESULTS.contains(&result)) {
+        return Err(());
     }
     let (since_epoch, until_epoch) = time_bounds(params)?;
     Ok(EventFilters {
@@ -339,10 +340,10 @@ fn time_bounds(params: &SecQueryParams) -> Result<(Option<f64>, Option<f64>), ()
         (None, Some(nanos)) => Some(epoch_of_nanos(nanos)),
         (None, None) => None,
     };
-    if let (Some(since), Some(until)) = (since, until) {
-        if since > until {
-            return Err(());
-        }
+    if let (Some(since), Some(until)) = (since, until)
+        && since > until
+    {
+        return Err(());
     }
     Ok((since, until))
 }
@@ -427,15 +428,15 @@ fn add_skill_ledger_fields(payload: &mut Map<String, Value>, details: &Map<Strin
     }
     let mut skill_name = result.and_then(|result| first_non_empty_string(result.get("skill_name")));
     if skill_name.is_none() {
-        if let Some(skill_dir) =
-            request.and_then(|request| first_non_empty_string(request.get("skill_dir")))
-        {
-            skill_name = Path::new(&skill_dir)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned)
-                .filter(|name| !name.is_empty());
-        }
+        skill_name = request
+            .and_then(|request| first_non_empty_string(request.get("skill_dir")))
+            .and_then(|skill_dir| {
+                Path::new(&skill_dir)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+                    .filter(|name| !name.is_empty())
+            });
     }
     if let Some(skill_name) = skill_name {
         payload.insert("skill_name".to_owned(), Value::String(skill_name));
@@ -469,13 +470,17 @@ fn non_empty_group_count(groups: &GroupCounts) -> usize {
 }
 
 /// Renders v1's sorted `count_by` item list.
+///
+/// The SQL `NULL` bucket is delivered as `value: null` — v1's CLI rendered
+/// it as the `"null"` object key, and the v2 CLI reproduces that spelling.
+/// Empty-string groups stay excluded, as in v1's daemon rendering.
 fn count_items(groups: &GroupCounts) -> Vec<Value> {
     let mut items: Vec<Value> = groups
         .iter()
-        .filter_map(|(key, count)| {
-            key.as_deref()
-                .filter(|key| !key.is_empty())
-                .map(|key| json!({"value": key, "count": count}))
+        .filter_map(|(key, count)| match key.as_deref() {
+            Some(key) if !key.is_empty() => Some(json!({"value": key, "count": count})),
+            None => Some(json!({"value": null, "count": count})),
+            Some(_) => None,
         })
         .collect();
     items.sort_by(|left, right| {
@@ -749,6 +754,55 @@ mod tests {
     }
 
     #[test]
+    fn count_by_applies_the_offset_in_sql_and_delivers_null_buckets() {
+        // Rows newest first: a2 (no session, SQL NULL bucket), a1 (session
+        // s-1) — both uid 1000; b1 belongs to uid 2000 and stays invisible.
+        // Skipping the newest row groups only a1, and the SQL NULL bucket
+        // is delivered as `value: null` for the client's v1 `"null"` key.
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("events.db");
+        let writer = SqliteEventWriter::new(&path).expect("writer");
+        let mut a1 = SecurityEvent::new("sandbox_prehook", "exec", Map::new());
+        "a1".clone_into(&mut a1.event_id);
+        a1.uid = 1000;
+        a1.session_id = Some("s-1".to_owned());
+        let mut a2 = SecurityEvent::new("sandbox_prehook", "network", Map::new());
+        "a2".clone_into(&mut a2.event_id);
+        a2.uid = 1000;
+        let mut b1 = SecurityEvent::new("sandbox_prehook", "exec", Map::new());
+        "b1".clone_into(&mut b1.event_id);
+        b1.uid = 2000;
+        for event in [a1, a2, b1] {
+            writer.write(&event);
+        }
+        writer.close_at(1000.0);
+        let source = SqliteEventQuerySource::new(&path).expect("source");
+        let handler = SecurityQueryHandler::new(source);
+
+        let data = success_data(handle(
+            &handler,
+            1000,
+            method::SEC_EVENTS_COUNT_BY,
+            json!({"group_by": "session_id"}),
+        ));
+        assert_eq!(
+            data["items"],
+            json!([
+                {"value": null, "count": 1},
+                {"value": "s-1", "count": 1},
+            ])
+        );
+
+        let data = success_data(handle(
+            &handler,
+            1000,
+            method::SEC_EVENTS_COUNT_BY,
+            json!({"group_by": "session_id", "offset": 1}),
+        ));
+        assert_eq!(data["items"], json!([{"value": "s-1", "count": 1}]));
+    }
+
+    #[test]
     fn count_by_groups_and_sorts_only_own_rows() {
         let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
@@ -904,9 +958,12 @@ mod tests {
                 method::SEC_EVENTS_COUNT_BY,
                 json!({"group_by": "category", "limit": 10}),
             ),
+            // `offset` is accepted (it skips rows in SQL before
+            // grouping, as v1's reader did); only its i64 overflow is
+            // rejected.
             (
                 method::SEC_EVENTS_COUNT_BY,
-                json!({"group_by": "category", "offset": 10}),
+                json!({"group_by": "category", "offset": 9_223_372_036_854_775_808_u64}),
             ),
             (method::SEC_EVENTS_LIST, json!({"limit": 0})),
             (method::SEC_EVENTS_LIST, json!({"limit": 1001})),

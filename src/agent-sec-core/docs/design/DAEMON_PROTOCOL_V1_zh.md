@@ -387,7 +387,10 @@ metadata-only 响应包含 `ignored=true`、`reason="metadata-only change"` 和 
 
 ### 6.7 `sec.events.count_by`
 
-参数：必填 `group_by`、security-event filters。`limit` 和 `offset` 明确禁止。
+参数：必填 `group_by`、security-event filters、可选 `offset`（默认 0，先在 SQL 内跳过
+最新 N 行再分组——与 v1 直读 SQLite 时的单条 GROUP BY 语义一致，分组计数来自同一次
+一致快照，避免客户端 OFFSET 分页在并发写入下重复计数）。`limit` 明确禁止
+（分组聚合不分页）。
 
 `group_by` 值域恰好为：
 
@@ -401,7 +404,8 @@ metadata-only 响应包含 `ignored=true`、`reason="metadata-only change"` 和 
 }
 ```
 
-空/null group 被排除；按 count 降序、value 字符串升序排列。
+SQL `NULL` 桶以 `value: null` 交付（客户端按 v1 的 SQL 拼写渲染为 `"null"` 对象键）；
+空字符串 group 被排除；按 count 降序、value 字符串升序排列。
 
 ### 6.8 `obs.sessions.list`
 

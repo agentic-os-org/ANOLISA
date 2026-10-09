@@ -214,8 +214,13 @@ impl EventsCommand {
         Ok(0)
     }
 
-    /// v1's `--count-by`: group the offset-skipped rows client-side, because
-    /// the daemon method rejects pagination parameters by v1 wire contract.
+    /// v1's `--count-by`: one server-side SQL aggregation.
+    ///
+    /// v1 read `SQLite` directly and grouped in a single statement with the
+    /// offset applied in SQL; the daemon method now accepts the offset the
+    /// same way, so the grouped counts come from one consistent snapshot.
+    /// Offset-paginated client-side aggregation — the first cut here —
+    /// double-counts rows that concurrent writers insert between pages.
     fn run_count_by(
         &self,
         field: &str,
@@ -223,20 +228,30 @@ impl EventsCommand {
         stdout: &mut dyn io::Write,
         stderr: &mut dyn io::Write,
     ) -> Result<u8, EventsRunError> {
-        let template = self.params(None, None);
-        let (items, _total, code) =
-            Self::fetch_pages(transport, &template, self.offset, usize::MAX, false, stderr)?;
-        if code != 0 {
-            return Ok(code);
-        }
+        let mut params = self.params(None, None);
+        params.group_by = Some(field.to_owned());
+        params.offset = Some(self.offset);
+        params.include_details = None;
+        let response = Self::request(transport, method::SEC_EVENTS_COUNT_BY, &params)?;
+        let Some(result) = response_result(&response, stderr) else {
+            return Ok(1);
+        };
         let mut groups: Map<String, Value> = Map::new();
-        for item in &items {
-            let key = group_key(item, field);
-            let count = groups.get(&key).and_then(Value::as_u64).unwrap_or(0) + 1;
-            groups.insert(key, json!(count));
+        if let Some(items) = result["items"].as_array() {
+            for item in items {
+                // The SQL `NULL` bucket arrives as `value: null`; v1's CLI
+                // rendered it as the `"null"` object key.
+                let key = match &item["value"] {
+                    Value::Null => "null".to_owned(),
+                    Value::String(value) => value.clone(),
+                    other => other.to_string(),
+                };
+                let count = item["count"].as_u64().unwrap_or_default();
+                groups.insert(key, json!(count));
+            }
         }
         // v1 printed the grouped counts as a JSON object regardless of
-        // `--output`, sorted as the SQL GROUP BY produced them.
+        // `--output`, in the SQL GROUP BY's order.
         writeln!(
             stdout,
             "{}",
@@ -253,7 +268,13 @@ impl EventsCommand {
         stderr: &mut dyn io::Write,
     ) -> Result<u8, EventsRunError> {
         let (window, label) = self.summary_window();
-        let template = self.params(window.0, window.1);
+        // The resolved window are *time* bounds: they belong in
+        // `start_ns`/`end_ns`, never in the `limit`/`offset` positions of
+        // `params()` — fetch_pages would overwrite those and the request
+        // would leave the time range null.
+        let mut template = self.params(None, None);
+        template.start_ns = window.0;
+        template.end_ns = window.1;
         let (items, _total, code) =
             Self::fetch_pages(transport, &template, 0, SUMMARY_LIMIT, true, stderr)?;
         if code != 0 {
@@ -580,14 +601,6 @@ fn response_result<'a>(
 /// The bucket key of one grouped row, v1's SQL semantics: a `NULL` column
 /// lands in the `null` bucket (`json.dumps({None: ...})` spelling), an empty
 /// string stays its own bucket.
-fn group_key(item: &Value, field: &str) -> String {
-    match item.get(field) {
-        Some(Value::String(value)) => value.clone(),
-        Some(Value::Null) | None => "null".to_owned(),
-        Some(other) => other.to_string(),
-    }
-}
-
 /// Renders an ISO-8601 timestamp in local time, v1's `_format_timestamp`.
 fn format_timestamp(timestamp: &str) -> String {
     let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
@@ -769,18 +782,19 @@ mod tests {
     }
 
     #[test]
-    fn count_by_applies_the_offset_before_grouping() {
-        // Five rows: e1..e5 (newest first: e5, e4, e3, e2, e1). Skipping the
-        // newest two leaves e3, e2, e1 — three exec rows.
+    fn count_by_is_one_server_side_aggregation_with_the_offset() {
+        // v1 skipped the newest rows in SQL before grouping, in one
+        // statement. The offset rides the single `sec.events.count_by`
+        // request, and the grouped counts come from that one snapshot —
+        // offset-paginated client aggregation double-counts rows that
+        // concurrent writers insert between pages.
         let events = command(&["--count-by", "category", "--offset", "2"]);
-        let mut transport = Scripted::new(vec![page(
-            json!([
-                event("e3", "exec"),
-                event("e2", "exec"),
-                event("e1", "exec"),
-            ]),
-            5,
-            None,
+        let mut transport = Scripted::new(vec![DaemonResponse::success(
+            request_id(),
+            json!({
+                "group_by": "category",
+                "items": [{"value": "exec", "count": 3}],
+            }),
         )]);
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -791,20 +805,28 @@ mod tests {
         let text = String::from_utf8(out).expect("text");
         let parsed: Value = serde_json::from_str(&text).expect("json object");
         assert_eq!(parsed, json!({"exec": 3}));
-        // The offset must reach the daemon: v1 skipped the newest rows in SQL
-        // before grouping, and the CLI may not silently drop it even though
-        // `sec.events.count_by` itself rejects pagination parameters.
+        assert_eq!(
+            transport.requests.len(),
+            1,
+            "one aggregation request, not offset pagination"
+        );
         let first = &transport.requests[0];
+        assert_eq!(first.method, "sec.events.count_by");
         let params: SecQueryParams = serde_json::from_value(first.params.clone()).expect("params");
+        assert_eq!(params.group_by.as_deref(), Some("category"));
         assert_eq!(params.offset, Some(2), "the offset went on the wire");
+        assert_eq!(params.limit, None, "count_by takes no page size");
     }
 
     #[test]
     fn count_by_null_buckets_follow_the_sql_spelling() {
+        // The server delivers the SQL NULL bucket as `value: null`; v1's
+        // CLI rendered it as the `"null"` object key.
         let events = command(&["--count-by", "trace_id"]);
-        let mut row = event("e1", "exec");
-        row.as_object_mut().expect("object").remove("trace_id");
-        let mut transport = Scripted::new(vec![page(json!([row]), 1, None)]);
+        let mut transport = Scripted::new(vec![DaemonResponse::success(
+            request_id(),
+            json!({"group_by": "trace_id", "items": [{"value": null, "count": 1}]}),
+        )]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())
@@ -933,6 +955,44 @@ mod tests {
             .expect("run");
         assert_eq!(code, 0);
         assert_eq!(String::from_utf8(out).expect("text"), "No events found.\n");
+    }
+
+    #[test]
+    fn summary_sends_the_default_24h_window_on_the_wire() {
+        // The "last 24 hours" label must describe the actual request:
+        // `start_ns`/`end_ns` bound the fetch, so historical rows cannot
+        // enter the default summary. (The first cut passed the window into
+        // `params()`'s limit/offset positions, which fetch_pages then
+        // overwrote — the request left the time range null.)
+        let events = command(&["--summary"]);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let mut transport = Scripted::new(vec![page(json!([]), 0, None)]);
+        let mut out = Vec::new();
+        let code = events
+            .run_with(&mut transport, &mut out, &mut Vec::new())
+            .expect("run");
+        assert_eq!(code, 0);
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        assert_eq!(transport.requests.len(), 1);
+        let first = &transport.requests[0];
+        let params: SecQueryParams = serde_json::from_value(first.params.clone()).expect("params");
+        let start = u128::from(params.start_ns.expect("start_ns bounds the window"));
+        let end = u128::from(params.end_ns.expect("end_ns bounds the window"));
+        assert!(
+            end >= before && end <= after,
+            "end_ns {end} is the request-time now, not {before}..{after}"
+        );
+        let day_ns: u128 = 86_400_000_000_000;
+        assert!(
+            start + day_ns >= end.saturating_sub(8) && start + day_ns <= end + 8,
+            "the window is the 24h before now: start {start}, end {end}"
+        );
     }
 
     #[test]

@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// One struct serves all four methods, exactly as v1's handlers all read from
 /// the same parameter dictionary: `sec.events.get` requires `event_id`,
-/// `sec.events.count_by` requires `group_by` and rejects `limit`/`offset`, and
-/// the handler enforces those per-method rules after decoding.
+/// `sec.events.count_by` requires `group_by` and rejects `limit` (its
+/// optional `offset` skips the newest rows in SQL before grouping), and the
+/// handler enforces those per-method rules after decoding.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecQueryParams {
