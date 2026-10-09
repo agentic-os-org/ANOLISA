@@ -335,30 +335,85 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
+    // A snapshot's tool calls are whole and repeat with every snapshot chunk,
+    // so the last one's calls are kept aside and used only when no delta
+    // fragment carried any — the same delta-wins rule the closing Responses
+    // events follow.
+    let mut snapshot_tool_calls: Vec<String> = Vec::new();
     for chunk in chunks {
         if saw_text_delta && repeats_full_text(chunk) {
             continue;
         }
+        // A choice carrying `message` instead of `delta` speaks in cumulative
+        // snapshots: each frame repeats the answer so far rather than an
+        // increment (SysOM's Copilot stream sends nothing else, and an
+        // OpenAI-compatible gateway's final frame is a whole `message`).
+        // Appending such a frame once per captured chunk counted the answer
+        // N times; accumulate it the way the SSE merger does — replace when
+        // the snapshot extends what we have.
+        let snapshot = carries_message_snapshot(chunk);
         if let Some((chunk_content, chunk_reasoning, chunk_tool_calls)) =
             extract_response_content(Some(chunk))
         {
             if !chunk_content.is_empty() {
-                content.push_str(&chunk_content);
+                if snapshot {
+                    accumulate_text(&mut content, &chunk_content);
+                } else {
+                    content.push_str(&chunk_content);
+                }
             }
             if let Some(reasoning_chunk) = chunk_reasoning {
                 if !reasoning_chunk.is_empty() {
-                    reasoning.push_str(&reasoning_chunk);
+                    if snapshot {
+                        accumulate_text(&mut reasoning, &reasoning_chunk);
+                    } else {
+                        reasoning.push_str(&reasoning_chunk);
+                    }
                 }
             }
-            for tool_call in chunk_tool_calls {
-                if !tool_call.is_empty() {
-                    tool_calls.push(tool_call);
+            if snapshot {
+                snapshot_tool_calls = chunk_tool_calls;
+            } else {
+                for tool_call in chunk_tool_calls {
+                    if !tool_call.is_empty() {
+                        tool_calls.push(tool_call);
+                    }
                 }
             }
         }
     }
+    if tool_calls.is_empty() {
+        tool_calls = snapshot_tool_calls;
+    }
 
     (content, reasoning, tool_calls)
+}
+
+/// A choice that carries `message` instead of `delta` speaks in cumulative
+/// snapshots: each frame repeats the answer so far rather than an increment.
+fn carries_message_snapshot(chunk: &Value) -> bool {
+    chunk
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| choice.get("message").is_some() && choice.get("delta").is_none())
+        })
+}
+
+/// Accumulate cumulative-or-incremental text into `buf`, mirroring the SSE
+/// merger's helper: a frame that repeats the whole text so far replaces the
+/// buffer; a frame that carries only an increment appends.
+fn accumulate_text(buf: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if next.starts_with(buf.as_str()) {
+        *buf = next.to_string();
+    } else {
+        buf.push_str(next);
+    }
 }
 
 /// Extract role and content from OpenAI message JSON
@@ -624,6 +679,68 @@ mod tests {
             serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
         ];
         assert_eq!(merge_response_output_text(&empty_delta).0, "hello there");
+    }
+
+    /// A `choices[].message` snapshot repeats the answer so far (SysOM's
+    /// Copilot stream sends nothing else), so the fold must count the answer
+    /// once, not once per captured chunk.
+    #[test]
+    fn test_merge_response_output_text_counts_message_snapshots_once() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"message":{"content":"Hello"}}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Hello there"}}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Hello there!"},"finish_reason":"stop"}]}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "Hello there!");
+        assert!(reasoning.is_empty());
+        assert!(tool_calls.is_empty());
+    }
+
+    /// An OpenAI-compatible gateway's final frame can be a whole `message`
+    /// after a run of deltas; the snapshot completes the text instead of
+    /// appending to it.
+    #[test]
+    fn test_merge_response_output_text_snapshot_completes_delta_text() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"delta":{"content":"Do"},"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}),
+        ];
+        let (content, _, _) = merge_response_output_text(&chunks);
+        assert_eq!(content, "Done");
+    }
+
+    /// A snapshot's tool calls are whole and repeat with every chunk; the
+    /// last snapshot's calls must be counted once, not once per chunk.
+    #[test]
+    fn test_merge_response_output_text_snapshot_tool_calls_do_not_repeat() {
+        let second = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"index":0,"id":"c1","function":{
+                            "name":"get_weather",
+                            "arguments": serde_json::json!({"city":"Beijing"}).to_string()}}
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let chunks = vec![
+            serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[
+                {"index":0,"id":"c1","function":{"name":"get_weather","arguments":"{}"}}]}}]}),
+            second,
+        ];
+        let (content, _, tool_calls) = merge_response_output_text(&chunks);
+        assert!(content.is_empty());
+        assert_eq!(
+            tool_calls,
+            vec![format!(
+                "get_weather: {}",
+                serde_json::json!({"city":"Beijing"})
+            )]
+        );
     }
 
     /// Reasoning and tool fragments pass through the same merge unchanged.
