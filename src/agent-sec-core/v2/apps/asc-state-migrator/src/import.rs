@@ -201,12 +201,17 @@ pub fn plan(
 
 /// Imports every validated source into the destination and journals the run.
 ///
+/// `rejected` carries the discovery-found sources validation skipped, so a
+/// partial migration still tells the operator whose state was left behind;
+/// explicit `--source` rejections never reach this point (they abort first).
+///
 /// # Errors
 ///
 /// Fails when there is no usable source, or when a destination or source
 /// `SQLite` operation fails.
 pub fn apply(
     scans: &[SourceScan],
+    rejected: &[crate::discovery::RejectedSource],
     destination: &Path,
     options: &ApplyOptions,
 ) -> Result<ApplyReport, crate::MigratorError> {
@@ -297,6 +302,10 @@ pub fn apply(
         retention_days: options.retention_days,
         sources: record.sources.clone(),
         totals: record.totals.clone(),
+        rejected: rejected
+            .iter()
+            .map(|item| (item.dir.display().to_string(), item.reason.clone()))
+            .collect(),
     })
 }
 
