@@ -41,13 +41,18 @@ sudo make -C src/agent-sec-core install-core-v2
 系统 unit 安装到 `/usr/lib/systemd/system`，初始配置以 0600 安装到 `/etc/agent-sec/skillsec.json`。
 重装保留已有配置；RPM 使用 `%config(noreplace)`。安装过程不会初始化签名密钥或启用 Agent Hook。
 
-RPM 遵循发行版的 systemd preset，可能启用该服务的开机启动。检查配置后，显式启动 root 系统服务：
+在运行 systemd manager 的主机上，RPM 会在首次安装和 V1 升级到 V2 时启用并启动 root
+系统服务。安装前先检查配置，随后验证 daemon 是否可用：
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now agent-sec-core.service
 sudo systemctl status agent-sec-core.service
 agent-sec-cli skill-ledger status
+```
+
+如果 RPM 安装在没有 systemd manager 的镜像或容器中，或者服务后来被停止或禁用，请显式启动：
+
+```sh
+sudo systemctl enable --now agent-sec-core.service
 ```
 
 使用系统级 `systemctl`，不带 `--user`。unit 创建运行、状态和日志目录，保持密钥和日志私有，

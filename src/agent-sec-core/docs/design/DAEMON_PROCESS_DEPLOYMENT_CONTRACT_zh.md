@@ -118,7 +118,7 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 - 当前 Linux unit 使用 root:root，不创建专用账户；保留现有 capability 和沙箱限制，
   root 身份不等于开放全部特权；
 - systemd 负责 start/stop/restart、资源限制、目录准备和故障拉起；
-- V2 RPM 首次安装或检测到尚未卸载的 V1 user unit 时，在运行中的 system manager 上执行 `systemctl enable --now agent-sec-core.service`；这使 V1 升级切换到 system service，同时纯 V2 重装保留管理员已有的服务状态。没有 system manager 的镜像构建或容器安装只完成文件安装，不尝试启动 daemon；
+- V2 RPM 首次安装或检测到尚未卸载的 V1 user unit 时，在运行中的 system manager 上执行 `systemctl enable --now agent-sec-core.service`；这使 V1 升级切换到 system service，同时纯 V2 重装保留管理员已有的服务状态。启动失败不使 RPM 事务失败，部署者应查询 service 状态和 journal。没有 system manager 的镜像构建或容器安装只完成文件安装，不尝试启动 daemon；
 - daemon 不自行 daemonize，不在启动路径隐式执行不可逆 migration；
 - runtime 目录由 systemd RuntimeDirectory 创建；state/log 路径按各自存储契约管理；
 - 两个不同 UID/Agent 通过同一 system socket 访问并保持 owner-scope 隔离。
