@@ -134,6 +134,7 @@ def inventory(text: str) -> set[str]:
 def check_inventory() -> None:
     """Require runnable tests for configuration, contracts, execution and journals."""
     for package, target in (
+        ("aw-package", "installation"),
         ("aw-contracts", "canonical"),
         ("aw-contracts", "schemas"),
         ("aw-contracts", "contracts"),
@@ -159,6 +160,7 @@ def check_inventory() -> None:
 def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and Rust source sizes explicit."""
     allowed = {
+        "aw-package": {"serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile", "aw-config", "aw-exec", "aw-service"},
         "aw-provider-sec-core": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"},
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},

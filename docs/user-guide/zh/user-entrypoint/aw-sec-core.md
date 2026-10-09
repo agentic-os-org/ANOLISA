@@ -6,9 +6,11 @@
 配置指定哪些工具输入包含代码，以及发现风险后返回观察还是阻断候选效果。
 sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调用。
 
-当前交付为 Linux 源码，可用于本地 Provider 集成。AW 安装包和 Agent 原生效果采用
-分别交付。Provider 不启动任何 daemon，不安装 Agent Hook，也不持久化 AW 审计。
+当前交付为 Linux 源码，可用于本地 Provider 集成。完整 Preview 集成见下方指南。Provider 不启动任何 daemon，不安装 Agent Hook，也不持久化 AW 审计。
 工具后仅返回观察记录，不扫描或替换结果。
+
+完整的 AW 服务、Qoder 和 sec-core 预编译集成见 [Preview 包指南](aw-preview.md)。
+以下仍可单独从源码使用 Provider 桥接。
 
 ## 前置条件与构建
 

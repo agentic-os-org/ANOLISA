@@ -1,0 +1,23 @@
+[package]
+name = "aw-package"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Native AW Preview packaging and installation"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+libc = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+aw-config = { workspace = true }
+aw-exec = { workspace = true }
+
+[dev-dependencies]
+aw-service = { workspace = true }

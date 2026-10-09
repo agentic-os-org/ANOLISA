@@ -1,0 +1,91 @@
+name: CI / AW Packages
+
+on:
+  pull_request:
+    paths:
+      - 'src/aw/crates/aw-package/**'
+      - 'src/aw/Cargo.*'
+      - 'docs/user-guide/*/user-entrypoint/aw-preview.md'
+      - '.github/workflows/aw-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aw-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    name: AW / Package install tests
+    runs-on: >-
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
+      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
+    timeout-minutes: 45
+    steps:
+      - name: Select isolated package output
+        run: echo "AW_PREVIEW_DIR=$RUNNER_TEMP/aw-preview-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates \
+            curl git pkg-config libssl-dev
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97.1'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/aw
+            src/agent-sec-core/v2
+      - name: Test installer and build the three artifacts
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ! command -v python3
+          cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-package
+          cargo run --locked --release --manifest-path src/aw/Cargo.toml \
+            -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
+            --output "$AW_PREVIEW_DIR/packages"
+      - name: Verify installed packages and service lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AW_PREVIEW_DIR/packages"
+          sha256sum -c SHA256SUMS
+          for archive in *.tar.gz; do tar -xzf "$archive"; done
+          root="$(dirname "$PWD")"
+          chmod 700 "$root"
+          runtime="$(mktemp -d /tmp/aw-preview.XXXXXX)"
+          trap 'mkdir -p "$root/demo"; cp -a "$runtime/demo/." "$root/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
+          aw-core-*/aw-package install --prefix "$root/split"
+          aw-provider-sec-core-*/aw-package install --prefix "$root/split"
+          aw-all-in-one-*/aw-package install --prefix "$root/combined"
+          diff -r "$root/split/.aw-packages" "$root/combined/.aw-packages"
+          umask 0002
+          AW_TEST_PREFIX="$root/combined" AW_TEST_WORK_DIR="$runtime/demo" \
+            timeout 180 cargo test --locked --manifest-path "$GITHUB_WORKSPACE/src/aw/Cargo.toml" \
+            -p aw-package --test installed -- --ignored
+          aw-all-in-one-*/aw-package uninstall --prefix "$root/combined"
+          test -f "$runtime/demo/result.json"
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: aw-preview-linux-x86_64-${{ github.sha }}${{ github.event_name == 'pull_request' && '-validation' || '' }}
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 14 }}
+          path: |
+            ${{ env.AW_PREVIEW_DIR }}/packages/*.tar.gz
+            ${{ env.AW_PREVIEW_DIR }}/packages/SHA256SUMS
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aw-preview-evidence-${{ github.sha }}
+          path: |
+            ${{ env.AW_PREVIEW_DIR }}/demo/result.json
+            ${{ env.AW_PREVIEW_DIR }}/demo/*.log
+          if-no-files-found: ignore

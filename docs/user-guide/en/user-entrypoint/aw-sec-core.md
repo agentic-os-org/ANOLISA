@@ -7,10 +7,13 @@ command. You choose which tool inputs contain code and whether reported risks
 produce an observation or a block candidate. sec-core supplies the scanner and
 rules; AW supplies configuration, protocol validation and bounded invocation.
 
-This is a Linux source delivery for local Provider integration. AW installation
-packages and native Agent effect adoption remain separate deliveries. The
+This is a Linux source delivery for local Provider integration. The integrated Preview is described separately below. The
 Provider does not start either daemon, install Agent Hooks or persist AW audits.
 Tool-after support records an observation; it does not scan or replace results.
+
+For a prebuilt AW service + Qoder + sec-core integration, use the
+[Preview package guide](aw-preview.md). The standalone source bridge below
+is also available.
 
 ## Prerequisites and build
 

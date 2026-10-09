@@ -8,6 +8,10 @@ runs external Providers and keeps execution metadata independently of an Agent
 session. Native scheduling and permissions remain with the framework; the
 current interfaces are experimental.
 
+AW Preview provides core and Provider packages installed with `aw-package`. It
+currently includes the sec-core Provider and an example sharing one configuration
+between Qoder and OpenClaw; see [Preview installation and demo](../../docs/user-guide/en/user-entrypoint/aw-preview.md).
+
 ## Available today
 
 | Capability | Availability |

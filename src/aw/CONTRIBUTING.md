@@ -65,6 +65,7 @@ Local validation also uses Linux ARM64.
 | `aw-host` | Compose configuration, Provider admission and bounded transport into local preparation and invocation; depends on `aw-config`, `aw-provider` and `aw-exec` |
 | `aw-service` | Standalone service, reusable client and native launcher; uses `aw-host` for Hook execution, `aw-exec` for foreground ownership and `aw-core` Journal for metadata |
 | `aw-provider-sec-core` | Concrete Provider binary; calls public sec-core CLI through `aw-exec`, with no sec-core crate dependency |
+| `aw-package` | Rust Preview build, manifests, installation and dual-Agent configuration; `aw-service` is a test-only dependency |
 
 Keep native framework integration outside these libraries and service; process execution belongs in `aw-exec`.
 Keep Provider message parsing and offline admission in `aw-provider`; `aw-host`

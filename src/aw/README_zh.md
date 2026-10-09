@@ -6,6 +6,9 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以
 入口启动 Qoder CLI 和 OpenClaw，运行外部 Provider，并独立于 Agent 会话保存
 执行元数据。原生调度与权限仍由框架负责，当前接口处于实验阶段。
 
+AW Preview提供核心包和Provider包，通过`aw-package`安装。当前包含sec-core Provider，
+并提供Qoder和OpenClaw共用一份配置的示例，详见[Preview安装与演示](../../docs/user-guide/zh/user-entrypoint/aw-preview.md)。
+
 ## 当前可用范围
 
 | 能力 | 可用状态 |

@@ -54,6 +54,7 @@ Ubuntu 24.04。范围判断与完整验证分别执行：
 | `aw-host` | 组合配置、Provider 准入和有界传输，提供本地准备与调用；依赖 `aw-config`、`aw-provider` 和 `aw-exec` |
 | `aw-service` | 独立服务、可复用客户端与原生启动器；通过 `aw-host` 执行 Hook，`aw-exec` 管理前台进程，`aw-core` Journal 保存元数据 |
 | `aw-provider-sec-core` | 具体 Provider 二进制，通过 `aw-exec` 调用公开 sec-core CLI，不依赖 sec-core crate |
+| `aw-package` | Rust Preview 构建、清单、安装及双 Agent 配置；`aw-service` 仅用于测试 |
 
 原生框架接入不属于这些库或服务；进程执行属于 `aw-exec`。
 Provider 消息解析和离线准入保留在 `aw-provider`；`aw-host` 负责它们的执行边界，

@@ -10,6 +10,11 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
+## 安装 Preview
+
+使用 [Preview 包](aw-preview.md) 安装并演示 AW + sec-core，无需编译。
+下方源码构建说明面向开发者；Preview 尚非稳定发行。
+
 ## 当前支持范围
 
 | 能力 | 状态 |
@@ -24,7 +29,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 | 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、结果替换或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
-| 安装已发布的 AW 包或生成默认配置 | ❌ 当前手动复制示例 |
+| 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](aw-preview.md)，尚非稳定发行 |
 
 对于 Qoder，`tool.after` 映射到成功调用后的 `PostToolUse`。Qoder 的 `PostToolUseFailure`
 是独立事件，本 Adapter 尚未接入。原生 Hook 命令仍按 Qoder 的响应语义处理。
