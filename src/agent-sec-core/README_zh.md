@@ -326,7 +326,7 @@ L2 分类器默认使用 ModelScope 上的
 # 部署环境提供 daemon endpoint。
 export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# regex 引擎（V2 当前唯一可用的扫描引擎）
+# 内嵌 regex 引擎
 agent-sec-cli scan-code --code 'rm -rf /'
 agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
   scan-code --code 'import os; os.system("rm -rf /")' --language python
