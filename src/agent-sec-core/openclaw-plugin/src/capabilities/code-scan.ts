@@ -50,6 +50,11 @@ export const codeScan: SecurityCapability = {
           return undefined;
         }
 
+        const selfProtectOperation = extractSelfProtectOperation(event);
+        if (selfProtectOperation) {
+          return blockSelfProtect(api, selfProtectOperation);
+        }
+
         // 只拦截 shell 类工具
         const command = extractCommand(event);
         if (!command) {
@@ -85,9 +90,12 @@ export const codeScan: SecurityCapability = {
           (f: any) => f.rule_id === "shell-self-protect-openclaw",
         );
         if (selfProtectFinding) {
-          const msg = `[agent-sec-core] 自我保护：该命令将禁用 agent-sec 安全插件。如果您确实需要禁用，请手动执行以下命令：\n\n  ${command}\n\n出于安全原因，AI agent 无法执行此操作。`;
-          report("warn", `SELF-PROTECT block — ${command}`, { outcome: "scan-result", verdict, decision: "block" });
-          return { block: true, blockReason: msg };
+          report("warn", `SELF-PROTECT block — ${command}`, {
+            outcome: "scan-result",
+            verdict,
+            decision: "block",
+          });
+          return blockSelfProtect(api, command);
         }
 
         if (verdict === "pass" || findings.length === 0) {
@@ -166,12 +174,38 @@ export const codeScan: SecurityCapability = {
   },
 };
 
-/** 从 event 中提取 shell 命令，无法提取则返回 undefined */
+/** Extract text passed to a tool boundary that can remove this plugin. */
 function extractCommand(event: { toolName: string; params: Record<string, unknown> }): string | undefined {
-  // OpenClaw 唯一的 shell 执行工具是 exec，参数字段为 command
-  // 参考: https://docs.openclaw.ai/tools/exec
-  if (event.toolName !== "exec") return undefined;
-  const cmd = event.params.command;
-  if (typeof cmd !== "string" || !cmd.trim()) return undefined;
-  return cmd;
+  if (event.toolName === "exec") {
+    const command = event.params.command;
+    return typeof command === "string" && command.trim() ? command : undefined;
+  }
+  if (event.toolName === "openclaw") {
+    const message = event.params.message;
+    return typeof message === "string" && message.trim() ? message : undefined;
+  }
+  return undefined;
+}
+
+function extractSelfProtectOperation(event: {
+  toolName: string;
+  params: Record<string, unknown>;
+}): string | undefined {
+  if (
+    event.toolName === "openclaw" &&
+    event.params.action === "plugin_uninstall" &&
+    event.params.pluginId === "agent-sec"
+  ) {
+    return "openclaw plugin_uninstall agent-sec";
+  }
+  return undefined;
+}
+
+function blockSelfProtect(
+  api: { logger: { warn(message: string): void } },
+  operation: string,
+): { block: true; blockReason: string } {
+  const message = `[agent-sec-core] 自我保护：该操作将禁用或卸载 agent-sec 安全插件。如果您确认需要，请手动执行或完成该操作。\n\n操作：${operation}`;
+  api.logger.warn(`[scan-code] SELF-PROTECT block — ${operation}`);
+  return { block: true, blockReason: message };
 }

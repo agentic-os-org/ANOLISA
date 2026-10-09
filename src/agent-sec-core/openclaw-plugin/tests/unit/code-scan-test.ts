@@ -47,6 +47,11 @@ function execEvent(command: string) {
   return { toolName: "exec", params: { command } };
 }
 
+/** Native OpenClaw system-agent plugin removal event factory. */
+function pluginUninstallEvent(pluginId: string) {
+  return { toolName: "openclaw", params: { action: "plugin_uninstall", pluginId } };
+}
+
 /** Captured CLI args from last mock call. */
 let lastCliArgs: string[] | undefined;
 let lastCliOpts: { timeout?: number } | undefined;
@@ -586,6 +591,53 @@ describe("scan-code", () => {
       assert.ok(result);
       assert.equal(result.block, true);
       assert.ok(result.blockReason.includes(cmd));
+    });
+
+    it("native plugin uninstall blocks agent-sec without calling the CLI", async () => {
+      const { handler } = registerAndGetHandler();
+      mockCliNoCall();
+
+      const result = await handler(pluginUninstallEvent("agent-sec"), {});
+
+      assert.ok(result);
+      assert.equal(result.block, true);
+      assert.ok(result.blockReason.includes("plugin_uninstall agent-sec"));
+    });
+
+    it("native plugin uninstall allows other plugins without calling the CLI", async () => {
+      const { handler } = registerAndGetHandler();
+      mockCliNoCall();
+
+      const result = await handler(pluginUninstallEvent("other-plugin"), {});
+
+      assert.equal(result, undefined);
+    });
+
+    it("outer OpenClaw delegation message is scanned for self-protection", async () => {
+      const { handler } = registerAndGetHandler();
+      mockCli({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          verdict: "warn",
+          findings: [{ rule_id: "shell-self-protect-openclaw", desc_zh: "禁用 agent-sec 插件" }],
+        }),
+        stderr: "",
+      });
+
+      const result = await handler(
+        { toolName: "openclaw", params: { message: "openclaw plugins disable agent-sec" } },
+        {},
+      );
+
+      assert.ok(result);
+      assert.equal(result.block, true);
+      assert.deepEqual(lastCliArgs?.slice(2), [
+        "scan-code",
+        "--code",
+        "openclaw plugins disable agent-sec",
+        "--language",
+        "bash",
+      ]);
     });
 
     it("non-self-protect deny finding does not force block without codeScanRequireApproval", async () => {
