@@ -51,7 +51,7 @@ pub fn load_server_config(config_path: &str) -> agentsight::config::AgentsightCo
     use agentsight::config::{AgentsightConfig, ensure_default_agents_config};
 
     let path = std::path::Path::new(config_path);
-    let mut config = AgentsightConfig::new();
+    let mut config = AgentsightConfig::new().set_config_path(path.to_path_buf());
 
     if let Err(e) = ensure_default_agents_config(path) {
         log::warn!("Failed to ensure default config at {config_path:?}: {e}, using defaults");
@@ -93,7 +93,22 @@ pub fn hours_ago_ns(hours: u64) -> u64 {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::hours_ago_ns;
+    use super::{hours_ago_ns, load_server_config};
+
+    #[test]
+    fn load_server_config_retains_the_runtime_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-server-config-path-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let config = load_server_config(path.to_str().unwrap());
+
+        assert_eq!(config.config_path.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn hours_ago_saturates_for_absurd_hours() {

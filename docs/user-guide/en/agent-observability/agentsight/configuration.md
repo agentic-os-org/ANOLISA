@@ -21,6 +21,7 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
   "schema_version": 4,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
+    "max_total_size_mb": 2200,
     "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 60 },
     "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 60 },
     "interruptions": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 },
@@ -85,11 +86,16 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ## SQLite storage policies
 
-`storage.base_path` is the directory shared by AgentSight-owned databases. In schema v4, every
-policy uses the same keys: `retention_days`, `max_db_size_mb`, and `check_interval_secs`. A zero
-value disables the corresponding age-retention, capacity, or scheduled-maintenance rule. If
-`check_interval_secs` is `0`, no automatic pass is scheduled even when the other two values are
-non-zero.
+`storage.base_path` is the directory shared by AgentSight-owned databases.
+`storage.max_total_size_mb` limits their combined physical allocation and defaults to `2200` MiB.
+Set it to `0` to disable the combined limit; any enabled value must be at least `9` MiB. AgentSight
+re-reads valid edits before each maintenance pass and retains the last valid value while the file is
+missing, incomplete, or invalid.
+
+In schema v4, every per-store policy uses the same keys: `retention_days`, `max_db_size_mb`, and
+`check_interval_secs`. A zero value disables the corresponding age-retention, capacity, or
+scheduled-maintenance rule. If `check_interval_secs` is `0`, no automatic pass is scheduled even
+when the other two values are non-zero.
 
 | Store | Retention | Size limit | Check interval |
 |---|---:|---:|---:|

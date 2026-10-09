@@ -2130,14 +2130,32 @@ export interface StorageStoreStatus {
 }
 
 export interface StorageStatusResponse {
-  schema_version: 2;
+  schema_version: 3;
   observed_at_unix_ms: number;
+  /** Combined size limit in MiB; 0 disables, otherwise the minimum is 9. */
+  max_total_size_mb: number;
+  /** Combined physical bytes of every measured store. */
+  total_physical_bytes: number;
   stores: StorageStoreStatus[];
 }
 
 /** Read effective SQLite policies and current disk allocation. */
 export async function fetchStorageStatus(): Promise<StorageStatusResponse> {
   return apiFetch<StorageStatusResponse>(`${API_BASE}/api/storage/status`);
+}
+
+/** Persist the combined SQLite storage limit into the runtime config file. */
+export async function saveStorageLimit(maxTotalSizeMb: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/storage/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ max_total_size_mb: maxTotalSizeMb }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(detail || `POST /api/storage/config -> ${res.status}`);
+  }
 }
 
 // ─── Optimization analysis API ───────────────────────────────────────────────

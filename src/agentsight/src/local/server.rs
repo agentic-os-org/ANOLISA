@@ -11,11 +11,12 @@ mod reuse;
 mod trajectories;
 
 use actix_cors::Cors;
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, post, web};
 use agentsight_opt_store::{OptimizationMaintenancePolicy, OptimizationStore};
 use agentsight_sqlite_lifecycle::{LifecycleError, MaintenanceJob};
 use agentsight_trajectory_collector::TrajectoryStore;
 use include_dir::{Dir, include_dir};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -34,6 +35,8 @@ pub struct LocalState {
     pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
     pub db_path: PathBuf,
     storage_config: StorageConfig,
+    config_path: Option<PathBuf>,
+    storage_budget: Arc<crate::storage_budget::StorageBudget>,
     database_manager: Arc<DatabaseManager>,
     /// Trajectory reuse labels (`reuse.db`).
     ///
@@ -306,7 +309,38 @@ async fn storage_status(state: web::Data<LocalState>) -> impl Responder {
         &state.db_path,
         &state.storage_config,
         Some(&state.database_manager),
+        state.storage_budget.cap_mb(),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageConfigRequest {
+    max_total_size_mb: u64,
+}
+
+/// POST /api/storage/config — persist the local combined storage limit.
+#[post("/api/storage/config")]
+async fn update_storage_config(
+    state: web::Data<LocalState>,
+    body: web::Json<StorageConfigRequest>,
+) -> impl Responder {
+    if let Err(error) = StorageConfig::validate_total_size_mb(body.max_total_size_mb) {
+        return HttpResponse::BadRequest().body(error);
+    }
+    let Some(config_path) = state.config_path.as_deref() else {
+        return HttpResponse::ServiceUnavailable()
+            .body("configuration file unavailable: server started without --config");
+    };
+    if let Err(error) =
+        crate::storage_budget::write_total_size_limit(config_path, body.max_total_size_mb)
+    {
+        log::warn!("Failed to persist storage limit to {config_path:?}: {error}");
+        return HttpResponse::InternalServerError()
+            .body(format!("failed to persist configuration: {error}"));
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "max_total_size_mb": body.max_total_size_mb
+    }))
 }
 
 /// Catch-all for any other unregistered /api/* path — returns empty array
@@ -429,6 +463,7 @@ fn local_maintenance_jobs(
     manager: &DatabaseManager,
     storage_config: &StorageConfig,
     stores: LocalMaintenanceStores,
+    budget: Arc<crate::storage_budget::StorageBudget>,
 ) -> Result<Vec<Box<dyn MaintenanceJob>>, DatabaseManagerError> {
     let mut jobs = Vec::new();
     for (id, policy) in [
@@ -439,14 +474,16 @@ fn local_maintenance_jobs(
             continue;
         }
         let interval = Duration::from_secs(policy.check_interval_secs);
+        let budget = Arc::clone(&budget);
         let job = match id {
             DatabaseId::Optimization => stores.optimization.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
                         .maintain(OptimizationMaintenancePolicy {
                             retention_days: policy.retention_days,
-                            max_db_size_mb: policy.max_db_size_mb,
+                            max_db_size_mb: limit_mb,
                         })
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
@@ -455,8 +492,9 @@ fn local_maintenance_jobs(
             DatabaseId::Reuse => stores.reuse.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .maintain(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -488,6 +526,7 @@ pub async fn run_server(
     port: u16,
     storage_config: StorageConfig,
     reuse_llm_judge_enabled: bool,
+    config_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!(
@@ -558,11 +597,17 @@ pub async fn run_server(
             None
         }
     };
+    let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
+        config_path.clone(),
+        &storage_config,
+    ));
 
     let local_state = web::Data::new(LocalState {
         trajectory_store: Arc::new(RwLock::new(initial_store)),
         db_path,
         storage_config: storage_config.clone(),
+        config_path,
+        storage_budget: Arc::clone(&storage_budget),
         database_manager: Arc::clone(&database_manager),
         reuse_store: reuse_store.as_ref().map(Arc::clone),
         reuse_llm_judge_enabled,
@@ -634,6 +679,7 @@ pub async fn run_server(
             .service(preferences::get_preference_turns)
             .service(export_atif_unavailable)
             .service(storage_status)
+            .service(update_storage_config)
             // Catch-all for unregistered API endpoints (returns empty array)
             .service(api_fallback)
             // Frontend static files (catch-all, must be last)
@@ -648,6 +694,7 @@ pub async fn run_server(
             optimization: optimization_store,
             reuse: reuse_store,
         },
+        storage_budget,
     )
     .map_err(|error| std::io::Error::other(error.to_string()))?;
     database_manager
@@ -729,6 +776,7 @@ mod tests {
                 optimization: Some(Arc::clone(&optimization)),
                 reuse: Some(Arc::clone(&reuse)),
             },
+            Arc::new(crate::storage_budget::StorageBudget::new(None, &config)),
         )
         .unwrap();
         let ids = jobs.iter().map(|job| job.id()).collect::<Vec<_>>();
@@ -763,6 +811,7 @@ mod tests {
                 optimization: None,
                 reuse: None,
             },
+            Arc::new(crate::storage_budget::StorageBudget::new(None, &config)),
         )
         .unwrap();
 
@@ -796,10 +845,16 @@ mod tests {
             )
             .unwrap(),
         );
+        let storage_config = StorageConfig::default();
         let local_state = web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(None)),
             db_path,
-            storage_config: StorageConfig::default(),
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &storage_config,
+            )),
+            storage_config,
+            config_path: None,
             database_manager,
             reuse_store: None,
             reuse_llm_judge_enabled: false,
@@ -830,6 +885,8 @@ mod tests {
             .service(reuse::list_sessions)
             .service(reuse::run_triage)
             .service(export_atif_unavailable)
+            .service(storage_status)
+            .service(update_storage_config)
             .service(api_fallback)
             .service(serve_frontend)
     }
@@ -893,6 +950,70 @@ mod tests {
             second["workspace_path"], "/Users/dev/project-b",
             "each row must carry its own instance's workspace, not the first-seen one"
         );
+    }
+
+    #[actix_web::test]
+    async fn storage_config_rejects_unsafe_cap_before_requiring_a_file() {
+        let app = actix_web::test::init_service(build_stub_app()).await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/storage/config")
+            .set_json(serde_json::json!({"max_total_size_mb": 8}))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn local_storage_config_updates_the_live_budget() {
+        let config_path = std::env::temp_dir().join(format!(
+            "agentsight-local-storage-config-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&config_path, r#"{"storage":{"max_total_size_mb":100}}"#).unwrap();
+        let db_path = config_path.with_file_name("missing-trajectories.db");
+        let database_manager = Arc::new(
+            DatabaseManager::new(
+                DatabaseRole::LocalServer,
+                [DatabaseSpec::new(
+                    DatabaseId::Trajectories,
+                    &db_path,
+                    DatabaseAccess::ReadOnly,
+                    DatabaseCoverage::Partial,
+                )],
+            )
+            .unwrap(),
+        );
+        let storage_config = StorageConfig::default();
+        let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
+            Some(config_path.clone()),
+            &storage_config,
+        ));
+        let local_state = web::Data::new(LocalState {
+            trajectory_store: Arc::new(RwLock::new(None)),
+            db_path,
+            storage_config,
+            config_path: Some(config_path.clone()),
+            storage_budget: Arc::clone(&storage_budget),
+            database_manager,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+        });
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(local_state)
+                .service(update_storage_config),
+        )
+        .await;
+
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/storage/config")
+            .set_json(serde_json::json!({"max_total_size_mb": 9}))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(storage_budget.cap_mb(), 9);
+
+        std::fs::remove_file(config_path).unwrap();
     }
 
     #[actix_web::test]

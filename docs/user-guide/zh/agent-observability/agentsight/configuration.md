@@ -20,6 +20,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
   "schema_version": 4,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
+    "max_total_size_mb": 2200,
     "primary": { "retention_days": 30, "max_db_size_mb": 500, "check_interval_secs": 60 },
     "genai": { "retention_days": 30, "max_db_size_mb": 200, "check_interval_secs": 60 },
     "interruptions": { "retention_days": 30, "max_db_size_mb": 100, "check_interval_secs": 60 },
@@ -84,9 +85,13 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 
 ## SQLite 存储策略
 
-`storage.base_path` 是 AgentSight 自有数据库共用的目录。在 schema v4 中，每项策略统一使用
-`retention_days`、`max_db_size_mb` 和 `check_interval_secs`。值为 `0` 时，分别关闭按时间保留、按容量清理
-或定时维护；如果 `check_interval_secs` 为 `0`，即使另外两项非零也不会自动执行维护。
+`storage.base_path` 是 AgentSight 自有数据库共用的目录。`storage.max_total_size_mb` 限制这些数据库的
+总物理占用，默认值为 `2200` MiB。设为 `0` 可关闭总量限制；启用时必须至少为 `9` MiB。每轮维护前都会
+重读有效配置；如果配置文件缺失、未写完或无效，则继续使用最近一次有效值。
+
+在 schema v4 中，每项存储策略统一使用 `retention_days`、`max_db_size_mb` 和 `check_interval_secs`。值为
+`0` 时，分别关闭按时间保留、按容量清理或定时维护；如果 `check_interval_secs` 为 `0`，即使另外两项
+非零也不会自动执行维护。
 
 | 存储 | 保留时间 | 容量上限 | 检查间隔 |
 |---|---:|---:|---:|

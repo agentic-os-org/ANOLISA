@@ -996,10 +996,16 @@ mod tests {
             )
             .expect("build the local database manager"),
         );
+        let storage_config = StorageConfig::default();
         let local_state = web::Data::new(super::super::LocalState {
             trajectory_store: Arc::new(RwLock::new(None)),
             db_path,
-            storage_config: StorageConfig::default(),
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &storage_config,
+            )),
+            storage_config,
+            config_path: None,
             database_manager,
             reuse_store: None,
             reuse_llm_judge_enabled: false,

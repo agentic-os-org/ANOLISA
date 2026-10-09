@@ -53,6 +53,10 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 pub const DEFAULT_MAINTENANCE_INTERVAL_SECS: u64 = 60;
 /// Default primary database size limit in MiB.
 pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
+/// Default combined size limit for all AgentSight SQLite databases in MiB.
+pub const DEFAULT_MAX_TOTAL_SIZE_MB: u64 = 2_200;
+/// Minimum non-zero combined limit, reserving 1 MiB for each managed database.
+pub const MIN_TOTAL_SIZE_MB: u64 = 9;
 
 /// Default bounded channel capacity for probe → event loop events.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 10_000;
@@ -367,6 +371,8 @@ pub struct StorageConfig {
     pub causal: PeriodicStoragePolicy,
     /// Policy for the private enforcement database.
     pub enforcement: PeriodicStoragePolicy,
+    /// Combined size limit in MiB; zero disables it, otherwise the minimum is 9.
+    pub max_total_size_mb: u64,
 }
 
 impl Default for StorageConfig {
@@ -382,6 +388,7 @@ impl Default for StorageConfig {
             reuse: PeriodicStoragePolicy::new(30, 200, 300),
             causal: PeriodicStoragePolicy::new(30, 200, 300),
             enforcement: PeriodicStoragePolicy::new(30, 100, 60),
+            max_total_size_mb: DEFAULT_MAX_TOTAL_SIZE_MB,
         }
     }
 }
@@ -410,6 +417,18 @@ impl StorageConfig {
     /// Returns the fixed path of the optimization database.
     pub fn optimization_path(&self) -> PathBuf {
         self.base_path.join(OPTIMIZATION_DB_NAME)
+    }
+
+    pub(crate) fn validate_total_size_mb(max_total_size_mb: u64) -> Result<(), String> {
+        if max_total_size_mb != 0 && max_total_size_mb < MIN_TOTAL_SIZE_MB {
+            return Err(format!(
+                "storage.max_total_size_mb must be zero or at least {MIN_TOTAL_SIZE_MB}"
+            ));
+        }
+        max_total_size_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| "storage.max_total_size_mb is too large".to_string())?;
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -446,12 +465,15 @@ impl StorageConfig {
         ] {
             validate(name, policy.retention_days, policy.max_db_size_mb)?;
         }
-        Ok(())
+        Self::validate_total_size_mb(self.max_total_size_mb)
     }
 
     fn apply_json(&mut self, json: JsonStorageConfig) {
         if let Some(base_path) = json.base_path {
             self.base_path = base_path;
+        }
+        if let Some(max_total_size_mb) = json.max_total_size_mb {
+            self.max_total_size_mb = max_total_size_mb;
         }
         apply_periodic_policy(&mut self.primary, json.primary);
         apply_periodic_policy(&mut self.genai, json.genai);
@@ -469,6 +491,7 @@ impl StorageConfig {
 #[serde(default)]
 struct JsonStorageConfig {
     base_path: Option<PathBuf>,
+    max_total_size_mb: Option<u64>,
     primary: Option<JsonPeriodicStoragePolicy>,
     genai: Option<JsonPeriodicStoragePolicy>,
     interruptions: Option<JsonPeriodicStoragePolicy>,
@@ -1888,6 +1911,17 @@ mod tests {
             u64::MAX
         );
         assert!(config.load_from_json(&json).is_err());
+
+        let mut config = AgentsightConfig::new();
+        let error = config
+            .load_from_json(r#"{"storage":{"max_total_size_mb":8}}"#)
+            .unwrap_err();
+        assert!(error.contains("must be zero or at least 9"));
+
+        let mut config = AgentsightConfig::new();
+        config
+            .load_from_json(r#"{"storage":{"max_total_size_mb":0}}"#)
+            .unwrap();
     }
 
     #[test]

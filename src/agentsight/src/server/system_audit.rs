@@ -621,6 +621,11 @@ mod tests {
         let auth_config = crate::config::ServerAuthConfig { enabled: false };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
         let state = actix_web::web::Data::new(AppState {
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             storage_path: dir.join("agentsight.db"),
             genai_store: None,
             start_time: Instant::now(),

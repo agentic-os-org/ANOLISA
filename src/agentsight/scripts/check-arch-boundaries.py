@@ -26,6 +26,7 @@ LAYER_MAP = {
     "atif":        5,   # L5: Semantic
     "grounding":   5,   # L5: Semantic (deterministic ATIF analysis, no crate deps)
     "storage":     6,   # L6: Persist
+    "storage_budget": 6,  # L6: Shared SQLite capacity budget
     "storage_status": 6,  # L6: Cross-platform read-only storage status
     "agent_sec":   7,   # L7: Serve
     "grader":      7,   # L7: Serve
@@ -56,12 +57,14 @@ ALLOWED_DEPS = {
     # more than one subsystem share it.
     "grounding":   set(),
     "storage":     {"analyzer", "genai", "security"},
+    "storage_budget": set(),
     "storage_status": set(),
     "grader":      {"storage"},
     "enforcement": {"storage"},
     "security":    {"enforcement"},
     "server":      {
         "storage",
+        "storage_budget",
         "storage_status",
         "health",
         "atif",

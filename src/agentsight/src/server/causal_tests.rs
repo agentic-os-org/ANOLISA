@@ -681,6 +681,11 @@ fn test_app_state() -> actix_web::web::Data<AppState> {
         std::path::Path::new("/tmp"),
     ));
     actix_web::web::Data::new(AppState {
+        config_path: None,
+        storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+            None,
+            &crate::config::StorageConfig::default(),
+        )),
         reuse_store: None,
         reuse_llm_judge_enabled: false,
         causal_store: None,

@@ -97,6 +97,10 @@ pub struct AppState {
     /// dashboard feature, so the rest of the server still serves and the
     /// endpoints report why rather than the process refusing to start.
     pub reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
+    /// Runtime configuration file backing the storage settings panel.
+    pub config_path: Option<PathBuf>,
+    /// Global SQLite capacity budget shared with the maintenance worker.
+    pub storage_budget: Arc<crate::storage_budget::StorageBudget>,
     /// Read-only store over collected trajectories (`trajectories.db`)
     ///
     /// Wrapped in `RwLock` so `trajectory_store()` can memoize lazy opens
@@ -339,6 +343,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::get_trajectory_detail)
                 // Storage lifecycle status
                 .service(storage_status::get_storage_status)
+                .service(storage_status::post_storage_config)
                 // API self-documentation
                 .service(web::resource("/docs").route(web::get().to(api_docs)))
                 .default_service(web::route().to(api_not_found)),
@@ -819,16 +824,19 @@ fn server_maintenance_jobs(
     manager: &DatabaseManager,
     config: &StorageConfig,
     stores: ServerMaintenanceStores,
+    budget: Arc<crate::storage_budget::StorageBudget>,
 ) -> Result<Vec<Box<dyn MaintenanceJob>>, DatabaseManagerError> {
     let mut jobs = Vec::new();
     for (id, policy) in server_maintenance_schedule(config) {
         let interval = Duration::from_secs(policy.check_interval_secs);
+        let budget = Arc::clone(&budget);
         let job = match id {
             DatabaseId::GenAi => stores.genai.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain()
+                        .maintain_with_limit_mb(limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -836,8 +844,9 @@ fn server_maintenance_jobs(
             DatabaseId::Interruptions => stores.interruptions.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+                        .purge_old_and_oversized(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -845,8 +854,10 @@ fn server_maintenance_jobs(
             DatabaseId::Optimization => stores.optimization.has_storage().then(|| {
                 let state = Arc::clone(&stores.optimization);
                 manager.maintenance_job(id, interval, move || {
+                    let mut effective = policy;
+                    effective.max_db_size_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     state
-                        .maintain_storage(policy)
+                        .maintain_storage(effective)
                         .map(|_| ())
                         .map_err(LifecycleError::MaintenanceJobFailed)
                 })
@@ -854,10 +865,11 @@ fn server_maintenance_jobs(
             DatabaseId::SecurityAudit => {
                 let store = Arc::clone(&stores.security_audit);
                 Some(manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
                         .maintain(agentsight_audit::AuditMaintenancePolicy {
                             retention_days: policy.retention_days,
-                            max_db_size_mb: policy.max_db_size_mb,
+                            max_db_size_mb: limit_mb,
                         })
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
@@ -866,8 +878,9 @@ fn server_maintenance_jobs(
             DatabaseId::Reuse => stores.reuse.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .maintain(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -875,10 +888,11 @@ fn server_maintenance_jobs(
             DatabaseId::Causal => stores.causal.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
                         .maintain(causal_store::CausalMaintenancePolicy {
                             retention_days: policy.retention_days,
-                            max_db_size_mb: policy.max_db_size_mb,
+                            max_db_size_mb: limit_mb,
                         })
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
@@ -887,8 +901,9 @@ fn server_maintenance_jobs(
             DatabaseId::Enforcement => {
                 let store = Arc::clone(&stores.enforcement);
                 Some(manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .maintain(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 }))
@@ -934,6 +949,7 @@ pub async fn run_server(
     storage_config: StorageConfig,
     reuse_llm_judge_enabled: bool,
     cmdline_rules: Vec<crate::config::CmdlineRule>,
+    config_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
     let storage_base = storage_data_dir(&storage_path);
@@ -1091,6 +1107,10 @@ pub async fn run_server(
     };
     let optimize_state = optimize::OptimizeState::init(storage_base, optimization_store);
 
+    let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
+        config_path.clone(),
+        &storage_config,
+    ));
     let maintenance_jobs = server_maintenance_jobs(
         &database_manager,
         &storage_config,
@@ -1103,6 +1123,7 @@ pub async fn run_server(
             causal: causal_store.as_ref().map(Arc::clone),
             enforcement: Arc::clone(&enforcement_store),
         },
+        Arc::clone(&storage_budget),
     )
     .map_err(|error| std::io::Error::other(error.to_string()))?;
     database_manager
@@ -1148,6 +1169,8 @@ pub async fn run_server(
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
         reuse_store,
+        config_path,
+        storage_budget,
         reuse_llm_judge_enabled,
         causal_store,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
@@ -1774,6 +1797,11 @@ mod tests {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
@@ -1806,6 +1834,11 @@ mod tests {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
     }
@@ -1840,6 +1873,11 @@ mod tests {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             trajectory_store: Arc::new(RwLock::new(None)),
         })
     }

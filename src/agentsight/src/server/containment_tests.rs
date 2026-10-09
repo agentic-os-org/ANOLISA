@@ -282,6 +282,11 @@ impl ApiFixture {
         containment: Option<Arc<ContainmentCoordinator>>,
     ) -> web::Data<AppState> {
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,

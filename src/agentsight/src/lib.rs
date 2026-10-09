@@ -94,6 +94,7 @@ pub mod server;
 pub mod skill_metrics;
 #[cfg(target_os = "linux")]
 pub mod storage;
+pub mod storage_budget;
 pub mod storage_status;
 #[cfg(target_os = "linux")]
 mod unified;

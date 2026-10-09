@@ -74,6 +74,7 @@ impl ServeCommand {
                 agentsight::container::warn_if_data_dir_not_persistent(dir);
             }
 
+            let config_path = std::path::PathBuf::from(&self.config);
             actix_web::rt::System::new().block_on(async move {
                 if let Err(e) = run_server(
                     &host,
@@ -83,6 +84,7 @@ impl ServeCommand {
                     storage_config,
                     judge_enabled,
                     cmdline_rules,
+                    Some(config_path),
                 )
                 .await
                 {
@@ -105,6 +107,7 @@ impl ServeCommand {
                     .join("agentsight");
             }
             let judge_enabled = config.features.reuse_llm_judge_enabled;
+            let config_path = config.config_path.clone();
             let storage_config = config.storage;
 
             actix_web::rt::System::new().block_on(async move {
@@ -113,6 +116,7 @@ impl ServeCommand {
                     port,
                     storage_config,
                     judge_enabled,
+                    config_path,
                 )
                 .await
                 {

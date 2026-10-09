@@ -1273,6 +1273,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         let data = web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -1490,6 +1495,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -1638,6 +1648,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -1748,6 +1763,11 @@ mod tests {
         let auth_config = crate::config::ServerAuthConfig { enabled };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -1910,6 +1930,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -1948,6 +1973,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -2027,6 +2057,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -2111,6 +2146,11 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -3572,6 +3612,11 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(web::Data::new(AppState {
+                    config_path: None,
+                    storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                        None,
+                        &crate::config::StorageConfig::default(),
+                    )),
                     reuse_store: None,
                     reuse_llm_judge_enabled: false,
                     causal_store: None,
@@ -4423,6 +4468,11 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(web::Data::new(AppState {
+                    config_path: None,
+                    storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                        None,
+                        &crate::config::StorageConfig::default(),
+                    )),
                     reuse_store: None,
                     reuse_llm_judge_enabled: false,
                     causal_store: None,
