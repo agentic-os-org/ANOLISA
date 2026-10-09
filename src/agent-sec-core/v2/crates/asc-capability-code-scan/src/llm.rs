@@ -1,8 +1,9 @@
 //! Local-model execution for Code Scanner's V1-compatible LLM mode.
 
+use std::fmt::Write as _;
 use std::time::Instant;
 
-use asc_model_client::{ModelClient, ModelOptions};
+use asc_model_client::{ConfigError, ModelClient, ModelOptions, ModelServiceError};
 use serde_json::{Value, json};
 
 use crate::errors::CodeScanError;
@@ -154,6 +155,72 @@ pub(crate) fn unavailable(code: &str, language: Language, reason: &str) -> ScanR
     )
 }
 
+/// Renders a client initialization failure in the wording of V1's Python
+/// `model_service`, which Code Scanner used; the shared client's own wording
+/// follows the Rust `model-service` crate that V1 Prompt Scanner used.
+pub(crate) fn initialization_message(error: &ModelServiceError) -> String {
+    let ModelServiceError::Config(config) = error else {
+        return error.to_string();
+    };
+    match config {
+        ConfigError::UnsupportedBackend(backend) => {
+            format!("Unsupported model service backend: {}", py_repr(backend))
+        }
+        // V1 only checks for an `http://`/`https://` prefix and then a
+        // loopback hostname, so an unparsable URL fails one of those two.
+        ConfigError::UnsupportedScheme(base_url) | ConfigError::InvalidBaseUrl { base_url, .. }
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") =>
+        {
+            format!(
+                "base_url must use http:// or https:// scheme: {}",
+                py_repr(base_url)
+            )
+        }
+        ConfigError::UnsupportedScheme(base_url)
+        | ConfigError::InvalidBaseUrl { base_url, .. }
+        | ConfigError::NonLoopbackBaseUrl(base_url) => format!(
+            "refusing non-loopback model service base_url {}: only a local model service is \
+             supported, and scanned content must not leave the host",
+            py_repr(base_url)
+        ),
+    }
+}
+
+/// Quotes a string the way Python's `repr` does.
+fn py_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut rendered = String::with_capacity(text.len() + 2);
+    rendered.push(quote);
+    for character in text.chars() {
+        match character {
+            '\\' => rendered.push_str("\\\\"),
+            '\n' => rendered.push_str("\\n"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            c if c == quote => {
+                rendered.push('\\');
+                rendered.push(c);
+            }
+            c if c.is_control() => {
+                let code = u32::from(c);
+                // Writing to a `String` cannot fail.
+                let _ = if code < 0x100 {
+                    write!(rendered, "\\x{code:02x}")
+                } else {
+                    write!(rendered, "\\u{code:04x}")
+                };
+            }
+            c => rendered.push(c),
+        }
+    }
+    rendered.push(quote);
+    rendered
+}
+
 fn blank_input_result(code: &str, language: Language, start: Instant) -> Option<ScanResult> {
     code.trim()
         .is_empty()
@@ -211,7 +278,7 @@ fn json_candidates(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asc_model_client::{GenerateRequest, ModelServiceError};
+    use asc_model_client::GenerateRequest;
 
     struct FixedResponseClient {
         response: Value,
@@ -299,10 +366,7 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.verdict, Verdict::Error);
-        assert_eq!(
-            result.summary,
-            "scan error: LLM response unparsable: raw output: PASS and DENY"
-        );
+        assert_eq!(result.summary, "scan error: raw output: PASS and DENY");
 
         let long_output = "x".repeat(121);
         assert_eq!(extract_verdict(&long_output), Err("x".repeat(120)));
@@ -320,18 +384,55 @@ mod tests {
 
     #[test]
     fn client_initialization_failure_keeps_the_v1_error_message() {
-        let result = unavailable(
-            "echo hello",
-            Language::Bash,
-            "invalid model service configuration: unsupported backend",
-        );
+        let reason = initialization_message(&ModelServiceError::Config(
+            ConfigError::UnsupportedBackend("bogus".to_owned()),
+        ));
+        let result = unavailable("echo hello", Language::Bash, &reason);
 
         assert!(!result.ok);
         assert_eq!(result.verdict, Verdict::Error);
         assert_eq!(
             result.summary,
-            "scan error: invalid model service configuration: unsupported backend"
+            "scan error: Unsupported model service backend: 'bogus'"
         );
+    }
+
+    #[test]
+    fn base_url_rejections_use_v1_python_wording() {
+        let non_loopback = "refusing non-loopback model service base_url 'http://10.0.0.1:11434': \
+                            only a local model service is supported, and scanned content must \
+                            not leave the host";
+        for (config, message) in [
+            (
+                ConfigError::UnsupportedScheme("ftp://localhost:11434".to_owned()),
+                "base_url must use http:// or https:// scheme: 'ftp://localhost:11434'",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "not a url".to_owned(),
+                    reason: "relative URL without a base".to_owned(),
+                },
+                "base_url must use http:// or https:// scheme: 'not a url'",
+            ),
+            (
+                ConfigError::NonLoopbackBaseUrl("http://10.0.0.1:11434".to_owned()),
+                non_loopback,
+            ),
+        ] {
+            assert_eq!(
+                initialization_message(&ModelServiceError::Config(config)),
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn py_repr_matches_python_quoting() {
+        assert_eq!(py_repr(""), "''");
+        assert_eq!(py_repr("it's"), "\"it's\"");
+        assert_eq!(py_repr("a'b\"c"), "'a\\'b\"c'");
+        assert_eq!(py_repr("tab\there\\"), "'tab\\there\\\\'");
+        assert_eq!(py_repr("\u{1}"), "'\\x01'");
     }
 
     struct UnavailableClient;

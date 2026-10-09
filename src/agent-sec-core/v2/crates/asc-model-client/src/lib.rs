@@ -61,13 +61,36 @@ pub fn code_scan_budget() -> Duration {
 /// Errors raised by the model service client.
 #[derive(Debug, Error)]
 pub enum ModelServiceError {
-    /// Invalid configuration (unsupported backend name, bad timeout).
+    /// Invalid configuration (unsupported backend name, rejected base URL).
     #[error("invalid model service configuration: {0}")]
-    Config(String),
+    Config(ConfigError),
 
     /// The service is unreachable or returned an unusable response.
     #[error("model inference failed: {0}")]
     Inference(String),
+}
+
+/// A rejected model service configuration value.
+///
+/// Structured so each consumer can render the wording of the V1 tool it
+/// replaces; the `Display` text is the V1 Rust `model-service` wording.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConfigError {
+    /// `AGENT_SEC_MODEL_SERVICE_BACKEND` names a backend other than Ollama.
+    #[error("Unsupported model service backend: {0:?}")]
+    UnsupportedBackend(String),
+    /// The base URL does not parse.
+    #[error("base_url is not a valid URL {base_url:?}: {reason}")]
+    InvalidBaseUrl { base_url: String, reason: String },
+    /// The base URL scheme is neither `http` nor `https`.
+    #[error("base_url must use http:// or https:// scheme: {0:?}")]
+    UnsupportedScheme(String),
+    /// The base URL targets a host other than loopback.
+    #[error(
+        "refusing non-loopback model service base_url {0:?}: only a local model service is \
+         supported, and scanned prompts must not leave the host"
+    )]
+    NonLoopbackBaseUrl(String),
 }
 
 /// Options forwarded to the backend's `options` field.
@@ -348,8 +371,8 @@ pub fn create_client() -> Result<Box<dyn ModelClient>, ModelServiceError> {
 fn ollama_from_env() -> Result<OllamaClient, ModelServiceError> {
     let backend = env_or(ENV_BACKEND, DEFAULT_BACKEND);
     if backend != DEFAULT_BACKEND {
-        return Err(ModelServiceError::Config(format!(
-            "Unsupported model service backend: {backend:?}"
+        return Err(ModelServiceError::Config(ConfigError::UnsupportedBackend(
+            backend,
         )));
     }
     let base_url = env_or(ENV_BASE_URL, DEFAULT_BASE_URL);
@@ -382,19 +405,21 @@ fn ollama_from_env() -> Result<OllamaClient, ModelServiceError> {
 /// neither `http://` nor `https://`, or the host is not loopback.
 fn validate_base_url(base_url: &str) -> Result<(), ModelServiceError> {
     let url = Url::parse(base_url).map_err(|error| {
-        ModelServiceError::Config(format!("base_url is not a valid URL {base_url:?}: {error}"))
+        ModelServiceError::Config(ConfigError::InvalidBaseUrl {
+            base_url: base_url.to_owned(),
+            reason: error.to_string(),
+        })
     })?;
     // `Url::parse` accepts any scheme, so `localhost:11434` parses with scheme
     // `localhost` rather than failing.
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(ModelServiceError::Config(format!(
-            "base_url must use http:// or https:// scheme: {base_url:?}"
+        return Err(ModelServiceError::Config(ConfigError::UnsupportedScheme(
+            base_url.to_owned(),
         )));
     }
     if !is_loopback_host(&url) {
-        return Err(ModelServiceError::Config(format!(
-            "refusing non-loopback model service base_url {base_url:?}: only a local model \
-             service is supported, and scanned prompts must not leave the host"
+        return Err(ModelServiceError::Config(ConfigError::NonLoopbackBaseUrl(
+            base_url.to_owned(),
         )));
     }
     Ok(())
@@ -667,9 +692,10 @@ mod tests {
             "http://[2001:db8::1]:11434",
         ] {
             let error = validate_base_url(remote).expect_err("must be rejected");
-            let ModelServiceError::Config(message) = &error else {
+            let ModelServiceError::Config(config) = &error else {
                 panic!("{remote:?} must fail with Config, got {error:?}");
             };
+            let message = config.to_string();
             assert!(
                 message.contains(remote),
                 "rejection must name the offending URL so operators can fix it; got {message:?}"
@@ -717,9 +743,10 @@ mod tests {
             "http://user:pass@attacker.example",
         ] {
             let error = validate_base_url(disguised).expect_err("must be refused");
-            let ModelServiceError::Config(message) = &error else {
+            let ModelServiceError::Config(config) = &error else {
                 panic!("{disguised:?} must fail with Config, got {error:?}");
             };
+            let message = config.to_string();
             assert!(
                 message.contains(disguised),
                 "rejection must name the offending URL; got {message:?}"

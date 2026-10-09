@@ -37,7 +37,7 @@ impl CodeScanExecutor {
             Ok(client) => Self::new(Arc::from(client)),
             Err(error) => Self {
                 model_client: None,
-                initialization_error: Some(error.to_string()),
+                initialization_error: Some(crate::llm::initialization_message(&error)),
             },
         }
     }
