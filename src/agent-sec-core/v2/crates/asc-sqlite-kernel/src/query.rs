@@ -76,6 +76,36 @@ impl<R> ReadOnlySource<R> {
         self.query_or(T::default(), query)
     }
 
+    /// Runs `query` and reports the full outcome instead of degrading.
+    ///
+    /// This is the query-port counterpart of [`ReadOnlySource::query_or`]:
+    /// `Ok(None)` still means "database absent" (the normal before-first-write
+    /// state), while a store that exists but cannot be opened or read
+    /// (corrupt pages, I/O failure, interrupted query) is returned as an
+    /// error so it is distinguishable from a store that holds no rows. The
+    /// cached connection is disposed exactly when the query fails, matching
+    /// `query_or`'s recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError`] when the store cannot be opened or the query
+    /// cannot run.
+    pub fn try_query<T>(
+        &self,
+        query: impl FnOnce(&R, &Connection) -> Result<T, KernelError>,
+    ) -> Result<Option<T>, KernelError> {
+        // `raise_on_error = true` is what separates the two failure families:
+        // an absent database still yields `Ok(None)`, an unopenable or
+        // unreadable one yields `Err` instead of silently degrading.
+        let outcome = self
+            .store
+            .with_connection(true, |conn| query(&self.repository, conn));
+        if outcome.is_err() {
+            self.store.dispose();
+        }
+        outcome
+    }
+
     /// Drops the cached connection.
     pub fn close(&self) {
         self.store.close();

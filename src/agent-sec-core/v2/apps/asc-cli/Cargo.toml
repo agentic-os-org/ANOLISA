@@ -24,6 +24,7 @@ asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
 asc-policy-types = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -42,6 +43,8 @@ asc-daemon-handler = { workspace = true }
 asc-daemon-service = { workspace = true }
 asc-pap = { workspace = true }
 asc-pap-repository-memory = { workspace = true }
+asc-persistence-sqlite = { workspace = true }
+asc-telemetry = { workspace = true }
 uuid = { workspace = true }
 
 [lints]

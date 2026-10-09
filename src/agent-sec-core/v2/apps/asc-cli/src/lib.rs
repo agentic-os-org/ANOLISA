@@ -15,7 +15,8 @@ use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
 use commands::Command;
 pub use commands::{
-    CapabilitiesCommand, EventsCommand, PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
+    CapabilitiesCommand, EventsCommand, EventsRunError, EventsTransport, PiiOutputFormat,
+    PromptScanPlan, ScanPromptInputError,
 };
 
 /// Parsed invocation for one CLI command.
@@ -317,6 +318,10 @@ pub enum InputError {
     /// through [`Cli::prompt_scan_run`], not the single-request path.
     #[error("scan-prompt requests are resolved through prompt_scan_run")]
     PromptScanBatch,
+    /// The events command paginates its own requests through the events
+    /// transport loop, not the single-request path.
+    #[error("events requests are resolved through the events transport loop")]
+    EventsBatch,
     /// A scan-prompt input failure; that command owns its variants and
     /// wording, mirroring V1's scan-specific messages.
     #[error(transparent)]
@@ -342,7 +347,8 @@ impl InputError {
             | Self::TooLarge
             | Self::Json(_)
             | Self::LocalCommand
-            | Self::PromptScanBatch => false,
+            | Self::PromptScanBatch
+            | Self::EventsBatch => false,
         }
     }
 }

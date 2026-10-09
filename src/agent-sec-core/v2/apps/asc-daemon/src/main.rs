@@ -359,7 +359,7 @@ fn event_finalizer(
     (
         Finalizer,
         sinks::DurableSinks,
-        Option<asc_daemon_handler::SqliteEventQuerySource>,
+        Option<asc_persistence_sqlite::security_events::SqliteEventQuerySource>,
     ),
     asc_event_sink::SinkError,
 > {
@@ -382,13 +382,14 @@ fn event_finalizer(
     // its read-only handle cannot open even though the writer warmed, the
     // daemon keeps serving scans and rejects queries with `unavailable`
     // rather than guessing at another database.
-    let query_source = asc_daemon_handler::SqliteEventQuerySource::new(&sqlite_path)
-        .map_err(|error| {
-            telemetry.report(&format!(
-                "agent-sec-daemon: warning: security event queries unavailable: {error}"
-            ));
-        })
-        .ok();
+    let query_source =
+        asc_persistence_sqlite::security_events::SqliteEventQuerySource::new(&sqlite_path)
+            .map_err(|error| {
+                telemetry.report(&format!(
+                    "agent-sec-daemon: warning: security event queries unavailable: {error}"
+                ));
+            })
+            .ok();
     Ok((
         Finalizer::new(
             Arc::new(EventSinkAdapter::new(Arc::clone(&sinks))),

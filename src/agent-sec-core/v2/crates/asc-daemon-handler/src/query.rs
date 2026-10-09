@@ -8,10 +8,18 @@
 //!   user over a 0600 socket and a per-user database; v2 serves many local
 //!   UIDs from one system store, so every read here carries a
 //!   [`QueryScope`] derived from the kernel-authenticated peer. A caller
-//!   cannot name, widen, or hint at a scope through request parameters.
-//! * **Cross-owner audit is absent on purpose.** The server assigns no
-//!   auditor role yet, so no principal — administrator or not — reads
-//!   another owner's rows through these methods (issue #6608).
+//!   cannot name, widen, or hint at a scope through request parameters — the
+//!   `owner_uid` field is a filter *within* the authorized scope.
+//! * **Cross-owner audit is absent on purpose.** Outside the kernel-derived
+//!   scope the server assigns no auditor role, so no non-root principal —
+//!   administrator or not — reads another owner's rows through these
+//!   methods (issue #6608). The one widening is the root peer, whose scope
+//!   is all owners by design.
+//!
+//! The query port and its scope live in `asc-security-events`; the `SQLite`
+//! adapter lives in `asc-persistence-sqlite` and is bound by the daemon
+//! composition root. That layering keeps this crate storage-free, which the
+//! architecture gate in `tests/v2/test_action_architecture.py` enforces.
 
 use std::path::Path;
 
@@ -19,13 +27,11 @@ use asc_daemon_core::Principal;
 use asc_daemon_protocol::{
     DaemonResponse, MAX_DAEMON_ERROR_MESSAGE_BYTES, RequestId, SecQueryParams, error_code, method,
 };
-use asc_persistence_sqlite::QueryScope;
-use asc_persistence_sqlite::security_events::{
-    EventFilters, GroupCounts, SqliteEventReader, VALID_GROUP_FIELDS,
+use asc_security_events::query::{
+    EventFilters, GroupCounts, QueryError, QueryScope, SecurityEventQueries, VALID_GROUP_FIELDS,
 };
 use asc_security_events::timestamp::{NaivePolicy, normalize_iso_to_utc_iso, utc_iso_to_epoch};
-use asc_security_events::{SecurityEvent, SecurityEventsSummary, extract_verdict};
-use asc_sqlite_kernel::KernelError;
+use asc_security_events::{SecurityEvent, extract_verdict};
 use serde_json::{Map, Value, json};
 
 /// v1's default page size for `sec.events.list`.
@@ -38,106 +44,6 @@ const DEFAULT_LATEST_LIMIT: u64 = 5;
 const MAX_LATEST_LIMIT: u64 = 50;
 /// v1's accepted `result` values.
 const EVENT_RESULTS: [&str; 2] = ["failed", "succeeded"];
-
-/// Read-only security-event queries one daemon can serve, scoped per owner.
-///
-/// The port keeps the handler free of storage decisions; the daemon
-/// composition root binds it to the same database the writers use.
-pub trait SecurityEventQueries: Send + Sync {
-    /// Returns the aggregates and newest rows of one owner scope.
-    fn summary(
-        &self,
-        filters: &EventFilters,
-        scope: &QueryScope,
-        latest_limit: u32,
-    ) -> SecurityEventsSummary;
-    /// Returns one page of one owner scope's rows, newest first.
-    fn list(
-        &self,
-        filters: &EventFilters,
-        scope: &QueryScope,
-        limit: u32,
-        offset: u32,
-    ) -> Vec<SecurityEvent>;
-    /// Returns the number of remaining rows of one owner scope.
-    fn count(&self, filters: &EventFilters, scope: &QueryScope, offset: u32) -> u64;
-    /// Returns grouped counts of one owner scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KernelError::Malformed`] when `group_field` is outside the
-    /// v1 allowlist.
-    fn count_by(
-        &self,
-        group_field: &str,
-        filters: &EventFilters,
-        scope: &QueryScope,
-        offset: u32,
-    ) -> Result<GroupCounts, KernelError>;
-    /// Returns one row of one owner scope by id, or `None`.
-    fn get(&self, event_id: &str, scope: &QueryScope) -> Option<SecurityEvent>;
-}
-
-/// [`SecurityEventQueries`] over the daemon's security-event database.
-///
-/// The reader opens its own read-only connection and survives a replaced
-/// database file by inode check; a database that does not exist yet degrades
-/// to empty results, which is the correct answer before the first write.
-pub struct SqliteEventQuerySource {
-    reader: SqliteEventReader,
-}
-
-impl SqliteEventQuerySource {
-    /// Opens the source over the database at `path`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KernelError`] when the path cannot be normalized.
-    pub fn new(path: &Path) -> Result<Self, KernelError> {
-        Ok(Self {
-            reader: SqliteEventReader::new(path)?,
-        })
-    }
-}
-
-impl SecurityEventQueries for SqliteEventQuerySource {
-    fn summary(
-        &self,
-        filters: &EventFilters,
-        scope: &QueryScope,
-        latest_limit: u32,
-    ) -> SecurityEventsSummary {
-        self.reader.summary(filters, scope, latest_limit)
-    }
-
-    fn list(
-        &self,
-        filters: &EventFilters,
-        scope: &QueryScope,
-        limit: u32,
-        offset: u32,
-    ) -> Vec<SecurityEvent> {
-        self.reader.query(filters, scope, limit, offset)
-    }
-
-    fn count(&self, filters: &EventFilters, scope: &QueryScope, offset: u32) -> u64 {
-        self.reader.count(filters, scope, offset)
-    }
-
-    fn count_by(
-        &self,
-        group_field: &str,
-        filters: &EventFilters,
-        scope: &QueryScope,
-        offset: u32,
-    ) -> Result<GroupCounts, KernelError> {
-        self.reader.count_by(group_field, filters, scope, offset)
-    }
-
-    fn get(&self, event_id: &str, scope: &QueryScope) -> Option<SecurityEvent> {
-        self.reader.get(event_id, scope)
-    }
-}
 
 /// Protocol adapter for the `sec.*` query family.
 pub struct SecurityQueryHandler {
@@ -187,8 +93,12 @@ impl SecurityQueryHandler {
             }
         };
         // The owner scope is derived once, from transport-authenticated
-        // evidence only. Nothing decoded from the request participates.
-        let scope = QueryScope::Owner(principal.peer().uid());
+        // evidence only. The only request input that participates is the
+        // owner filter, and it may only narrow what the peer is already
+        // authorized to read.
+        let Ok(scope) = resolve_scope(principal, &params) else {
+            return invalid_owner_filter(request_id);
+        };
         match query {
             method::QueryMethod::Summary => Self::summary(source, request_id, &params, scope),
             method::QueryMethod::EventsList => Self::list(source, request_id, &params, scope),
@@ -208,7 +118,10 @@ impl SecurityQueryHandler {
         let Ok((filters, latest_limit)) = summary_filters(params) else {
             return invalid_parameters(request_id);
         };
-        let summary = source.summary(&filters, &scope, latest_limit);
+        let summary = match source.summary(&filters, scope, latest_limit) {
+            Ok(summary) => summary,
+            Err(error) => return storage_failure(request_id, &error),
+        };
         DaemonResponse::success(
             request_id,
             json!({
@@ -236,8 +149,17 @@ impl SecurityQueryHandler {
         let Ok((filters, limit, offset, include_details)) = list_filters(params) else {
             return invalid_parameters(request_id);
         };
-        let items = source.list(&filters, &scope, limit, offset);
-        let total = source.count(&filters, &scope, offset);
+        let items = match source.list(&filters, scope, limit, offset) {
+            Ok(items) => items,
+            Err(error) => return storage_failure(request_id, &error),
+        };
+        // `total` is the pre-pagination row count of the whole scope: the
+        // client derives its own "rows after offset" view from it, so the
+        // cursor math must not fold the offset into the total.
+        let total = match source.count(&filters, scope, 0) {
+            Ok(total) => total,
+            Err(error) => return storage_failure(request_id, &error),
+        };
         let next_offset = next_offset(offset, u64::from(limit), items.len() as u64, total);
         DaemonResponse::success(
             request_id,
@@ -265,7 +187,10 @@ impl SecurityQueryHandler {
         };
         // A foreign event and a missing event are indistinguishable here, so
         // an event_id guess cannot probe another owner's store.
-        let event = source.get(event_id, &scope);
+        let event = match source.get(event_id, scope) {
+            Ok(event) => event,
+            Err(error) => return storage_failure(request_id, &error),
+        };
         DaemonResponse::success(
             request_id,
             json!({
@@ -293,7 +218,7 @@ impl SecurityQueryHandler {
         let Ok(filters) = event_filters(params) else {
             return invalid_parameters(request_id);
         };
-        match source.count_by(group_by, &filters, &scope, 0) {
+        match source.count_by(group_by, &filters, scope, 0) {
             Ok(groups) => DaemonResponse::success(
                 request_id,
                 json!({
@@ -301,8 +226,30 @@ impl SecurityQueryHandler {
                     "items": count_items(&groups),
                 }),
             ),
-            Err(_) => invalid_parameters(request_id),
+            Err(QueryError::InvalidGroupField(_)) => invalid_parameters(request_id),
+            Err(error) => storage_failure(request_id, &error),
         }
+    }
+}
+
+/// Derives the read scope from kernel-authenticated evidence.
+///
+/// Root reads all owners by default and may narrow to any single UID through
+/// the `owner_uid` filter. Every non-root principal — including a
+/// `PolicyAdministrator` — reads exactly its own UID, and selecting any other
+/// UID is an authorization failure, not a silently narrowed result.
+fn resolve_scope(principal: &Principal, params: &SecQueryParams) -> Result<QueryScope, ()> {
+    let peer = principal.peer().uid();
+    if peer == 0 {
+        return Ok(match params.owner_uid {
+            Some(uid) => QueryScope::Owner(uid),
+            None => QueryScope::All,
+        });
+    }
+    match params.owner_uid {
+        None => Ok(QueryScope::Owner(peer)),
+        Some(uid) if uid == peer => Ok(QueryScope::Owner(peer)),
+        Some(_) => Err(()),
     }
 }
 
@@ -327,18 +274,21 @@ fn summary_filters(params: &SecQueryParams) -> Result<(EventFilters, u32), ()> {
 }
 
 /// Parses the `sec.events.list` filter set.
-fn list_filters(params: &SecQueryParams) -> Result<(EventFilters, u32, u32, bool), ()> {
+fn list_filters(params: &SecQueryParams) -> Result<(EventFilters, u32, i64, bool), ()> {
     if params.group_by.is_some() || params.event_id.is_some() || params.latest_limit.is_some() {
         return Err(());
     }
     let filters = event_filters(params)?;
     let limit = bounded(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT)?;
-    let offset = bounded(params.offset, 0, 0, u64::from(u32::MAX))?;
+    // v1's offset is a signed 64-bit quantity clamped at zero; capping at
+    // `u32::MAX` narrowed it, so the bound now covers the full non-negative
+    // i64 range SQLite's `OFFSET` accepts.
+    let offset = bounded(params.offset, 0, 0, i64::MAX as u64)?;
     let include_details = params.include_details.unwrap_or(false);
     Ok((
         filters,
         u32::try_from(limit).expect("bounded to 1000"),
-        u32::try_from(offset).expect("bounded to u32::MAX"),
+        i64::try_from(offset).expect("bounded to i64::MAX"),
         include_details,
     ))
 }
@@ -433,8 +383,8 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 }
 
 /// Computes v1's `next_offset` pagination cursor.
-fn next_offset(offset: u32, limit: u64, returned: u64, total: u64) -> Option<u64> {
-    let offset = u64::from(offset);
+fn next_offset(offset: i64, limit: u64, returned: u64, total: u64) -> Option<u64> {
+    let offset = u64::try_from(offset).expect("non-negative");
     if offset + returned < total {
         Some(offset + limit)
     } else {
@@ -548,6 +498,27 @@ fn invalid_parameters(request_id: RequestId) -> DaemonResponse {
     )
 }
 
+/// A non-root caller named an owner other than itself.
+fn invalid_owner_filter(request_id: RequestId) -> DaemonResponse {
+    DaemonResponse::error(
+        request_id,
+        error_code::INVALID_ARGUMENT,
+        "owner_uid may only select the caller's own UID unless the caller is root",
+    )
+}
+
+/// The store is present but cannot be read; this must not look like "no
+/// events".
+fn storage_failure(request_id: RequestId, error: &QueryError) -> DaemonResponse {
+    DaemonResponse::error(
+        request_id,
+        error_code::UNAVAILABLE,
+        &bounded_message(&format!(
+            "security event store is unavailable or corrupt: {error}"
+        )),
+    )
+}
+
 fn bounded_message(message: &str) -> String {
     if message.len() > MAX_DAEMON_ERROR_MESSAGE_BYTES {
         "request parameters are invalid".to_owned()
@@ -558,23 +529,20 @@ fn bounded_message(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use asc_daemon_core::{PeerCredentials, PrincipalRole};
-    use asc_persistence_sqlite::security_events::SqliteEventWriter;
+    use asc_persistence_sqlite::security_events::SqliteEventQuerySource;
+    use asc_persistence_sqlite::security_events::writer::SqliteEventWriter;
     use serde_json::json;
     use tempfile::TempDir;
 
-    fn seeded_source() -> (TempDir, SqliteEventQuerySource) {
+    fn seeded_source(
+        rows: &[(&str, u32, &str, Option<&str>)],
+    ) -> (TempDir, SqliteEventQuerySource) {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("events.db");
         let writer = SqliteEventWriter::new(&path).expect("writer");
-        for (id, uid, category, verdict) in [
-            ("a1", 1000_u32, "exec", Some("deny")),
-            ("a2", 1000, "network", None),
-            ("b1", 2000, "exec", Some("allow")),
-        ] {
+        for &(id, uid, category, verdict) in rows {
             let mut event = SecurityEvent::new("sandbox_prehook", category, Map::new());
             id.clone_into(&mut event.event_id);
             event.uid = uid;
@@ -587,6 +555,14 @@ mod tests {
         writer.close_at(1000.0);
         let source = SqliteEventQuerySource::new(&path).expect("source");
         (dir, source)
+    }
+
+    fn two_owner_source() -> (TempDir, SqliteEventQuerySource) {
+        seeded_source(&[
+            ("a1", 1000_u32, "exec", Some("deny")),
+            ("a2", 1000, "network", None),
+            ("b1", 2000, "exec", Some("allow")),
+        ])
     }
 
     fn principal(uid: u32) -> Principal {
@@ -629,7 +605,7 @@ mod tests {
 
     #[test]
     fn one_owner_never_sees_another_owners_rows() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         let data = success_data(handle(&handler, 1000, method::SEC_EVENTS_LIST, json!({})));
@@ -646,8 +622,81 @@ mod tests {
     }
 
     #[test]
+    fn root_reads_all_owners_and_may_narrow_with_the_owner_filter() {
+        let (_dir, source) = two_owner_source();
+        let handler = SecurityQueryHandler::new(source);
+
+        let data = success_data(handle(&handler, 0, method::SEC_EVENTS_LIST, json!({})));
+        assert_eq!(
+            data["total"],
+            json!(3),
+            "root's default scope is all owners"
+        );
+
+        let data = success_data(handle(
+            &handler,
+            0,
+            method::SEC_EVENTS_LIST,
+            json!({"owner_uid": 2000}),
+        ));
+        assert_eq!(data["total"], json!(1));
+        assert_eq!(data["items"][0]["event_id"], json!("b1"));
+
+        let data = success_data(handle(&handler, 0, method::SEC_SUMMARY, json!({})));
+        assert_eq!(data["total"], json!(3));
+
+        let data = success_data(handle(
+            &handler,
+            0,
+            method::SEC_EVENTS_GET,
+            json!({"event_id": "b1"}),
+        ));
+        assert_eq!(data["found"], json!(true));
+    }
+
+    #[test]
+    fn a_non_root_caller_cannot_select_another_owner() {
+        let (_dir, source) = two_owner_source();
+        let handler = SecurityQueryHandler::new(source);
+
+        let response = handle(
+            &handler,
+            1000,
+            method::SEC_EVENTS_LIST,
+            json!({"owner_uid": 2000}),
+        );
+        assert_eq!(error_code_of(response), "invalid_argument");
+
+        // Selecting itself is the same as omitting the filter.
+        let data = success_data(handle(
+            &handler,
+            1000,
+            method::SEC_EVENTS_LIST,
+            json!({"owner_uid": 1000}),
+        ));
+        assert_eq!(data["total"], json!(2));
+    }
+
+    #[test]
+    fn a_policy_administrator_still_reads_only_its_own_rows() {
+        let (_dir, source) = two_owner_source();
+        let handler = SecurityQueryHandler::new(source);
+
+        let admin = Principal::from_authenticated_peer(
+            PeerCredentials::new(3000, 100, 7),
+            PrincipalRole::PolicyAdministrator,
+        );
+        let query = method::resolve(method::SEC_EVENTS_LIST).expect("registered method");
+        let method::MethodId::Query(query) = query else {
+            panic!("not a query method");
+        };
+        let response = handler.handle(request_id(), &admin, query, json!({"owner_uid": 1000}));
+        assert_eq!(error_code_of(response), "invalid_argument");
+    }
+
+    #[test]
     fn summary_counts_only_the_callers_rows() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         let data = success_data(handle(&handler, 1000, method::SEC_SUMMARY, json!({})));
@@ -669,7 +718,7 @@ mod tests {
 
     #[test]
     fn get_is_indistinguishable_between_foreign_and_missing() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         let own = success_data(handle(
@@ -701,7 +750,7 @@ mod tests {
 
     #[test]
     fn count_by_groups_and_sorts_only_own_rows() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         let data = success_data(handle(
@@ -722,12 +771,11 @@ mod tests {
 
     #[test]
     fn the_dashboard_projection_matches_v1() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         // The deny verdict is derived into the row payload, details are
-        // dropped by default, and a skill-ledger event gains command and
-        // skill_name.
+        // dropped by default.
         let data = success_data(handle(
             &handler,
             1000,
@@ -757,37 +805,71 @@ mod tests {
     }
 
     #[test]
-    fn pagination_reports_the_v1_cursor() {
-        let (_dir, source) = seeded_source();
+    fn pagination_reports_the_v1_cursor_with_a_pre_pagination_total() {
+        let rows: Vec<(&str, u32, &str, Option<&str>)> = (1..=5)
+            .map(|index| {
+                let id: &str = Box::leak(format!("e{index}").into_boxed_str());
+                (id, 1000, "exec", None)
+            })
+            .collect();
+        let (_dir, source) = seeded_source(&rows);
         let handler = SecurityQueryHandler::new(source);
 
+        // The reviewer's scenario: five rows, limit 2, offset 2. The old code
+        // folded the offset into the count and reported total=3 with no
+        // cursor, dropping the fifth row.
         let data = success_data(handle(
             &handler,
             1000,
             method::SEC_EVENTS_LIST,
-            json!({"limit": 1, "offset": 0}),
+            json!({"limit": 2, "offset": 2}),
         ));
-        assert_eq!(data["total"], json!(2));
-        assert_eq!(data["limit"], json!(1));
-        assert_eq!(data["offset"], json!(0));
-        assert_eq!(data["next_offset"], json!(1));
-
-        let data = success_data(handle(
-            &handler,
-            1000,
-            method::SEC_EVENTS_LIST,
-            json!({"limit": 1, "offset": 1}),
-        ));
+        assert_eq!(data["total"], json!(5), "total is the pre-pagination count");
+        assert_eq!(data["offset"], json!(2));
         assert_eq!(
             data["next_offset"],
-            json!(null),
-            "the last page has no cursor"
+            json!(4),
+            "the cursor advances absolutely"
+        );
+
+        // A full three-page traversal visits every row exactly once.
+        let mut seen: Vec<String> = Vec::new();
+        let mut offset = 0_u64;
+        for expected_pages in 0..3 {
+            let data = success_data(handle(
+                &handler,
+                1000,
+                method::SEC_EVENTS_LIST,
+                json!({"limit": 2, "offset": offset}),
+            ));
+            assert_eq!(data["total"], json!(5), "every page reports the same total");
+            for item in data["items"].as_array().expect("items") {
+                seen.push(item["event_id"].as_str().expect("id").to_owned());
+            }
+            let next = data["next_offset"].as_u64();
+            if expected_pages < 2 {
+                assert_eq!(next, Some(offset + 2));
+                offset = next.expect("cursor");
+            } else {
+                assert_eq!(next, None, "the last page has no cursor");
+            }
+        }
+        assert_eq!(seen.len(), 5);
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec!["e1", "e2", "e3", "e4", "e5"],
+            "three pages cover every row exactly once"
         );
     }
 
     #[test]
     fn the_v1_filter_set_is_honoured() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = seeded_source(&[
+            ("a1", 1000_u32, "exec", Some("deny")),
+            ("a2", 1000, "network", None),
+            ("b1", 2000, "exec", None),
+        ]);
         let handler = SecurityQueryHandler::new(source);
 
         let data = success_data(handle(
@@ -810,7 +892,7 @@ mod tests {
 
     #[test]
     fn invalid_parameters_are_rejected_with_invalid_argument() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         let cases: Vec<(&str, Value)> = vec![
@@ -828,10 +910,6 @@ mod tests {
             ),
             (method::SEC_EVENTS_LIST, json!({"limit": 0})),
             (method::SEC_EVENTS_LIST, json!({"limit": 1001})),
-            (
-                method::SEC_EVENTS_LIST,
-                json!({"offset": 5_000_000_000_u64}),
-            ),
             (method::SEC_EVENTS_LIST, json!({"result": "exploded"})),
             (method::SEC_EVENTS_LIST, json!({"since": "not a timestamp"})),
             (
@@ -856,8 +934,32 @@ mod tests {
     }
 
     #[test]
+    fn the_full_v1_offset_range_is_accepted() {
+        let (_dir, source) = two_owner_source();
+        let handler = SecurityQueryHandler::new(source);
+
+        // u32::MAX is a legal offset now; beyond i64::MAX is not.
+        let data = success_data(handle(
+            &handler,
+            1000,
+            method::SEC_EVENTS_LIST,
+            json!({"offset": 4_294_967_295_u64}),
+        ));
+        assert_eq!(data["total"], json!(2));
+        assert_eq!(data["next_offset"], json!(null));
+
+        let response = handle(
+            &handler,
+            1000,
+            method::SEC_EVENTS_LIST,
+            json!({"offset": 9_223_372_036_854_775_808_u64}),
+        );
+        assert_eq!(error_code_of(response), "invalid_argument");
+    }
+
+    #[test]
     fn unknown_or_foreign_parameters_are_rejected_with_invalid_request() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         let response = handle(
@@ -883,7 +985,7 @@ mod tests {
 
     #[test]
     fn epoch_nanosecond_bounds_are_accepted() {
-        let (_dir, source) = seeded_source();
+        let (_dir, source) = two_owner_source();
         let handler = SecurityQueryHandler::new(source);
 
         // 2026-01-01T00:00:00Z in epoch nanoseconds: everything is after it.
@@ -900,7 +1002,7 @@ mod tests {
     #[test]
     fn a_missing_store_degrades_to_empty_results_not_errors() {
         let dir = TempDir::new().expect("temp dir");
-        let path: PathBuf = dir.path().join("absent.db");
+        let path: std::path::PathBuf = dir.path().join("absent.db");
         let handler = SecurityQueryHandler::new(
             SqliteEventQuerySource::new(&path).expect("source over a missing store"),
         );
@@ -914,5 +1016,29 @@ mod tests {
             json!({"event_id": "a1"}),
         ));
         assert_eq!(data["found"], json!(false));
+    }
+
+    #[test]
+    fn a_corrupt_store_is_an_unavailable_error_not_an_empty_answer() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("events.db");
+        std::fs::write(&path, b"definitely not a sqlite database").expect("seed bytes");
+        let handler = SecurityQueryHandler::new(
+            SqliteEventQuerySource::new(&path).expect("source opens lazily"),
+        );
+
+        for (method_name, params) in [
+            (method::SEC_EVENTS_LIST, json!({})),
+            (method::SEC_SUMMARY, json!({})),
+            (method::SEC_EVENTS_GET, json!({"event_id": "a1"})),
+            (method::SEC_EVENTS_COUNT_BY, json!({"group_by": "category"})),
+        ] {
+            let response = handle(&handler, 1000, method_name, params);
+            assert_eq!(
+                error_code_of(response),
+                "unavailable",
+                "{method_name} must not report success over a corrupt store"
+            );
+        }
     }
 }

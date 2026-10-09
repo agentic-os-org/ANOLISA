@@ -18,6 +18,7 @@ mod query;
 mod rejection;
 mod skill_sec;
 
+pub use asc_security_events::query::SecurityEventQueries;
 pub use dispatcher::DaemonDispatcher;
-pub use query::{SecurityEventQueries, SecurityQueryHandler, SqliteEventQuerySource};
+pub use query::SecurityQueryHandler;
 pub use rejection::JsonRejectionEncoder;

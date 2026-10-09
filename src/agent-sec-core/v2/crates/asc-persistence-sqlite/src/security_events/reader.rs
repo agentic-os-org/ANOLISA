@@ -13,6 +13,7 @@ use asc_security_events::{
     SecurityEventsSummary, config::get_db_path,
 };
 use asc_sqlite_kernel::{KernelError, ReadOnlySource, SqliteStore};
+use rusqlite::Connection;
 
 use crate::scope::QueryScope;
 use crate::security_events::repository::{
@@ -77,6 +78,22 @@ impl SqliteEventReader {
         self.source.store().path()
     }
 
+    /// Runs one repository query and reports the full outcome.
+    ///
+    /// This is the query-port counterpart of the degrading facades below:
+    /// `Ok(None)` means the database is absent, an error means it could not
+    /// be read. See [`ReadOnlySource::try_query`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError`] when the query cannot run.
+    pub fn try_query<T>(
+        &self,
+        query: impl FnOnce(&SecurityEventRepository, &Connection) -> Result<T, KernelError>,
+    ) -> Result<Option<T>, KernelError> {
+        self.source.try_query(query)
+    }
+
     /// Returns matching events, newest first, within one owner scope.
     #[must_use]
     pub fn query(
@@ -84,7 +101,7 @@ impl SqliteEventReader {
         filters: &EventFilters,
         scope: &QueryScope,
         limit: u32,
-        offset: u32,
+        offset: i64,
     ) -> Vec<SecurityEvent> {
         self.source
             .query_or_default(|repo, conn| repo.query(conn, filters, scope, limit, offset))
@@ -123,7 +140,7 @@ impl SqliteEventReader {
 
     /// Counts matching events within one owner scope.
     #[must_use]
-    pub fn count(&self, filters: &EventFilters, scope: &QueryScope, offset: u32) -> u64 {
+    pub fn count(&self, filters: &EventFilters, scope: &QueryScope, offset: i64) -> u64 {
         self.source
             .query_or(0, |repo, conn| repo.count(conn, filters, scope, offset))
     }
@@ -139,7 +156,7 @@ impl SqliteEventReader {
         group_field: &str,
         filters: &EventFilters,
         scope: &QueryScope,
-        offset: u32,
+        offset: i64,
     ) -> Result<GroupCounts, KernelError> {
         validate_group_field(group_field)?;
         Ok(self.source.query_or_default(|repo, conn| {
@@ -176,6 +193,10 @@ mod tests {
         let writer = SqliteEventWriter::new(path).expect("writer");
         let mut event = SecurityEvent::new("sandbox_prehook", "exec", Map::new());
         "e1".clone_into(&mut event.event_id);
+        // The fixture rows and the scopes below must agree on the owner no
+        // matter which UID runs the suite (`SecurityEvent::new` stamps the
+        // current process UID by default).
+        event.uid = 0;
         writer.write(&event);
         writer.close_at(1000.0);
     }

@@ -18,14 +18,16 @@ tracing.workspace = true
 asc-daemon-core = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-daemon-service = { workspace = true }
-asc-persistence-sqlite = { workspace = true }
 asc-security-events = { workspace = true }
-asc-sqlite-kernel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# Test fixtures only: the query-port tests bind the real SQLite adapter. The
+# production dependency boundary (no storage crates in the handler) is
+# enforced by tests/v2/test_action_architecture.py.
+asc-persistence-sqlite = { workspace = true }
 asc-capability-pii-scan = { workspace = true }
 asc-capability-skill-sec = { workspace = true }
 asc-capability-code-scan.workspace = true

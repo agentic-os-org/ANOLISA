@@ -9,41 +9,35 @@
 //!   blob must not blank out a whole query.
 //!
 //! Unlike v1 the repository does not own the store: the kernel owns connection
-//! lifecycle, so every method takes a `&Connection`.
+//! lifecycle, so every method takes a `&Connection`. The filter and scope
+//! vocabulary lives in `asc-security-events::query`; this module renders it
+//! into SQL.
 
 use std::fmt::Write as _;
 
+use asc_security_events::query::QueryScope;
+pub use asc_security_events::query::{EventFilters, GroupCounts, VALID_GROUP_FIELDS};
 use asc_security_events::timestamp::utc_iso_to_epoch;
 use asc_security_events::{
-    CorrelationCandidate, EventResult, SecurityEvent, SecurityEventsSummary, TimestampError,
-    extract_verdict,
+    CorrelationCandidate, EventResult, SecurityEvent, SecurityEventsSummary, extract_verdict,
 };
 use asc_sqlite_kernel::{KernelError, RecordRepository, TableSpec};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Row};
 use serde_json::Value;
 
-use crate::scope::QueryScope;
 use crate::security_events::table::SECURITY_EVENTS_TABLES;
 
 /// Hard cap on rows returned to observability correlation (v1
 /// `_CORRELATION_CANDIDATE_LIMIT`).
 pub const CORRELATION_CANDIDATE_LIMIT: u32 = 1000;
 
-/// Group fields accepted by [`SecurityEventRepository::count_by`].
+/// Hard cap on the buckets one `count_by` may collect.
 ///
-/// Listed in v1's `_COUNT_BY_COLUMNS` order.
-pub const VALID_GROUP_FIELDS: &[&str] = &[
-    "category",
-    "event_type",
-    "result",
-    "trace_id",
-    "session_id",
-    "run_id",
-    "call_id",
-    "tool_call_id",
-    "verdict",
-];
+/// The grouping itself runs in SQL; this bounds the collected result so a
+/// pathological cardinality (for example `group_by trace_id` over a very
+/// large scope) cannot translate into unbounded memory in the daemon.
+pub const MAX_GROUP_BUCKETS: usize = 100_000;
 
 /// Group fields aggregated by [`SecurityEventRepository::summary`] in one query.
 const SUMMARY_GROUP_FIELDS: &[&str] = &["category", "event_type", "result", "session_id", "run_id"];
@@ -51,107 +45,6 @@ const SUMMARY_GROUP_FIELDS: &[&str] = &["category", "event_type", "result", "ses
 /// The columns every row read selects, in table order.
 const SELECT_COLUMNS: &str = "event_id, event_type, category, result, timestamp, timestamp_epoch, \
                               trace_id, pid, uid, session_id, run_id, call_id, tool_call_id, details";
-
-/// Optional query filters, all combined with `AND`.
-///
-/// Time bounds are stored as epochs because that is what the indexed column
-/// holds; use [`EventFilters::since`] / [`EventFilters::until`] to supply the ISO
-/// strings the v1 API takes.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct EventFilters {
-    /// Exact `event_type`.
-    pub event_type: Option<String>,
-    /// Exact `category`.
-    pub category: Option<String>,
-    /// Exact `result`.
-    pub result: Option<String>,
-    /// Exact `trace_id`.
-    pub trace_id: Option<String>,
-    /// Exact `session_id`.
-    pub session_id: Option<String>,
-    /// Exact `run_id`.
-    pub run_id: Option<String>,
-    /// Exact `call_id`.
-    pub call_id: Option<String>,
-    /// Exact `tool_call_id`.
-    pub tool_call_id: Option<String>,
-    /// Exact `verdict`.
-    pub verdict: Option<String>,
-    /// Inclusive lower bound on `timestamp_epoch`.
-    pub since_epoch: Option<f64>,
-    /// Exclusive upper bound on `timestamp_epoch`.
-    pub until_epoch: Option<f64>,
-}
-
-impl EventFilters {
-    /// Sets the inclusive lower bound from a UTC ISO timestamp.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TimestampError`] when `value` is not ISO-8601, matching v1,
-    /// where `utc_iso_to_epoch` raises out of `query()`.
-    pub fn since(mut self, value: &str) -> Result<Self, TimestampError> {
-        self.since_epoch = Some(utc_iso_to_epoch(value, "since")?);
-        Ok(self)
-    }
-
-    /// Sets the exclusive upper bound from a UTC ISO timestamp.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TimestampError`] when `value` is not ISO-8601.
-    pub fn until(mut self, value: &str) -> Result<Self, TimestampError> {
-        self.until_epoch = Some(utc_iso_to_epoch(value, "until")?);
-        Ok(self)
-    }
-
-    /// Renders the `WHERE` clause and its bound parameters for one scope.
-    ///
-    /// The owner predicate is always the first clause, so pagination, `COUNT`
-    /// and `GROUP BY` never see another owner's rows. Returns an empty string
-    /// only when nothing is filtered — which cannot happen for a scoped read,
-    /// because the owner predicate is unconditional.
-    fn build(&self, scope: QueryScope) -> (String, Vec<SqlValue>) {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<SqlValue> = Vec::new();
-
-        params.push(SqlValue::Integer(i64::from(scope.owner_uid())));
-        clauses.push(format!("uid = ?{}", params.len()));
-
-        let equality = [
-            ("event_type", self.event_type.as_ref()),
-            ("category", self.category.as_ref()),
-            ("result", self.result.as_ref()),
-            ("trace_id", self.trace_id.as_ref()),
-            ("session_id", self.session_id.as_ref()),
-            ("run_id", self.run_id.as_ref()),
-            ("call_id", self.call_id.as_ref()),
-            ("tool_call_id", self.tool_call_id.as_ref()),
-            ("verdict", self.verdict.as_ref()),
-        ];
-        for (column, value) in equality {
-            if let Some(value) = value {
-                params.push(SqlValue::Text(value.clone()));
-                clauses.push(format!("{column} = ?{}", params.len()));
-            }
-        }
-        if let Some(since) = self.since_epoch {
-            params.push(SqlValue::Real(since));
-            clauses.push(format!("timestamp_epoch >= ?{}", params.len()));
-        }
-        if let Some(until) = self.until_epoch {
-            params.push(SqlValue::Real(until));
-            clauses.push(format!("timestamp_epoch < ?{}", params.len()));
-        }
-
-        // The owner predicate is unconditional, so the clause list is never
-        // empty and the `WHERE` keyword is always present.
-        (format!(" WHERE {}", clauses.join(" AND ")), params)
-    }
-}
-
-/// Counts grouped by one column; `None` is the SQL `NULL` bucket.
-pub type GroupCounts = Vec<(Option<String>, u64)>;
 
 /// The filters of one correlation-candidate query.
 ///
@@ -233,14 +126,14 @@ impl SecurityEventRepository {
         filters: &EventFilters,
         scope: &QueryScope,
         limit: u32,
-        offset: u32,
+        offset: i64,
     ) -> Result<Vec<SecurityEvent>, KernelError> {
-        let (where_clause, mut params) = filters.build(*scope);
+        let (where_clause, mut params) = build_filters(filters, *scope);
         params.push(SqlValue::Integer(i64::from(limit)));
-        params.push(SqlValue::Integer(i64::from(offset)));
+        params.push(SqlValue::Integer(offset));
         let sql = format!(
             "SELECT {SELECT_COLUMNS} FROM security_events{where_clause} \
-             ORDER BY timestamp_epoch DESC LIMIT ?{} OFFSET ?{}",
+             ORDER BY timestamp_epoch DESC, event_id DESC LIMIT ?{} OFFSET ?{}",
             params.len() - 1,
             params.len()
         );
@@ -262,17 +155,22 @@ impl SecurityEventRepository {
         event_id: &str,
         scope: &QueryScope,
     ) -> Result<Option<SecurityEvent>, KernelError> {
-        let sql = format!(
-            "SELECT {SELECT_COLUMNS} FROM security_events WHERE event_id = ?1 AND uid = ?2"
-        );
-        let events = collect_events(
-            conn,
-            &sql,
-            &[
-                SqlValue::Text(event_id.to_owned()),
-                SqlValue::Integer(i64::from(scope.owner_uid())),
-            ],
-        )?;
+        let (sql, params): (String, Vec<SqlValue>) = match *scope {
+            QueryScope::Owner(uid) => (
+                format!(
+                    "SELECT {SELECT_COLUMNS} FROM security_events WHERE event_id = ?1 AND uid = ?2"
+                ),
+                vec![
+                    SqlValue::Text(event_id.to_owned()),
+                    SqlValue::Integer(i64::from(uid)),
+                ],
+            ),
+            QueryScope::All => (
+                format!("SELECT {SELECT_COLUMNS} FROM security_events WHERE event_id = ?1"),
+                vec![SqlValue::Text(event_id.to_owned())],
+            ),
+        };
+        let events = collect_events(conn, &sql, &params)?;
         Ok(events.into_iter().next())
     }
 
@@ -296,11 +194,12 @@ impl SecurityEventRepository {
             return Ok(Vec::new());
         }
 
-        let mut params: Vec<SqlValue> = vec![
-            SqlValue::Text(request.session_id.to_owned()),
-            SqlValue::Integer(i64::from(scope.owner_uid())),
-        ];
-        let mut clauses = vec!["session_id = ?1".to_owned(), "uid = ?2".to_owned()];
+        let mut params: Vec<SqlValue> = vec![SqlValue::Text(request.session_id.to_owned())];
+        let mut clauses = vec!["session_id = ?1".to_owned()];
+        if let QueryScope::Owner(uid) = *scope {
+            params.push(SqlValue::Integer(i64::from(uid)));
+            clauses.push(format!("uid = ?{}", params.len()));
+        }
 
         let placeholders = push_in_list(&mut params, request.categories);
         clauses.push(format!("category IN ({placeholders})"));
@@ -360,14 +259,14 @@ impl SecurityEventRepository {
         conn: &Connection,
         filters: &EventFilters,
         scope: &QueryScope,
-        offset: u32,
+        offset: i64,
     ) -> Result<u64, KernelError> {
-        let (where_clause, mut params) = filters.build(*scope);
+        let (where_clause, mut params) = build_filters(filters, *scope);
         let sql = if offset > 0 {
-            params.push(SqlValue::Integer(i64::from(offset)));
+            params.push(SqlValue::Integer(offset));
             format!(
                 "SELECT COUNT(*) FROM (SELECT event_id FROM security_events{where_clause} \
-                 ORDER BY timestamp_epoch DESC LIMIT -1 OFFSET ?{})",
+                 ORDER BY timestamp_epoch DESC, event_id DESC LIMIT -1 OFFSET ?{})",
                 params.len()
             )
         } else {
@@ -398,11 +297,11 @@ impl SecurityEventRepository {
         group_field: &str,
         filters: &EventFilters,
         scope: &QueryScope,
-        offset: u32,
+        offset: i64,
     ) -> Result<GroupCounts, KernelError> {
         let column = validate_group_field(group_field)?;
 
-        let (mut where_clause, mut params) = filters.build(*scope);
+        let (mut where_clause, mut params) = build_filters(filters, *scope);
         if column == "verdict" && filters.verdict.is_none() {
             let extra = "verdict IS NOT NULL AND verdict != ''";
             where_clause = if where_clause.is_empty() {
@@ -413,11 +312,11 @@ impl SecurityEventRepository {
         }
 
         let sql = if offset > 0 {
-            params.push(SqlValue::Integer(i64::from(offset)));
+            params.push(SqlValue::Integer(offset));
             format!(
                 "SELECT group_value, COUNT(*) FROM \
                  (SELECT {column} AS group_value FROM security_events{where_clause} \
-                 ORDER BY timestamp_epoch DESC LIMIT -1 OFFSET ?{}) \
+                 ORDER BY timestamp_epoch DESC, event_id DESC LIMIT -1 OFFSET ?{}) \
                  GROUP BY group_value",
                 params.len()
             )
@@ -431,6 +330,11 @@ impl SecurityEventRepository {
         let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
         let mut counts = Vec::new();
         while let Some(row) = rows.next()? {
+            if counts.len() >= MAX_GROUP_BUCKETS {
+                return Err(KernelError::Malformed(format!(
+                    "grouped counts exceeded the resource bound of {MAX_GROUP_BUCKETS} buckets"
+                )));
+            }
             let count: i64 = row.get(1)?;
             counts.push((row.get(0)?, count.try_into().unwrap_or_default()));
         }
@@ -452,7 +356,7 @@ impl SecurityEventRepository {
         scope: &QueryScope,
         latest_limit: u32,
     ) -> Result<SecurityEventsSummary, KernelError> {
-        let (where_clause, params) = filters.build(*scope);
+        let (where_clause, params) = build_filters(filters, *scope);
         let branches: Vec<String> = SUMMARY_GROUP_FIELDS
             .iter()
             .map(|field| {
@@ -507,6 +411,54 @@ impl SecurityEventRepository {
             by_run: take("run_id"),
             latest_events: latest,
         })
+    }
+}
+
+/// Renders the `WHERE` clause and its bound parameters for one scope.
+///
+/// For an owner scope the owner predicate is always the first clause, so
+/// pagination, `COUNT` and `GROUP BY` never see another owner's rows. The
+/// root `All` scope has no owner predicate at all; returns an empty clause
+/// only then and when nothing else is filtered.
+fn build_filters(filters: &EventFilters, scope: QueryScope) -> (String, Vec<SqlValue>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlValue> = Vec::new();
+
+    if let QueryScope::Owner(uid) = scope {
+        params.push(SqlValue::Integer(i64::from(uid)));
+        clauses.push(format!("uid = ?{}", params.len()));
+    }
+
+    let equality = [
+        ("event_type", filters.event_type.as_ref()),
+        ("category", filters.category.as_ref()),
+        ("result", filters.result.as_ref()),
+        ("trace_id", filters.trace_id.as_ref()),
+        ("session_id", filters.session_id.as_ref()),
+        ("run_id", filters.run_id.as_ref()),
+        ("call_id", filters.call_id.as_ref()),
+        ("tool_call_id", filters.tool_call_id.as_ref()),
+        ("verdict", filters.verdict.as_ref()),
+    ];
+    for (column, value) in equality {
+        if let Some(value) = value {
+            params.push(SqlValue::Text(value.clone()));
+            clauses.push(format!("{column} = ?{}", params.len()));
+        }
+    }
+    if let Some(since) = filters.since_epoch {
+        params.push(SqlValue::Real(since));
+        clauses.push(format!("timestamp_epoch >= ?{}", params.len()));
+    }
+    if let Some(until) = filters.until_epoch {
+        params.push(SqlValue::Real(until));
+        clauses.push(format!("timestamp_epoch < ?{}", params.len()));
+    }
+
+    if clauses.is_empty() {
+        (String::new(), params)
+    } else {
+        (format!(" WHERE {}", clauses.join(" AND ")), params)
     }
 }
 
@@ -725,9 +677,24 @@ mod tests {
 
     #[test]
     fn a_bare_scope_renders_only_the_owner_clause() {
-        let (clause, params) = EventFilters::default().build(QueryScope::Owner(1000));
+        let (clause, params) = build_filters(&EventFilters::default(), QueryScope::Owner(1000));
         assert_eq!(clause, " WHERE uid = ?1");
         assert_eq!(params, vec![SqlValue::Integer(1000)]);
+    }
+
+    #[test]
+    fn an_all_scope_renders_no_owner_clause() {
+        let (clause, params) = build_filters(&EventFilters::default(), QueryScope::All);
+        assert_eq!(clause, "");
+        assert!(params.is_empty());
+
+        let filters = EventFilters {
+            category: Some("exec".to_owned()),
+            ..EventFilters::default()
+        };
+        let (clause, params) = build_filters(&filters, QueryScope::All);
+        assert_eq!(clause, " WHERE category = ?1");
+        assert_eq!(params.len(), 1);
     }
 
     #[test]
@@ -738,7 +705,7 @@ mod tests {
             since_epoch: Some(1.0),
             ..EventFilters::default()
         };
-        let (clause, params) = filters.build(QueryScope::Owner(1000));
+        let (clause, params) = build_filters(&filters, QueryScope::Owner(1000));
         assert_eq!(
             clause,
             " WHERE uid = ?1 AND category = ?2 AND verdict = ?3 AND timestamp_epoch >= ?4"

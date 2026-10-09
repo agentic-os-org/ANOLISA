@@ -239,6 +239,21 @@ V1 parser 对 `ok` 与 `error` 的组合不做交叉字段强校验，但兼容�
 
 optional string 的空白值归一为未设置。
 
+#### Owner scope 与 owner 过滤
+
+四个 `sec.*` method 的读取范围由 transport 认证的 peer UID 决定（DPV1-018/019）：
+
+- root peer 默认读取全部 owner，也可以用 `owner_uid`（u32 integer）收窄到任意单个
+  UID；
+- 非 root peer（包括 `PolicyAdministrator`）只能读取自身 UID；`owner_uid` 只能等于
+  自身，指定其它 UID 返回 `invalid_argument`；
+- `owner_uid` 是已授权范围内的过滤器，不是身份 override，永远不会扩大 scope。
+
+存储存在但不可读（页损坏、I/O 错误、查询被中断）时，四个 method 返回 `unavailable`
+错误而不是成功的空结果；数据库尚未创建时仍返回空结果（首次写入前的正常状态）。
+SQL 执行受 5 秒内核级执行预算约束（progress handler 中断），`count_by` 收集的分组
+桶数上限为 100000。
+
 ### 6.2 `daemon.health`
 
 参数：当前忽略所有 `params`。
@@ -354,6 +369,11 @@ metadata-only 响应包含 `ignored=true`、`reason="metadata-only change"` 和 
 每个 event 使用 canonical SecurityEvent envelope；`include_details=false` 时删除
 `details`。若 details 可投影出 verdict，item 顶层增加 `verdict`；Skill Ledger event
 还可以增加 `command`、`skill_name` dashboard 字段。
+
+`total` 是应用 filter 后、分页前整个 scope 的行数（不折叠 offset）；`next_offset`
+是绝对偏移，仅当 `offset + 本页返回行数 < total` 时存在，末页为 `null`。`limit` 为
+`1..=1000`；`offset` 为非负 64-bit integer（上限 9223372036854775807，与 V1 校验
+一致）。
 
 ### 6.6 `sec.events.get`
 
@@ -829,7 +849,7 @@ agent-sec-cli 触发 PyO3、Python backend 或第二套本地业务执行。
 | DPV1-015 | 旧 daemon 返回 `unknown_method` 时返回稳定 version/capability mismatch；timeout/EOF 时同样不本地执行 |
 | DPV1-016 | envelope/wire-shape 错误与 action 领域输入错误稳定落入不同 response layer |
 | DPV1-017 | 八个 action method 的 timeout、queue/resource、access-log、blocking 和 cancellation metadata 已冻结并逐项验证 |
-| DPV1-018 | 多 UID 共用 system socket；trusted Principal/QueryScope 隔离 owner，`caller/trace_context` 不参与授权 |
+| DPV1-018 | 多 UID 共用 system socket；trusted Principal/QueryScope 隔离 owner，`caller/trace_context` 不参与授权；root 默认 All 并可用 `owner_uid` 收窄，非 root（含 PolicyAdministrator）仅限自身且 `owner_uid` 只能等于自身 |
 | DPV1-019 | CLI/TUI 不能用 RPC filter 绕过服务端 QueryScope，也不能直读 SQLite 替代授权查询 |
 | DPV1-020 | 15 个 PAP method 的 strict params、完整请求/响应 CRUD fixture、直接领域 result、错误投影、server-owned Principal；必跑 UDS integration 经 Dispatcher/PapHandler → PapService → Repository 执行完整 fixture，真实 `asc-daemon` 子进程通过启动管理员 UID 配置完成非 root 成功场景，同时验证默认拒绝；root 环境验证默认成功 |
 

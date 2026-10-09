@@ -41,6 +41,7 @@ asc-model-client.workspace = true
 asc-foundation-types.workspace = true
 asc-pap.workspace = true
 asc-policy-repository-sqlite.workspace = true
+asc-persistence-sqlite.workspace = true
 asc-security-events.workspace = true
 thiserror.workspace = true
 rustix.workspace = true
@@ -50,6 +51,8 @@ tokio.workspace = true
 
 [dev-dependencies]
 asc-pap-repository-memory.workspace = true
+# The dual-UID sec.* acceptance forks per-UID children over the socket.
+libc = "0.2"
 asc-action-runtime = { workspace = true, features = ["testing"] }
 asc-persistence-sqlite.workspace = true
 tempfile.workspace = true

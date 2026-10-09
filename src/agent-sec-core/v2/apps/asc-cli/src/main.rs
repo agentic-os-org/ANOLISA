@@ -77,9 +77,13 @@ fn main() -> ExitCode {
             println!("{result}");
             ExitCode::from(2)
         }
-        // Scan commands own their usage hints, so those errors render
-        // verbatim instead of behind the generic prefix.
+        // Scan and events commands own their usage hints, so those errors
+        // render verbatim instead of behind the generic prefix.
         Err(RunError::Input(input)) if input.is_usage_hint() => {
+            eprintln!("{input}");
+            ExitCode::FAILURE
+        }
+        Err(RunError::Events(asc_cli::EventsRunError::Input(input))) if input.is_usage_hint() => {
             eprintln!("{input}");
             ExitCode::FAILURE
         }
@@ -154,14 +158,22 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         }
         return Ok(exit_code);
     }
+    // Events owns its transport loop: pagination, count projection, and the
+    // v1 output contract cannot be served by the single-request path.
+    if let Some(events) = cli.events() {
+        return events
+            .run(
+                socket,
+                cli.timeout(),
+                &mut io::stdout().lock(),
+                &mut io::stderr(),
+            )
+            .map_err(RunError::Events);
+    }
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if let Some(events) = cli.events() {
-        events
-            .render(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
-    } else if let Some(format) = cli.pii_format() {
+    if let Some(format) = cli.pii_format() {
         render_pii_scan(
             &response,
             format,
@@ -193,6 +205,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
 enum RunError {
     #[error(transparent)]
     Input(#[from] InputError),
+    #[error(transparent)]
+    Events(#[from] asc_cli::EventsRunError),
     #[error(transparent)]
     Client(#[from] asc_daemon_client::ClientError),
     #[error(transparent)]

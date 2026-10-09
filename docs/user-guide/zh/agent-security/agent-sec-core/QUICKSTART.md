@@ -341,13 +341,17 @@ agent-sec-cli observability report --session-id <id> --format json
 
 ### Security Events（安全事件）
 
-查询本地安全事件存储。
+查询安全事件存储。V2 CLI 经 system daemon 查询，读取范围由内核认证的调用方 UID
+决定：普通用户只能看到自己的事件，root 可以看到全部 owner 的事件，并可用
+`--owner-uid` 收窄（非 root 只能指定自己的 UID）。输出形状与 V1 一致：
+`--output json` 是含 details 的事件数组，`jsonl` 每行一个事件，`--count` 是单个
+数字，`--count-by` 是 JSON object。
 
 ```bash
 # 最近事件（table 格式，默认）
 agent-sec-cli events --last-hours 24
 
-# JSON 输出
+# JSON 输出（纯事件数组，含 details）
 agent-sec-cli events --last-hours 24 --output json
 
 # 按类别过滤
@@ -362,11 +366,14 @@ agent-sec-cli events --count --last-hours 24
 # 按类别分组统计
 agent-sec-cli events --count-by category --last-hours 24
 
-# 分页
+# 分页（--offset 先跳过最新 N 条；大 --limit 会分页取回，不会被页上限拒绝）
 agent-sec-cli events --offset 50 --limit 20
 
-# 安全态势摘要
+# 安全态势摘要（默认最近 24 小时）
 agent-sec-cli events --summary
+
+# 仅 root：读取其它 owner 的事件
+agent-sec-cli events --owner-uid 1000
 ```
 
 ### Agent Capability 视图

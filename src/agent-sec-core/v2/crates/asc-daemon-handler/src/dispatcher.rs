@@ -62,7 +62,7 @@ impl DaemonDispatcher {
     #[must_use]
     pub fn with_security_queries(
         mut self,
-        source: impl crate::query::SecurityEventQueries + 'static,
+        source: impl crate::SecurityEventQueries + 'static,
     ) -> Self {
         self.queries = SecurityQueryHandler::new(source);
         self

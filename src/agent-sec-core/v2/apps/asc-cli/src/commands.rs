@@ -4,6 +4,7 @@ mod binding;
 mod capabilities;
 mod common;
 mod events;
+mod events_summary;
 mod observability;
 mod policy;
 mod scan_code;
@@ -17,7 +18,7 @@ use clap::Subcommand;
 
 use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
-pub use self::events::EventsCommand;
+pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -65,7 +66,10 @@ impl Command {
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
             Self::ScanPii(command) => command.request(),
-            Self::Events(command) => command.request(),
+            // Events resolves its own request pagination (large --limit
+            // values are satisfied through bounded page requests), so the
+            // single-request path refuses it.
+            Self::Events(_) => Err(InputError::EventsBatch),
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),

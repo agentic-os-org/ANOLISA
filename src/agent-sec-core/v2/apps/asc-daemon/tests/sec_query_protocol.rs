@@ -13,10 +13,11 @@ use std::time::Duration;
 use asc_action_runtime::Finalizer;
 use asc_daemon::{BootstrapConfig, scan_application, serve};
 use asc_daemon_core::{PeerCredentials, PrincipalPolicy, PrincipalRole};
-use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder, SqliteEventQuerySource};
+use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_persistence_sqlite::security_events::SqliteEventWriter;
+use asc_persistence_sqlite::security_events::query_source::SqliteEventQuerySource;
 use asc_security_events::SecurityEvent;
 use serde_json::{Map, json};
 use tokio::net::UnixStream;
@@ -73,6 +74,9 @@ impl RunningDaemon {
         let shutdown = asc_daemon_service::ShutdownToken::new();
         let service_shutdown = shutdown.clone();
         let mut config = BootstrapConfig::new(&socket_path);
+        // The production system socket is connectable by every local user;
+        // the dual-UID cases below depend on that.
+        config.socket_mode = 0o666;
         config.service.request_read_timeout = Duration::from_millis(50);
         let task = tokio::spawn(async move {
             serve(
@@ -136,9 +140,24 @@ async fn wait_for_socket(path: &Path) {
     .expect("daemon should accept connections on its socket");
 }
 
-/// Seeds the shared store with two owners' rows.
-fn seed_two_owners(database: &Path) {
-    let own_uid = rustix::process::getuid().as_raw();
+/// Whether the suite runs with root privileges.
+fn is_root() -> bool {
+    rustix::process::geteuid().as_raw() == 0
+}
+
+/// The UID the "own rows" are seeded for: a second real UID under root, the
+/// runner's own UID otherwise.
+fn seeded_own_uid() -> u32 {
+    if is_root() {
+        1000
+    } else {
+        rustix::process::geteuid().as_raw()
+    }
+}
+
+/// Seeds the shared store with two owners' rows: `own_uid`'s pair and one
+/// row of the foreign owner.
+fn seed_two_owners(database: &Path, own_uid: u32) {
     let writer = SqliteEventWriter::new(database).expect("writer");
     for (id, uid, category, verdict) in [
         ("own-1", own_uid, "exec", Some("deny")),
@@ -159,9 +178,18 @@ fn seed_two_owners(database: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_local_peer_reads_only_its_own_events_through_the_socket() {
+    if is_root() {
+        // Root's scope is every owner by design, so the own-only acceptance
+        // needs a non-root peer. The dual-UID E2E in
+        // apps/asc-cli/tests/events_dual_uid.rs drives exactly that through
+        // the production CLI under real UIDs.
+        eprintln!("skipping under root: covered by the dual-UID CLI E2E");
+        return;
+    }
     let directory = tempfile::tempdir().expect("temp dir");
     let database = directory.path().join("security-events.db");
-    seed_two_owners(&database);
+    let own_uid = seeded_own_uid();
+    seed_two_owners(&database, own_uid);
     let daemon = RunningDaemon::start(PrincipalRole::LocalUser, &database).await;
 
     let listed = request_json(
@@ -234,9 +262,14 @@ async fn a_local_peer_reads_only_its_own_events_through_the_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_policy_administrator_is_still_scoped_to_its_own_rows() {
+    if is_root() {
+        eprintln!("skipping under root: covered by the dual-UID CLI E2E");
+        return;
+    }
     let directory = tempfile::tempdir().expect("temp dir");
     let database = directory.path().join("security-events.db");
-    seed_two_owners(&database);
+    let admin_uid = seeded_own_uid();
+    seed_two_owners(&database, admin_uid);
     let daemon = RunningDaemon::start(PrincipalRole::PolicyAdministrator, &database).await;
 
     let listed = request_json(
@@ -253,12 +286,52 @@ async fn a_policy_administrator_is_still_scoped_to_its_own_rows() {
     daemon.stop().await;
 }
 
+/// Root reads every owner and may narrow with the owner filter; this is the
+/// one widening the design grants. Skipped on single-UID runners.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_reads_all_owners_and_narrows_with_the_owner_filter() {
+    if !is_root() {
+        eprintln!("skipping: root acceptance requires root");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let database = directory.path().join("security-events.db");
+    let own_uid = 1000_u32;
+    seed_two_owners(&database, own_uid);
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser, &database).await;
+
+    let listed = request_json(
+        &daemon.socket_path,
+        &json!({"method": "sec.events.list", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["total"],
+        json!(3),
+        "root's default scope is every owner: {listed}"
+    );
+
+    let narrowed = request_json(
+        &daemon.socket_path,
+        &json!({"method": "sec.events.list", "params": {"owner_uid": FOREIGN_UID}}),
+    )
+    .await;
+    assert_eq!(narrowed["result"]["total"], json!(1));
+    assert_eq!(
+        narrowed["result"]["items"][0]["event_id"],
+        json!("foreign-1")
+    );
+
+    daemon.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_query_parameters_are_rejected_over_the_socket() {
     let directory = tempfile::tempdir().expect("temp dir");
     let database = directory.path().join("security-events.db");
-    seed_two_owners(&database);
+    seed_two_owners(&database, seeded_own_uid());
     let daemon = RunningDaemon::start(PrincipalRole::LocalUser, &database).await;
+    let _ = &daemon.socket_path;
 
     for (params, code) in [
         (json!({"limit": 0}), "invalid_argument"),
