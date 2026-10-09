@@ -167,6 +167,13 @@ pub fn validate_and_scan(
         let identity = check_stream_file(&db_path, source.dir_uid).map_err(reject)?;
         newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(identity.mtime));
         sqlite = Some(scan_sqlite(&db_path, identity).map_err(reject)?);
+        // v1 runs its store in WAL mode: a live writer commits to
+        // `security-events.db-wal` while the main database's mtime only
+        // moves at checkpoint, so the sidecar is often the only fresh write
+        // evidence. The link itself is stat'ed, never followed.
+        if let Ok(meta) = fs::symlink_metadata(sidecar_of(&db_path, "-wal")) {
+            newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(meta.mtime()));
+        }
     }
 
     if path_exists(&jsonl_path) {
@@ -469,6 +476,15 @@ fn count_jsonl_records(main: &Path, backups: &[PathBuf]) -> u64 {
 
 fn path_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
+}
+
+// Sibling of a stream file with a raw suffix appended, e.g. `<db>-wal`.
+fn sidecar_of(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("stream"), ToOwned::to_owned);
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 /// The v1 fallback directory name, re-exported for operators.

@@ -65,7 +65,7 @@ pub fn run(cli: &Cli) -> Result<(), MigratorError> {
                 jsonl_recovery: !cli.common.sqlite_only,
                 now_epoch: asc_sqlite_kernel::current_epoch(),
             };
-            let report = import::apply(&scans, &destination, &apply_options)?;
+            let report = import::apply(&scans, &rejected, &destination, &apply_options)?;
             emit(&report, &report::render_apply(&report), cli.common.json);
             let _ = system_owned;
             Ok(())

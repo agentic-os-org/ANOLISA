@@ -185,7 +185,7 @@ fn apply_imports_under_the_verified_owner_and_journals_the_run() {
     let scans = scan_all(&options);
     assert_eq!(scans.len(), 2);
 
-    let report = import::apply(&scans, &destination, &apply_options(Some(30))).unwrap();
+    let report = import::apply(&scans, &[], &destination, &apply_options(Some(30))).unwrap();
     assert_eq!(report.totals.imported, 3);
     assert_eq!(report.totals.uid_conflicts, 1, "a2 records uid 9999");
 
@@ -234,15 +234,26 @@ fn apply_deduplicates_by_event_id_across_sources_and_reruns() {
     );
 
     let options = discovery_for(&destination, &[source_a.clone(), source_b.clone()]);
-    let first = import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let first = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(first.totals.imported, 3, "three distinct ids");
     assert_eq!(
         first.totals.duplicates_cross_source, 1,
         "the second source's 'shared' is a cross-source duplicate"
     );
 
-    let second =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let second = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(second.totals.imported, 0, "the rerun imports nothing");
     assert_eq!(second.totals.duplicates_existing, 3);
 
@@ -299,8 +310,13 @@ fn apply_fills_jsonl_gaps_and_tolerates_malformed_lines() {
     make_old(&jsonl);
 
     let options = discovery_for(&destination, &[source]);
-    let report =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let report = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(report.totals.imported, 2, "db row + jsonl gap");
     assert_eq!(report.totals.malformed_jsonl, 1);
     let ids: Vec<String> = destination_row_uids(&destination)
@@ -327,13 +343,18 @@ fn retention_cuts_at_import_time_and_can_be_disabled() {
     );
 
     let options = discovery_for(&destination, &[source.clone()]);
-    let with_cutoff =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let with_cutoff = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(with_cutoff.totals.imported, 1);
     assert_eq!(with_cutoff.totals.retention_skipped, 1);
 
     let without_cutoff =
-        import::apply(&scan_all(&options), &destination, &apply_options(None)).unwrap();
+        import::apply(&scan_all(&options), &[], &destination, &apply_options(None)).unwrap();
     assert_eq!(without_cutoff.totals.imported, 1, "the old row imports now");
     assert_eq!(without_cutoff.totals.retention_skipped, 0);
     assert_eq!(destination_row_uids(&destination).len(), 2);
@@ -445,7 +466,7 @@ fn admin_owner_mapping_overrides_directory_ownership() {
     assert_eq!(scans[0].owner_uid, 2000);
     assert!(scans[0].admin_mapped);
 
-    let report = import::apply(&scans, &destination, &apply_options(Some(30))).unwrap();
+    let report = import::apply(&scans, &[], &destination, &apply_options(Some(30))).unwrap();
     assert_eq!(
         report.totals.uid_conflicts, 1,
         "recorded 1001 vs mapped 2000"
@@ -464,8 +485,13 @@ fn older_revisions_import_with_null_correlation_columns() {
     seed_source(&source, 1001, &[("rev2", now, 1001)], &[], true);
 
     let options = discovery_for(&destination, &[source]);
-    let report =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let report = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(report.totals.imported, 1);
 
     let conn = Connection::open(&destination).unwrap();
@@ -492,8 +518,13 @@ fn rollback_is_exact_once_per_run_and_reports_unknown_ids() {
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
 
     let options = discovery_for(&destination, &[source]);
-    let report =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let report = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(destination_row_uids(&destination).len(), 1);
 
     import::rollback(&destination, Some(&report.run_id), false).unwrap();
@@ -527,7 +558,13 @@ fn verify_detects_rows_that_vanished_after_the_run() {
     );
 
     let options = discovery_for(&destination, &[source]);
-    import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
 
     let conn = Connection::open(&destination).unwrap();
     conn.execute("DELETE FROM security_events WHERE event_id = 'e1'", [])
@@ -570,8 +607,13 @@ fn apply_creates_and_converges_a_missing_destination() {
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
 
     let options = discovery_for(&destination, &[source]);
-    let report =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let report = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(report.totals.imported, 1);
     assert!(destination.exists());
     let dir_mode = fs::metadata(destination.parent().unwrap())
@@ -633,7 +675,13 @@ fn verify_fails_the_exit_status_when_quick_check_reports_corruption() {
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
 
     let options = discovery_for(&destination, &[source]);
-    import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
 
     // A rogue table on its own page lets quick_check fail while every
     // security_events page stays intact, so only the integrity verdict can
@@ -697,7 +745,13 @@ fn verify_reports_sources_that_grew_in_place_after_the_run() {
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
 
     let options = discovery_for(&destination, &[source.clone()]);
-    import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
 
     // An in-place append keeps dev/ino but grows the file and bumps mtime.
     let source_db = source.join("security-events.db");
@@ -747,7 +801,13 @@ fn bare_verify_checks_the_latest_run_only() {
     );
 
     let options = discovery_for(&destination, &[source.clone()]);
-    let first = import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let first = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(first.totals.imported, 2);
 
     // Rescan after removing e2 and adding e3: the second run's responsibility
@@ -766,8 +826,13 @@ fn bare_verify_checks_the_latest_run_only() {
     drop(conn);
     make_old(&source.join("security-events.db"));
 
-    let second =
-        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    let second = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
     assert_eq!(second.totals.imported, 1, "only e3 is new");
 
     // Break the first run only: e2 is absent from the second run's set.
@@ -793,4 +858,79 @@ fn bare_verify_checks_the_latest_run_only() {
     // The older run is still reachable — and still broken.
     let older = import::verify(&destination, Some(&first.run_id)).unwrap();
     assert!(!older.runs[0].ok, "run 1 lost e2");
+}
+
+#[test]
+fn apply_reports_discovery_rejections_it_skipped() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let homes = home.path().join("homes");
+    let alice = homes.join("alice/.agent-sec-core");
+    let bob = homes.join("bob/.agent-sec-core");
+    seed_source(&alice, 1001, &[("a1", now, 1001)], &[], false);
+    seed_source(&bob, 1002, &[("b1", now, 1002)], &[], false);
+    // bob's stream is world-writable: discovery still finds the directory,
+    // validation rejects it, and neither path is in the explicit list.
+    let db = bob.join("security-events.db");
+    let mut mode = fs::metadata(&db).unwrap().permissions();
+    mode.set_mode(0o666);
+    fs::set_permissions(&db, mode).unwrap();
+
+    let options = DiscoveryOptions {
+        explicit: Vec::new(),
+        owner_map: OwnerMap::default(),
+        homes_root: Some(homes.clone()),
+        tmp_root: None,
+        destination_dir: destination.parent().unwrap().to_path_buf(),
+    };
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    assert_eq!(scans.len(), 1, "alice scans");
+    assert_eq!(rejected.len(), 1, "bob is rejected: {rejected:?}");
+
+    let report = import::apply(&scans, &rejected, &destination, &apply_options(Some(30))).unwrap();
+    assert_eq!(report.totals.imported, 1);
+    assert_eq!(report.rejected.len(), 1, "the skipped source is reported");
+    assert!(report.rejected[0].0.ends_with("bob/.agent-sec-core"));
+    assert!(
+        report.rejected[0].1.contains("world-writable"),
+        "{}",
+        report.rejected[0].1
+    );
+    let rendered = asc_state_migrator::report::render_apply(&report);
+    assert!(rendered.contains("rejected"), "{rendered}");
+    assert!(rendered.contains("world-writable"), "{rendered}");
+}
+
+#[test]
+fn a_fresh_wal_sidecar_marks_the_source_live() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
+    // v1 commits land in `-wal`: the main database stays untouched while
+    // the sidecar carries the writer's fresh timestamp.
+    fs::write(
+        source.join("security-events.db-wal"),
+        b"fresh writer evidence",
+    )
+    .unwrap();
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    assert!(scans.is_empty(), "the live source must not scan");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert!(
+        rejected[0].reason.contains("stop v1 writers"),
+        "grace rejection: {}",
+        rejected[0].reason
+    );
+
+    // --force still reaches the data.
+    let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch());
+    assert_eq!(scans.len(), 1);
 }

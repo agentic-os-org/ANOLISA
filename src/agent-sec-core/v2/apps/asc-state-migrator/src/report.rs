@@ -63,6 +63,10 @@ pub struct ApplyReport {
     pub sources: Vec<RunSource>,
     /// Totals across sources.
     pub totals: RunTotals,
+    /// Discovery-found sources that were skipped by validation. Explicit
+    /// `--source` rejections abort the run instead; these are the ones an
+    /// operator must still see after a partial migration.
+    pub rejected: Vec<(String, String)>,
 }
 
 /// What `verify` checked.
@@ -216,6 +220,9 @@ pub fn render_apply(report: &ApplyReport) -> String {
         totals.malformed_jsonl
     );
     let _ = writeln!(out, "journal: {}", report.journal);
+    for (dir, reason) in &report.rejected {
+        let _ = writeln!(out, "rejected {dir}: {reason}");
+    }
     out
 }
 
