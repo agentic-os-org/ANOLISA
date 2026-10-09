@@ -127,7 +127,11 @@ run_rpm_packaging() {
     echo "shellcheck is required by the rpm packaging gate" >&2
     return 1
   fi
-  shellcheck tests/test-package-rpm.sh
+  shellcheck \
+    packaging/login/cosh-login \
+    tests/test-login-wrapper.sh \
+    tests/test-package-rpm.sh
+  bash tests/test-login-wrapper.sh
   bash tests/test-package-rpm.sh
 }
 

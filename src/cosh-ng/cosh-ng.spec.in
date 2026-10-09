@@ -58,6 +58,12 @@ install -m 0755 target/release/cosh-cli %{buildroot}%{_bindir}/cosh-cli
 # TUI-vs-passthrough decision lives in cosh-shell's invocation classifier.
 ln -s %{_libexecdir_cosh}/cosh-shell %{buildroot}%{_bindir}/cosh
 
+# Install the login-shell wrapper. AgenticOS images point user login shells
+# at %{_bindir}/cosh-login; it degrades to /bin/bash when the cosh runtime
+# is damaged (content-level ELF check), so a broken cosh-shell that keeps
+# its exec bit can never lock users out of the machine.
+install -m 0755 packaging/login/cosh-login %{buildroot}%{_bindir}/cosh-login
+
 # Install cosh-switch script
 cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
 #!/bin/bash
@@ -95,6 +101,7 @@ install -m 0644 skills/manage-task-checkpoints/SKILL.md \
 %doc %{_docdir}/%{name}/README.md
 %{_bindir}/cosh-cli
 %{_bindir}/cosh
+%{_bindir}/cosh-login
 %{_bindir}/cosh-switch
 %dir %{_libexecdir_cosh}
 %{_libexecdir_cosh}/cosh-core
@@ -114,12 +121,12 @@ if [ "$1" -eq 0 ]; then
     echo "error: cannot uninstall cosh-ng: getent returned no passwd entries." >&2
     exit 1
   fi
-  if ! users=$(printf '%s\n' "$passwd_entries" | awk -F: '$7 == "%{_bindir}/cosh" { print $1 }'); then
+  if ! users=$(printf '%s\n' "$passwd_entries" | awk -F: '$7 == "%{_bindir}/cosh" || $7 == "%{_bindir}/cosh-login" { print $1 }'); then
     echo "error: cannot uninstall cosh-ng: failed to inspect passwd login shells." >&2
     exit 1
   fi
   if [ -n "$users" ] && ! %{cosh_replacement_ready}; then
-    echo "error: cannot uninstall cosh-ng while users still use %{_bindir}/cosh as their login shell:" >&2
+    echo "error: cannot uninstall cosh-ng while users still use %{_bindir}/cosh or %{_bindir}/cosh-login as their login shell:" >&2
     printf '%s\n' "$users" >&2
     exit 1
   fi
@@ -133,48 +140,59 @@ fi
 
 %post -p <lua>
 local nl = '\n'
-local cosh = '%{_bindir}/cosh'
+local entries = { '%{_bindir}/cosh', '%{_bindir}/cosh-login' }
 local f, err = io.open('/etc/shells', 'a+')
 if f then
   f:seek('set')
   local shells = f:read('*all') or ''
   local normalized = nl..shells
   if shells ~= '' and shells:sub(-1) ~= nl then normalized = normalized..nl end
-  if not normalized:find(nl..cosh..nl, 1, true) then
-    local separator = (shells ~= '' and shells:sub(-1) ~= nl) and nl or ''
-    f:write(separator, cosh, nl)
+  local separator = (shells ~= '' and shells:sub(-1) ~= nl) and nl or ''
+  for _, entry in ipairs(entries) do
+    if not normalized:find(nl..entry..nl, 1, true) then
+      f:write(separator, entry, nl)
+      normalized = normalized..entry..nl
+      separator = ''
+    end
   end
   f:close()
 else
-  io.stderr:write('warning: cosh-ng: could not register '..cosh..' in /etc/shells: '..tostring(err)..nl)
+  io.stderr:write('warning: cosh-ng: could not register cosh login shells in /etc/shells: '..tostring(err)..nl)
 end
 
 %postun
-# On final erase (not upgrade), drop cosh's own /etc/shells line -- but only
-# when /usr/bin/cosh is gone. If a replacement provider (e.g. copilot-shell)
-# still owns an executable there, its registration stays valid, so the line is
-# kept. Testing the file directly is fail-safe and avoids running rpm inside a
-# scriptlet: a nested query can fail under the transaction lock and would then
-# wrongly drop a still-valid line. A temp copy + atomic rename keeps a crash
-# from truncating the shared table, and cp --attributes-only preserves the
-# original mode/ownership/xattrs. If /etc/shells is an admin-managed symlink,
-# rewrite its target so the link relationship survives. The signal handler must
-# exit (not resume) -- otherwise the EXIT cleanup would delete the temp
-# mid-rewrite and the following cp/mv would clobber the file with an empty copy.
-if [ "$1" -eq 0 ] && [ ! -x "%{_bindir}/cosh" ]; then
+# On final erase (not upgrade), drop cosh's own /etc/shells lines -- but each
+# only when its /usr/bin entry is gone. If a replacement provider (e.g.
+# copilot-shell) still owns an executable there, its registration stays
+# valid, so the line is kept. Testing the file directly is fail-safe and
+# avoids running rpm inside a scriptlet: a nested query can fail under the
+# transaction lock and would then wrongly drop a still-valid line. A temp
+# copy + atomic rename keeps a crash from truncating the shared table, and
+# cp --attributes-only preserves the original mode/ownership/xattrs. If
+# /etc/shells is an admin-managed symlink, rewrite its target so the link
+# relationship survives. The signal handler must exit (not resume) --
+# otherwise the EXIT cleanup would delete the temp mid-rewrite and the
+# following cp/mv would clobber the file with an empty copy.
+if [ "$1" -eq 0 ] && { [ ! -x "%{_bindir}/cosh" ] || [ ! -x "%{_bindir}/cosh-login" ]; }; then
   shells="%{_sysconfdir}/shells"
   if [ -f "$shells" ]; then
     target="$shells"
     if [ -L "$shells" ]; then
       target="$(readlink -f "$shells")" || target="$shells"
     fi
+    drop_cosh=0
+    [ -x "%{_bindir}/cosh" ] || drop_cosh=1
+    drop_login=0
+    [ -x "%{_bindir}/cosh-login" ] || drop_login=1
     if ! tmp="$(mktemp "${target}.cosh-ng.XXXXXX")"; then
       echo "error: cosh-ng: cannot update $shells: failed to create temporary file." >&2
       exit 1
     fi
     trap 'rm -f "$tmp"' EXIT
     trap 'exit 1' INT TERM HUP
-    if ! awk -v cosh="%{_bindir}/cosh" '$0 != cosh' "$target" > "$tmp"; then
+    if ! awk -v cosh="%{_bindir}/cosh" -v login="%{_bindir}/cosh-login" \
+        -v drop_cosh="$drop_cosh" -v drop_login="$drop_login" \
+        '!(($0 == cosh && drop_cosh) || ($0 == login && drop_login))' "$target" > "$tmp"; then
       echo "error: cosh-ng: cannot update $shells: failed to filter shell registration." >&2
       exit 1
     fi

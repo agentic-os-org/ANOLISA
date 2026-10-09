@@ -24,6 +24,16 @@ grep -Fq \
 grep -Fxq \
     '%{_datadir}/anolisa/skills/manage-task-checkpoints/' \
     "$SPEC"
+# cosh-login: the login wrapper must be installed, owned by the RPM, and
+# covered by the /etc/shells lifecycle and the %preun erase guard.
+grep -Fxq \
+    'install -m 0755 packaging/login/cosh-login %{buildroot}%{_bindir}/cosh-login' \
+    "$SPEC"
+grep -Fxq '%{_bindir}/cosh-login' "$SPEC"
+grep -Fq "'%{_bindir}/cosh-login'" "$SPEC"
+# shellcheck disable=SC2016  # the awk program text is matched literally
+grep -Fq '$7 == "%{_bindir}/cosh-login"' "$SPEC"
+grep -Fq 'login="%{_bindir}/cosh-login"' "$SPEC"
 if grep -Fxq '%systemd_preun cosh-gateway-acp@.service' "$SPEC"; then
     echo "ERROR: removed legacy ACP unit still has a lifecycle macro" >&2
     exit 1
@@ -66,6 +76,7 @@ fi
 # --- %post registration matrix through the real RPM Lua interpreter ---
 SHELLS="$TMP/shells"
 COSH="$TMP/cosh"
+LOGIN="$COSH-login"
 
 post_script() {
     awk '/^%post -p <lua>$/{f=1;next} /^%/{f=0} f' "$SPEC" |
@@ -140,23 +151,29 @@ if command -v rpm >/dev/null 2>&1 && rpm --eval '%{lua:print("ok")}' >/dev/null 
             ;;
     esac
 
-    run_post_case "missing file" "<missing>" "$COSH"$'\n'
-    run_post_case "empty file" "" "$COSH"$'\n'
+    run_post_case "missing file" "<missing>" "$COSH"$'\n'"$LOGIN"$'\n'
+    run_post_case "empty file" "" "$COSH"$'\n'"$LOGIN"$'\n'
     run_post_case "missing trailing newline" \
         $'/bin/sh\n/bin/bash' \
-        $'/bin/sh\n/bin/bash\n'"$COSH"$'\n'
+        $'/bin/sh\n/bin/bash\n'"$COSH"$'\n'"$LOGIN"$'\n'
     run_post_case "existing trailing newline" \
         $'/usr/bin/bash\n' \
-        $'/usr/bin/bash\n'"$COSH"$'\n'
+        $'/usr/bin/bash\n'"$COSH"$'\n'"$LOGIN"$'\n'
     run_post_case "existing exact registration" \
         $'/usr/bin/bash\n'"$COSH"$'\n/usr/bin/zsh\n' \
-        $'/usr/bin/bash\n'"$COSH"$'\n/usr/bin/zsh\n'
+        $'/usr/bin/bash\n'"$COSH"$'\n/usr/bin/zsh\n'"$LOGIN"$'\n'
     run_post_case "duplicate registrations preserved" \
         $'/usr/bin/bash\n'"$COSH"$'\n'"$COSH"$'\n' \
-        $'/usr/bin/bash\n'"$COSH"$'\n'"$COSH"$'\n'
+        $'/usr/bin/bash\n'"$COSH"$'\n'"$COSH"$'\n'"$LOGIN"$'\n'
     run_post_case "substring is not a registration" \
         $'/usr/bin/bash\n'"$COSH"$'-backup\n' \
-        $'/usr/bin/bash\n'"$COSH"$'-backup\n'"$COSH"$'\n'
+        $'/usr/bin/bash\n'"$COSH"$'-backup\n'"$COSH"$'\n'"$LOGIN"$'\n'
+    run_post_case "existing cosh-login registration" \
+        "$LOGIN"$'\n' \
+        "$LOGIN"$'\n'"$COSH"$'\n'
+    run_post_case "both registrations present" \
+        "$COSH"$'\n'"$LOGIN"$'\n' \
+        "$COSH"$'\n'"$LOGIN"$'\n'
 
     # registration stays fail-open when the shells file cannot be opened,
     # but the failure must be observable (not silent).
@@ -245,6 +262,12 @@ grep -Fq coshuser "$TMP/preun.err"
 grep -Fq "$GUARD_COSH" "$TMP/preun.err"
 test ! -s "$SYSTEMCTL_LOG"
 
+write_stub getent "printf '%s\n' 'loginuser:x:1001:1001::/home/loginuser:$GUARD_COSH-login'"
+expect_preun "erase with cosh-login login-shell user" 0 1
+grep -Fq loginuser "$TMP/preun.err"
+test ! -s "$SYSTEMCTL_LOG"
+write_stub getent "printf '%s\n' 'coshuser:x:1000:1000::/home/coshuser:$GUARD_COSH'"
+
 expect_preun "upgrade never blocks" 1 0
 test ! -s "$SYSTEMCTL_LOG"
 
@@ -331,6 +354,20 @@ if cp --version 2>/dev/null | grep -q 'GNU coreutils'; then
         echo "ERROR: %postun did not preserve /etc/shells mode" >&2
         exit 1
     fi
+
+    # final erase drops the cosh-login registration too
+    printf '%s\n' /bin/sh "$STUB/cosh-login" /usr/bin/zsh > "$POSTUN_SHELLS"
+    run_postun 0
+    printf '%s\n' /bin/sh /usr/bin/zsh > "$TMP/postun.expected"
+    expect_postun_shells "erase drops cosh-login line"
+
+    # a replacement provider keeps the cosh line, but cosh-login still goes
+    write_stub cosh ":"
+    printf '%s\n' /bin/sh "$STUB/cosh" "$STUB/cosh-login" > "$POSTUN_SHELLS"
+    run_postun 0
+    printf '%s\n' /bin/sh "$STUB/cosh" > "$TMP/postun.expected"
+    expect_postun_shells "replacement keeps cosh line while cosh-login is dropped"
+    rm -f "$STUB/cosh"
 
     # upgrade ($1=1): never touch the shared table
     printf '%s\n' /bin/sh "$STUB/cosh" > "$POSTUN_SHELLS"
