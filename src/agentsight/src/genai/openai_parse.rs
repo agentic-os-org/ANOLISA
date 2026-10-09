@@ -586,6 +586,10 @@ impl GenAIBuilder {
         let mut finish_reason: Option<String> = None;
         // tool_call delta merging: index -> (id, name, arguments_accumulated)
         let mut tc_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // Legacy `function_call` delta merging: the pre-`tool_calls` spelling
+        // streams its single call as fragments (the name once, then bare
+        // argument fragments), so like tc_map it accumulates (name, arguments).
+        let mut legacy_fc: Option<(String, String)> = None;
 
         log::debug!("[GenAI] Merging SSE chunks ({} chunks)", chunks.len());
 
@@ -682,6 +686,26 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                // Legacy function_call deltas — the pre-`tool_calls` spelling
+                // of a tool request, streamed as `delta.function_call`
+                // fragments: the name arrives once (later fragments repeat it
+                // empty or omit it), the arguments as string fragments. The
+                // message converters read the whole-message form; without
+                // this arm the enrich and drain paths dropped the streamed
+                // call entirely. A snapshot's `message.function_call` is
+                // whole, not a fragment, and is left to the typed parsers —
+                // the same rule the tool_calls merge above follows.
+                if let (false, Some(fc)) = (cumulative, delta.get("function_call")) {
+                    let entry = legacy_fc.get_or_insert_with(|| (String::new(), String::new()));
+                    if let Some(name) = fc.get("name").and_then(|v| v.as_str()) {
+                        if !name.is_empty() {
+                            entry.0 = name.to_string();
+                        }
+                    }
+                    if let Some(args) = fc.get("arguments").and_then(|v| v.as_str()) {
+                        entry.1.push_str(args);
+                    }
+                }
                 // Finish reason — take the last non-null value
                 if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
                     finish_reason = Some(fr.to_string());
@@ -726,6 +750,23 @@ impl GenAIBuilder {
                         arguments: parsed_args,
                     });
                 }
+            }
+        }
+        // Merged legacy function_call (pre-tool_calls spelling): the same
+        // ToolCall shape the message converters produce for the whole-message
+        // form — no id on the wire, arguments a JSON string when complete.
+        if let Some((name, arguments)) = legacy_fc {
+            if !name.is_empty() {
+                let parsed_args: Option<serde_json::Value> = if arguments.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&arguments).ok()
+                };
+                parts.push(MessagePart::ToolCall {
+                    id: None,
+                    name,
+                    arguments: parsed_args,
+                });
             }
         }
 
@@ -1746,6 +1787,37 @@ mod tests {
             matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that.")
         );
         assert_eq!(finish, Some("stop".to_string()));
+    }
+
+    /// Legacy models streamed their single tool request as
+    /// `delta.function_call` fragments — the name once, then bare argument
+    /// fragments — the pre-`tool_calls` spelling the message converters
+    /// already read. The merger only read `delta.tool_calls`, so a streamed
+    /// legacy call left no ToolCall part on the enrich and drain paths.
+    #[test]
+    fn legacy_streamed_function_call_becomes_a_tool_call_part() {
+        let body = r#"[
+            {"choices":[{"delta":{"role":"assistant","function_call":{"name":"get_weather","arguments":""}}}]},
+            {"choices":[{"delta":{"function_call":{"arguments":"{\"city\":"}}}]},
+            {"choices":[{"delta":{"function_call":{"arguments":"\"Beijing\"}"}}}]},
+            {"choices":[{"delta":{},"finish_reason":"function_call"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a streamed legacy call must still yield output");
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id, &None);
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments, &Some(serde_json::json!({"city": "Beijing"})));
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert_eq!(finish.as_deref(), Some("function_call"));
     }
 
     /// Anthropic SSE bodies carry no `choices` array, so the merger must
