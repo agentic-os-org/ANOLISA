@@ -393,18 +393,16 @@ pub fn validate_and_scan(
         jsonl_streams = Some(streams);
     }
 
-    if !force {
-        if let Some(mtime) = newest_mtime {
-            // File mtimes in epoch seconds fit f64 exactly for any date this
-            // filesystem can represent, so the cast is lossless in practice.
-            #[allow(clippy::cast_precision_loss)]
-            let age = (now_epoch - mtime as f64).max(0.0);
-            if age < f64::from(writer_grace) {
-                return Err(reject(format!(
-                    "stream modified {age:.0}s ago (grace {writer_grace}s); \
-                     stop v1 writers or pass --force"
-                )));
-            }
+    if !force && let Some(mtime) = newest_mtime {
+        // File mtimes in epoch seconds fit f64 exactly for any date this
+        // filesystem can represent, so the cast is lossless in practice.
+        #[allow(clippy::cast_precision_loss)]
+        let age = (now_epoch - mtime as f64).max(0.0);
+        if age < f64::from(writer_grace) {
+            return Err(reject(format!(
+                "stream modified {age:.0}s ago (grace {writer_grace}s); \
+                 stop v1 writers or pass --force"
+            )));
         }
     }
 

@@ -83,10 +83,10 @@ impl OwnerMap {
     /// and by literal path second.
     #[must_use]
     pub fn owner_of(&self, dir: &Path) -> Option<u32> {
-        if let Ok(canonical) = fs::canonicalize(dir) {
-            if let Some(uid) = self.entries.get(&canonical) {
-                return Some(*uid);
-            }
+        if let Ok(canonical) = fs::canonicalize(dir)
+            && let Some(uid) = self.entries.get(&canonical)
+        {
+            return Some(*uid);
         }
         self.entries.get(dir).copied()
     }
@@ -208,14 +208,13 @@ fn classify(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        if let Some(suffix) = name.strip_prefix("agent-sec-") {
-            if let Ok(named_uid) = suffix.parse::<u32>() {
-                if named_uid != dir_uid {
-                    return Err(format!(
-                        "tmp directory names uid {named_uid} but is owned by uid {dir_uid}"
-                    ));
-                }
-            }
+        if let Some(suffix) = name.strip_prefix("agent-sec-")
+            && let Ok(named_uid) = suffix.parse::<u32>()
+            && named_uid != dir_uid
+        {
+            return Err(format!(
+                "tmp directory names uid {named_uid} but is owned by uid {dir_uid}"
+            ));
         }
     }
 
