@@ -6,9 +6,17 @@
 //! to recently, and a schema revision the migrator understands. Reading is
 //! always `SQLite`-first with `JSONL` as explicit gap recovery, because the
 //! two streams were an independent fail-open dual write in v1 (#6605).
+//!
+//! Validation and reading are bound to one object per file: every stream
+//! file is opened once with `O_NOFOLLOW` and checked through the descriptor's
+//! own `fstat`, `JSONL` recovery reads the held descriptor, and the `SQLite`
+//! pass reads a private snapshot copied through it. `SQLite` resolves
+//! pathnames itself at open time, so a path-based reopen would follow
+//! whatever the (user-controlled) source directory holds by then; the
+//! snapshot is the exact object that passed validation.
 
-use std::fs;
-use std::io::{BufRead, BufReader};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek as _, SeekFrom};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -51,7 +59,7 @@ pub struct FileIdentity {
 }
 
 /// One validated source, with what the plan needs to know about it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SourceScan {
     /// The source directory.
     pub dir: PathBuf,
@@ -73,20 +81,29 @@ pub struct SourceScan {
 }
 
 /// The `SQLite` side of a source.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SqliteScan {
-    /// Database path.
+    /// Database path, as discovered.
     pub path: PathBuf,
-    /// File identity for the journal.
+    /// Identity of the validated file, captured through its descriptor.
     pub identity: FileIdentity,
     /// Schema revision the source declares.
     pub user_version: u32,
     /// Rows in `security_events` at scan time.
     pub rows: u64,
+    /// Private snapshot of the validated database the import reads.
+    snapshot: SqliteSnapshot,
+}
+
+impl SqliteScan {
+    /// The snapshot database the import passes must read.
+    pub(crate) fn snapshot_db(&self) -> &Path {
+        &self.snapshot.db
+    }
 }
 
 /// The `JSONL` side of a source.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct JsonlScan {
     /// Main log path.
     pub path: PathBuf,
@@ -96,6 +113,163 @@ pub struct JsonlScan {
     pub identity: FileIdentity,
     /// Non-empty lines in the main log and its backups at scan time.
     pub records: u64,
+    /// The validated descriptors of the main log and its backups, in read
+    /// order. Recovery reads these, never a fresh pathname open.
+    streams: Vec<ValidatedFile>,
+}
+
+/// A stream file opened with `O_NOFOLLOW` and checked through `fstat`.
+#[derive(Debug)]
+struct ValidatedFile {
+    /// The path as discovered, for messages and ordering.
+    path: PathBuf,
+    /// The held descriptor; reading it is bound to the validated object.
+    file: File,
+    /// Identity captured from the descriptor's own `fstat`.
+    identity: FileIdentity,
+}
+
+impl ValidatedFile {
+    /// Opens one stream file without following symlinks and applies the
+    /// per-file trust checks to the descriptor itself.
+    fn open(path: &Path, dir_uid: u32) -> Result<Self, String> {
+        let fd = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|err| open_error(path, err))?;
+        let file = File::from(fd);
+        let meta = file
+            .metadata()
+            .map_err(|err| format!("{}: cannot stat: {err}", path.display()))?;
+        check_stream_metadata(path, &meta, dir_uid)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            identity: FileIdentity {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                size: meta.size(),
+                mtime: meta.mtime(),
+            },
+        })
+    }
+}
+
+/// Maps an `O_NOFOLLOW` open failure to the operator-facing rejection.
+fn open_error(path: &Path, err: rustix::io::Errno) -> String {
+    if err == rustix::io::Errno::LOOP {
+        format!("{}: is a symlink — refusing to use", path.display())
+    } else {
+        format!("{}: cannot open: {err}", path.display())
+    }
+}
+
+/// The per-file trust contract, evaluated on the open descriptor's metadata
+/// so the checks describe the object the migrator will actually read.
+fn check_stream_metadata(path: &Path, meta: &fs::Metadata, dir_uid: u32) -> Result<(), String> {
+    if !meta.is_file() {
+        return Err(format!("{}: is not a regular file", path.display()));
+    }
+    if meta.nlink() > 1 {
+        return Err(format!(
+            "{}: has {} hard links — refusing to use",
+            path.display(),
+            meta.nlink()
+        ));
+    }
+    if meta.permissions().mode() & 0o002 != 0 {
+        return Err(format!(
+            "{}: is world-writable (mode {:o})",
+            path.display(),
+            meta.permissions().mode() & 0o777
+        ));
+    }
+    if meta.uid() != dir_uid {
+        return Err(format!(
+            "{}: owned by uid {} but the directory is owned by uid {dir_uid}",
+            path.display(),
+            meta.uid()
+        ));
+    }
+    Ok(())
+}
+
+/// Copies the validated database (and a frame-bearing `WAL` sidecar) into a
+/// private directory through the held descriptor.
+///
+/// The sidecar is held to the same trust contract: its frames become import
+/// input, so it is opened with `O_NOFOLLOW` and checked before it is read.
+/// An empty sidecar carries no frames and is treated as absent.
+fn snapshot_sqlite(stream: &ValidatedFile, dir_uid: u32) -> Result<SqliteSnapshot, String> {
+    let path = &stream.path;
+    let dir =
+        tempfile::tempdir().map_err(|err| format!("{}: cannot snapshot: {err}", path.display()))?;
+    let db = dir.path().join("security-events.db");
+    copy_through(&stream.file, &db, path)?;
+    if let Some(wal_path) = wal_sidecar_of(path)? {
+        let wal = ValidatedFile::open(&wal_path, dir_uid)?;
+        copy_through(&wal.file, &dir.path().join("security-events.db-wal"), path)?;
+    }
+    Ok(SqliteSnapshot { _dir: dir, db })
+}
+
+/// The `WAL` sidecar of a source database, when it exists and carries frames.
+fn wal_sidecar_of(path: &Path) -> Result<Option<PathBuf>, String> {
+    let wal = sidecar_of(path, "-wal");
+    let Ok(meta) = fs::symlink_metadata(&wal) else {
+        return Ok(None);
+    };
+    if meta.file_type().is_symlink() {
+        return Err(format!("{}: is a symlink — refusing to use", wal.display()));
+    }
+    if !meta.is_file() {
+        return Err(format!("{}: is not a regular file", wal.display()));
+    }
+    if meta.len() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(wal))
+}
+
+/// Copies a descriptor's bytes into a fresh private file.
+fn copy_through(source: &File, destination: &Path, display: &Path) -> Result<(), String> {
+    // The duplicate shares the original's offset; rewinding it leaves the
+    // validated descriptor's position untouched for any other reader.
+    let mut reader = source
+        .try_clone()
+        .map_err(|err| format!("{}: cannot snapshot: {err}", display.display()))?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| format!("{}: cannot snapshot: {err}", display.display()))?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .and_then(|file| {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            Ok(file)
+        })
+        .map_err(|err| format!("{}: cannot snapshot: {err}", display.display()))?;
+    std::io::copy(&mut reader, &mut writer)
+        .map_err(|err| format!("{}: cannot snapshot: {err}", display.display()))?;
+    Ok(())
+}
+
+/// A private, read-only snapshot of one validated source database.
+///
+/// `SQLite` resolves (and opens) the pathname it is handed, so the import
+/// cannot read the held descriptor directly. The snapshot is copied through
+/// that descriptor into a private directory instead: it is exactly the bytes
+/// that passed validation, and the copy's lifetime is the scan's.
+#[derive(Debug)]
+struct SqliteSnapshot {
+    /// Private directory holding the copy; removed when dropped. The field
+    /// is only held for that lifetime, never read.
+    _dir: tempfile::TempDir,
+    /// The copied main database.
+    db: PathBuf,
 }
 
 /// One source row, exactly as the source stored it.
@@ -138,6 +312,13 @@ pub struct SourceRow {
 
 /// Validates and scans one discovered source.
 ///
+/// Every stream file is opened once with `O_NOFOLLOW` and checked through
+/// the descriptor before anything is read; the `SQLite` stream is then
+/// snapshotted through that same descriptor (see [`SqliteSnapshot`]), and
+/// the `JSONL` descriptors are held for the recovery pass. What the import
+/// reads is therefore the object that passed these checks, whatever the
+/// source directory holds afterwards.
+///
 /// # Errors
 ///
 /// Returns a [`RejectedSource`] carrying the first failed check. The
@@ -160,13 +341,13 @@ pub fn validate_and_scan(
         .map_err(|err| reject(format!("stream name: {err}")))?;
 
     let mut newest_mtime: Option<i64> = None;
-    let mut sqlite = None;
-    let mut jsonl = None;
+    let mut sqlite: Option<SqliteScan> = None;
+    let mut jsonl: Option<JsonlScan> = None;
+    let mut db_stream: Option<ValidatedFile> = None;
 
     if path_exists(&db_path) {
-        let identity = check_stream_file(&db_path, source.dir_uid).map_err(reject)?;
-        newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(identity.mtime));
-        sqlite = Some(scan_sqlite(&db_path, identity).map_err(reject)?);
+        let stream = ValidatedFile::open(&db_path, source.dir_uid).map_err(reject)?;
+        newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(stream.identity.mtime));
         // v1 runs its store in WAL mode: a live writer commits to
         // `security-events.db-wal` while the main database's mtime only
         // moves at checkpoint, so the sidecar is often the only fresh write
@@ -174,23 +355,20 @@ pub fn validate_and_scan(
         if let Ok(meta) = fs::symlink_metadata(sidecar_of(&db_path, "-wal")) {
             newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(meta.mtime()));
         }
+        db_stream = Some(stream);
     }
 
+    let mut jsonl_streams: Option<Vec<ValidatedFile>> = None;
     if path_exists(&jsonl_path) {
-        let identity = check_stream_file(&jsonl_path, source.dir_uid).map_err(reject)?;
-        newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(identity.mtime));
-        let backups = rotated_backups(&jsonl_path);
-        for backup in &backups {
-            let identity = check_stream_file(backup, source.dir_uid).map_err(reject)?;
-            newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(identity.mtime));
+        let main = ValidatedFile::open(&jsonl_path, source.dir_uid).map_err(reject)?;
+        newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(main.identity.mtime));
+        let mut streams = vec![main];
+        for backup in rotated_backups(&jsonl_path) {
+            let stream = ValidatedFile::open(&backup, source.dir_uid).map_err(reject)?;
+            newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(stream.identity.mtime));
+            streams.push(stream);
         }
-        let records = count_jsonl_records(&jsonl_path, &backups);
-        jsonl = Some(JsonlScan {
-            path: jsonl_path,
-            backups,
-            identity,
-            records,
-        });
+        jsonl_streams = Some(streams);
     }
 
     if !force {
@@ -206,6 +384,35 @@ pub fn validate_and_scan(
                 )));
             }
         }
+    }
+
+    if let Some(stream) = db_stream {
+        let identity = stream.identity.clone();
+        let path = stream.path.clone();
+        let snapshot = snapshot_sqlite(&stream, source.dir_uid).map_err(reject)?;
+        let (user_version, rows) = scan_sqlite(&snapshot.db, &path).map_err(reject)?;
+        sqlite = Some(SqliteScan {
+            path,
+            identity,
+            user_version,
+            rows,
+            snapshot,
+        });
+    }
+
+    if let Some(mut streams) = jsonl_streams {
+        let records = count_jsonl_records(&mut streams);
+        let main = &streams[0];
+        jsonl = Some(JsonlScan {
+            path: main.path.clone(),
+            backups: streams[1..]
+                .iter()
+                .map(|stream| stream.path.clone())
+                .collect(),
+            identity: main.identity.clone(),
+            records,
+            streams,
+        });
     }
 
     let observability_db = stream_db_path_in(&source.dir, "observability")
@@ -226,58 +433,17 @@ pub fn validate_and_scan(
     })
 }
 
-/// Applies the per-file trust checks and captures identity.
-fn check_stream_file(path: &Path, dir_uid: u32) -> Result<FileIdentity, String> {
-    let meta = fs::symlink_metadata(path)
-        .map_err(|err| format!("{}: cannot stat: {err}", path.display()))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "{}: is a symlink — refusing to use",
-            path.display()
-        ));
-    }
-    if !meta.is_file() {
-        return Err(format!("{}: is not a regular file", path.display()));
-    }
-    if meta.nlink() > 1 {
-        return Err(format!(
-            "{}: has {} hard links — refusing to use",
-            path.display(),
-            meta.nlink()
-        ));
-    }
-    if meta.permissions().mode() & 0o002 != 0 {
-        return Err(format!(
-            "{}: is world-writable (mode {:o})",
-            path.display(),
-            meta.permissions().mode() & 0o777
-        ));
-    }
-    if meta.uid() != dir_uid {
-        return Err(format!(
-            "{}: owned by uid {} but the directory is owned by uid {dir_uid}",
-            path.display(),
-            meta.uid()
-        ));
-    }
-    Ok(FileIdentity {
-        dev: meta.dev(),
-        ino: meta.ino(),
-        size: meta.size(),
-        mtime: meta.mtime(),
-    })
-}
-
-fn scan_sqlite(path: &Path, identity: FileIdentity) -> Result<SqliteScan, String> {
-    let wrap = |err: rusqlite::Error| format!("{}: {err}", path.display());
-    let connection = open_read_only(path).map_err(wrap)?;
+/// Schema and row checks over the snapshot, reported against the source path.
+fn scan_sqlite(copy: &Path, display: &Path) -> Result<(u32, u64), String> {
+    let wrap = |err: rusqlite::Error| format!("{}: {err}", display.display());
+    let connection = open_read_only(copy).map_err(wrap)?;
     let user_version: u32 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(wrap)?;
     if user_version > SECURITY_EVENTS_SQLITE_SCHEMA_VERSION {
         return Err(format!(
             "{}: schema revision {user_version} is newer than this migrator understands ({})",
-            path.display(),
+            display.display(),
             SECURITY_EVENTS_SQLITE_SCHEMA_VERSION
         ));
     }
@@ -291,7 +457,7 @@ fn scan_sqlite(path: &Path, identity: FileIdentity) -> Result<SqliteScan, String
     if !has_table {
         return Err(format!(
             "{}: no security_events table — not a v1 security-event store",
-            path.display()
+            display.display()
         ));
     }
     let columns = table_columns(&connection).map_err(wrap)?;
@@ -299,7 +465,7 @@ fn scan_sqlite(path: &Path, identity: FileIdentity) -> Result<SqliteScan, String
         if !columns.contains(&(*column).to_owned()) {
             return Err(format!(
                 "{}: security_events is missing required column '{column}'",
-                path.display()
+                display.display()
             ));
         }
     }
@@ -307,12 +473,7 @@ fn scan_sqlite(path: &Path, identity: FileIdentity) -> Result<SqliteScan, String
         .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
         .map_err(wrap)?;
     let rows = u64::try_from(counted).expect("COUNT(*) is never negative");
-    Ok(SqliteScan {
-        path: path.to_path_buf(),
-        identity,
-        user_version,
-        rows,
-    })
+    Ok((user_version, rows))
 }
 
 /// Opens a source database read-only.
@@ -397,26 +558,35 @@ pub fn read_batch(
 
 /// Streams every `JSONL` record of a source, main log then backups.
 ///
+/// Records are read from the descriptors opened and checked at scan time,
+/// never from a fresh pathname open: a user controlling the source directory
+/// cannot redirect the recovery pass after validation.
+///
 /// Malformed lines are reported instead of aborting: the `JSONL` stream is
 /// recovery input and a crash-truncated tail must not stop the migration.
 ///
 /// # Errors
 ///
-/// Returns an error only when a file cannot be opened.
+/// Returns an error only when a held descriptor cannot be rewound.
 pub fn for_each_jsonl_record<F>(scan: &JsonlScan, mut on_record: F) -> Result<(), String>
 where
     F: FnMut(Result<asc_security_events::SecurityEvent, String>),
 {
-    let mut paths = vec![scan.path.clone()];
-    paths.extend(scan.backups.iter().cloned());
-    for path in paths {
-        let file = fs::File::open(&path)
-            .map_err(|err| format!("{}: cannot open: {err}", path.display()))?;
+    for stream in &scan.streams {
+        // A duplicated descriptor shares the original's offset, so rewinding
+        // the duplicate rewinds the shared position without needing mutable
+        // access to the validated file itself.
+        let mut file = stream
+            .file
+            .try_clone()
+            .map_err(|err| format!("{}: cannot open: {err}", stream.path.display()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|err| format!("{}: cannot seek: {err}", stream.path.display()))?;
         for line in BufReader::new(file).lines() {
             let line = match line {
                 Ok(line) => line,
                 Err(err) => {
-                    on_record(Err(format!("{}: read error: {err}", path.display())));
+                    on_record(Err(format!("{}: read error: {err}", stream.path.display())));
                     continue;
                 }
             };
@@ -426,7 +596,9 @@ where
             }
             match serde_json::from_str(trimmed) {
                 Ok(event) => on_record(Ok(event)),
-                Err(err) => on_record(Err(format!("{}: {err}", path.display()))),
+                Err(err) => {
+                    on_record(Err(format!("{}: {err}", stream.path.display())));
+                }
             }
         }
     }
@@ -457,15 +629,16 @@ fn rotated_backups(main: &Path) -> Vec<PathBuf> {
     backups
 }
 
-fn count_jsonl_records(main: &Path, backups: &[PathBuf]) -> u64 {
-    let mut paths = vec![main.to_path_buf()];
-    paths.extend(backups.iter().cloned());
+fn count_jsonl_records(streams: &mut [ValidatedFile]) -> u64 {
     let mut records = 0u64;
-    for path in paths {
-        let Ok(file) = fs::File::open(&path) else {
+    for stream in streams {
+        if stream.file.seek(SeekFrom::Start(0)).is_err() {
             continue;
-        };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
+        }
+        for line in BufReader::new(&mut stream.file)
+            .lines()
+            .map_while(Result::ok)
+        {
             if !line.trim().is_empty() {
                 records += 1;
             }
@@ -578,16 +751,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let err = scan_sqlite(
-            &path,
-            FileIdentity {
-                dev: 0,
-                ino: 0,
-                size: 0,
-                mtime: 0,
-            },
-        )
-        .expect_err("future revision must be rejected");
+        let err = scan_sqlite(&path, &path).expect_err("future revision must be rejected");
         assert!(err.contains("newer than this migrator"));
     }
 

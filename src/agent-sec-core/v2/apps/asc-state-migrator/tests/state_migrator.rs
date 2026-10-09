@@ -914,11 +914,11 @@ fn a_fresh_wal_sidecar_marks_the_source_live() {
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
     // v1 commits land in `-wal`: the main database stays untouched while
     // the sidecar carries the writer's fresh timestamp.
-    fs::write(
-        source.join("security-events.db-wal"),
-        b"fresh writer evidence",
-    )
-    .unwrap();
+    let wal = source.join("security-events.db-wal");
+    fs::write(&wal, b"fresh writer evidence").unwrap();
+    // v1 writes the sidecar as the directory's owner; the scan holds every
+    // stream file it reads to that same ownership contract.
+    chown(&wal, Some(1001), None).unwrap();
 
     let options = discovery_for(&destination, &[source.clone()]);
     let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
@@ -933,4 +933,160 @@ fn a_fresh_wal_sidecar_marks_the_source_live() {
     // --force still reaches the data.
     let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch());
     assert_eq!(scans.len(), 1);
+}
+
+#[test]
+fn apply_reads_the_validated_database_not_a_replacement() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("legit", now, 1001)], &[], false);
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let scans = scan_all(&options);
+
+    // Between validation and the import passes the directory owner replaces
+    // the validated database wholesale. The replacement even fails the
+    // per-file checks (world-writable, foreign rows) on purpose: the import
+    // must read the object that passed validation, not the path's new
+    // tenant.
+    let replacement = home.path().join("replacement.db");
+    {
+        let conn = Connection::open(&replacement).unwrap();
+        conn.execute_batch(&full_v1_schema()).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        insert_source_row(&conn, "swapped-in", now, 4242);
+    }
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o666)).unwrap();
+    fs::rename(&replacement, source.join("security-events.db")).unwrap();
+
+    let report = import::apply(&scans, &[], &destination, &apply_options(Some(30))).unwrap();
+    assert_eq!(report.totals.imported, 1);
+
+    let rows = destination_row_uids(&destination);
+    assert_eq!(
+        rows,
+        vec![("legit".to_owned(), 1001)],
+        "the import must read the validated database, not the replacement"
+    );
+}
+
+#[test]
+fn jsonl_recovery_reads_the_validated_log_not_a_replacement() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(
+        &source,
+        1001,
+        &[("db-row", now, 1001)],
+        &[jsonl_event("jsonl-row", now, 1001)],
+        false,
+    );
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let scans = scan_all(&options);
+
+    // Same race on the recovery stream: after validation the main log is
+    // replaced by a symlink to another user's data, which a pathname open
+    // would follow.
+    let victim = home.path().join("victim.jsonl");
+    fs::write(
+        &victim,
+        serde_json::to_string(&jsonl_event("swapped-jsonl", now, 4242)).unwrap() + "\n",
+    )
+    .unwrap();
+    let log = source.join("security-events.jsonl");
+    fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink(&victim, &log).unwrap();
+
+    let report = import::apply(&scans, &[], &destination, &apply_options(Some(30))).unwrap();
+    assert_eq!(report.totals.imported, 2);
+
+    let rows = destination_row_uids(&destination);
+    let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(ids.contains(&"db-row"));
+    assert!(ids.contains(&"jsonl-row"));
+    assert!(
+        !ids.contains(&"swapped-jsonl"),
+        "recovery must read the validated log, not the replacement: {rows:?}"
+    );
+}
+
+#[test]
+fn a_symlinked_stream_is_refused_at_scan_time() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
+
+    // A symlink cannot be smuggled past the descriptor open: O_NOFOLLOW
+    // fails the open itself instead of following the link.
+    let real = home.path().join("real.db");
+    fs::rename(source.join("security-events.db"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, source.join("security-events.db")).unwrap();
+
+    let options = discovery_for(&destination, &[source]);
+    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch());
+    assert!(scans.is_empty());
+    assert!(
+        rejected[0].reason.contains("symlink"),
+        "the rejection must name the symlink: {}",
+        rejected[0].reason
+    );
+}
+
+#[test]
+fn wal_frames_of_a_crashed_writer_survive_the_snapshot() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("main", now, 1001)], &[], false);
+
+    // A crashed v1 writer leaves un-checkpointed frames behind in `-wal`;
+    // the migration must still see them through the validated snapshot.
+    {
+        let conn = Connection::open(source.join("security-events.db")).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        insert_source_row(&conn, "wal-only", now, 1001);
+        // No clean close: the connection never checkpoints.
+        std::mem::forget(conn);
+    }
+    let wal = source.join("security-events.db-wal");
+    assert!(wal.exists(), "the crashed writer leaves a sidecar");
+    chown(&wal, Some(1001), None).unwrap();
+    make_old(&wal);
+    make_old(&source.join("security-events.db"));
+
+    let options = discovery_for(&destination, &[source]);
+    let report = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
+
+    let rows = destination_row_uids(&destination);
+    let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(
+        ids.contains(&"wal-only"),
+        "WAL frames are import input and must survive the snapshot: {rows:?} \
+         (imported {})",
+        report.totals.imported
+    );
 }
