@@ -127,7 +127,10 @@ deadline; raw output forwarding does not establish that support or portable
 approval.
 
 The Linux `CLOCK_MONOTONIC` deadline includes connection setup and framing.
-A call may have at most 60 seconds remaining. `open_event` fixes the event deadline
+A call may have at most 60 seconds remaining. The initial request read sheds a
+connection only after one second without received progress, never for slowness
+alone; an active sender of a legal frame may take until the sixty-second cap.
+`open_event` fixes the event deadline
 as the earlier of its request deadline and the configured event budget; subsequent
 step calls cannot extend it. If an `invoke_step` RPC has a shorter deadline,
 expiry of the response wait cancels the whole shared event; executor cleanup

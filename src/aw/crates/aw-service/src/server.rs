@@ -144,12 +144,19 @@ impl Server {
 }
 
 fn connection(mut stream: UnixStream, runtime: Arc<Runtime>) {
-    let initial = Instant::now() + Duration::from_secs(1);
-    let Ok(request) = ipc::read::<Request>(&mut stream, initial) else {
+    // A legal request may fill the whole eight MiB frame; every received byte
+    // resets the initial stall budget so only idle connections are shed,
+    // while the total window still matches the protocol's call deadline cap.
+    let stall = Duration::from_secs(1);
+    let limit = Instant::now() + deadline::MAX_BUDGET;
+    let Ok(request) = ipc::read_initial::<Request>(&mut stream, stall, limit) else {
         return;
     };
     let deadline = deadline::decode(request.deadline_ns);
-    let expires = deadline.as_ref().copied().unwrap_or(initial);
+    let expires = deadline
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|_| Instant::now() + stall);
     let binding = matches!(&request.operation, Operation::Bind { .. });
     let result = (|| {
         if request.api_version != VERSION {

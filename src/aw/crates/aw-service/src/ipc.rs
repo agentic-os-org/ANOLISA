@@ -94,6 +94,7 @@ fn transfer(
     remaining(deadline).map(|_| ())
 }
 
+#[cfg(test)]
 pub(crate) fn read<T: DeserializeOwned>(
     stream: &mut UnixStream,
     deadline: Instant,
@@ -132,6 +133,81 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
         .end()
         .map_err(|_| invalid("unexpected trailing JSON data"))?;
     serde_json::from_value(value).map_err(|_| invalid("JSON message does not match the protocol"))
+}
+
+/// The initial request of a connection may legally fill the whole frame limit.
+/// Slow active senders reset the stall budget on every read while idle
+/// connections are still shed; the absolute limit bounds the whole window to
+/// the protocol's maximum remaining call deadline. Decoding is bounded by the
+/// frame size limit, not by when the bytes happened to arrive.
+pub(crate) fn read_initial<T: DeserializeOwned>(
+    stream: &mut UnixStream,
+    stall: Duration,
+    limit: Instant,
+) -> io::Result<T> {
+    if stall.is_zero() || stall > Duration::from_secs(60) {
+        return Err(invalid("socket stall budget must be within 1..60000 ms"));
+    }
+    let mut prefix = [0; 4];
+    transfer_stalled(stream, &mut prefix, stall, limit)?;
+    let length = u32::from_be_bytes(prefix) as usize;
+    if length > MAX_FRAME {
+        return Err(invalid("socket frame exceeds size limit"));
+    }
+    let mut bytes = vec![0; length];
+    transfer_stalled(stream, &mut bytes, stall, limit)?;
+    decode(&bytes)
+}
+
+/// Progress on a legal frame resets the stall budget: a connection that stops
+/// making progress is shed after one stall window, while one that keeps
+/// sending may take until the absolute limit.
+fn transfer_stalled(
+    stream: &mut UnixStream,
+    buffer: &mut [u8],
+    stall: Duration,
+    limit: Instant,
+) -> io::Result<()> {
+    let mut offset = 0;
+    let mut idle = Instant::now() + stall;
+    while offset < buffer.len() {
+        let now = Instant::now();
+        let budget = idle
+            .checked_duration_since(now)
+            .filter(|duration| !duration.is_zero())
+            .map(|until_stall| {
+                until_stall.min(limit.checked_duration_since(now).unwrap_or(Duration::ZERO))
+            })
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "socket deadline exceeded"))?;
+        stream.set_read_timeout(Some(budget))?;
+        match stream.read(&mut buffer[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "socket closed before complete frame",
+                ));
+            }
+            Ok(count) => {
+                offset += count;
+                idle = Instant::now() + stall;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "socket deadline exceeded",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn write<T: Serialize>(
@@ -414,6 +490,58 @@ mod tests {
         let error = read::<Value>(&mut receiver, start + Duration::from_millis(25)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn initial_reads_reset_the_stall_budget_on_progress() {
+        let payload = br#"{"a":1}"#;
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            sender
+                .write_all(&(payload.len() as u32).to_be_bytes())
+                .unwrap();
+            for chunk in payload.chunks(2) {
+                thread::sleep(Duration::from_millis(300));
+                sender.write_all(chunk).unwrap();
+            }
+        });
+        let value = read_initial::<Value>(
+            &mut receiver,
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(value, json!({"a": 1}));
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn initial_reads_shed_idle_senders_and_reject_out_of_range_budgets() {
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        sender.write_all(&4_u32.to_be_bytes()).unwrap();
+        let start = Instant::now();
+        let error = read_initial::<Value>(
+            &mut receiver,
+            Duration::from_millis(100),
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        for stall in [Duration::ZERO, Duration::from_secs(61)] {
+            let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&4_u32.to_be_bytes()).unwrap();
+            assert_eq!(
+                read_initial::<Value>(
+                    &mut receiver,
+                    stall,
+                    Instant::now() + Duration::from_secs(60)
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
     }
 
     #[test]

@@ -6,14 +6,15 @@ mod common;
 #[path = "service/native.rs"]
 mod native;
 
-use aw_service::{Client, Operation, Server};
+use aw_service::{Client, Operation, Request, Server, VERSION};
 use common::{
     audit, close, event, invoke, open, second_step, Fixture, Running, PRIVATE_MARKER, TIMEOUT,
 };
 use serde_json::{json, Value};
 use std::{
     fs,
-    os::unix::process::CommandExt,
+    io::{Read, Write},
+    os::unix::{net::UnixStream, process::CommandExt},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -618,4 +619,50 @@ fn restart_rejects_stale_clients_and_keeps_crashed_event_incomplete() {
         .is_err());
     assert_eq!(fixture.calls("describe").len(), 1);
     assert_eq!(fixture.calls("invoke").len(), 0);
+}
+
+#[test]
+fn slow_active_senders_of_legal_requests_are_served() {
+    let fixture = Fixture::new();
+    let service = Running::start(&fixture, &fixture.document());
+    let mut stream = UnixStream::connect(&service.socket).unwrap();
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: now points to one writable timespec for this synchronous call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    let deadline_ns = u64::try_from(now.tv_sec).unwrap() * 1_000_000_000
+        + now.tv_nsec as u64
+        + 30 * 1_000_000_000;
+    let request = serde_json::to_vec(&Request {
+        api_version: VERSION.into(),
+        identity: None,
+        deadline_ns,
+        operation: Operation::Status,
+    })
+    .unwrap();
+    // Deliver a valid request far inside its own 30 s deadline, but paced so the
+    // whole frame takes well over one second while no individual gap ever
+    // reaches one second. A slow but active sender of a legal frame must be
+    // served; only an idle connection may be shed by the initial window.
+    stream
+        .write_all(&(request.len() as u32).to_be_bytes())
+        .unwrap();
+    for chunk in request.chunks(request.len().div_ceil(4)) {
+        thread::sleep(Duration::from_millis(400));
+        stream.write_all(chunk).unwrap();
+    }
+    stream.flush().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut prefix = [0; 4];
+    stream.read_exact(&mut prefix).unwrap();
+    let mut bytes = vec![0; u32::from_be_bytes(prefix) as usize];
+    stream.read_exact(&mut bytes).unwrap();
+    let response: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(response["api_version"], VERSION);
+    assert_eq!(response["error"], Value::Null);
+    assert_eq!(response["result"]["pid"], json!(std::process::id()));
 }
