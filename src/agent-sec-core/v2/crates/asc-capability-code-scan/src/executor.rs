@@ -33,8 +33,16 @@ impl CodeScanExecutor {
     /// Creates the production executor from the shared local-model configuration.
     #[must_use]
     pub fn from_env() -> Self {
-        match create_client() {
+        Self::from_client(create_client())
+    }
+
+    fn from_client(client: Result<Box<dyn ModelClient>, ModelServiceError>) -> Self {
+        match client {
             Ok(client) => Self::new(Arc::from(client)),
+            // V1 builds a client for this URL and reports it as an unavailable model.
+            Err(error) if crate::llm::v1_accepts_unparsable_loopback(&error) => {
+                Self::new(Arc::new(UnavailableModelClient))
+            }
             Err(error) => Self {
                 model_client: None,
                 initialization_error: Some(crate::llm::initialization_message(&error)),
@@ -123,5 +131,58 @@ impl ModelClient for UnavailableModelClient {
         Err(ModelServiceError::Inference(
             "model client unavailable".to_owned(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use asc_model_client::ConfigError;
+
+    use super::*;
+
+    fn llm_summary(executor: &CodeScanExecutor, code: &str) -> Value {
+        let control = ExecutionControl {
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancelled: false,
+        };
+        let request = CodeScanRequest {
+            code: code.to_owned(),
+            language: "bash".to_owned(),
+            rules: None,
+            mode: Some("llm".to_owned()),
+        };
+        executor.execute(&control, &request).data["summary"].clone()
+    }
+
+    fn invalid_base_url(base_url: &str) -> ModelServiceError {
+        ModelServiceError::Config(ConfigError::InvalidBaseUrl {
+            base_url: base_url.to_owned(),
+            reason: "invalid port number".to_owned(),
+        })
+    }
+
+    #[test]
+    fn malformed_loopback_port_reports_the_v1_unavailable_model() {
+        let executor =
+            CodeScanExecutor::from_client(Err(invalid_base_url("http://localhost:notaport")));
+
+        assert_eq!(
+            llm_summary(&executor, "echo hello"),
+            "scan error: model 'warden' not available"
+        );
+        assert_eq!(llm_summary(&executor, " "), "scan error: empty input code");
+    }
+
+    #[test]
+    fn malformed_remote_url_keeps_the_v1_initialization_error() {
+        let executor = CodeScanExecutor::from_client(Err(invalid_base_url("http://exa mple")));
+
+        assert_eq!(
+            llm_summary(&executor, "echo hello"),
+            "scan error: refusing non-loopback model service base_url 'http://exa mple': only \
+             a local model service is supported, and scanned content must not leave the host"
+        );
     }
 }

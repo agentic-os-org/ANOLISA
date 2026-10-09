@@ -191,6 +191,42 @@ pub(crate) fn initialization_message(error: &ModelServiceError) -> String {
     }
 }
 
+/// Whether V1 would have accepted a base URL that the shared client cannot parse.
+///
+/// V1 validates only the `urlsplit` hostname, which ignores a malformed port,
+/// so such a loopback URL builds a client whose availability check then fails.
+pub(crate) fn v1_accepts_unparsable_loopback(error: &ModelServiceError) -> bool {
+    let ModelServiceError::Config(ConfigError::InvalidBaseUrl { base_url, .. }) = error else {
+        return false;
+    };
+    v1_invalid_url_message(base_url).is_none()
+        && v1_hostname(base_url).is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+/// Mirrors Python's `urlsplit(base_url).hostname` for an `http(s)://` URL.
+fn v1_hostname(base_url: &str) -> Option<String> {
+    let rest = base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))?;
+    // `urlsplit` drops ASCII tab and newline characters before splitting.
+    let rest: String = rest
+        .chars()
+        .filter(|character| !matches!(character, '\t' | '\r' | '\n'))
+        .collect();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    (!host.is_empty()).then(|| host.to_lowercase())
+}
+
 fn v1_non_loopback_message(base_url: &str) -> Option<String> {
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
         return None;
@@ -522,6 +558,44 @@ mod tests {
                 message
             );
         }
+    }
+
+    #[test]
+    fn unparsable_loopback_urls_follow_v1_acceptance() {
+        let invalid = |base_url: &str| {
+            ModelServiceError::Config(ConfigError::InvalidBaseUrl {
+                base_url: base_url.to_owned(),
+                reason: "invalid port number".to_owned(),
+            })
+        };
+        for base_url in [
+            "http://localhost:notaport",
+            "http://127.0.0.1:99999",
+            "http://[::1]:x",
+            "http://localhost:-1",
+            "https://user@LOCALHOST:x/api",
+        ] {
+            assert!(
+                v1_accepts_unparsable_loopback(&invalid(base_url)),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "http://exa mple",
+            "http://10.0.0.1:x",
+            "http://[",
+            "http://[127.0.0.1]:x",
+            "http://:x",
+            "ftp://localhost:x",
+        ] {
+            assert!(
+                !v1_accepts_unparsable_loopback(&invalid(base_url)),
+                "{base_url}"
+            );
+        }
+        assert!(!v1_accepts_unparsable_loopback(&ModelServiceError::Config(
+            ConfigError::NonLoopbackBaseUrl("http://localhost:x".to_owned())
+        )));
     }
 
     #[test]
