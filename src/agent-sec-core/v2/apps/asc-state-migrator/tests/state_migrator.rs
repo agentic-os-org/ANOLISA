@@ -1,9 +1,11 @@
 //! End-to-end tests of the state migrator over real source directories and a
 //! real destination store.
 //!
-//! Everything runs as the current user with `chown`-able files, which the v2
-//! test environment provides. Source databases are seeded with the v1 table
-//! contract, including an older revision without the correlation columns.
+//! Fixtures own their files as the requested uid when the suite runs as root
+//! and as the current user otherwise, so the suite also passes at an
+//! unprivileged uid; only the two-owner scenario genuinely needs root.
+//! Source databases are seeded with the v1 table contract, including an
+//! older revision without the correlation columns.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
@@ -18,6 +20,23 @@ use asc_state_migrator::journal;
 use rusqlite::Connection;
 
 const DAY: f64 = 86_400.0;
+
+/// The uid the fixtures can actually chown files to: the requested uid when
+/// the suite runs as root, otherwise the current (unprivileged) user.
+fn fixture_uid(wanted: u32) -> u32 {
+    if is_root() { wanted } else { current_uid() }
+}
+
+fn is_root() -> bool {
+    current_uid() == 0
+}
+
+fn current_uid() -> u32 {
+    let probe = tempfile::tempdir().unwrap();
+    let file = probe.path().join("uid-probe");
+    fs::write(&file, b"uid").unwrap();
+    fs::metadata(&file).unwrap().uid()
+}
 
 fn full_v1_schema() -> String {
     "CREATE TABLE security_events (event_id TEXT NOT NULL PRIMARY KEY, event_type TEXT NOT \
@@ -70,6 +89,7 @@ fn seed_source(
     jsonl_events: &[SecurityEvent],
     old_schema: bool,
 ) {
+    let uid = fixture_uid(uid);
     fs::create_dir_all(dir).unwrap();
     let db = dir.join("security-events.db");
     let conn = Connection::open(&db).unwrap();
@@ -165,6 +185,12 @@ fn destination_row_uids(destination: &Path) -> Vec<(String, i64)> {
 
 #[test]
 fn apply_imports_under_the_verified_owner_and_journals_the_run() {
+    // This scenario needs two distinct owning uids, which only root can
+    // create; at an unprivileged uid it is skipped rather than panicked.
+    if !is_root() {
+        eprintln!("skipped: needs two distinct owning uids, which only root can create");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let destination = home.path().join("dest/security-events.db");
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -274,7 +300,10 @@ fn apply_deduplicates_by_event_id_across_sources_and_reruns() {
         let uid = fs::metadata(source.join("security-events.db"))
             .unwrap()
             .uid();
-        assert!(uid == 1001 || uid == 1002, "source ownership unchanged");
+        assert!(
+            uid == fixture_uid(1001) || uid == fixture_uid(1002),
+            "source ownership unchanged"
+        );
     }
 }
 
@@ -306,7 +335,7 @@ fn apply_fills_jsonl_gaps_and_tolerates_malformed_lines() {
         ),
     )
     .unwrap();
-    chown(&jsonl, Some(1001), None).unwrap();
+    chown(&jsonl, Some(fixture_uid(1001)), None).unwrap();
     make_old(&jsonl);
 
     let options = discovery_for(&destination, &[source]);
@@ -918,7 +947,7 @@ fn a_fresh_wal_sidecar_marks_the_source_live() {
     fs::write(&wal, b"fresh writer evidence").unwrap();
     // v1 writes the sidecar as the directory's owner; the scan holds every
     // stream file it reads to that same ownership contract.
-    chown(&wal, Some(1001), None).unwrap();
+    chown(&wal, Some(fixture_uid(1001)), None).unwrap();
 
     let options = discovery_for(&destination, std::slice::from_ref(&source));
     let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
@@ -969,7 +998,7 @@ fn apply_reads_the_validated_database_not_a_replacement() {
     let rows = destination_row_uids(&destination);
     assert_eq!(
         rows,
-        vec![("legit".to_owned(), 1001)],
+        vec![("legit".to_owned(), i64::from(fixture_uid(1001)))],
         "the import must read the validated database, not the replacement"
     );
 }
@@ -1068,7 +1097,7 @@ fn wal_frames_of_a_crashed_writer_survive_the_snapshot() {
     }
     let wal = source.join("security-events.db-wal");
     assert!(wal.exists(), "the crashed writer leaves a sidecar");
-    chown(&wal, Some(1001), None).unwrap();
+    chown(&wal, Some(fixture_uid(1001)), None).unwrap();
     make_old(&wal);
     make_old(&source.join("security-events.db"));
 
@@ -1272,7 +1301,7 @@ fn a_wal_only_append_after_the_run_reports_drift() {
         std::mem::forget(conn);
     }
     let wal = source.join("security-events.db-wal");
-    chown(&wal, Some(1001), None).unwrap();
+    chown(&wal, Some(fixture_uid(1001)), None).unwrap();
     make_old(&wal);
     make_old(&source.join("security-events.db"));
 
