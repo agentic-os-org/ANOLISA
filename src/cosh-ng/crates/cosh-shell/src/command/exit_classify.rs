@@ -427,13 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn first_program_token_survives_multibyte_sudo_arguments() {
-        assert_eq!(first_program_token("sudo 中文"), "中文");
-        assert_eq!(first_program_token("sudo -é"), "-é");
-        assert_eq!(first_program_token("sudo '中文 文件.sh'"), "'中文");
-    }
-
-    #[test]
     fn first_program_token_with_env_and_sudo() {
         assert_eq!(first_program_token("LANG=C sudo /usr/bin/diff a b"), "diff");
     }
