@@ -285,9 +285,10 @@ def test_main_redacts_then_records_and_returns_noop(monkeypatch, capsys):
     }
     # The redaction call must keep its full argv contract: renaming the
     # scan-pii subcommand or dropping --redact-output previously kept the
-    # suite green while the real CLI stopped redacting (fail-open path
-    # drops the raw value only when the CLI errors, not when it silently
-    # succeeds without redaction).
+    # suite green while the real CLI stopped redacting. A response without
+    # a string redacted_text makes _redact_text return None, which becomes
+    # _DROP: the sensitive metric field is then omitted from the record,
+    # so a drifted argv silently loses audit data instead of redacting it.
     assert pii_command[trace_context_index + 1 :] == [
         "scan-pii",
         "--stdin",
