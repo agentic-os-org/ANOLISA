@@ -3997,12 +3997,27 @@ fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
     1
 }
 
-fn eval_tcp_dsack(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_dsack";
-    if !std::path::Path::new(path).exists() {
+fn eval_tcp_dsack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
+    eval_tcp_dsack_at(info, recs, "/proc/sys/net/ipv4/tcp_dsack")
+}
+
+/// Path-injectable form of [`eval_tcp_dsack`] (the `eval_*_at` idiom).
+/// Through v5.10 net/ipv4/sysctl_net_ipv4.c registered tcp_dsack as a plain
+/// `proc_dointvec` int with no min/max (the same table as tcp_sack), so -1
+/// is a legal, persistent value there, and every consumer is a truthiness
+/// test (net/ipv4/tcp_input.c: `tcp_is_sack(tp) && READ_ONCE(sock_net(sk)->
+/// ipv4.sysctl_tcp_dsack)` gates the duplicate-SACK bookkeeping in
+/// tcp_dsack_set / tcp_dsack_extend). The unsigned reader parsed "-1" to
+/// Err and fell back to 0 — the *disabled* value — so the `== 0` gate
+/// invented a finding on a host whose D-SACK is on. The later u8 conversion
+/// (`proc_dou8vec_minmax`, no extra1/extra2; v6.6) rejects negatives at
+/// write time; the signed reader keeps the truthiness contract correct on
+/// both registrations.
+fn eval_tcp_dsack_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, path: &str) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_dsack".to_string(),
@@ -12530,6 +12545,40 @@ mod tests {
                 assert_eq!(recs[0].param, "net.ipv4.tcp_window_scaling");
                 assert_eq!(sack_recs[0].param, "net.ipv4.tcp_sack");
                 assert_eq!(ts_recs[0].param, "net.ipv4.tcp_timestamps");
+                assert_eq!(recs[0].recommended_value, "1");
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_dsack_reads_truthiness_signed() {
+        // tcp_dsack sat in the same net/ipv4/sysctl_net_ipv4.c table as
+        // tcp_sack through v5.10 — a plain proc_dointvec int with no
+        // min/max, so "-1" is a legal, persistent value there — and
+        // tcp_input.c consumes it as a bare truthiness test
+        // (`tcp_is_sack(tp) && READ_ONCE(...sysctl_tcp_dsack)` in
+        // tcp_dsack_set / tcp_dsack_extend). The unsigned reader parsed
+        // "-1" to Err and fell back to 0, the disabled value, so the
+        // `== 0` gate invented a finding on a host whose D-SACK is on.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_dsack_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_dsack_at(&info, &mut recs, path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 disables D-SACK"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_dsack");
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
