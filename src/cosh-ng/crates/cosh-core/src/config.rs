@@ -595,21 +595,22 @@ struct PartialLoggingConfig {
     level: Option<String>,
 }
 
-fn expand_env_vars(s: &str) -> String {
+/// Single-pass `${VAR}` expansion: the scan cursor advances past every
+/// substitution, so replacement text is never re-scanned and expansion always
+/// terminates (self-referential values stay literal). Unset variables expand
+/// to the empty string.
+pub(crate) fn expand_env_vars(s: &str) -> String {
     let mut result = s.to_string();
-    while let Some(start) = result.find("${") {
-        if let Some(end) = result[start..].find('}') {
-            let var_name = &result[start + 2..start + end];
-            let replacement = std::env::var(var_name).unwrap_or_default();
-            result = format!(
-                "{}{}{}",
-                &result[..start],
-                replacement,
-                &result[start + end + 1..]
-            );
-        } else {
+    let mut search_from = 0;
+    while let Some(pos) = result[search_from..].find("${") {
+        let start = search_from + pos;
+        let Some(end_offset) = result[start..].find('}') else {
             break;
-        }
+        };
+        let end = start + end_offset;
+        let replacement = std::env::var(&result[start + 2..end]).unwrap_or_default();
+        result.replace_range(start..=end, &replacement);
+        search_from = start + replacement.len();
     }
     result
 }
@@ -2250,5 +2251,44 @@ approval_mode = "balanced"
         assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
         assert!(parsed.ai.providers.contains_key("new-provider"));
         assert_eq!(parsed.ai.providers.len(), 1);
+    }
+
+    #[test]
+    fn expand_env_vars_terminates_on_self_referential_value() {
+        std::env::set_var("COSH_TEST_SELFREF", "${COSH_TEST_SELFREF}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(expand_env_vars("${COSH_TEST_SELFREF}"));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("expand_env_vars must terminate on a self-referential value");
+        assert_eq!(result, "${COSH_TEST_SELFREF}");
+        std::env::remove_var("COSH_TEST_SELFREF");
+    }
+
+    #[test]
+    fn expand_env_vars_expanding_value_does_not_grow() {
+        std::env::set_var("COSH_TEST_GROW", "${COSH_TEST_GROW}${COSH_TEST_GROW}");
+        let result = expand_env_vars("${COSH_TEST_GROW}");
+        assert_eq!(result, "${COSH_TEST_GROW}${COSH_TEST_GROW}");
+        std::env::remove_var("COSH_TEST_GROW");
+    }
+
+    #[test]
+    fn expand_env_vars_unset_variable_expands_to_empty() {
+        std::env::remove_var("COSH_TEST_UNSET_3839");
+        let result = expand_env_vars("a${COSH_TEST_UNSET_3839}b");
+        assert_eq!(result, "ab");
+    }
+
+    #[test]
+    fn expand_env_vars_multiple_variables() {
+        std::env::set_var("COSH_TEST_A", "x");
+        std::env::set_var("COSH_TEST_B", "y");
+        let result = expand_env_vars("${COSH_TEST_A}-${COSH_TEST_B}");
+        assert_eq!(result, "x-y");
+        std::env::remove_var("COSH_TEST_A");
+        std::env::remove_var("COSH_TEST_B");
     }
 }
