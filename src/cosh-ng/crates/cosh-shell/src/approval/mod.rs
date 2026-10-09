@@ -4,6 +4,8 @@ pub(crate) mod cards;
 pub(crate) mod handoff;
 pub(crate) mod journal;
 pub(crate) mod panel;
+pub(crate) mod plan_mode;
+pub(crate) mod policy;
 pub(crate) mod provider;
 pub(crate) mod requests;
 pub(crate) mod resolution;

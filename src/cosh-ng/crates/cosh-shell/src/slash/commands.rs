@@ -103,6 +103,7 @@ pub(super) fn render_slash_command<W: Write>(
         SlashCommand::Mode(arg, sub, confirm) => {
             render_mode_command(arg, sub, confirm, state, output)
         }
+        SlashCommand::Plan => crate::runtime::plan_mode::render_plan_command(state, output),
         SlashCommand::Config(sub, value) => render_config_command(sub, value, state, output),
         SlashCommand::Debug(sub) => {
             render_debug_command(sub, adapter, state, output)?;

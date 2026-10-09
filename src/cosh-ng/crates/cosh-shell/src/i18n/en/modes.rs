@@ -10,7 +10,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeAnalysisLine => "analysis: {mode}",
         MessageId::ModeRoutingLine => "routing: {mode}",
         MessageId::ModeSummaryFooter => {
-            "Use /mode approval, /mode analysis, or /mode routing for details."
+            "Use /mode approval, /mode analysis, /mode routing, or /mode plan for details."
         }
         MessageId::RoutingModeTitle => "Input routing",
         MessageId::RoutingModeCurrentBody => "Current: {mode}",
@@ -35,7 +35,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeLanguageFooter => "Use /config language [auto|en-US|zh-CN].",
         MessageId::ModeUnknownBody => "Unknown mode: {mode}",
         MessageId::ModeUnknownFooter => {
-            "Use /mode approval, /mode analysis, or /mode routing."
+            "Use /mode approval, /mode analysis, /mode routing, or /mode plan."
         }
         MessageId::ApprovalModeTitle => "Approval mode",
         MessageId::ApprovalModeSetBody => "Mode set to {mode}.",
@@ -104,6 +104,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AnalysisModeRemainsBody => "Mode remains {mode}.",
         MessageId::AnalysisModeCancelBody => "Mode unchanged: {mode}.",
         MessageId::AnalysisModeCancelFooter => "No shell command ran.",
+        MessageId::HelpSummaryPlan => "toggle plan mode",
+        MessageId::HelpSummaryModePlan => "switch plan mode on or off",
+        MessageId::ModePlanLine => "plan: {mode}",
+        MessageId::PlanModeTitle => "Plan mode",
+        MessageId::PlanModeCurrentBody => "Current: {mode}",
+        MessageId::PlanModeSetBody => "Plan mode set to {mode}.",
+        MessageId::PlanModeUnknownBody => "Unknown plan mode value: {mode}",
+        MessageId::PlanModeUsageFooter => "Use /mode plan on|off|status, or /plan to toggle.",
+        MessageId::PlanModeOnFooter => {
+            "Read-only tools still run; run /plan (or /mode plan off) to exit before executing changes."
+        }
+        MessageId::PlanModeOffFooter => {
+            "Tools follow the current approval mode again."
+        }
         _ => return None,
     })
 }

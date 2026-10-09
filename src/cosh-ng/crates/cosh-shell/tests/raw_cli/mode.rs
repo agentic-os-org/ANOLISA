@@ -378,7 +378,7 @@ fn raw_cli_mode_root_and_language_guidance_are_canonical() {
     assert!(output.contains("approval: auto"), "{output}");
     assert!(output.contains("analysis: smart"), "{output}");
     assert!(
-        output.contains("Use /mode approval, /mode analysis, or /mode routing"),
+        output.contains("Use /mode approval, /mode analysis, /mode routing, or /mode plan"),
         "{output}"
     );
     assert!(
@@ -594,4 +594,100 @@ fn raw_cli_auto_mode_trusted_command_requires_exact_match() {
     assert!(!output.contains("Auto-approved req-1"), "{output}");
 
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");
+}
+
+#[test]
+fn raw_cli_plan_slash_toggles_and_reports_plan_mode() {
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/help\n"),
+            ("toggle plan mode", b"/plan\n"),
+            ("Plan mode set to on.", b"/mode\n"),
+            ("plan: on", b"/mode plan status\n"),
+            ("Current: on", b"/mode plan maybe\n"),
+            ("Unknown plan mode value: maybe", b"/mode plan off\n"),
+            ("Plan mode set to off.", b"/mode plan status\n"),
+            ("Current: off", b"/mode\n"),
+            ("plan: off", b"/plan\n"),
+            ("Plan mode set to on.", b"/plan\n"),
+            ("Plan mode set to off.", b"echo after-plan\n"),
+            ("after-plan", b"exit\n"),
+        ],
+    );
+
+    // `/plan` is intercepted by the TUI instead of reaching bash (#1776).
+    assert!(output.contains("Plan mode set to on."), "{output}");
+    assert!(output.contains("Plan mode set to off."), "{output}");
+    assert!(!output.contains("bash: /plan"), "{output}");
+    assert!(
+        !output.contains("zsh: no such file or directory: /plan"),
+        "{output}"
+    );
+    // Help and the mode summary expose the new surface.
+    assert!(output.contains("toggle plan mode"), "{output}");
+    assert!(output.contains("/mode plan [on|off|status]"), "{output}");
+    assert!(output.contains("plan: on"), "{output}");
+    assert!(output.contains("plan: off"), "{output}");
+    // `/mode plan` status/unknown/off behave like the issue specifies.
+    assert!(output.contains("Current: on"), "{output}");
+    assert!(output.contains("Current: off"), "{output}");
+    assert!(
+        output.contains("Unknown plan mode value: maybe"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Use /mode plan on|off|status, or /plan to toggle."),
+        "{output}"
+    );
+    // The shell keeps working after the toggles.
+    assert!(output.contains("after-plan"), "{output}");
+    assert!(!output.contains("bash: /mode"), "{output}");
+}
+
+#[test]
+fn raw_cli_plan_mode_denies_mutating_tool_until_exited() {
+    // Delayed input: the /plan panel repaints the prompt before input
+    // ownership returns, so a marker-gated follow-up can be dropped.
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/plan\n".to_vec(), Duration::ZERO),
+            (
+                b"?? request unsafe tool approval\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"/plan\n".to_vec(), Duration::from_millis(1_500)),
+            (
+                b"?? request unsafe tool approval\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\x1b".to_vec(), Duration::from_millis(1_000)),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("Plan mode set to on."), "{output}");
+    // While plan mode is on, the mutating tool request is refused by
+    // policy instead of being carded or auto-approved: exactly one
+    // approval prompt exists and it belongs to the post-exit request.
+    // Exactly one approval prompt exists and it belongs to the
+    // post-exit request; the plan-phase transcript carries neither the
+    // card nor its command preview.
+    assert_eq!(count_approval_prompts(&output), 1, "{output}");
+    assert!(output.contains("Plan mode set to off."), "{output}");
+    assert!(output.contains("Cancelled req-"), "{output}");
+    let plan_phase = &output[..output.rfind("Plan mode set to off.").expect("exit marker")];
+    assert!(!approval_request_card_visible(plan_phase), "{output}");
+    assert!(
+        !plan_phase.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
+        "{output}"
+    );
+    assert!(!output.contains("Auto-approved"), "{output}");
+    assert!(!output.contains("bash: /plan"), "{output}");
 }

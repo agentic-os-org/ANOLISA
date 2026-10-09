@@ -294,7 +294,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsChecking as usize,
-            MessageId::ALL.len() - 12
+            MessageId::ALL.len() - 22
         );
         assert_eq!(
             MessageId::AuthEcsCancelHint as usize,
@@ -302,6 +302,10 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsRefreshing as usize + 1,
+            MessageId::PlanModeOffFooter as usize - 9
+        );
+        assert_eq!(
+            MessageId::PlanModeOffFooter as usize + 1,
             MessageId::ALL.len()
         );
     }

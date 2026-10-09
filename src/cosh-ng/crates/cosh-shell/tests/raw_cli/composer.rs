@@ -45,7 +45,9 @@ fn raw_cli_agent_composer_lists_completes_and_executes_slash_commands() {
 
 #[test]
 fn raw_cli_agent_composer_enter_executes_the_selected_command() {
-    let select_hooks = b"\x1b[B".repeat(11);
+    // Twelve visible commands precede /hooks since /plan joined the
+    // completion list (#1776).
+    let select_hooks = b"\x1b[B".repeat(12);
     let output = run_composer_slash_steps(&[
         ("Agent Composer", b"/"),
         ("› /help", &select_hooks),

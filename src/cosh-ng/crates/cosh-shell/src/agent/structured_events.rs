@@ -1,4 +1,6 @@
 use crate::agent::approval_bridge::{render_auto_approved_tool, render_trusted_tool};
+use crate::approval::plan_mode::partition_plan_mode_gated_events;
+use crate::approval::policy::ShellRequestPolicyHandling;
 use crate::runtime::prelude::*;
 
 use super::events::{event_may_render_structured_surface, render_active_agent_event};
@@ -84,10 +86,37 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     }
     let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
     crate::auth::runtime::render_auth_panel(state, &auth_ids, output)?;
-    if render_trusted_tool(state, governed_events, run_request, origin, output, adapter)? {
+    // Plan mode (#1776): refuse mutating tool events once, before any
+    // approval pass — trust/auto would execute them and the card flow
+    // would allow approving around the mode. Read-only requests keep
+    // every existing pipeline.
+    let (plan_gated_events, plan_handling) = if state.plan_mode {
+        partition_plan_mode_gated_events(
+            state,
+            governed_events,
+            run_request,
+            origin,
+            ignore_tool_calls,
+        )
+    } else {
+        (Vec::new(), ShellRequestPolicyHandling::Continue)
+    };
+    // A plan-mode denial that could not be delivered or homed leaves the
+    // request with the terminal sweep: stop the batch here — the same
+    // contract the trust/auto passes apply — so no later approval pass
+    // advances state while the unhomed request awaits its response.
+    if plan_handling == ShellRequestPolicyHandling::AwaitingTerminalSweep {
         return Ok(());
     }
-    if render_auto_approved_tool(state, governed_events, run_request, origin, output, adapter)? {
+    let approval_events: &[GovernedEvent] = if state.plan_mode {
+        &plan_gated_events
+    } else {
+        governed_events
+    };
+    if render_trusted_tool(state, approval_events, run_request, origin, output, adapter)? {
+        return Ok(());
+    }
+    if render_auto_approved_tool(state, approval_events, run_request, origin, output, adapter)? {
         return Ok(());
     }
     if state.approval_mode == CoshApprovalMode::Recommend {
@@ -95,7 +124,7 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     }
     let approval_ids = record_approval_requests(
         state,
-        governed_events,
+        approval_events,
         run_request,
         origin,
         ignore_tool_calls,

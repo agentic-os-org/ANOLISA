@@ -35,7 +35,15 @@ mod auth;
 
 macro_rules! define_message_id {
     ($($id:ident,)*) => {
+        /// Stable public enum (exported via `lib.rs` as part of the
+        /// `stable-runtime-api` surface): new id segments are appended as
+        /// trailing variants only. `#[non_exhaustive]` makes that contract
+        /// compile-time — downstream exhaustive matches must carry a
+        /// wildcard arm, so adding a variant (#1776 added the plan-mode
+        /// segment) is no longer a breaking change for external users.
+        /// In-crate matches stay exhaustive and untouched.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
         pub enum MessageId {
             $($id,)*
         }
@@ -114,4 +122,5 @@ collect_message_ids!([
     managed_task_ids,
     composer_control_submit_ids,
     auth_ecs_ids,
+    plan_mode_ids,
 ],);

@@ -20,6 +20,7 @@ pub(super) enum SlashCommand<'a> {
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Mode(Option<&'a str>, Option<&'a str>, Option<&'a str>),
+    Plan,
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
     #[allow(dead_code)]
@@ -75,6 +76,10 @@ impl<'a> SlashCommand<'a> {
                 let third = parts.next();
                 Some(Self::Mode(first, second, third))
             }
+            // `/plan` is a pure toggle (#1776): bare command enters plan
+            // mode, a second `/plan` exits it. Explicit values go through
+            // `/mode plan [on|off|status]`.
+            "/plan" => Some(Self::Plan),
             "/approval-mode" => Some(Self::Removed(RemovedCommand::ApprovalMode(parts.next()))),
             "/allow" | "/approve" | "/deny" => {
                 Some(Self::Removed(RemovedCommand::ApprovalDecision(token)))
@@ -156,6 +161,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/auth"
             | "/hooks"
             | "/mode"
+            | "/plan"
             | "/approval-mode"
             | "/allow"
             | "/approve"
@@ -212,6 +218,24 @@ mod tests {
         assert!(matches!(
             SlashCommand::parse("/agent"),
             Ok(Some(SlashCommand::Agent))
+        ));
+    }
+
+    #[test]
+    fn plan_command_parses_as_the_bare_toggle() {
+        match SlashCommand::parse("/plan") {
+            Ok(Some(SlashCommand::Plan)) => {}
+            _ => panic!("/plan did not parse as the plan mode toggle"),
+        }
+        // The bare toggle owns no value grammar: explicit values live
+        // under `/mode plan on|off|status`.
+        match SlashCommand::parse("/plan extra") {
+            Ok(Some(SlashCommand::Plan)) => {}
+            _ => panic!("/plan with stray tokens did not parse as the toggle"),
+        }
+        assert!(matches!(
+            SlashCommand::parse("/plan \"on\""),
+            Err(SlashParseError::QuotedArgumentsUnsupported)
         ));
     }
 

@@ -14,6 +14,7 @@ pub(crate) fn render_mode_command<W: Write>(
         Some("approval") => render_approval_mode_command(sub, confirm, state, output),
         Some("analysis") => render_analysis_mode_command(sub, state, output),
         Some("routing") => render_routing_mode_command(sub, state, output),
+        Some("plan") => crate::runtime::plan_mode::render_plan_mode_command(sub, state, output),
         Some("recommend" | "auto" | "trust") => render_notice_panel(
             output,
             state.i18n().t(MessageId::ModeRemovedTitle),
@@ -62,6 +63,10 @@ fn render_mode_summary<W: Write>(state: &InlineState, output: &mut W) -> std::io
             state.i18n().format(
                 MessageId::ModeRoutingLine,
                 &[("mode", routing_mode_label(state))],
+            ),
+            state.i18n().format(
+                MessageId::ModePlanLine,
+                &[("mode", crate::runtime::plan_mode::plan_mode_label(state))],
             ),
         ],
         Some(state.i18n().t(MessageId::ModeSummaryFooter)),
