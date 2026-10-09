@@ -334,8 +334,10 @@ def test_main_invokes_observability_cli_with_record(monkeypatch, capsys):
     # The redaction calls must keep their full argv contract: the suite
     # matched them only by a "scan-pii" substring, so dropping
     # --redact-output or changing --source kept every test green while
-    # the real CLI stopped redacting (silent success without redaction
-    # passes raw PII straight into the observability record).
+    # the real CLI stopped redacting. A response without a string
+    # redacted_text makes _redact_text return None, which becomes _DROP:
+    # the sensitive metric field is then omitted from the record, so a
+    # drifted argv silently loses audit data instead of redacting it.
     redact_cmds = [c[0] for c in calls if "scan-pii" in c[0]]
     assert redact_cmds
     assert all(
