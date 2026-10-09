@@ -76,7 +76,7 @@ own. Agent Hook migration is delivered separately.
 
 %post -n agent-sec-cli
 %systemd_post agent-sec-core.service
-if [ "$1" -eq 1 ] && [ -d /run/systemd/system ]; then
+if [ -d /run/systemd/system ] && { [ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]; }; then
     /usr/bin/systemctl enable --now agent-sec-core.service
 fi
 

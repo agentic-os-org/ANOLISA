@@ -49,7 +49,7 @@ def test_v2_stages_root_system_unit(tmp_path):
     assert not (tmp_path / "usr/lib/sysusers.d/agent-sec-core.conf").exists()
     spec = (ROOT / "agent-sec-core.spec.v2.in").read_text()
     assert "%systemd_postun_with_restart agent-sec-core.service" in spec
-    assert 'if [ "$1" -eq 1 ] && [ -d /run/systemd/system ]; then' in spec
+    assert '[ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]' in spec
     assert "/usr/bin/systemctl enable --now agent-sec-core.service" in spec
     assert "systemd_user_" not in spec and "_userunitdir" not in spec
     assert "systemd-sysusers" not in spec
