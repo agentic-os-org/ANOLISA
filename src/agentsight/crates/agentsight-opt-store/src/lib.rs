@@ -357,9 +357,7 @@ mod tests {
     use super::*;
 
     fn temp_store() -> (OptimizationStore, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("opt-store-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("test-{:?}.db", std::time::Instant::now()));
+        let path = temp_path("test");
         (OptimizationStore::new_with_path(&path).unwrap(), path)
     }
 
@@ -442,9 +440,17 @@ mod tests {
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // The tests in this binary start in parallel, and two clock reads can
+        // land on the same instant: both stores then share one file, and the
+        // loser fails on `PRAGMA journal_mode=WAL` with SQLITE_BUSY. The
+        // sequence keeps the name unique even when the instant matches.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!("opt-store-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join(format!("{tag}-{:?}.db", std::time::Instant::now()))
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        dir.join(format!("{tag}-{:?}-{seq}.db", std::time::Instant::now()))
     }
 
     #[test]
