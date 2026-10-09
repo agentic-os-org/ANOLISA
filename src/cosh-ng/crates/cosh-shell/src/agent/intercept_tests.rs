@@ -670,3 +670,26 @@ fn smart_and_auto_failure_requests_share_the_same_bounded_evidence() {
         assert!(auto.user_input.is_none());
     }
 }
+
+#[test]
+fn ai_disabled_drops_pending_insight_binding_on_accept() {
+    let block = source_block();
+    let mut state = InlineState {
+        pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
+            insight_binding("suggestion-1"),
+        ))),
+        ..Default::default()
+    };
+    state.personalization.ai_disabled = true;
+    let mut event = prompt_ghost_event(
+        Some("input intercepted before reaching bash"),
+        Some("analyze edited failure"),
+    );
+    event.component = Some("prompt_ghost:suggestion-1".to_string());
+
+    assert!(
+        agent_request_from_pending_insight(&event, std::slice::from_ref(&block), &mut state)
+            .is_none()
+    );
+    assert!(state.pending_input_ghost_binding.is_none());
+}

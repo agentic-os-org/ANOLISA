@@ -520,6 +520,13 @@ fn agent_request_from_pending_insight(
     ) {
         return None;
     }
+    // COSH_SHELL_AI=off: defense in depth on the accept path. The render-side
+    // gate already prevents arming this binding; drop it here too in case a
+    // future arming path bypasses the render funnel.
+    if state.personalization.ai_disabled {
+        state.pending_input_ghost_binding = None;
+        return None;
+    }
     let PendingInputGhostBinding::Insight(binding) = state.pending_input_ghost_binding.take()?
     else {
         unreachable!("binding kind checked before take");
