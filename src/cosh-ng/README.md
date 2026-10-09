@@ -342,12 +342,13 @@ interoperability commands. The real Codex provider, SSH-disconnect flow, and
 systemd service have not been rerun for this increment; current acceptance is
 based on deterministic local coverage.
 
-The experimental `cosh agent web` command is Linux-only. Before opening an HTTP
-listener, it queries the selected daemon's capabilities and verifies the
-canonical workspace identity and Runtime authority. It rejects the current
-Core/Codex catalog because both entries attest local-user authority, which can
-read a same-user token even outside the workspace. Use `/task` or
-`cosh agent task` for continuation with this release. The former
+The experimental `cosh agent web` command is Linux-only and **not yet
+available in this build**. Every sealed Runtime executes effects with delegated
+local authority, so the brokered-only token boundary the Web adapter requires
+cannot be attested. The subcommand is hidden from `--help` and exits with a
+`web_failed` not-yet-available error before any workspace, token, or daemon
+work; the startup attestation stays in place as the future-ready check. Use
+`/task` or `cosh agent task` for continuation with this release. The former
 `--capability-profile` declaration has been removed; it never restricted the
 daemon. See the [Web command reference](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)
 for the admission boundary and platform limits.

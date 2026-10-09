@@ -23,6 +23,11 @@ const HTTP_REQUEST_DEADLINE: Duration = Duration::from_secs(2);
 const HTTP_WORKERS: usize = 4;
 const HTTP_QUEUE_CAPACITY: usize = 16;
 
+/// Build gate message: no sealed Runtime can attest the brokered-only token
+/// boundary this adapter requires, so the entrypoint must stop before any
+/// bind, workspace, token, socket, or daemon work.
+const WEB_UNAVAILABLE: &str = "not yet available in this build: every sealed Runtime executes effects with delegated local authority, so the brokered-only token boundary cannot be attested; use `cosh-gateway task`";
+
 #[derive(Debug, Clone, Args)]
 pub(super) struct WebArgs {
     /// Loopback address for the local browser beta.
@@ -43,6 +48,7 @@ pub(super) struct WebArgs {
 }
 
 pub(super) fn web(args: WebArgs, reporter: &Reporter) -> Result<u8, CliError> {
+    gate_web_until_brokered_runtime()?;
     validate_bind(args.bind)?;
     let workspace = canonical_workspace(&args.workspace)?;
     let token = read_token(&args.token_file)?;
@@ -80,6 +86,14 @@ pub(super) fn web(args: WebArgs, reporter: &Reporter) -> Result<u8, CliError> {
         }
     }
     Ok(0)
+}
+
+/// Rejects Web startup while every sealed Runtime executes effects with
+/// delegated local authority. The brokered-only attestation below stays in
+/// place as the future-ready check; flipping this gate requires a separately
+/// validated restricted Runtime and attestation contract.
+fn gate_web_until_brokered_runtime() -> Result<(), CliError> {
+    Err(CliError::Web(WEB_UNAVAILABLE.to_owned()))
 }
 
 struct HttpWorkers {
