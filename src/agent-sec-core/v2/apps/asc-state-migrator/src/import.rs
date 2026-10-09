@@ -56,10 +56,14 @@ fn required<T>(value: Option<T>) -> Result<T, crate::MigratorError> {
 
 /// Resolves the destination database path.
 ///
+/// Purely a path decision: creating (or chmod'ing) the parent directory is a
+/// write side effect that belongs to the write commands' store opening, so
+/// `plan` and `verify` never touch the filesystem here.
+///
 /// # Errors
 ///
-/// Fails when an explicit path is relative or its directory cannot be
-/// prepared, or when the daemon default cannot be resolved.
+/// Fails when an explicit path is relative, or when the daemon default cannot
+/// be resolved.
 pub fn resolve_destination(explicit: Option<&Path>) -> Result<PathBuf, crate::MigratorError> {
     match explicit {
         Some(path) => {
@@ -68,14 +72,6 @@ pub fn resolve_destination(explicit: Option<&Path>) -> Result<PathBuf, crate::Mi
                     path: path.display().to_string(),
                     reason: "destination must be an absolute path".to_owned(),
                 });
-            }
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
             }
             Ok(path.to_path_buf())
         }
@@ -109,6 +105,30 @@ pub fn open_destination(path: &Path) -> Result<SqliteStore, crate::MigratorError
     )?;
     store.with_connection(true, |_| Ok(()))?;
     Ok(store)
+}
+
+/// Opens the destination store read-only for `verify`, without creating or
+/// migrating anything.
+///
+/// # Errors
+///
+/// Fails when the destination file does not exist: verification is read-only,
+/// so a missing database is an error, not something to create.
+pub fn open_destination_readonly(path: &Path) -> Result<SqliteStore, crate::MigratorError> {
+    if !path.is_file() {
+        return Err(crate::MigratorError::DestinationUnusable {
+            path: path.display().to_string(),
+            reason: "does not exist; run apply first".to_owned(),
+        });
+    }
+    Ok(SqliteStore::new(
+        path,
+        true,
+        SECURITY_EVENTS_SQLITE_SCHEMA_VERSION,
+        asc_persistence_sqlite::security_events::SECURITY_EVENTS_TABLES,
+        None,
+        LOG_PREFIX,
+    )?)
 }
 
 /// Discovery plus validation of every configured source.
@@ -512,10 +532,16 @@ pub fn verify(
                 .ok_or_else(|| crate::MigratorError::RunNotFound(id.to_owned()))?;
             vec![record]
         }
-        None => records.iter().collect(),
+        // The CLI documents a bare `verify` as checking the most recent run,
+        // not the whole history: an older run's mismatch must not fail the
+        // latest healthy migration.
+        None => records
+            .last()
+            .map(|record| vec![record])
+            .unwrap_or_default(),
     };
 
-    let store = open_destination(destination)?;
+    let store = open_destination_readonly(destination)?;
     let quick_check = required(store.with_connection(true, |conn| {
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
             .map_err(KernelError::from)
@@ -567,7 +593,13 @@ fn identity_matches(dir: &str, file: &str, identity: &FileIdentity) -> bool {
     let Ok(meta) = fs::symlink_metadata(&path) else {
         return false;
     };
-    meta.dev() == identity.dev && meta.ino() == identity.ino
+    // The full captured identity: an in-place append keeps dev/ino but grows
+    // the file, so size and mtime are what distinguish real drift from a
+    // replaced file.
+    meta.dev() == identity.dev
+        && meta.ino() == identity.ino
+        && meta.size() == identity.size
+        && meta.mtime() == identity.mtime
 }
 
 /// Removes the rows journaled runs imported.
