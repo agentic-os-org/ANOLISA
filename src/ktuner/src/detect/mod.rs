@@ -2,6 +2,165 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+#[cfg(test)]
+mod java_application_argument_regressions {
+    use super::*;
+
+    #[test]
+    fn java_application_arguments_do_not_name_a_service() {
+        for cmdline in [
+            "java\0-jar\0/opt/client/report.jar\0kafka",
+            "java\0-cp\0/opt/client/lib\0com.example.Report\0elasticsearch",
+            "java\0com.example.Report\0/opt/data/pulsar.json",
+            "java\0com.example.Report\0@config\0kafka",
+            "java\0-jar\0/opt/client/report.jar\0@config\0kafka",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), None, "{cmdline:?}");
+        }
+    }
+
+    #[test]
+    fn java_daemon_identity_is_not_overridden_by_application_arguments() {
+        assert_eq!(
+            runtime_service_from_cmdline("java\0kafka.Kafka\0elasticsearch"),
+            Some("kafka")
+        );
+        assert_eq!(
+            runtime_service_from_cmdline("java\0-jar\0kafka_2.13-3.7.0.jar\0pulsar"),
+            Some("kafka")
+        );
+        for cmdline in [
+            "java\0-m\0app/kafka.Kafka\0elasticsearch",
+            "java\0--module\0app/kafka.Kafka\0elasticsearch",
+            "java\0--module=app/kafka.Kafka\0elasticsearch",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        }
+    }
+
+    #[test]
+    fn non_java_runtime_matching_keeps_its_existing_behavior() {
+        for (cmdline, expected) in [
+            ("python3\0/opt/app/spark.py", Some("spark")),
+            ("node\0/opt/app/server.js\0kafka", Some("kafka")),
+            ("python3\0/opt/app/sparklesh-report.py", None),
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), expected);
+        }
+    }
+
+    #[test]
+    fn java_launcher_option_values_keep_the_daemon_identity() {
+        for cmdline in [
+            "java\0--module-path\0/opt/client/lib\0kafka.Kafka",
+            "java\0--add-opens\0java.base/java.lang=ALL-UNNAMED\0kafka.Kafka",
+            "java\0--source\x0021\0Report.java\0kafka",
+        ] {
+            let expected = if cmdline.contains("Report.java") {
+                None
+            } else {
+                Some("kafka")
+            };
+            assert_eq!(
+                runtime_service_from_cmdline(cmdline),
+                expected,
+                "{cmdline:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn java_options_argument_file_does_not_hide_the_entrypoint() {
+        for cmdline in [
+            "java\0@/tmp/jvm-options.txt\0kafka.Kafka",
+            "java\0@/tmp/jvm-options.txt\0-jar\0kafka_2.13-3.7.0.jar",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        }
+    }
+
+    #[test]
+    fn java_literal_at_source_name_keeps_its_identity() {
+        for cmdline in [
+            "java\0--disable-@files\0@spark.java",
+            "java\0@@spark.java",
+            "java\0--disable-@files\0--source\x0021\0@spark.java",
+            "java\0spark.java",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("spark"));
+        }
+    }
+
+    #[test]
+    fn unresolved_java_argument_files_preserve_legacy_matching() {
+        for cmdline in [
+            "java\0@options.txt\0/opt/client/lib\0kafka.Kafka",
+            "java\0-cp\0@classpath.txt\0/opt/client/lib\0kafka.Kafka",
+            "java\0-jar\0@jar-arguments.txt\0/opt/client/report.jar\0kafka.Kafka",
+            "java\0--module\0@module-arguments.txt\0app/kafka.Kafka",
+        ] {
+            assert_eq!(runtime_service_from_cmdline(cmdline), Some("kafka"));
+        }
+    }
+
+    #[test]
+    fn a_java_client_argument_must_not_trigger_streaming_read_ahead() {
+        let mut processes = vec![ProcessInfo {
+            name: "java".into(),
+        }];
+        if let Some(service) =
+            runtime_service_from_cmdline("java\0-jar\0/opt/client/report.jar\0kafka")
+        {
+            processes.push(ProcessInfo {
+                name: service.into(),
+            });
+        }
+        let info = SystemInfo {
+            kernel_version: "6.6.0".into(),
+            os_distro: String::new(),
+            cpu_model: String::new(),
+            cpu_cores: 8,
+            numa_nodes: 1,
+            memory_total_gb: 16,
+            disks: vec![DiskInfo {
+                name: "fixture-java-client".into(),
+                disk_type: DiskType::HDD,
+                scheduler: "mq-deadline".into(),
+                available_schedulers: vec!["mq-deadline".into()],
+                nr_requests: 128,
+                read_ahead_kb: 128,
+                rq_affinity: 1,
+                hidden: false,
+                holders: vec![],
+            }],
+            network: vec![],
+            sysctl: SysctlValues {
+                swappiness: 60,
+                dirty_ratio: 20,
+                dirty_background_ratio: 10,
+                somaxconn: 128,
+                thp_enabled: "always".into(),
+            },
+            processes,
+        };
+        let workload = crate::profile::classify(&info);
+        let evaluation = crate::rules::evaluate_with_workload(&info, &workload).unwrap();
+        let disk_recommendations: Vec<_> = evaluation
+            .recommendations
+            .iter()
+            .filter(|recommendation| {
+                recommendation.param == "block/fixture-java-client/read_ahead_kb"
+            })
+            .collect();
+        assert!(
+            disk_recommendations.is_empty(),
+            "a client request must not change the disk's 128-KiB readahead: {disk_recommendations:?}"
+        );
+        assert_eq!(workload, crate::profile::WorkloadType::Mixed);
+        assert!(!crate::services::detect_services(&info).contains(&"Kafka"));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SystemInfo {
     pub kernel_version: String,
@@ -1356,28 +1515,92 @@ const RUNTIME_SERVICE_MARKERS: &[(&str, &str)] = &[
 /// classified as Spark and fired the streaming rules on an unrelated
 /// workload. This is the same class of false positive the name-boundary fix
 /// for `has_process` removed (etcdctl vs etcd).
+/// Java argument scanning stops at an explicit entrypoint. Launches using
+/// unexpanded argument files retain legacy matching because the entrypoint
+/// cannot be located from the visible arguments alone.
 ///
 /// Each candidate argument is matched by its file-name component only (a
 /// directory named after a service is not the program), and a marker matches
 /// only as a whole consecutive run of name tokens, so `sparklesh` or
 /// `etcdbackup` no longer satisfy `spark`/`etcd`.
 fn runtime_service_from_cmdline(cmdline: &str) -> Option<&'static str> {
-    // Collect identity-bearing args: everything that is not an option, plus
-    // the jar path that follows `-jar` (that one *is* an option's value but
-    // names the program).
+    // Java exposes one entrypoint; retain the existing candidate scan for
+    // other runtimes whose launch contracts differ.
     let mut candidates: Vec<&str> = Vec::new();
-    let mut args = cmdline.split('\0').filter(|a| !a.is_empty());
+    let nonempty: fn(&&str) -> bool = |value| !value.is_empty();
+    let mut args = cmdline.split('\0').filter(nonempty);
+    let is_java = args
+        .clone()
+        .next()
+        .is_some_and(|program| program.rsplit('/').next() == Some("java"));
+    if is_java {
+        let _ = args.next();
+    }
+    let mut bound_java_entrypoint = is_java;
+    let mut argument_files_enabled = true;
+    let is_argument_file =
+        |value: &str| value.len() > 1 && value.starts_with('@') && !value.starts_with("@@");
     while let Some(arg) = args.next() {
-        if arg == "-jar" {
-            if let Some(jar) = args.next() {
-                candidates.push(jar);
+        if bound_java_entrypoint && arg == "--disable-@files" {
+            argument_files_enabled = false;
+            continue;
+        } else if bound_java_entrypoint && argument_files_enabled && is_argument_file(arg) {
+            // An argument file can end with an option whose value is supplied
+            // on the command line. Preserve the old scan instead of guessing.
+            bound_java_entrypoint = false;
+            candidates.clear();
+            args = cmdline.split('\0').filter(nonempty);
+            continue;
+        } else if arg == "-jar" || (bound_java_entrypoint && matches!(arg, "-m" | "--module")) {
+            if let Some(entrypoint) = args.next() {
+                if bound_java_entrypoint && argument_files_enabled && is_argument_file(entrypoint) {
+                    bound_java_entrypoint = false;
+                    candidates.clear();
+                    args = cmdline.split('\0').filter(nonempty);
+                    continue;
+                }
+                candidates.push(entrypoint);
             }
-        } else if arg == "-cp" || arg == "-classpath" || arg == "--class-path" {
-            // The classpath is an option value, not the program: it names
-            // libraries (often service jars), not the entrypoint.
-            let _ = args.next();
+            if bound_java_entrypoint {
+                break;
+            }
+        } else if bound_java_entrypoint && arg.starts_with("--module=") {
+            candidates.push(&arg["--module=".len()..]);
+            break;
+        } else if arg == "-cp"
+            || arg == "-classpath"
+            || arg == "--class-path"
+            || (bound_java_entrypoint
+                && matches!(
+                    arg,
+                    "-p" | "--module-path"
+                        | "--upgrade-module-path"
+                        | "--add-modules"
+                        | "--limit-modules"
+                        | "--add-exports"
+                        | "--add-opens"
+                        | "--add-reads"
+                        | "--patch-module"
+                        | "--enable-native-access"
+                        | "--source"
+                ))
+        {
+            // Search paths and JVM option values describe the launch
+            // environment, not the application entrypoint.
+            if let Some(value) = args.next() {
+                if bound_java_entrypoint && argument_files_enabled && is_argument_file(value) {
+                    bound_java_entrypoint = false;
+                    candidates.clear();
+                    args = cmdline.split('\0').filter(nonempty);
+                }
+            }
         } else if !arg.starts_with('-') {
             candidates.push(arg);
+            // Java passes everything after its main class/source or JAR to
+            // the application; those values cannot identify the JVM's service.
+            if bound_java_entrypoint {
+                break;
+            }
         }
     }
 
