@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use asc_model_client::{ConfigError, ModelClient, ModelOptions, ModelServiceError};
 use serde_json::{Value, json};
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 use crate::errors::CodeScanError;
 use crate::findings::{Finding, Verdict};
@@ -176,14 +177,49 @@ pub(crate) fn initialization_message(error: &ModelServiceError) -> String {
                 py_repr(base_url)
             )
         }
-        ConfigError::UnsupportedScheme(base_url)
-        | ConfigError::InvalidBaseUrl { base_url, .. }
-        | ConfigError::NonLoopbackBaseUrl(base_url) => format!(
-            "refusing non-loopback model service base_url {}: only a local model service is \
-             supported, and scanned content must not leave the host",
-            py_repr(base_url)
-        ),
+        ConfigError::InvalidBaseUrl { base_url, reason } => {
+            v1_invalid_url_message(base_url).unwrap_or_else(|| reason.clone())
+        }
+        ConfigError::UnsupportedScheme(base_url) | ConfigError::NonLoopbackBaseUrl(base_url) => {
+            format!(
+                "refusing non-loopback model service base_url {}: only a local model service is \
+                 supported, and scanned content must not leave the host",
+                py_repr(base_url)
+            )
+        }
     }
+}
+
+fn v1_invalid_url_message(base_url: &str) -> Option<String> {
+    let authority = base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))?
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let Some(open) = host.find('[') else {
+        return host.contains(']').then(|| "Invalid IPv6 URL".to_owned());
+    };
+    let Some(close) = host.find(']') else {
+        return Some("Invalid IPv6 URL".to_owned());
+    };
+    if open != 0 || close + 1 < host.len() && !host[close + 1..].starts_with(':') {
+        return Some("Invalid IPv6 URL".to_owned());
+    }
+    let bracketed = &host[open + 1..close];
+    if bracketed.starts_with('v') && bracketed.contains('.') {
+        return None;
+    }
+    if bracketed.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some("An IPv4 address cannot be in brackets".to_owned());
+    }
+    bracketed.parse::<std::net::Ipv6Addr>().err().map(|_| {
+        format!(
+            "{} does not appear to be an IPv4 or IPv6 address",
+            py_repr(bracketed)
+        )
+    })
 }
 
 /// Quotes a string the way Python's `repr` does.
@@ -205,13 +241,15 @@ fn py_repr(text: &str) -> String {
                 rendered.push('\\');
                 rendered.push(c);
             }
-            c if c.is_control() => {
+            c if !python_printable(c) => {
                 let code = u32::from(c);
                 // Writing to a `String` cannot fail.
                 let _ = if code < 0x100 {
                     write!(rendered, "\\x{code:02x}")
-                } else {
+                } else if code < 0x1_0000 {
                     write!(rendered, "\\u{code:04x}")
+                } else {
+                    write!(rendered, "\\U{code:08x}")
                 };
             }
             c => rendered.push(c),
@@ -219,6 +257,14 @@ fn py_repr(text: &str) -> String {
     }
     rendered.push(quote);
     rendered
+}
+
+fn python_printable(character: char) -> bool {
+    character == ' '
+        || !matches!(
+            character.general_category_group(),
+            GeneralCategoryGroup::Other | GeneralCategoryGroup::Separator
+        )
 }
 
 fn blank_input_result(code: &str, language: Language, start: Instant) -> Option<ScanResult> {
@@ -415,6 +461,20 @@ mod tests {
                 "base_url must use http:// or https:// scheme: 'not a url'",
             ),
             (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "Invalid IPv6 URL",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[127.0.0.1]".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "An IPv4 address cannot be in brackets",
+            ),
+            (
                 ConfigError::NonLoopbackBaseUrl("http://10.0.0.1:11434".to_owned()),
                 non_loopback,
             ),
@@ -433,6 +493,11 @@ mod tests {
         assert_eq!(py_repr("a'b\"c"), "'a\\'b\"c'");
         assert_eq!(py_repr("tab\there\\"), "'tab\\there\\\\'");
         assert_eq!(py_repr("\u{1}"), "'\\x01'");
+        assert_eq!(
+            py_repr("\u{ad}\u{200b}\u{202e}\u{2028}\u{feff}"),
+            "'\\xad\\u200b\\u202e\\u2028\\ufeff'"
+        );
+        assert_eq!(py_repr("\u{10000}"), "'𐀀'");
     }
 
     struct UnavailableClient;

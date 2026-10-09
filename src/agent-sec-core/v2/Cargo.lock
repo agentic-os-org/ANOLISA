@@ -135,6 +135,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
  "yaml-rust2",
 ]
 

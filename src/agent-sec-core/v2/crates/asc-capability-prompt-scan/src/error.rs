@@ -34,3 +34,38 @@ pub enum ScannerError {
     #[error("model service error: {0}")]
     ModelService(#[from] asc_model_client::ModelServiceError),
 }
+
+#[cfg(test)]
+mod tests {
+    use asc_model_client::{ConfigError, ModelServiceError};
+
+    use super::ScannerError;
+
+    #[test]
+    fn model_service_config_errors_keep_the_v1_rust_display() {
+        for (config, expected) in [
+            (
+                ConfigError::UnsupportedBackend("bogus".to_owned()),
+                "model service error: invalid model service configuration: Unsupported model service backend: \"bogus\"",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "model service error: invalid model service configuration: base_url is not a valid URL \"http://[\": invalid IPv6 address",
+            ),
+            (
+                ConfigError::UnsupportedScheme("ftp://localhost:11434".to_owned()),
+                "model service error: invalid model service configuration: base_url must use http:// or https:// scheme: \"ftp://localhost:11434\"",
+            ),
+            (
+                ConfigError::NonLoopbackBaseUrl("http://10.0.0.1:11434".to_owned()),
+                "model service error: invalid model service configuration: refusing non-loopback model service base_url \"http://10.0.0.1:11434\": only a local model service is supported, and scanned prompts must not leave the host",
+            ),
+        ] {
+            let error = ScannerError::from(ModelServiceError::Config(config));
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+}

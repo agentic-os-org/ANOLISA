@@ -675,6 +675,17 @@ mod tests {
     }
 
     #[test]
+    fn malformed_http_url_keeps_its_typed_parse_failure() {
+        let error = validate_base_url("http://[").expect_err("must be rejected");
+        let ModelServiceError::Config(ConfigError::InvalidBaseUrl { base_url, reason }) = error
+        else {
+            panic!("malformed HTTP URL must keep its parse failure")
+        };
+        assert_eq!(base_url, "http://[");
+        assert!(!reason.is_empty());
+    }
+
+    #[test]
     fn loopback_base_url_is_accepted() {
         assert!(validate_base_url("http://localhost:11434").is_ok());
         assert!(validate_base_url("http://127.0.0.1:11434").is_ok());
