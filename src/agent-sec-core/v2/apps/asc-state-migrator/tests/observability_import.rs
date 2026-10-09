@@ -402,7 +402,7 @@ fn observability_import_is_idempotent_across_reruns_and_rolls_back_exactly() {
         true,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let first = import::apply(
         &scan_all(&options),
         &[],
@@ -497,7 +497,7 @@ fn observability_jsonl_recovery_is_explicit_and_fills_gaps() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
 
     // Default: SQLite is the source; JSONL recovery is opt-in.
     let without_recovery = import::apply(
@@ -677,7 +677,7 @@ fn an_untrusted_observability_file_rejects_the_source() {
     perms.set_mode(0o666);
     fs::set_permissions(&db, perms).unwrap();
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert!(scans.is_empty(), "the whole source is untrusted");
     assert!(
@@ -994,7 +994,7 @@ fn verify_reports_observability_sources_that_grew_in_place_after_the_run() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     import::apply(
         &scan_all(&options),
         &[],
@@ -1064,7 +1064,7 @@ fn a_fresh_observability_wal_sidecar_marks_the_source_live() {
     // migrator reads is held to that same ownership contract.
     chown(&wal, Some(1001), None).unwrap();
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
     assert!(scans.is_empty(), "the live source must not scan");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
@@ -1102,7 +1102,7 @@ fn apply_reads_the_validated_observability_database_not_a_replacement() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let scans = scan_all(&options);
 
     // Between validation and the import passes the directory owner replaces
@@ -1166,7 +1166,7 @@ fn observability_jsonl_recovery_reads_the_validated_log_not_a_replacement() {
     );
     seed_observability_source(&source, 1001, &[], &jsonl, false);
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let scans = scan_all(&options);
 
     // The recovery stream is replaced after validation, this time by a
@@ -1311,7 +1311,7 @@ fn an_observability_wal_only_append_after_the_run_reports_drift() {
     make_old(&wal);
     make_old(&source.join("observability.db"));
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     import::apply(
         &scan_all(&options),
         &[],
