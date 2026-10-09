@@ -1184,7 +1184,7 @@ fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     let Some(&program) = args.first() else {
         return false;
     };
-    if is_monitoring_helper_name(program) {
+    if is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program)) {
         return true;
     }
     if is_shell_program(program) {
@@ -1194,7 +1194,9 @@ fn cmdline_names_helper<'a>(args: impl Iterator<Item = &'a str>) -> bool {
             && args
                 .get(2)
                 .and_then(|&payload| payload.split_whitespace().next())
-                .is_some_and(is_monitoring_helper_name);
+                .is_some_and(|program| {
+                    is_monitoring_helper_name(program.rsplit('/').next().unwrap_or(program))
+                });
     }
     if program.rsplit('/').next().unwrap_or_default() == "java" {
         // A JVM names its program in the jar after `-jar`; argv[0] is only the
@@ -3095,6 +3097,55 @@ mod tests {
                 "{service} is a service, not a collector"
             );
         }
+    }
+
+    #[test]
+    fn collector_directories_do_not_hide_daemon_programs() {
+        for cmdline in [
+            "/opt/exporter/postgres\0-D\0/var/lib/postgresql/data",
+            "/opt/exporter/nginx\0-g\0daemon off;",
+            "sh\0-c\0/opt/exporter/postgres -D /var/lib/postgresql/data",
+            "/opt/exporter/bin/java\0com.example.Main",
+        ] {
+            assert!(!cmdline_names_helper(cmdline.split('\0')), "{cmdline:?}");
+        }
+    }
+
+    #[test]
+    fn collector_programs_and_raw_task_names_keep_matching() {
+        for cmdline in [
+            "/usr/local/bin/postgres_exporter\0--web.listen-address=:9187",
+            "/opt/exporter/postgres_exporter\0--web.listen-address=:9187",
+            "sh\0-c\0/opt/exporter/postgres_exporter --web.listen-address=:9187",
+            "java\0-jar\0/opt/client/jmx_prometheus_httpserver.jar",
+        ] {
+            assert!(cmdline_names_helper(cmdline.split('\0')), "{cmdline:?}");
+        }
+        assert!(is_monitoring_helper_name("node_exporter/x"));
+    }
+
+    #[test]
+    fn a_live_daemon_under_a_collector_directory_stays_visible() {
+        let root = std::env::temp_dir().join(format!("ktuner_daemon_path_{}", std::process::id()));
+        let dir = root.join("exporter");
+        fs::create_dir_all(&dir).expect("create private fixture");
+        let program = dir.join("postgres");
+        fs::copy("/bin/sleep", &program).expect("copy inert executable");
+        let mut command = std::process::Command::new(&program);
+        command.arg("30").stdout(std::process::Stdio::null());
+        let mut child = spawn_fresh_executable(&mut command, "spawn inert daemon-named process");
+        let pid = child.id().to_string();
+        wait_for_cmdline(&pid, b"exporter/postgres");
+        let comm = read_comm_from(&format!("/proc/{pid}/comm"));
+        let filtered = is_monitoring_helper(&pid);
+        child.kill().ok();
+        child.wait().ok();
+        fs::remove_dir_all(&root).ok();
+        assert_eq!(comm.as_deref(), Some("postgres"));
+        assert!(
+            !filtered,
+            "the program's parent directory is not its identity"
+        );
     }
 
     #[test]
