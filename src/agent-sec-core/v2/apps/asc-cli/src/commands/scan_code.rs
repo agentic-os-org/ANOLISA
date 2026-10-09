@@ -6,7 +6,10 @@ use clap::Args;
 use crate::InputError;
 
 /// Scans one Bash or Python snippet through `asc-daemon`.
+///
+/// A repeated option keeps its last value, as V1's Click parser does.
 #[derive(Debug, Args)]
+#[command(args_override_self = true)]
 pub(crate) struct ScanCodeCommand {
     /// Source code to scan.
     #[arg(long, default_value = "", allow_hyphen_values = true)]

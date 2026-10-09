@@ -42,9 +42,13 @@ pub enum Plan<'a> {
 #[command(
     name = "agent-sec-cli",
     version,
+    disable_version_flag = true,
     about = "Manage Policy, Scope and Binding through asc-daemon"
 )]
 struct Arguments {
+    /// Show version and exit (`-v`, as in V1; there is no `-V`).
+    #[arg(short = 'v', long, action = clap::ArgAction::Version)]
+    version: (),
     /// Absolute endpoint; otherwise `AGENT_SEC_DAEMON_SOCKET` or the system default.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,

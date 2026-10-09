@@ -113,6 +113,25 @@ fn scan_code_matches_the_v1_parameters_and_rejects_empty_input() {
         hyphen_source.request().unwrap().params["code"],
         "--executable=$(which python3)"
     );
+
+    let repeated = Cli::parse_from([
+        "agent-sec-cli",
+        "--socket",
+        "/run/asc.sock",
+        "scan-code",
+        "--code",
+        "echo a",
+        "--language",
+        "bash",
+        "--code",
+        "rm -rf /tmp/x",
+        "--language",
+        "python",
+    ])
+    .unwrap();
+    let params = repeated.request().unwrap().params;
+    assert_eq!(params["code"], "rm -rf /tmp/x");
+    assert_eq!(params["language"], "python");
 }
 
 #[test]
@@ -340,7 +359,7 @@ fn scan_code_rendering_preserves_error_results_on_stdout() {
 
 #[test]
 fn binary_help_version_and_failures_have_stable_exit_codes() {
-    let mut help_cases = vec![vec!["--help"], vec!["--version"]];
+    let mut help_cases = vec![vec!["--help"], vec!["--version"], vec!["-v"]];
     for resource in ["policy", "scope", "binding"] {
         help_cases.push(vec![resource, "--help"]);
         for operation in ["create", "get", "list", "update", "delete"] {
@@ -355,7 +374,7 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if args == ["--version"] {
+        if args == ["--version"] || args == ["-v"] {
             assert_eq!(
                 stdout,
                 format!("agent-sec-cli {}\n", env!("CARGO_PKG_VERSION"))
