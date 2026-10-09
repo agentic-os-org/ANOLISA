@@ -769,10 +769,10 @@ fn compute_posture(
     let latest_full_verify = verify
         .iter()
         .find(|event| is_full_verify(event) && asset_verify_outcome(event) != "no_candidates");
-    if let Some(latest_full_verify) = latest_full_verify {
-        if asset_verify_outcome(latest_full_verify) == "failed" {
-            needs_attention = true;
-        }
+    if let Some(latest_full_verify) = latest_full_verify
+        && asset_verify_outcome(latest_full_verify) == "failed"
+    {
+        needs_attention = true;
     }
 
     for event in prompt_scan {
@@ -863,12 +863,11 @@ fn compute_suggestions(
 ) -> Vec<String> {
     let mut suggestions: Vec<String> = Vec::new();
 
-    if let Some(latest) = hardening.first() {
-        if has_actionable_hardening_failure(latest)
-            && (str_of(latest, "result") == "succeeded" || has_hardening_stats(latest))
-        {
-            suggestions.push("agent-sec-cli harden --reinforce    Fix failed rules".to_owned());
-        }
+    if let Some(latest) = hardening.first()
+        && has_actionable_hardening_failure(latest)
+        && (str_of(latest, "result") == "succeeded" || has_hardening_stats(latest))
+    {
+        suggestions.push("agent-sec-cli harden --reinforce    Fix failed rules".to_owned());
     }
 
     if !ledger_statuses.is_empty() {
@@ -901,7 +900,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn scan_event(category: &str, result: &str, details: Value) -> Value {
+    fn scan_event(category: &str, result: &str, details: &Value) -> Value {
         json!({
             "event_id": format!("{category}-1"),
             "event_type": "sandbox_prehook",
@@ -925,7 +924,7 @@ mod tests {
         let events = vec![scan_event(
             "prompt_scan",
             "succeeded",
-            json!({"result": {"verdict": "deny", "threat_type": "prompt_injection", "summary": "bad"}}),
+            &json!({"result": {"verdict": "deny", "threat_type": "prompt_injection", "summary": "bad"}}),
         )];
         let text = format_summary(&events, "last 24 hours");
         assert!(
@@ -944,7 +943,7 @@ mod tests {
         let events = vec![scan_event(
             "skill_ledger",
             "succeeded",
-            json!({
+            &json!({
                 "result": {"command": "check", "status": "tampered", "reason": "signature mismatch"},
                 "request": {"skill_dir": "/opt/skills/demo"}
             }),
@@ -964,7 +963,7 @@ mod tests {
         let events = vec![scan_event(
             "code_scan",
             "succeeded",
-            json!({"result": {"verdict": "pass"}}),
+            &json!({"result": {"verdict": "pass"}}),
         )];
         let text = format_summary(&events, "last 24 hours");
         assert!(text.contains("System Status: Good"), "{text}");
@@ -977,7 +976,7 @@ mod tests {
         let events = vec![scan_event(
             "hardening",
             "succeeded",
-            json!({"result": {"mode": "scan", "passed": 8, "total": 10, "failures": [
+            &json!({"result": {"mode": "scan", "passed": 8, "total": 10, "failures": [
                 {"rule_id": "r-1", "status": "FAIL"}
             ]}}),
         )];
@@ -1000,7 +999,7 @@ mod tests {
         let failed = vec![scan_event(
             "asset_verify",
             "succeeded",
-            json!({"result": {"passed": 1, "failed": 2}, "request": {}}),
+            &json!({"result": {"passed": 1, "failed": 2}, "request": {}}),
         )];
         let text = format_summary(&failed, "last 24 hours");
         assert!(text.contains("--- Asset Verification ---"), "{text}");

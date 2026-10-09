@@ -486,28 +486,28 @@ impl EventsCommand {
                 "--summary is incompatible with --output (summary has its own format).".to_owned(),
             ));
         }
-        if let Some(output) = self.output.as_deref() {
-            if !OUTPUT_FORMATS.contains(&output) {
-                return Err(InputError::Events(format!(
-                    "--output must be one of: {}.",
-                    OUTPUT_FORMATS.join(", ")
-                )));
-            }
+        if let Some(output) = self.output.as_deref()
+            && !OUTPUT_FORMATS.contains(&output)
+        {
+            return Err(InputError::Events(format!(
+                "--output must be one of: {}.",
+                OUTPUT_FORMATS.join(", ")
+            )));
         }
-        if let Some(field) = self.count_by.as_deref() {
-            if !COUNT_BY_ALLOWED.contains(&field) {
-                return Err(InputError::Events(format!(
-                    "--count-by must be one of: {}.",
-                    COUNT_BY_ALLOWED.join(", ")
-                )));
-            }
+        if let Some(field) = self.count_by.as_deref()
+            && !COUNT_BY_ALLOWED.contains(&field)
+        {
+            return Err(InputError::Events(format!(
+                "--count-by must be one of: {}.",
+                COUNT_BY_ALLOWED.join(", ")
+            )));
         }
-        if let Some(hours) = self.last_hours {
-            if hours < 0.0 || !hours.is_finite() {
-                return Err(InputError::Events(
-                    "--last-hours must be non-negative.".to_owned(),
-                ));
-            }
+        if let Some(hours) = self.last_hours
+            && (hours < 0.0 || !hours.is_finite())
+        {
+            return Err(InputError::Events(
+                "--last-hours must be non-negative.".to_owned(),
+            ));
         }
         if self.limit == 0 {
             return Err(InputError::Events("--limit must be positive.".to_owned()));
@@ -669,7 +669,7 @@ mod tests {
         asc_daemon_protocol::RequestId::new("test".to_owned()).expect("non-empty")
     }
 
-    fn page(items: Value, total: u64, next_offset: Option<u64>) -> DaemonResponse {
+    fn page(items: &Value, total: u64, next_offset: Option<u64>) -> DaemonResponse {
         DaemonResponse::success(
             request_id(),
             json!({
@@ -755,7 +755,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock");
         let (start_ns, end_ns) = (start_ns.expect("start"), end_ns.expect("end"));
-        assert!(end_ns >= before.as_nanos() as u64 && end_ns <= after.as_nanos() as u64);
+        let (before_ns, after_ns) = (before.as_nanos(), after.as_nanos());
+        assert!(u128::from(end_ns) >= before_ns && u128::from(end_ns) <= after_ns);
         let span = end_ns - start_ns;
         // One hour, give or take the clock movement across the call.
         assert!(
@@ -771,7 +772,7 @@ mod tests {
     #[test]
     fn count_prints_the_rows_remaining_after_the_offset() {
         let events = command(&["--count", "--offset", "2"]);
-        let mut transport = Scripted::new(vec![page(json!([]), 5, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([]), 5, None)]);
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = events
@@ -840,7 +841,7 @@ mod tests {
     #[test]
     fn json_output_is_the_v1_event_array_with_details() {
         let events = command(&["--output", "json"]);
-        let mut transport = Scripted::new(vec![page(json!([event("e1", "exec")]), 1, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([event("e1", "exec")]), 1, None)]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())
@@ -860,7 +861,7 @@ mod tests {
     fn jsonl_output_is_one_event_per_line() {
         let events = command(&["--output", "jsonl"]);
         let mut transport = Scripted::new(vec![page(
-            json!([event("e1", "exec"), event("e2", "network")]),
+            &json!([event("e1", "exec"), event("e2", "network")]),
             2,
             None,
         )]);
@@ -891,9 +892,9 @@ mod tests {
             )
         };
         let mut transport = Scripted::new(vec![
-            page(page_of("a", 1000), 2500, Some(1000)),
-            page(page_of("b", 1000), 2500, Some(2000)),
-            page(page_of("c", 500), 2500, None),
+            page(&page_of("a", 1000), 2500, Some(1000)),
+            page(&page_of("b", 1000), 2500, Some(2000)),
+            page(&page_of("c", 500), 2500, None),
         ]);
         let mut out = Vec::new();
         let code = events
@@ -909,7 +910,7 @@ mod tests {
     fn a_page_failure_prints_no_report() {
         let events = command(&["--limit", "2500"]);
         let mut transport = Scripted::new(vec![
-            page(json!([event("e1", "exec")]), 2500, Some(1000)),
+            page(&json!([event("e1", "exec")]), 2500, Some(1000)),
             DaemonResponse::error(
                 request_id(),
                 asc_daemon_protocol::error_code::UNAVAILABLE,
@@ -933,7 +934,7 @@ mod tests {
     #[test]
     fn the_table_render_matches_the_v1_shape() {
         let events = command(&[]);
-        let mut transport = Scripted::new(vec![page(json!([event("e1", "exec")]), 1, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([event("e1", "exec")]), 1, None)]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())
@@ -948,7 +949,7 @@ mod tests {
     #[test]
     fn an_empty_table_says_no_events_found() {
         let events = command(&[]);
-        let mut transport = Scripted::new(vec![page(json!([]), 0, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([]), 0, None)]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())
@@ -969,7 +970,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let mut transport = Scripted::new(vec![page(json!([]), 0, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([]), 0, None)]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())
@@ -1001,7 +1002,7 @@ mod tests {
         let mut prompt = event("e1", "prompt_scan");
         prompt["result"] = json!("succeeded");
         prompt["details"] = json!({"result": {"verdict": "pass"}});
-        let mut transport = Scripted::new(vec![page(json!([prompt]), 1, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([prompt]), 1, None)]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())
@@ -1019,7 +1020,7 @@ mod tests {
     #[test]
     fn an_empty_summary_says_no_events_recorded() {
         let events = command(&["--summary"]);
-        let mut transport = Scripted::new(vec![page(json!([]), 0, None)]);
+        let mut transport = Scripted::new(vec![page(&json!([]), 0, None)]);
         let mut out = Vec::new();
         let code = events
             .run_with(&mut transport, &mut out, &mut Vec::new())

@@ -26,7 +26,7 @@ use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_persistence_sqlite::security_events::SqliteEventWriter;
 use asc_persistence_sqlite::security_events::query_source::SqliteEventQuerySource;
 use asc_security_events::SecurityEvent;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tokio::net::UnixStream;
 
 /// A third owner that certainly never connects.
@@ -158,10 +158,10 @@ fn cli_as(uid: u32, socket: &Path, args: &[&str]) -> (Option<i32>, String, Strin
 
 fn event_ids(stdout: &str) -> Vec<String> {
     let id_of = |value: &Value| value["event_id"].as_str().unwrap_or_default().to_owned();
-    if let Ok(parsed) = serde_json::from_str::<Value>(stdout) {
-        if let Some(items) = parsed.as_array() {
-            return items.iter().map(id_of).collect();
-        }
+    if let Ok(parsed) = serde_json::from_str::<Value>(stdout)
+        && let Some(items) = parsed.as_array()
+    {
+        return items.iter().map(id_of).collect();
     }
     // jsonl output: one event object per line.
     stdout

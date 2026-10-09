@@ -79,11 +79,9 @@ fn main() -> ExitCode {
         }
         // Scan and events commands own their usage hints, so those errors
         // render verbatim instead of behind the generic prefix.
-        Err(RunError::Input(input)) if input.is_usage_hint() => {
-            eprintln!("{input}");
-            ExitCode::FAILURE
-        }
-        Err(RunError::Events(asc_cli::EventsRunError::Input(input))) if input.is_usage_hint() => {
+        Err(RunError::Input(input) | RunError::Events(asc_cli::EventsRunError::Input(input)))
+            if input.is_usage_hint() =>
+        {
             eprintln!("{input}");
             ExitCode::FAILURE
         }
