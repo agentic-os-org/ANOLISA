@@ -32,6 +32,9 @@ pub fn run(cli: &Cli) -> Result<(), MigratorError> {
                 retention_days(&cli.common),
                 cli.common.force,
                 cli.common.writer_grace,
+                // A `--sqlite-only` plan reports the same stream selection
+                // the apply would use.
+                !cli.common.sqlite_only,
             )?;
             emit(&report, &report::render_plan(&report), cli.common.json);
             Ok(())
@@ -44,6 +47,7 @@ pub fn run(cli: &Cli) -> Result<(), MigratorError> {
                 cli.common.force,
                 cli.common.writer_grace,
                 asc_sqlite_kernel::current_epoch(),
+                !cli.common.sqlite_only,
             );
 
             // An explicitly requested source that failed validation is a hard

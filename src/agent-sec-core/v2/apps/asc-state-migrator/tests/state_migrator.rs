@@ -135,7 +135,7 @@ fn discovery_for(destination: &Path, sources: &[PathBuf]) -> DiscoveryOptions {
 }
 
 fn scan_all(options: &DiscoveryOptions) -> Vec<asc_state_migrator::source::SourceScan> {
-    let (scans, rejected, _) = import::scan_sources(options, true, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(options, true, 300, current_epoch(), true);
     assert!(
         rejected.is_empty(),
         "force-scan must accept the seeded sources: {rejected:?}"
@@ -376,7 +376,7 @@ fn recent_source_writes_are_refused_without_force() {
     .unwrap();
 
     let options = discovery_for(&destination, &[source]);
-    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
     assert!(scans.is_empty());
     assert!(rejected.len() == 1);
     assert!(
@@ -385,7 +385,7 @@ fn recent_source_writes_are_refused_without_force() {
         rejected[0].reason
     );
 
-    let (forced, _, _) = import::scan_sources(&options, true, 300, current_epoch());
+    let (forced, _, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert_eq!(forced.len(), 1, "--force accepts the fresh source");
 }
 
@@ -404,7 +404,7 @@ fn world_writable_and_hardlinked_stream_files_are_rejected() {
     fs::set_permissions(&db, perms).unwrap();
 
     let options = discovery_for(&destination, &[source.clone()]);
-    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert!(scans.is_empty());
     assert!(rejected[0].reason.contains("world-writable"));
 
@@ -412,7 +412,7 @@ fn world_writable_and_hardlinked_stream_files_are_rejected() {
     fs::set_permissions(&db, fs::Permissions::from_mode(0o600)).unwrap();
     fs::hard_link(&db, home.path().join("hardlink.db")).unwrap();
 
-    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert!(scans.is_empty());
     assert!(rejected[0].reason.contains("hard links"));
 }
@@ -591,7 +591,7 @@ fn plan_counts_without_touching_the_destination() {
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
 
     let options = discovery_for(&destination, &[source]);
-    let report = import::plan(&options, &destination, Some(30), true, 300).unwrap();
+    let report = import::plan(&options, &destination, Some(30), true, 300, true).unwrap();
     assert_eq!(report.sources.len(), 1);
     assert_eq!(report.sources[0].sqlite_rows, Some(1));
     assert!(!destination.exists(), "plan never creates the destination");
@@ -886,7 +886,7 @@ fn apply_reports_discovery_rejections_it_skipped() {
         tmp_root: None,
         destination_dir: destination.parent().unwrap().to_path_buf(),
     };
-    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
     assert_eq!(scans.len(), 1, "alice scans");
     assert_eq!(rejected.len(), 1, "bob is rejected: {rejected:?}");
 
@@ -921,7 +921,7 @@ fn a_fresh_wal_sidecar_marks_the_source_live() {
     chown(&wal, Some(1001), None).unwrap();
 
     let options = discovery_for(&destination, &[source.clone()]);
-    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
     assert!(scans.is_empty(), "the live source must not scan");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
     assert!(
@@ -931,7 +931,7 @@ fn a_fresh_wal_sidecar_marks_the_source_live() {
     );
 
     // --force still reaches the data.
-    let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch());
+    let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert_eq!(scans.len(), 1);
 }
 
@@ -1035,7 +1035,7 @@ fn a_symlinked_stream_is_refused_at_scan_time() {
     std::os::unix::fs::symlink(&real, source.join("security-events.db")).unwrap();
 
     let options = discovery_for(&destination, &[source]);
-    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert!(scans.is_empty());
     assert!(
         rejected[0].reason.contains("symlink"),
@@ -1088,5 +1088,231 @@ fn wal_frames_of_a_crashed_writer_survive_the_snapshot() {
         "WAL frames are import input and must survive the snapshot: {rows:?} \
          (imported {})",
         report.totals.imported
+    );
+}
+
+// --- Codex re-review round 2 (commit 93eb69327): the five new findings ---
+
+/// A pre-revision-3 source carries the verdict inside `details`; the
+/// migration must backfill it instead of inserting `NULL` (the v1 schema
+/// migration backfills the same way at upgrade time).
+#[test]
+fn a_pre_revision3_verdict_backfills_from_details() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[], &[], true);
+    {
+        let conn = Connection::open(source.join("security-events.db")).unwrap();
+        conn.execute(
+            "INSERT INTO security_events (event_id, event_type, category, result, timestamp, \
+             timestamp_epoch, pid, uid, details) VALUES ('v1', 'sandbox_prehook', 'exec', \
+             'succeeded', ?1, ?2, 4242, 1001, '{\"verdict\": \"deny\"}')",
+            rusqlite::params![iso_of(now), now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO security_events (event_id, event_type, category, result, timestamp, \
+             timestamp_epoch, pid, uid, details) VALUES ('v2', 'sandbox_prehook', 'exec', \
+             'succeeded', ?1, ?2, 4242, 1001, '{\"result\": {\"verdict\": \"allow\"}}')",
+            rusqlite::params![iso_of(now), now],
+        )
+        .unwrap();
+        drop(conn);
+    }
+
+    let options = discovery_for(&destination, &[source]);
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
+
+    let conn = Connection::open(&destination).unwrap();
+    let verdict_of = |id: &str| {
+        conn.query_row(
+            "SELECT verdict FROM security_events WHERE event_id = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        verdict_of("v1").as_deref(),
+        Some("deny"),
+        "a top-level details verdict must be backfilled"
+    );
+    assert_eq!(
+        verdict_of("v2").as_deref(),
+        Some("allow"),
+        "a nested result.verdict must be backfilled"
+    );
+}
+
+/// The journal sidecar must never be followed when it is a symlink: the
+/// migrator runs as root, so a following append would write migration data
+/// to an attacker-chosen target and skip the `0600` protection.
+#[test]
+fn a_symlinked_journal_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let target = home.path().join("attacker.log");
+    fs::write(&target, "").unwrap();
+    let sidecar = journal::journal_path(&destination);
+    std::os::unix::fs::symlink(&target, &sidecar).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
+
+    let options = discovery_for(&destination, &[source]);
+    let result = import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    );
+
+    match result {
+        Err(MigratorError::Journal { .. }) => {}
+        other => panic!("a symlinked journal must be refused, got {other:?}"),
+    }
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(
+        written.is_empty(),
+        "the symlink target must stay untouched: {written:?}"
+    );
+}
+
+/// `--sqlite-only` must not let an unusable `JSONL` sidecar reject the whole
+/// source: the scan has to skip the `JSONL` streams of the run.
+#[test]
+fn sqlite_only_scans_ignore_a_damaged_jsonl_stream() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
+    let foreign = home.path().join("foreign.jsonl");
+    fs::write(&foreign, "{}\n").unwrap();
+    std::os::unix::fs::symlink(&foreign, source.join("security-events.jsonl")).unwrap();
+
+    let options = discovery_for(&destination, &[source]);
+    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), false);
+    assert!(
+        rejected.is_empty(),
+        "a sqlite-only scan must skip the JSONL stream: {rejected:?}"
+    );
+    assert_eq!(scans.len(), 1, "the source itself stays usable");
+    assert!(
+        scans[0].jsonl.is_none(),
+        "a sqlite-only scan must not open the JSONL stream"
+    );
+    assert!(scans[0].sqlite.is_some());
+
+    let mut sqlite_only = apply_options(Some(30));
+    sqlite_only.jsonl_recovery = false;
+    import::apply(&scans, &[], &destination, &sqlite_only).unwrap();
+    let ids: Vec<String> = destination_row_uids(&destination)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids, ["e1"]);
+}
+
+/// Resolving the default destination must be a pure path decision: `plan`
+/// and `verify` without `--destination` must not create (or chmod) the
+/// daemon data directory. Driven through the real binary so the environment
+/// override is set on a child process, not this one.
+#[test]
+fn a_default_destination_resolution_creates_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let data_dir = home.path().join("data-dir-must-not-exist");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_asc-state-migrator"))
+        .env("AGENT_SEC_DATA_DIR", &data_dir)
+        .arg("plan")
+        .output()
+        .expect("the migrator binary runs");
+
+    assert!(
+        !data_dir.exists(),
+        "a read-only command must not create the data directory (exit {}, stderr {:?})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A post-run writer that commits only to the `WAL` keeps the main database
+/// byte-identical, so the run must journal (and verify) the `WAL` identity
+/// it snapshotted, or the source wrongly reports as unchanged.
+#[test]
+fn a_wal_only_append_after_the_run_reports_drift() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("main", now, 1001)], &[], false);
+    {
+        let conn = Connection::open(source.join("security-events.db")).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        insert_source_row(&conn, "wal-only", now, 1001);
+        std::mem::forget(conn);
+    }
+    let wal = source.join("security-events.db-wal");
+    chown(&wal, Some(1001), None).unwrap();
+    make_old(&wal);
+    make_old(&source.join("security-events.db"));
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30)),
+    )
+    .unwrap();
+
+    // Positive control before disturbing anything.
+    let report = import::verify(&destination, None).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["runs"][0]["sources"][0]["sqlite_wal_unchanged"].as_bool(),
+        Some(true),
+        "an untouched WAL must report unchanged: {json}"
+    );
+
+    // WAL-only append: the main database keeps its size and mtime.
+    let before = fs::metadata(source.join("security-events.db")).unwrap();
+    {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new().append(true).open(&wal).unwrap();
+        file.write_all(&[0u8; 32]).unwrap();
+    }
+    let after = fs::metadata(source.join("security-events.db")).unwrap();
+    assert_eq!(
+        (before.size(), before.mtime()),
+        (after.size(), after.mtime()),
+        "the fixture must only disturb the WAL"
+    );
+
+    let report = import::verify(&destination, None).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["runs"][0]["sources"][0]["sqlite_wal_unchanged"].as_bool(),
+        Some(false),
+        "a WAL-only append after the run must report drift: {json}"
     );
 }

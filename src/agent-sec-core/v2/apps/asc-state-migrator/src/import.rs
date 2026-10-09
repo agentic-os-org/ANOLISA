@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use asc_persistence_sqlite::security_events::writer::LOG_PREFIX;
 use asc_security_events::{
-    SECURITY_EVENTS_SQLITE_SCHEMA_VERSION, SecurityEvent, config::daemon_security_event_paths,
+    SECURITY_EVENTS_SQLITE_SCHEMA_VERSION, SecurityEvent,
+    config::daemon_security_event_paths_readonly,
 };
 use asc_sqlite_kernel::{KernelError, SqliteStore, current_epoch};
 use rusqlite::Connection;
@@ -58,7 +59,9 @@ fn required<T>(value: Option<T>) -> Result<T, crate::MigratorError> {
 ///
 /// Purely a path decision: creating (or chmod'ing) the parent directory is a
 /// write side effect that belongs to the write commands' store opening, so
-/// `plan` and `verify` never touch the filesystem here.
+/// `plan` and `verify` never touch the filesystem here. The daemon default
+/// is resolved through the read-only variant of the daemon's path helper,
+/// which also does not prepare the data directory.
 ///
 /// # Errors
 ///
@@ -75,7 +78,7 @@ pub fn resolve_destination(explicit: Option<&Path>) -> Result<PathBuf, crate::Mi
             }
             Ok(path.to_path_buf())
         }
-        None => Ok(daemon_security_event_paths()?.1),
+        None => Ok(daemon_security_event_paths_readonly()?.1),
     }
 }
 
@@ -136,17 +139,22 @@ pub fn open_destination_readonly(path: &Path) -> Result<SqliteStore, crate::Migr
 /// Rejections of scan-found directories are soft (returned for the report);
 /// the orchestrator decides which of them were explicit `--source` arguments
 /// and escalates those to fatal errors before `apply`.
+///
+/// `open_jsonl` is false for a `--sqlite-only` run, so a damaged `JSONL`
+/// stream cannot reject a source whose `SQLite` stream is the intended
+/// input.
 pub fn scan_sources(
     options: &DiscoveryOptions,
     force: bool,
     writer_grace: u32,
     now_epoch: f64,
+    open_jsonl: bool,
 ) -> (Vec<SourceScan>, Vec<RejectedSource>, Vec<PathBuf>) {
     let discovery = crate::discovery::discover(options);
     let mut rejected = discovery.rejected;
     let mut scans = Vec::new();
     for source in &discovery.sources {
-        match source::validate_and_scan(source, force, writer_grace, now_epoch) {
+        match source::validate_and_scan(source, force, writer_grace, now_epoch, open_jsonl) {
             Ok(scan) => scans.push(scan),
             Err(rejection) => rejected.push(rejection),
         }
@@ -166,9 +174,10 @@ pub fn plan(
     retention_days: Option<u32>,
     force: bool,
     writer_grace: u32,
+    open_jsonl: bool,
 ) -> Result<PlanReport, crate::MigratorError> {
     let (scans, rejected, system_owned) =
-        scan_sources(options, force, writer_grace, current_epoch());
+        scan_sources(options, force, writer_grace, current_epoch(), open_jsonl);
 
     let sources = scans
         .iter()
@@ -237,6 +246,10 @@ pub fn apply(
             admin_mapped: scan.admin_mapped,
             dir_uid: scan.dir_uid,
             sqlite_identity: scan.sqlite.as_ref().map(|sqlite| sqlite.identity.clone()),
+            sqlite_wal_identity: scan
+                .sqlite
+                .as_ref()
+                .and_then(|sqlite| sqlite.wal_identity.clone()),
             jsonl_identity: scan.jsonl.as_ref().map(|jsonl| jsonl.identity.clone()),
             sqlite_rows_read: 0,
             jsonl_records_read: 0,
@@ -579,6 +592,9 @@ pub fn verify(
                     sqlite_unchanged: item.sqlite_identity.as_ref().map(|identity| {
                         identity_matches(&item.dir, "security-events.db", identity)
                     }),
+                    sqlite_wal_unchanged: item.sqlite_wal_identity.as_ref().map(|identity| {
+                        wal_identity_matches(&item.dir, "security-events.db-wal", identity)
+                    }),
                     jsonl_unchanged: item.jsonl_identity.as_ref().map(|identity| {
                         identity_matches(&item.dir, "security-events.jsonl", identity)
                     }),
@@ -599,6 +615,26 @@ pub fn verify(
         quick_check,
         runs,
     })
+}
+
+/// Re-checks the journaled `WAL` sidecar identity against the sidecar on
+/// disk now.
+///
+/// A checkpoint folds the sidecar into the main database and deletes it, so
+/// an absent sidecar is a normal end state rather than drift: the main
+/// database's own comparison covers the checkpoint because the checkpoint
+/// rewrote that file. Only a sidecar that still exists and differs from the
+/// journaled identity reports as changed — the `WAL`-only commit a
+/// post-run writer can make without touching the main database.
+fn wal_identity_matches(dir: &str, file: &str, identity: &FileIdentity) -> bool {
+    let path = Path::new(dir).join(file);
+    let Ok(meta) = fs::symlink_metadata(&path) else {
+        return true;
+    };
+    meta.dev() == identity.dev
+        && meta.ino() == identity.ino
+        && meta.size() == identity.size
+        && meta.mtime() == identity.mtime
 }
 
 fn identity_matches(dir: &str, file: &str, identity: &FileIdentity) -> bool {
