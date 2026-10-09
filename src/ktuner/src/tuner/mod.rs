@@ -3827,7 +3827,12 @@ mod tests {
                 .truncate(false)
                 .open(format!("{}.lock", ledger.to_str().unwrap()))
                 .expect("open holdover lock");
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            // The release the guard just dropped can still lag visibility on
+            // the runners' overlay filesystem (#6527), so the holdover probes
+            // with the same bounded retry the acquiring side uses — a
+            // single-shot probe here would flake the test setup itself, not
+            // the property under test.
+            let rc = acquire_exclusive_with_retry(file.as_raw_fd());
             acquired.send(rc).expect("signal holdover acquire");
             std::thread::sleep(std::time::Duration::from_millis(150));
         });
