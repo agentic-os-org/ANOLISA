@@ -486,21 +486,39 @@ fn cancellation_converges_from_every_active_state() {
         TaskState::Suspended,
     ] {
         let mut fixture = fixture(state);
-        let requested = prepare_event(&mut fixture, TaskEventKind::CancellationRequested);
-        let requested = envelope(&fixture.aggregate, requested);
-        fixture.aggregate.apply(&requested).unwrap();
-        assert!(fixture.aggregate.cancellation_requested());
-
-        let cancelled = prepare_event(&mut fixture, TaskEventKind::RunCancelled);
-        let cancelled = envelope(&fixture.aggregate, cancelled);
-        fixture.aggregate.apply(&cancelled).unwrap();
-        assert_eq!(fixture.aggregate.state(), TaskState::Suspended);
-
-        let completed = prepare_event(&mut fixture, TaskEventKind::TaskCancelled);
-        let completed = envelope(&fixture.aggregate, completed);
-        fixture.aggregate.apply(&completed).unwrap();
-        assert_eq!(fixture.aggregate.state(), TaskState::Cancelled);
+        converge_to_cancelled(&mut fixture);
     }
+
+    // ExecutionUncertainty parks a live Run in Suspended with an Uncertain
+    // outcome; durable cancellation must converge from that fixture too.
+    let mut uncertain = fixture(TaskState::Suspended);
+    uncertain.aggregate.run_outcome = RunOutcome::Uncertain;
+    converge_to_cancelled(&mut uncertain);
+
+    // A durable cancel that raced a retryable RunFailed leaves the Run
+    // Suspended+Failed with the request already recorded; the guarded
+    // re-cancel must converge from that composite too.
+    let mut raced = fixture(TaskState::Suspended);
+    raced.aggregate.run_outcome = RunOutcome::Failed;
+    raced.aggregate.cancellation_requested = true;
+    converge_to_cancelled(&mut raced);
+}
+
+fn converge_to_cancelled(fixture: &mut Fixture) {
+    let requested = prepare_event(fixture, TaskEventKind::CancellationRequested);
+    let requested = envelope(&fixture.aggregate, requested);
+    fixture.aggregate.apply(&requested).unwrap();
+    assert!(fixture.aggregate.cancellation_requested());
+
+    let cancelled = prepare_event(fixture, TaskEventKind::RunCancelled);
+    let cancelled = envelope(&fixture.aggregate, cancelled);
+    fixture.aggregate.apply(&cancelled).unwrap();
+    assert_eq!(fixture.aggregate.state(), TaskState::Suspended);
+
+    let completed = prepare_event(fixture, TaskEventKind::TaskCancelled);
+    let completed = envelope(&fixture.aggregate, completed);
+    fixture.aggregate.apply(&completed).unwrap();
+    assert_eq!(fixture.aggregate.state(), TaskState::Cancelled);
 }
 
 #[test]
