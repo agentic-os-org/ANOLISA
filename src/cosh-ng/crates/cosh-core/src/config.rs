@@ -1182,6 +1182,21 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
         if let Some(true) = provider.explicit_cache {
             preserved.push_str("explicit_cache = true\n");
         }
+        if let Some(ref extra_params) = provider.extra_params {
+            // toml::Value Display renders an inline table with proper escaping;
+            // JSON-only shapes (null, u64 > i64::MAX) cannot be represented, so
+            // warn and skip only this field rather than dropping the config.
+            match toml::Value::try_from(extra_params) {
+                Ok(value) => {
+                    preserved.push_str(&format!("extra_params = {value}\n"));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[cosh-core] Warning: skipping extra_params for provider {name}: {e}"
+                    );
+                }
+            }
+        }
         preserved.push('\n');
     }
 
@@ -2024,6 +2039,72 @@ sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
             "https://sysom.cn-shanghai.aliyuncs.com"
         );
         assert_eq!(reloaded.access_key_id, "new-ak");
+    }
+
+    #[test]
+    fn persist_round_trips_provider_extra_params() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[ai]
+active_provider = "dashscope"
+[ai.providers.dashscope]
+type = "dashscope"
+api_key = "sk-old"
+extra_params = { enable_thinking = false, top_p = 0.5 }
+"#,
+        )
+        .unwrap();
+        let mut config = CoreConfig::load_from_paths(None, Some(&path), None);
+        let response = crate::auth::AuthResponse {
+            provider_id: "dashscope".to_string(),
+            provider_type: None,
+            values: HashMap::from([("api_key".to_string(), "sk-new".to_string())]),
+            persist: true,
+        };
+        crate::auth::apply_auth_credentials(&mut config, &response).unwrap();
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(persisted.contains("extra_params"));
+        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None).resolve_provider();
+        assert_eq!(reloaded.api_key, "sk-new");
+        assert_eq!(
+            reloaded.extra_params,
+            Some(serde_json::json!({"enable_thinking": false, "top_p": 0.5}))
+        );
+    }
+
+    #[test]
+    fn persist_warns_and_skips_extra_params_with_json_null() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = CoreConfig::default();
+        config.user_ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-user".to_string()),
+                extra_params: Some(serde_json::json!({"stop": null})),
+                ..Default::default()
+            },
+        );
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+        let persisted = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+        // Only the unrepresentable extra_params field is skipped (with a
+        // warning); the rest of the provider section must still be written.
+        assert!(persisted.contains("api_key = \"sk-user\""));
+        assert!(!persisted.contains("extra_params"));
+        // The file must remain loadable.
+        let reloaded =
+            CoreConfig::load_from_paths(None, Some(&tmp.path().join("config.toml")), None);
+        assert!(reloaded
+            .ai
+            .providers
+            .get("dashscope")
+            .unwrap()
+            .extra_params
+            .is_none());
     }
 
     #[test]
