@@ -220,8 +220,17 @@ fn v1_invalid_url_message(base_url: &str) -> Option<String> {
         return Some("Invalid IPv6 URL".to_owned());
     }
     let bracketed = &host[open + 1..close];
-    if bracketed.starts_with('v') && bracketed.contains('.') {
-        return None;
+    if let Some(ipv_future) = bracketed.strip_prefix('v') {
+        let valid = ipv_future
+            .split_once('.')
+            .is_some_and(|(version, address)| {
+                !version.is_empty()
+                    && version
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+                    && !address.is_empty()
+            });
+        return (!valid).then(|| "IPvFuture address is invalid".to_owned());
     }
     if bracketed.parse::<std::net::Ipv4Addr>().is_ok() {
         return Some("An IPv4 address cannot be in brackets".to_owned());
@@ -488,6 +497,13 @@ mod tests {
                     reason: "invalid IPv6 address".to_owned(),
                 },
                 "An IPv4 address cannot be in brackets",
+            ),
+            (
+                ConfigError::InvalidBaseUrl {
+                    base_url: "http://[v.foo]".to_owned(),
+                    reason: "invalid IPv6 address".to_owned(),
+                },
+                "IPvFuture address is invalid",
             ),
             (
                 ConfigError::InvalidBaseUrl {
