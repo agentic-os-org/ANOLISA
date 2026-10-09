@@ -104,6 +104,9 @@ pub struct SourceVerification {
     pub dir: String,
     /// Whether the `SQLite` file still has the journaled identity.
     pub sqlite_unchanged: Option<bool>,
+    /// Whether the snapshotted `WAL` sidecar still has the journaled
+    /// identity (`None` when the run had no frame-bearing sidecar).
+    pub sqlite_wal_unchanged: Option<bool>,
     /// Whether the `JSONL` file still has the journaled identity.
     pub jsonl_unchanged: Option<bool>,
 }
@@ -255,6 +258,7 @@ pub fn render_verify(report: &VerifyReport) -> String {
         for source in &run.sources {
             for (label, unchanged) in [
                 ("sqlite", source.sqlite_unchanged),
+                ("sqlite wal", source.sqlite_wal_unchanged),
                 ("jsonl", source.jsonl_unchanged),
             ] {
                 if let Some(unchanged) = unchanged {

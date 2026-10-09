@@ -87,6 +87,11 @@ pub struct SqliteScan {
     pub path: PathBuf,
     /// Identity of the validated file, captured through its descriptor.
     pub identity: FileIdentity,
+    /// Identity of the frame-bearing `WAL` sidecar that was snapshotted,
+    /// when there was one. A post-run writer that only commits to the
+    /// `WAL` leaves the main database untouched, so this is the only
+    /// evidence that can catch it.
+    pub wal_identity: Option<FileIdentity>,
     /// Schema revision the source declares.
     pub user_version: u32,
     /// Rows in `security_events` at scan time.
@@ -208,11 +213,17 @@ fn snapshot_sqlite(stream: &ValidatedFile, dir_uid: u32) -> Result<SqliteSnapsho
         tempfile::tempdir().map_err(|err| format!("{}: cannot snapshot: {err}", path.display()))?;
     let db = dir.path().join("security-events.db");
     copy_through(&stream.file, &db, path)?;
+    let mut wal_identity = None;
     if let Some(wal_path) = wal_sidecar_of(path)? {
         let wal = ValidatedFile::open(&wal_path, dir_uid)?;
+        wal_identity = Some(wal.identity.clone());
         copy_through(&wal.file, &dir.path().join("security-events.db-wal"), path)?;
     }
-    Ok(SqliteSnapshot { _dir: dir, db })
+    Ok(SqliteSnapshot {
+        _dir: dir,
+        db,
+        wal_identity,
+    })
 }
 
 /// The `WAL` sidecar of a source database, when it exists and carries frames.
@@ -270,6 +281,8 @@ struct SqliteSnapshot {
     _dir: tempfile::TempDir,
     /// The copied main database.
     db: PathBuf,
+    /// Identity of the `WAL` sidecar that was copied, when there was one.
+    wal_identity: Option<FileIdentity>,
 }
 
 /// One source row, exactly as the source stored it.
@@ -324,11 +337,16 @@ pub struct SourceRow {
 /// Returns a [`RejectedSource`] carrying the first failed check. The
 /// writer-grace rejection mentions `--force` so operators get the remedy in
 /// the message.
+///
+/// `open_jsonl` is false for a `--sqlite-only` run: the `JSONL` streams are
+/// then neither discovered nor opened, so a damaged log cannot reject a
+/// source whose `SQLite` stream is the only intended input.
 pub fn validate_and_scan(
     source: &DiscoveredSource,
     force: bool,
     writer_grace: u32,
     now_epoch: f64,
+    open_jsonl: bool,
 ) -> Result<SourceScan, RejectedSource> {
     let reject = |reason: String| RejectedSource {
         dir: source.dir.clone(),
@@ -359,7 +377,11 @@ pub fn validate_and_scan(
     }
 
     let mut jsonl_streams: Option<Vec<ValidatedFile>> = None;
-    if path_exists(&jsonl_path) {
+    // A `--sqlite-only` run never reads the `JSONL` streams, so an unusable
+    // log (a symlink, a world-writable file, an unreadable backup) must not
+    // reject the source: the advertised recovery mode has to keep working
+    // precisely when the fail-open stream is damaged.
+    if open_jsonl && path_exists(&jsonl_path) {
         let main = ValidatedFile::open(&jsonl_path, source.dir_uid).map_err(reject)?;
         newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(main.identity.mtime));
         let mut streams = vec![main];
@@ -394,6 +416,7 @@ pub fn validate_and_scan(
         sqlite = Some(SqliteScan {
             path,
             identity,
+            wal_identity: snapshot.wal_identity.clone(),
             user_version,
             rows,
             snapshot,
@@ -518,6 +541,11 @@ pub fn read_batch(
     last_rowid: i64,
 ) -> Result<Vec<(i64, SourceRow)>, rusqlite::Error> {
     let columns = table_columns(connection)?;
+    // Revision 3 added the `verdict` column and v1's schema migration
+    // backfills it from `details` at upgrade time; a pre-revision-3 source
+    // is derived the same way here so verdict-filtered queries keep seeing
+    // migrated events.
+    let has_verdict_column = columns.iter().any(|column| column == "verdict");
     let sql = format!(
         "SELECT rowid AS _source_rowid_, event_id, event_type, category, result, timestamp, \
          timestamp_epoch, {trace}, pid, uid, {session}, {run}, {call}, {tool}, {verdict}, \
@@ -533,6 +561,12 @@ pub fn read_batch(
     let mapped = statement
         .query_map([last_rowid], |row| {
             let rowid: i64 = row.get("_source_rowid_")?;
+            let details: String = row.get("details")?;
+            let verdict = if has_verdict_column {
+                row.get("verdict")?
+            } else {
+                verdict_from_details(&details)
+            };
             let source_row = SourceRow {
                 event_id: row.get("event_id")?,
                 event_type: row.get("event_type")?,
@@ -547,13 +581,24 @@ pub fn read_batch(
                 run_id: row.get("run_id")?,
                 call_id: row.get("call_id")?,
                 tool_call_id: row.get("tool_call_id")?,
-                verdict: row.get("verdict")?,
-                details: row.get("details")?,
+                verdict,
+                details,
             };
             Ok((rowid, source_row))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(mapped)
+}
+
+/// The verdict a pre-revision-3 source embedded in `details`, derived with
+/// the same shape v1's `extract_verdict` uses: a top-level string first,
+/// then `result.verdict`.
+fn verdict_from_details(details: &str) -> Option<String> {
+    let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(details)
+    else {
+        return None;
+    };
+    asc_security_events::extract_verdict(&map)
 }
 
 /// Streams every `JSONL` record of a source, main log then backups.

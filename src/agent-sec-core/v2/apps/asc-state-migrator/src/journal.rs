@@ -6,10 +6,11 @@
 //! converge to. It is created `0600` in the destination's `0700` directory.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read as _, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
 use crate::source::FileIdentity;
@@ -52,6 +53,13 @@ pub struct RunSource {
     pub dir_uid: u32,
     /// `SQLite` stream identity at import time.
     pub sqlite_identity: Option<FileIdentity>,
+    /// `SQLite` `WAL` sidecar identity at import time, when the snapshot
+    /// carried frames. A post-run writer that only commits to the `WAL`
+    /// leaves the main database untouched, so this is the only evidence
+    /// `verify` can catch it by. Absent in records written before the
+    /// sidecar identity was journaled.
+    #[serde(default)]
+    pub sqlite_wal_identity: Option<FileIdentity>,
     /// `JSONL` stream identity at import time.
     pub jsonl_identity: Option<FileIdentity>,
     /// Rows read from the `SQLite` stream.
@@ -100,17 +108,21 @@ pub fn journal_path(destination: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns [`crate::MigratorError::Journal`] when the file exists but cannot
-/// be read or parsed. A missing journal is an empty list, not an error.
+/// be read or parsed, or when it is a symlink (see [`open_no_follow`]). A
+/// missing journal is an empty list, not an error.
 pub fn load(path: &Path) -> Result<Vec<RunRecord>, crate::MigratorError> {
     let journal_error = |reason: String| crate::MigratorError::Journal {
         path: path.display().to_string(),
         reason,
     };
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(journal_error(err.to_string())),
+    let mut file = match open_no_follow(path, OFlags::RDONLY) {
+        Ok(Opened::File(file)) => file,
+        Ok(Opened::Missing) => return Ok(Vec::new()),
+        Err(err) => return Err(err),
     };
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|err| journal_error(err.to_string()))?;
     let mut records = Vec::new();
     for (index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -128,14 +140,16 @@ pub fn load(path: &Path) -> Result<Vec<RunRecord>, crate::MigratorError> {
 ///
 /// # Errors
 ///
-/// Returns [`crate::MigratorError::Io`] or [`crate::MigratorError::Journal`]
-/// when the file cannot be written.
+/// Returns [`crate::MigratorError::Journal`] when the file cannot be opened
+/// or written; a symlinked journal is refused rather than followed.
 pub fn append(path: &Path, record: &RunRecord) -> Result<(), crate::MigratorError> {
-    let fresh = !path.exists();
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    // `symlink_metadata` never follows, so a symlink counts as existing and
+    // an existing journal is never re-chmod'ed by a later append.
+    let fresh = fs::symlink_metadata(path).is_err();
+    let mut file = match open_no_follow(path, OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND)? {
+        Opened::File(file) => file,
+        Opened::Missing => unreachable!("O_CREAT always yields a file"),
+    };
     if fresh {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
@@ -152,7 +166,8 @@ pub fn append(path: &Path, record: &RunRecord) -> Result<(), crate::MigratorErro
 ///
 /// # Errors
 ///
-/// Returns [`crate::MigratorError::Io`] when the rewrite fails.
+/// Returns [`crate::MigratorError::Journal`] when the rewrite fails; a
+/// symlinked journal is refused rather than followed.
 pub fn rewrite(path: &Path, records: &[RunRecord]) -> Result<(), crate::MigratorError> {
     let mut content = String::new();
     for record in records {
@@ -163,8 +178,62 @@ pub fn rewrite(path: &Path, records: &[RunRecord]) -> Result<(), crate::Migrator
         content.push_str(&line);
         content.push('\n');
     }
-    fs::write(path, content)?;
+    let mut file = match open_no_follow(path, OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC)? {
+        Opened::File(file) => file,
+        Opened::Missing => unreachable!("O_CREAT always yields a file"),
+    };
+    file.write_all(content.as_bytes())?;
     Ok(())
+}
+
+/// The outcome of a no-follow journal open.
+enum Opened {
+    /// An open, validated journal file.
+    File(fs::File),
+    /// No journal exists (only possible without `O_CREAT`).
+    Missing,
+}
+
+/// Opens the journal without following symlinks.
+///
+/// The journal sits beside the destination database, and an explicit
+/// `--destination` can place that in a directory another user controls; the
+/// migrator normally runs as root, so a following open would let that user
+/// aim the append at an arbitrary file (also skipping the `0600`
+/// protection). The opened object is additionally required to be a regular
+/// file, so a device or fifo cannot take the journal's place.
+fn open_no_follow(path: &Path, flags: OFlags) -> Result<Opened, crate::MigratorError> {
+    let journal_error = |reason: String| crate::MigratorError::Journal {
+        path: path.display().to_string(),
+        reason,
+    };
+    let fd = rustix::fs::open(
+        path,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|err| {
+        if err == rustix::io::Errno::NOENT {
+            "missing".to_owned()
+        } else if err == rustix::io::Errno::LOOP {
+            "is a symlink — refusing to use".to_owned()
+        } else {
+            err.to_string()
+        }
+    });
+    let fd = match fd {
+        Ok(fd) => fd,
+        Err(reason) if reason == "missing" => return Ok(Opened::Missing),
+        Err(reason) => return Err(journal_error(reason)),
+    };
+    let file = fs::File::from(fd);
+    let meta = file
+        .metadata()
+        .map_err(|err| journal_error(err.to_string()))?;
+    if !meta.is_file() {
+        return Err(journal_error("is not a regular file".to_owned()));
+    }
+    Ok(Opened::File(file))
 }
 
 #[cfg(test)]
