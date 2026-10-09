@@ -581,3 +581,216 @@ fn apply_creates_and_converges_a_missing_destination() {
         & 0o777;
     assert_eq!(dir_mode, 0o700, "the created destination dir is private");
 }
+
+fn verify_cli(destination: &Path) -> asc_state_migrator::cli::Cli {
+    use asc_state_migrator::cli::{Cli, Command, CommonArgs};
+    Cli {
+        command: Command::Verify { run_id: None },
+        common: CommonArgs {
+            destination: Some(destination.to_path_buf()),
+            sources: Vec::new(),
+            map_owner: Vec::new(),
+            discover_homes: None,
+            no_discover_homes: true,
+            discover_tmp: None,
+            no_discover_tmp: true,
+            retention_days: 30,
+            no_retention_cutoff: false,
+            sqlite_only: false,
+            force: false,
+            writer_grace: 300,
+            json: false,
+        },
+    }
+}
+
+#[test]
+fn verify_needs_an_existing_destination_and_creates_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+
+    match asc_state_migrator::run(&verify_cli(&destination)) {
+        Err(MigratorError::DestinationUnusable { path, reason }) => {
+            assert!(path.ends_with("security-events.db"), "got {path}");
+            assert!(reason.contains("does not exist"), "got {reason}");
+        }
+        other => panic!("expected DestinationUnusable, got {other:?}"),
+    }
+    assert!(
+        !destination.parent().unwrap().exists(),
+        "verify is read-only: neither the database nor its directory may appear"
+    );
+}
+
+#[test]
+fn verify_fails_the_exit_status_when_quick_check_reports_corruption() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
+
+    let options = discovery_for(&destination, &[source]);
+    import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+
+    // A rogue table on its own page lets quick_check fail while every
+    // security_events page stays intact, so only the integrity verdict can
+    // fail the command.
+    let conn = Connection::open(&destination).unwrap();
+    conn.execute_batch("CREATE TABLE rogue_probe(t); INSERT INTO rogue_probe VALUES (1);")
+        .unwrap();
+    let root: i64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'rogue_probe'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    let page_size: usize = {
+        let conn = Connection::open(&destination).unwrap();
+        let raw: i64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+        usize::try_from(raw).unwrap()
+    };
+    let mut bytes = fs::read(&destination).unwrap();
+    let root_page = usize::try_from(root).unwrap();
+    let offset = root_page.saturating_sub(1).saturating_mul(page_size);
+    // An invalid b-tree page type: quick_check reports it, queries that do
+    // not touch the page still succeed.
+    bytes[offset] = 0;
+    fs::write(&destination, bytes).unwrap();
+
+    let verification = import::verify(&destination, None).unwrap();
+    assert_ne!(
+        verification.quick_check, "ok",
+        "the corrupted page must be reported"
+    );
+    assert!(
+        verification.runs.iter().all(|run| run.ok),
+        "the journaled rows are still present: {:?}",
+        verification.runs
+    );
+
+    match asc_state_migrator::run(&verify_cli(&destination)) {
+        Err(MigratorError::Usage(message)) => {
+            assert!(
+                message.contains("integrity"),
+                "the quick_check verdict must fail the command, got {message}"
+            );
+        }
+        other => panic!("expected Usage error, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_reports_sources_that_grew_in_place_after_the_run() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+
+    // An in-place append keeps dev/ino but grows the file and bumps mtime.
+    let source_db = source.join("security-events.db");
+    let before = fs::symlink_metadata(&source_db).unwrap();
+    {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&source_db)
+            .unwrap();
+        file.write_all(&[0u8; 16]).unwrap();
+    }
+    let after = fs::symlink_metadata(&source_db).unwrap();
+    assert_eq!(before.dev(), after.dev());
+    assert_eq!(before.ino(), after.ino());
+    assert!(after.size() > before.size());
+
+    let verification = import::verify(&destination, None).unwrap();
+    assert_eq!(verification.runs.len(), 1);
+    assert!(
+        verification.runs[0].sources[0]
+            .sqlite_unchanged
+            .is_some_and(|unchanged| !unchanged),
+        "an in-place append is source drift and must be reported: {:?}",
+        verification.runs[0].sources
+    );
+    assert!(
+        verification.runs[0].ok,
+        "source drift is reported, not a destination mismatch"
+    );
+}
+
+#[test]
+fn bare_verify_checks_the_latest_run_only() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_source(
+        &source,
+        1001,
+        &[("e1", now, 1001), ("e2", now, 1001)],
+        &[],
+        false,
+    );
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let first = import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    assert_eq!(first.totals.imported, 2);
+
+    // Rescan after removing e2 and adding e3: the second run's responsibility
+    // set is {e1, e3} — it never covers e2.
+    let conn = Connection::open(source.join("security-events.db")).unwrap();
+    conn.execute("DELETE FROM security_events WHERE event_id = 'e2'", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO security_events (event_id, event_type, category, result, timestamp, \
+         timestamp_epoch, trace_id, pid, uid, session_id, run_id, call_id, tool_call_id, \
+         verdict, details) VALUES ('e3', 'sandbox_prehook', 'exec', 'succeeded', ?1, ?2, '', \
+         4242, 1001, NULL, NULL, NULL, NULL, NULL, '{\"k\": \"v\"}')",
+        rusqlite::params![iso_of(now), now],
+    )
+    .unwrap();
+    drop(conn);
+    make_old(&source.join("security-events.db"));
+
+    let second =
+        import::apply(&scan_all(&options), &destination, &apply_options(Some(30))).unwrap();
+    assert_eq!(second.totals.imported, 1, "only e3 is new");
+
+    // Break the first run only: e2 is absent from the second run's set.
+    let conn = Connection::open(&destination).unwrap();
+    conn.execute("DELETE FROM security_events WHERE event_id = 'e2'", [])
+        .unwrap();
+    drop(conn);
+
+    let records = journal::load(&journal::journal_path(&destination)).unwrap();
+    assert_eq!(records.len(), 2);
+
+    let verification = import::verify(&destination, None).unwrap();
+    assert_eq!(
+        verification.runs.len(),
+        1,
+        "a bare verify selects the most recent run"
+    );
+    assert_eq!(verification.runs[0].run_id, second.run_id);
+    assert!(verification.runs[0].ok, "the latest run is intact");
+
+    asc_state_migrator::run(&verify_cli(&destination)).unwrap();
+
+    // The older run is still reachable — and still broken.
+    let older = import::verify(&destination, Some(&first.run_id)).unwrap();
+    assert!(!older.runs[0].ok, "run 1 lost e2");
+}
