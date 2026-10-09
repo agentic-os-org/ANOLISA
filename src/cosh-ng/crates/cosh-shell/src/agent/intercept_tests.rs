@@ -670,3 +670,221 @@ fn smart_and_auto_failure_requests_share_the_same_bounded_evidence() {
         assert!(auto.user_input.is_none());
     }
 }
+
+#[test]
+fn ai_disabled_drops_pending_insight_binding_on_accept() {
+    let block = source_block();
+    let mut state = InlineState {
+        pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
+            insight_binding("suggestion-1"),
+        ))),
+        ..Default::default()
+    };
+    state.personalization.ai_disabled = true;
+    let mut event = prompt_ghost_event(
+        Some("input intercepted before reaching bash"),
+        Some("analyze edited failure"),
+    );
+    event.component = Some("prompt_ghost:suggestion-1".to_string());
+
+    assert!(
+        agent_request_from_pending_insight(&event, std::slice::from_ref(&block), &mut state)
+            .is_none()
+    );
+    assert!(state.pending_input_ghost_binding.is_none());
+}
+
+fn insight_intercept_state(ai_disabled: bool) -> InlineState {
+    let mut state = InlineState {
+        pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
+            insight_binding("suggestion-1"),
+        ))),
+        ..Default::default()
+    };
+    state.personalization.ai_disabled = ai_disabled;
+    state
+}
+
+#[test]
+fn insight_intercept_ai_off_consumes_submission_without_freeform_dispatch() {
+    for component in ["prompt_ghost:suggestion-1", "prompt_ghost"] {
+        let mut state = insight_intercept_state(true);
+        let mut event = candidate_event("suggestion-1", None, Some("analyze edited failure"));
+        event.component = Some(component.to_string());
+        let mut output = Vec::new();
+
+        render_intercept_agent_guidance(
+            &[event],
+            &[source_block()],
+            &AdapterInstance::Fake(FakeAgentAdapter),
+            &mut state,
+            &mut output,
+            0,
+        )
+        .expect("consume disabled insight submission");
+
+        assert!(state.pending_input_ghost_binding.is_none(), "{component}");
+        assert!(
+            state.agent_run.active.is_none(),
+            "{component}: unexpected active run"
+        );
+        assert!(
+            state.agent_run.queued_requests.is_empty(),
+            "{component}: unexpected queue"
+        );
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(!rendered.contains("Thinking"), "{component}: {rendered}");
+        assert!(output.is_empty(), "{component}: {rendered}");
+    }
+}
+
+#[test]
+fn insight_intercept_ai_off_preserves_busy_run_and_existing_queue() {
+    let mut state = insight_intercept_state(true);
+    let (active, _approval_receiver) =
+        crate::agent::run::test_support::test_active_run_with_id("already-active");
+    let queued_request = active.request.clone();
+    state.agent_run.active = Some(active);
+    state
+        .agent_run
+        .queue_request(crate::agent::run::PendingAgentRequest {
+            request: queued_request,
+            origin: AgentRunOrigin::Standard,
+            intent: AgentStartIntent::UserInitiated,
+            class: crate::agent::run::PendingRequestClass::Normal,
+            selectable_after_event_index: Some(42),
+            before_held_text: false,
+        });
+    let mut output = Vec::new();
+
+    render_intercept_agent_guidance(
+        &[candidate_event(
+            "suggestion-1",
+            None,
+            Some("analyze edited failure"),
+        )],
+        &[source_block()],
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut output,
+        0,
+    )
+    .expect("consume insight while busy");
+
+    assert!(state.pending_input_ghost_binding.is_none());
+    assert_eq!(
+        state.agent_run.active.as_ref().unwrap().request.id,
+        "already-active"
+    );
+    assert_eq!(state.agent_run.queued_requests.len(), 1);
+    let queued = &state.agent_run.queued_requests[0];
+    assert_eq!(queued.request.id, "already-active");
+    assert_eq!(queued.selectable_after_event_index, Some(42));
+    assert_eq!(queued.origin, AgentRunOrigin::Standard);
+    assert!(output.is_empty(), "{}", String::from_utf8_lossy(&output));
+}
+
+#[test]
+fn insight_intercept_ai_on_queues_bound_request() {
+    let mut state = insight_intercept_state(false);
+    let (active, _approval_receiver) =
+        crate::agent::run::test_support::test_active_run_with_id("already-active");
+    state.agent_run.active = Some(active);
+    let mut output = Vec::new();
+
+    render_intercept_agent_guidance(
+        &[candidate_event(
+            "suggestion-1",
+            None,
+            Some("analyze edited failure"),
+        )],
+        &[source_block()],
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut output,
+        0,
+    )
+    .expect("queue enabled insight submission");
+
+    assert!(state.pending_input_ghost_binding.is_none());
+    assert_eq!(state.agent_run.queued_requests.len(), 1);
+    let queued = &state.agent_run.queued_requests[0];
+    assert_eq!(queued.origin, AgentRunOrigin::InsightPrompt);
+    assert_eq!(queued.request.command_block.id, "cmd-1");
+    assert_eq!(
+        queued.request.user_input.as_deref(),
+        Some("analyze edited failure")
+    );
+}
+
+#[test]
+fn insight_intercept_ai_off_preserves_unrelated_explicit_input_routing() {
+    for component in ["prompt_ghost:other-suggestion", "natural_language"] {
+        let mut state = insight_intercept_state(true);
+        let (active, _approval_receiver) =
+            crate::agent::run::test_support::test_active_run_with_id("already-active");
+        state.agent_run.active = Some(active);
+        let mut event = candidate_event("other-suggestion", None, Some("inspect my project"));
+        event.component = Some(component.to_string());
+        let mut output = Vec::new();
+
+        render_intercept_agent_guidance(
+            &[event],
+            &[source_block()],
+            &AdapterInstance::Fake(FakeAgentAdapter),
+            &mut state,
+            &mut output,
+            0,
+        )
+        .expect("preserve unrelated explicit input");
+
+        assert_eq!(state.agent_run.queued_requests.len(), 1, "{component}");
+        let queued = &state.agent_run.queued_requests[0];
+        assert_eq!(queued.origin, AgentRunOrigin::Standard, "{component}");
+        assert_eq!(
+            queued.request.user_input.as_deref(),
+            Some("inspect my project")
+        );
+        assert_eq!(
+            crate::types::request_context_binding(&queued.request),
+            AgentContextBinding::FreeForm
+        );
+        assert!(queued.request.context_blocks.is_empty(), "{component}");
+        assert_eq!(
+            state.agent_run.active.as_ref().unwrap().request.id,
+            "already-active"
+        );
+    }
+}
+
+#[test]
+fn insight_intercept_ai_off_preserves_health_ghost_routing() {
+    let mut state = insight_intercept_state(true);
+    state.pending_input_ghost_binding = Some(PendingInputGhostBinding::Health(
+        AgentContextBinding::StartupHealthFollowUp,
+    ));
+    let (active, _approval_receiver) =
+        crate::agent::run::test_support::test_active_run_with_id("already-active");
+    state.agent_run.active = Some(active);
+    let mut output = Vec::new();
+
+    render_intercept_agent_guidance(
+        &[candidate_event(
+            "suggestion-1",
+            None,
+            Some("inspect host health"),
+        )],
+        &[source_block()],
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut output,
+        0,
+    )
+    .expect("preserve health ghost submission");
+
+    assert_eq!(state.agent_run.queued_requests.len(), 1);
+    assert_eq!(
+        crate::types::request_context_binding(&state.agent_run.queued_requests[0].request),
+        AgentContextBinding::StartupHealthFollowUp
+    );
+}

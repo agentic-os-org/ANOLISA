@@ -19,6 +19,14 @@ pub(crate) fn render_pending_command_insight<W: Write>(
     let Some(suggestion) = candidate.suggestion.take() else {
         return Ok(());
     };
+    // COSH_SHELL_AI=off: silently drop agent-backed insights here, the single
+    // consumer of pending_command_insight, so accepting a ghost can never
+    // reach a provider; local ShellRewrite suggestions stay available.
+    if state.personalization.ai_disabled
+        && matches!(suggestion, PromptSuggestion::AgentPrompt { .. })
+    {
+        return Ok(());
+    }
     let now_ms = match &suggestion {
         PromptSuggestion::AgentPrompt { binding, .. } => binding.target.created_at_ms,
         PromptSuggestion::ShellRewrite { .. } => SystemTime::now()
@@ -551,5 +559,50 @@ mod tests {
             "{styled}"
         );
         assert!(styled.contains("\x1b[2mPress Tab to fill"), "{styled}");
+    }
+
+    #[test]
+    fn ai_disabled_drops_agent_prompt_insight_without_arming_ghost() {
+        let mut state = InlineState {
+            pending_command_insight: Some(candidate(PromptSuggestion::AgentPrompt {
+                binding: Box::new(binding()),
+            })),
+            ..Default::default()
+        };
+        state.personalization.ai_disabled = true;
+        let mut output = Vec::new();
+
+        render_pending_command_insight(&mut state, &mut output).expect("drop agent insight");
+
+        assert!(output.is_empty());
+        assert!(state.pending_command_insight.is_none());
+        assert!(state.pending_input_ghost.is_none());
+        assert!(state.pending_input_ghost_binding.is_none());
+        // The route keeps its default: nothing was armed for this insight.
+        assert_eq!(state.pending_input_ghost_route, PromptGhostRoute::default());
+        assert!(!state.trigger_pty_prompt);
+        assert!(!state.shown_agent_prompt_guidance);
+    }
+
+    #[test]
+    fn ai_disabled_keeps_shell_rewrite_insight() {
+        let mut state = InlineState {
+            pending_command_insight: Some(candidate(PromptSuggestion::ShellRewrite {
+                text: "grep file".to_string(),
+            })),
+            ..Default::default()
+        };
+        state.personalization.ai_disabled = true;
+        let mut output = Vec::new();
+
+        render_pending_command_insight(&mut state, &mut output).expect("render shell rewrite");
+
+        assert!(!output.is_empty());
+        assert_eq!(state.pending_input_ghost.as_deref(), Some("grep file"));
+        assert_eq!(
+            state.pending_input_ghost_route,
+            PromptGhostRoute::NativeShell
+        );
+        assert!(state.pending_input_ghost_binding.is_none());
     }
 }
