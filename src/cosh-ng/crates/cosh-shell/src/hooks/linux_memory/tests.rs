@@ -1038,6 +1038,13 @@ fn env_wrapper_options_are_supported_fail_closed() {
 }
 
 #[test]
+fn memory_target_program_survives_multibyte_sudo_arguments() {
+    assert_eq!(memory_target_program("sudo 中文"), "中文");
+    assert_eq!(memory_target_program("sudo -é"), "-é");
+    assert_eq!(memory_target_program("sudo '中文 文件.sh'"), "'中文");
+}
+
+#[test]
 fn malformed_outputs_miss() {
     assert!(parse_ps_process_rows("hello\nworld\n").is_empty());
     assert!(parse_free_memory_metrics("free -m", "Mem: 1 2 3\n").is_none());

@@ -164,7 +164,12 @@ fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
     {
         return true;
     }
-    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+    if token.len() > 2
+        && matches!(
+            &token.as_bytes()[..2],
+            b"-u" | b"-g" | b"-h" | b"-p" | b"-C" | b"-T"
+        )
+    {
         return true;
     }
     token
@@ -419,6 +424,13 @@ mod tests {
     #[test]
     fn first_program_token_with_env() {
         assert_eq!(first_program_token("FOO=bar grep pattern"), "grep");
+    }
+
+    #[test]
+    fn first_program_token_survives_multibyte_sudo_arguments() {
+        assert_eq!(first_program_token("sudo 中文"), "中文");
+        assert_eq!(first_program_token("sudo -é"), "-é");
+        assert_eq!(first_program_token("sudo '中文 文件.sh'"), "'中文");
     }
 
     #[test]
