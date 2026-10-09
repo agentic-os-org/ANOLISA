@@ -43,6 +43,12 @@ pub struct ApplyOptions {
     pub retention_days: Option<u32>,
     /// Whether `JSONL` gap recovery runs after the `SQLite` pass.
     pub jsonl_recovery: bool,
+    /// Observability retention window in days; `None` disables the cutoff
+    /// (#6605 phase 5).
+    pub observability_retention_days: Option<u32>,
+    /// Whether the explicit observability `JSONL` recovery pass runs
+    /// (#6605 phase 5).
+    pub observability_jsonl_recovery: bool,
     /// Wall clock at run start, injectable for tests.
     pub now_epoch: f64,
 }
@@ -189,12 +195,34 @@ pub fn plan(
             sqlite_schema: scan.sqlite.as_ref().map(|sqlite| sqlite.user_version),
             jsonl_records: scan.jsonl.as_ref().map(|jsonl| jsonl.records),
             jsonl_backups: scan.jsonl.as_ref().map_or(0, |jsonl| jsonl.backups.len()),
-            observability_deferred: scan.observability_present,
+            observability_sqlite_rows: scan
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.sqlite.as_ref())
+                .map(|sqlite| sqlite.rows),
+            observability_schema: scan
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.sqlite.as_ref())
+                .map(|sqlite| sqlite.user_version),
+            observability_jsonl_records: scan
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.jsonl.as_ref())
+                .map(|jsonl| jsonl.records),
+            observability_jsonl_backups: scan
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.jsonl.as_ref())
+                .map_or(0, |jsonl| jsonl.backups.len()),
         })
         .collect();
 
     Ok(PlanReport {
         destination: destination.display().to_string(),
+        observability_destination: crate::observability::destination_for(destination)
+            .display()
+            .to_string(),
         retention_days,
         sources,
         rejected: rejected
@@ -229,54 +257,29 @@ pub fn apply(
     }
 
     let store = open_destination(destination)?;
+    let observability_destination = crate::observability::destination_for(destination);
+    let observability_store = crate::observability::open_destination(&observability_destination)?;
     let cutoff = options
         .retention_days
+        .map(|days| options.now_epoch - f64::from(days) * 86_400.0);
+    let observability_cutoff = options
+        .observability_retention_days
         .map(|days| options.now_epoch - f64::from(days) * 86_400.0);
 
     let started_at = asc_security_events::timestamp::now_iso();
     let run_id = uuid::Uuid::new_v4().to_string();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut imported_event_ids: Vec<String> = Vec::new();
-    let mut run_sources: Vec<RunSource> = Vec::new();
-
+    let mut state = RunState::default();
+    let mut run_sources = Vec::with_capacity(scans.len());
     for scan in scans {
-        let mut stats = RunSource {
-            dir: scan.dir.display().to_string(),
-            owner_uid: scan.owner_uid,
-            admin_mapped: scan.admin_mapped,
-            dir_uid: scan.dir_uid,
-            sqlite_identity: scan.sqlite.as_ref().map(|sqlite| sqlite.identity.clone()),
-            sqlite_wal_identity: scan
-                .sqlite
-                .as_ref()
-                .and_then(|sqlite| sqlite.wal_identity.clone()),
-            jsonl_identity: scan.jsonl.as_ref().map(|jsonl| jsonl.identity.clone()),
-            sqlite_rows_read: 0,
-            jsonl_records_read: 0,
-            imported: 0,
-            duplicates_existing: 0,
-            duplicates_cross_source: 0,
-            retention_skipped: 0,
-            uid_conflicts: 0,
-            malformed_jsonl: 0,
-        };
-
-        let mut import = SourceImport {
-            store: &store,
-            owner_uid: scan.owner_uid,
+        run_sources.push(import_source(
+            scan,
+            &store,
+            &observability_store,
             cutoff,
-            seen: &mut seen,
-            imported_event_ids: &mut imported_event_ids,
-        };
-        if let Some(sqlite_scan) = &scan.sqlite {
-            import.sqlite_pass(sqlite_scan, &mut stats)?;
-        }
-        if options.jsonl_recovery
-            && let Some(jsonl_scan) = &scan.jsonl
-        {
-            import.jsonl_pass(jsonl_scan, &mut stats)?;
-        }
-        run_sources.push(stats);
+            observability_cutoff,
+            options,
+            &mut state,
+        )?);
     }
 
     let totals = run_sources
@@ -288,6 +291,13 @@ pub fn apply(
             acc.retention_skipped += item.retention_skipped;
             acc.uid_conflicts += item.uid_conflicts;
             acc.malformed_jsonl += item.malformed_jsonl;
+            if let Some(observability) = &item.observability {
+                acc.observability.imported += observability.imported;
+                acc.observability.duplicates_existing += observability.duplicates_existing;
+                acc.observability.duplicates_cross_source += observability.duplicates_cross_source;
+                acc.observability.retention_skipped += observability.retention_skipped;
+                acc.observability.malformed_jsonl += observability.malformed_jsonl;
+            }
             acc
         });
 
@@ -300,7 +310,8 @@ pub fn apply(
         retention_days: options.retention_days,
         sources: run_sources,
         totals,
-        imported_event_ids,
+        imported_event_ids: state.imported_event_ids,
+        imported_observability_rowids: state.imported_observability_rowids,
         rolled_back: false,
         rolled_back_at: None,
     };
@@ -322,6 +333,111 @@ pub fn apply(
     })
 }
 
+/// Mutable state one apply run accumulates across its sources.
+#[derive(Default)]
+struct RunState {
+    /// Security-event ids handled this run.
+    seen: HashSet<String>,
+    /// Security-event ids the run is responsible for.
+    imported_event_ids: Vec<String>,
+    /// Observability content keys handled this run.
+    observability_seen: HashSet<crate::observability::RowKey>,
+    /// Observability destination row ids the run is responsible for.
+    imported_observability_rowids: Vec<i64>,
+}
+
+/// Imports one source's security-events and observability streams.
+///
+/// # Errors
+///
+/// Propagates every stream failure of this source.
+fn import_source(
+    scan: &SourceScan,
+    store: &SqliteStore,
+    observability_store: &SqliteStore,
+    cutoff: Option<f64>,
+    observability_cutoff: Option<f64>,
+    options: &ApplyOptions,
+    run_state: &mut RunState,
+) -> Result<RunSource, crate::MigratorError> {
+    let mut stats = RunSource {
+        dir: scan.dir.display().to_string(),
+        owner_uid: scan.owner_uid,
+        admin_mapped: scan.admin_mapped,
+        dir_uid: scan.dir_uid,
+        sqlite_identity: scan.sqlite.as_ref().map(|sqlite| sqlite.identity.clone()),
+        sqlite_wal_identity: scan
+            .sqlite
+            .as_ref()
+            .and_then(|sqlite| sqlite.wal_identity.clone()),
+        jsonl_identity: scan.jsonl.as_ref().map(|jsonl| jsonl.identity.clone()),
+        sqlite_rows_read: 0,
+        jsonl_records_read: 0,
+        imported: 0,
+        duplicates_existing: 0,
+        duplicates_cross_source: 0,
+        retention_skipped: 0,
+        uid_conflicts: 0,
+        malformed_jsonl: 0,
+        observability: None,
+    };
+    let mut observability_stats =
+        scan.observability
+            .as_ref()
+            .map(|observability| crate::journal::ObservabilitySourceStats {
+                sqlite_identity: observability
+                    .sqlite
+                    .as_ref()
+                    .map(|sqlite| sqlite.identity.clone()),
+                sqlite_wal_identity: observability
+                    .sqlite
+                    .as_ref()
+                    .and_then(|sqlite| sqlite.wal_identity.clone()),
+                jsonl_identity: observability
+                    .jsonl
+                    .as_ref()
+                    .map(|jsonl| jsonl.identity.clone()),
+                ..crate::journal::ObservabilitySourceStats::default()
+            });
+
+    let mut import = SourceImport {
+        store,
+        owner_uid: scan.owner_uid,
+        cutoff,
+        seen: &mut run_state.seen,
+        imported_event_ids: &mut run_state.imported_event_ids,
+    };
+    if let Some(sqlite_scan) = &scan.sqlite {
+        import.sqlite_pass(sqlite_scan, &mut stats)?;
+    }
+    if options.jsonl_recovery
+        && let Some(jsonl_scan) = &scan.jsonl
+    {
+        import.jsonl_pass(jsonl_scan, &mut stats)?;
+    }
+
+    if let Some(observability_scan) = &scan.observability {
+        let mut observability_import = crate::observability::ObservabilityImport::new(
+            observability_store,
+            observability_cutoff,
+            &mut run_state.observability_seen,
+            &mut run_state.imported_observability_rowids,
+        );
+        let stats_ref = observability_stats
+            .get_or_insert_with(crate::journal::ObservabilitySourceStats::default);
+        if let Some(sqlite_scan) = &observability_scan.sqlite {
+            observability_import.sqlite_pass(sqlite_scan, scan.owner_uid, stats_ref)?;
+        }
+        if options.observability_jsonl_recovery
+            && let Some(jsonl_scan) = &observability_scan.jsonl
+        {
+            observability_import.jsonl_pass(jsonl_scan, scan.owner_uid, stats_ref)?;
+        }
+    }
+    stats.observability = observability_stats;
+    Ok(stats)
+}
+
 /// Mutable state shared by one source's two import passes.
 struct SourceImport<'a> {
     store: &'a SqliteStore,
@@ -332,6 +448,9 @@ struct SourceImport<'a> {
 }
 
 impl SourceImport<'_> {
+    /// Reads the source's `SQLite` stream in batches and inserts every row
+    /// that survives the retention cutoff and the run-wide dedup.
+    ///
     /// Reads the source's `SQLite` stream in batches and inserts every row
     /// that survives the retention cutoff and the run-wide dedup.
     ///
@@ -573,46 +692,24 @@ pub fn verify(
             .map_err(KernelError::from)
     })?)?;
 
+    let observability_destination = crate::observability::destination_for(destination);
+    let observability_store = crate::observability::open_destination(&observability_destination)?;
+    let observability_quick_check =
+        required(observability_store.with_connection(true, |conn| {
+            conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .map_err(KernelError::from)
+        })?)?;
+
     let mut runs = Vec::new();
     for record in selected {
-        let present = required(store.with_connection(true, |conn| {
-            chunked_ids(conn, &record.imported_event_ids, count_ids_present)
-        })?)?;
-        let expected = if record.rolled_back {
-            0
-        } else {
-            record.imported_event_ids.len()
-        };
-        let sources =
-            record
-                .sources
-                .iter()
-                .map(|item| SourceVerification {
-                    dir: item.dir.clone(),
-                    sqlite_unchanged: item.sqlite_identity.as_ref().map(|identity| {
-                        identity_matches(&item.dir, "security-events.db", identity)
-                    }),
-                    sqlite_wal_unchanged: item.sqlite_wal_identity.as_ref().map(|identity| {
-                        wal_identity_matches(&item.dir, "security-events.db-wal", identity)
-                    }),
-                    jsonl_unchanged: item.jsonl_identity.as_ref().map(|identity| {
-                        identity_matches(&item.dir, "security-events.jsonl", identity)
-                    }),
-                })
-                .collect();
-        runs.push(RunVerification {
-            run_id: record.run_id.clone(),
-            rolled_back: record.rolled_back,
-            expected_present: expected as u64,
-            present,
-            ok: present == expected as u64,
-            sources,
-        });
+        runs.push(verify_run(record, &store, &observability_store)?);
     }
 
     Ok(VerifyReport {
         destination: destination.display().to_string(),
         quick_check,
+        observability_destination: observability_destination.display().to_string(),
+        observability_quick_check,
         runs,
     })
 }
@@ -635,6 +732,94 @@ fn wal_identity_matches(dir: &str, file: &str, identity: &FileIdentity) -> bool 
         && meta.ino() == identity.ino
         && meta.size() == identity.size
         && meta.mtime() == identity.mtime
+}
+
+/// Re-checks one journaled run against both destination stores.
+///
+/// # Errors
+///
+/// Propagates destination read failures.
+fn verify_run(
+    record: &RunRecord,
+    store: &SqliteStore,
+    observability_store: &SqliteStore,
+) -> Result<RunVerification, crate::MigratorError> {
+    let present = required(store.with_connection(true, |conn| {
+        chunked_ids(conn, &record.imported_event_ids, count_ids_present)
+    })?)?;
+    let expected = if record.rolled_back {
+        0
+    } else {
+        record.imported_event_ids.len()
+    };
+    let observability_present = required(observability_store.with_connection(true, |conn| {
+        crate::observability::chunked_rowids(
+            conn,
+            &record.imported_observability_rowids,
+            crate::observability::count_rowids_present,
+        )
+    })?)?;
+    let observability_expected = if record.rolled_back {
+        0
+    } else {
+        record.imported_observability_rowids.len()
+    };
+    let sources = record
+        .sources
+        .iter()
+        .map(|item| SourceVerification {
+            dir: item.dir.clone(),
+            sqlite_unchanged: item
+                .sqlite_identity
+                .as_ref()
+                .map(|identity| identity_matches(&item.dir, "security-events.db", identity)),
+            sqlite_wal_unchanged: item
+                .sqlite_wal_identity
+                .as_ref()
+                .map(|identity| {
+                    wal_identity_matches(&item.dir, "security-events.db-wal", identity)
+                }),
+            jsonl_unchanged: item
+                .jsonl_identity
+                .as_ref()
+                .map(|identity| identity_matches(&item.dir, "security-events.jsonl", identity)),
+            observability_sqlite_unchanged: item
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.sqlite_identity.as_ref())
+                .map(|identity| {
+                    crate::observability::identity_matches(&item.dir, "observability.db", identity)
+                }),
+            observability_sqlite_wal_unchanged: item
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.sqlite_wal_identity.as_ref())
+                .map(|identity| {
+                    wal_identity_matches(&item.dir, "observability.db-wal", identity)
+                }),
+            observability_jsonl_unchanged: item
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.jsonl_identity.as_ref())
+                .map(|identity| {
+                    crate::observability::identity_matches(
+                        &item.dir,
+                        "observability.jsonl",
+                        identity,
+                    )
+                }),
+        })
+        .collect();
+    Ok(RunVerification {
+        run_id: record.run_id.clone(),
+        rolled_back: record.rolled_back,
+        expected_present: expected as u64,
+        present,
+        observability_expected_present: observability_expected as u64,
+        observability_present,
+        ok: present == expected as u64 && observability_present == observability_expected as u64,
+        sources,
+    })
 }
 
 fn identity_matches(dir: &str, file: &str, identity: &FileIdentity) -> bool {
@@ -695,18 +880,31 @@ pub fn rollback(
     }
 
     let store = open_destination(destination)?;
+    let observability_destination = crate::observability::destination_for(destination);
+    let observability_store = crate::observability::open_destination(&observability_destination)?;
     let mut runs = Vec::new();
     let now = asc_security_events::timestamp::now_iso();
     for index in targets {
         let ids = records[index].imported_event_ids.clone();
         let removed =
             required(store.with_connection(true, |conn| chunked_ids(conn, &ids, delete_ids))?)?;
+        let rowids = records[index].imported_observability_rowids.clone();
+        let observability_removed =
+            required(observability_store.with_connection(true, |conn| {
+                crate::observability::chunked_rowids(
+                    conn,
+                    &rowids,
+                    crate::observability::delete_rowids,
+                )
+            })?)?;
         records[index].rolled_back = true;
         records[index].rolled_back_at = Some(now.clone());
         runs.push(RolledBackRun {
             run_id: records[index].run_id.clone(),
             requested: ids.len() as u64,
             removed,
+            observability_requested: rowids.len() as u64,
+            observability_removed,
         });
     }
     journal::rewrite(&journal_path, &records)?;

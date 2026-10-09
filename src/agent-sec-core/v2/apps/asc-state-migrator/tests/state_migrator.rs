@@ -147,6 +147,8 @@ fn apply_options(retention_days: Option<u32>) -> ApplyOptions {
     ApplyOptions {
         retention_days,
         jsonl_recovery: true,
+        observability_retention_days: Some(7),
+        observability_jsonl_recovery: false,
         now_epoch: current_epoch(),
     }
 }
@@ -637,8 +639,10 @@ fn verify_cli(destination: &Path) -> asc_state_migrator::cli::Cli {
             discover_tmp: None,
             no_discover_tmp: true,
             retention_days: 30,
+            observability_retention_days: 7,
             no_retention_cutoff: false,
             sqlite_only: false,
+            recover_observability_jsonl: false,
             force: false,
             writer_grace: 300,
             json: false,

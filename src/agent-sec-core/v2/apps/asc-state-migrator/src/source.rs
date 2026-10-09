@@ -21,6 +21,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use asc_event_log::jsonl::is_backup_suffix;
+use asc_observability::OBSERVABILITY_SQLITE_SCHEMA_VERSION;
 use asc_security_events::{
     SECURITY_EVENTS_SQLITE_SCHEMA_VERSION,
     config::{DEFAULT_SECURITY_STREAM, FALLBACK_DIR_NAME, stream_db_path_in, stream_log_path_in},
@@ -32,7 +33,7 @@ use crate::discovery::{DiscoveredSource, RejectedSource};
 /// Rows per source read batch, matching the library migrator's batch size.
 pub const SOURCE_BATCH_SIZE: i64 = 5000;
 
-/// Columns without which a source table cannot be interpreted.
+/// Columns without which a security-events source table can be interpreted.
 const REQUIRED_COLUMNS: &[&str] = &[
     "event_id",
     "event_type",
@@ -43,6 +44,20 @@ const REQUIRED_COLUMNS: &[&str] = &[
     "pid",
     "uid",
     "details",
+];
+
+/// Columns without which an observability source table can be interpreted.
+///
+/// `call_id` and `tool_call_id` are read as `NULL`s when absent, mirroring the
+/// optional correlation columns of the security-events reader.
+const OBSERVABILITY_REQUIRED_COLUMNS: &[&str] = &[
+    "hook",
+    "observed_at",
+    "observed_at_epoch",
+    "session_id",
+    "run_id",
+    "metrics_json",
+    "metadata_json",
 ];
 
 /// Identity of one stream file, captured for journal evidence.
@@ -73,11 +88,74 @@ pub struct SourceScan {
     pub sqlite: Option<SqliteScan>,
     /// Validated `JSONL` stream, when present.
     pub jsonl: Option<JsonlScan>,
-    /// Whether the directory also holds observability streams.
-    ///
-    /// Observability import waits on the owner-aware destination schema
-    /// (issue #6605 phase 5), so its presence is reported, not acted on.
-    pub observability_present: bool,
+    /// Validated observability streams, when the directory carries any
+    /// (#6605 phase 5).
+    pub observability: Option<ObservabilityScan>,
+}
+
+/// The observability streams of a source (#6605 phase 5).
+#[derive(Debug)]
+pub struct ObservabilityScan {
+    /// Validated observability `SQLite` stream, when present.
+    pub sqlite: Option<ObservabilitySqliteScan>,
+    /// Validated observability `JSONL` stream (explicit recovery input),
+    /// when present.
+    pub jsonl: Option<JsonlScan>,
+}
+
+/// The observability `SQLite` side of a source.
+#[derive(Debug)]
+pub struct ObservabilitySqliteScan {
+    /// Database path, as discovered.
+    pub path: PathBuf,
+    /// Identity of the validated file, captured through its descriptor.
+    pub identity: FileIdentity,
+    /// Identity of the frame-bearing `WAL` sidecar that was snapshotted,
+    /// when there was one. The v1 observability writer reuses the security
+    /// store's `WAL`-mode `SqliteStore`, so a post-run writer can commit
+    /// solely to `observability.db-wal` while the main file stays
+    /// byte-identical.
+    pub wal_identity: Option<FileIdentity>,
+    /// Schema revision the source declares.
+    pub user_version: u32,
+    /// Rows in `observability_events` at scan time.
+    pub rows: u64,
+    /// Private snapshot of the validated database the import reads.
+    snapshot: SqliteSnapshot,
+}
+
+impl ObservabilitySqliteScan {
+    /// The snapshot database the import passes must read.
+    pub(crate) fn snapshot_db(&self) -> &Path {
+        &self.snapshot.db
+    }
+}
+
+/// One observability source row, exactly as the source stored it.
+///
+/// The v1 stream records no owner and no stable identifier: the verified
+/// owner comes from the source directory, and identity is the row's full
+/// content (#6605).
+#[derive(Debug, Clone)]
+pub struct ObservabilitySourceRow {
+    /// Hook name as stored.
+    pub hook: String,
+    /// Wire-format observation timestamp.
+    pub observed_at: String,
+    /// Observation timestamp as epoch seconds.
+    pub observed_at_epoch: f64,
+    /// Session correlation.
+    pub session_id: String,
+    /// Run correlation.
+    pub run_id: String,
+    /// Serialized metrics object, verbatim.
+    pub metrics_json: String,
+    /// Serialized metadata object, verbatim.
+    pub metadata_json: String,
+    /// Optional LLM call correlation.
+    pub call_id: Option<String>,
+    /// Optional tool call correlation.
+    pub tool_call_id: Option<String>,
 }
 
 /// The `SQLite` side of a source.
@@ -207,17 +285,22 @@ fn check_stream_metadata(path: &Path, meta: &fs::Metadata, dir_uid: u32) -> Resu
 /// The sidecar is held to the same trust contract: its frames become import
 /// input, so it is opened with `O_NOFOLLOW` and checked before it is read.
 /// An empty sidecar carries no frames and is treated as absent.
-fn snapshot_sqlite(stream: &ValidatedFile, dir_uid: u32) -> Result<SqliteSnapshot, String> {
+fn snapshot_sqlite(
+    stream: &ValidatedFile,
+    dir_uid: u32,
+    file_name: &str,
+) -> Result<SqliteSnapshot, String> {
     let path = &stream.path;
     let dir =
         tempfile::tempdir().map_err(|err| format!("{}: cannot snapshot: {err}", path.display()))?;
-    let db = dir.path().join("security-events.db");
+    let db = dir.path().join(file_name);
     copy_through(&stream.file, &db, path)?;
     let mut wal_identity = None;
     if let Some(wal_path) = wal_sidecar_of(path)? {
         let wal = ValidatedFile::open(&wal_path, dir_uid)?;
         wal_identity = Some(wal.identity.clone());
-        copy_through(&wal.file, &dir.path().join("security-events.db-wal"), path)?;
+        let wal_name = format!("{file_name}-wal");
+        copy_through(&wal.file, &dir.path().join(wal_name), path)?;
     }
     Ok(SqliteSnapshot {
         _dir: dir,
@@ -393,7 +476,12 @@ pub fn validate_and_scan(
         jsonl_streams = Some(streams);
     }
 
-    if !force && let Some(mtime) = newest_mtime {
+    let observability = scan_observability(source, &mut newest_mtime, open_jsonl)
+        .map_err(reject)?;
+
+    if !force
+        && let Some(mtime) = newest_mtime
+    {
         // File mtimes in epoch seconds fit f64 exactly for any date this
         // filesystem can represent, so the cast is lossless in practice.
         #[allow(clippy::cast_precision_loss)]
@@ -409,7 +497,8 @@ pub fn validate_and_scan(
     if let Some(stream) = db_stream {
         let identity = stream.identity.clone();
         let path = stream.path.clone();
-        let snapshot = snapshot_sqlite(&stream, source.dir_uid).map_err(reject)?;
+        let snapshot =
+            snapshot_sqlite(&stream, source.dir_uid, "security-events.db").map_err(reject)?;
         let (user_version, rows) = scan_sqlite(&snapshot.db, &path).map_err(reject)?;
         sqlite = Some(SqliteScan {
             path,
@@ -436,13 +525,6 @@ pub fn validate_and_scan(
         });
     }
 
-    let observability_db = stream_db_path_in(&source.dir, "observability")
-        .map(|path| path_exists(&path))
-        .unwrap_or(false);
-    let observability_jsonl = stream_log_path_in(&source.dir, "observability")
-        .map(|path| path_exists(&path))
-        .unwrap_or(false);
-
     Ok(SourceScan {
         dir: source.dir.clone(),
         owner_uid: source.owner_uid,
@@ -450,8 +532,93 @@ pub fn validate_and_scan(
         dir_uid: source.dir_uid,
         sqlite,
         jsonl,
-        observability_present: observability_db || observability_jsonl,
+        observability,
     })
+}
+
+/// Validates and scans the observability streams of one source.
+///
+/// The same per-file trust checks and descriptor binding apply as to the
+/// security-events streams: a source directory is only trusted after **all**
+/// of its stream files survive them, and the import reads the objects these
+/// checks validated. A `--sqlite-only` run passes `open_jsonl = false`, so a
+/// damaged observability log cannot reject the source either.
+#[allow(clippy::too_many_lines)]
+fn scan_observability(
+    source: &DiscoveredSource,
+    newest_mtime: &mut Option<i64>,
+    open_jsonl: bool,
+) -> Result<Option<ObservabilityScan>, String> {
+    let db_path = stream_db_path_in(&source.dir, "observability")
+        .map_err(|err| format!("stream name: {err}"))?;
+    let jsonl_path = stream_log_path_in(&source.dir, "observability")
+        .map_err(|err| format!("stream name: {err}"))?;
+
+    let mut sqlite = None;
+    let mut jsonl = None;
+    let mut db_stream: Option<ValidatedFile> = None;
+    let mut jsonl_streams: Option<Vec<ValidatedFile>> = None;
+
+    if path_exists(&db_path) {
+        let stream = ValidatedFile::open(&db_path, source.dir_uid)?;
+        *newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(stream.identity.mtime));
+        // The v1 observability writer shares the security store's WAL-mode
+        // `SqliteStore`, so active commits land in `observability.db-wal`
+        // while the main database's mtime only moves at checkpoint: fold the
+        // sidecar into the writer-grace window the same way as the security
+        // stream.
+        if let Ok(meta) = fs::symlink_metadata(sidecar_of(&db_path, "-wal")) {
+            *newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(meta.mtime()));
+        }
+        db_stream = Some(stream);
+    }
+
+    if open_jsonl && path_exists(&jsonl_path) {
+        let main = ValidatedFile::open(&jsonl_path, source.dir_uid)?;
+        *newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(main.identity.mtime));
+        let mut streams = vec![main];
+        for backup in rotated_backups(&jsonl_path) {
+            let stream = ValidatedFile::open(&backup, source.dir_uid)?;
+            *newest_mtime = Some(newest_mtime.unwrap_or(i64::MIN).max(stream.identity.mtime));
+            streams.push(stream);
+        }
+        jsonl_streams = Some(streams);
+    }
+
+    if let Some(stream) = db_stream {
+        let identity = stream.identity.clone();
+        let path = stream.path.clone();
+        let snapshot = snapshot_sqlite(&stream, source.dir_uid, "observability.db")?;
+        let (user_version, rows) = scan_observability_sqlite(&snapshot.db, &path)?;
+        sqlite = Some(ObservabilitySqliteScan {
+            path,
+            identity,
+            wal_identity: snapshot.wal_identity.clone(),
+            user_version,
+            rows,
+            snapshot,
+        });
+    }
+
+    if let Some(mut streams) = jsonl_streams {
+        let records = count_jsonl_records(&mut streams);
+        let main = &streams[0];
+        jsonl = Some(JsonlScan {
+            path: main.path.clone(),
+            backups: streams[1..]
+                .iter()
+                .map(|stream| stream.path.clone())
+                .collect(),
+            identity: main.identity.clone(),
+            records,
+            streams,
+        });
+    }
+
+    match (&sqlite, &jsonl) {
+        (None, None) => Ok(None),
+        _ => Ok(Some(ObservabilityScan { sqlite, jsonl })),
+    }
 }
 
 /// Schema and row checks over the snapshot, reported against the source path.
@@ -495,6 +662,61 @@ fn scan_sqlite(copy: &Path, display: &Path) -> Result<(u32, u64), String> {
         .map_err(wrap)?;
     let rows = u64::try_from(counted).expect("COUNT(*) is never negative");
     Ok((user_version, rows))
+}
+
+/// Observability schema and row checks over the snapshot, reported against
+/// the source path.
+fn scan_observability_sqlite(copy: &Path, display: &Path) -> Result<(u32, u64), String> {
+    let wrap = |err: rusqlite::Error| format!("{}: {err}", display.display());
+    let connection = open_read_only(copy).map_err(wrap)?;
+    let user_version: u32 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(wrap)?;
+    if user_version > OBSERVABILITY_SQLITE_SCHEMA_VERSION {
+        return Err(format!(
+            "{}: schema revision {user_version} is newer than this migrator understands ({})",
+            display.display(),
+            OBSERVABILITY_SQLITE_SCHEMA_VERSION
+        ));
+    }
+    let has_table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND \
+             name='observability_events')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(wrap)?;
+    if !has_table {
+        return Err(format!(
+            "{}: no observability_events table — not a v1 observability store",
+            display.display()
+        ));
+    }
+    let columns = observability_table_columns(&connection).map_err(wrap)?;
+    for column in OBSERVABILITY_REQUIRED_COLUMNS {
+        if !columns.contains(&(*column).to_owned()) {
+            return Err(format!(
+                "{}: observability_events is missing required column '{column}'",
+                display.display()
+            ));
+        }
+    }
+    let counted: i64 = connection
+        .query_row("SELECT COUNT(*) FROM observability_events", [], |row| {
+            row.get(0)
+        })
+        .map_err(wrap)?;
+    let rows = u64::try_from(counted).expect("COUNT(*) is never negative");
+    Ok((user_version, rows))
+}
+
+fn observability_table_columns(connection: &Connection) -> Result<Vec<String>, rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(observability_events)")?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names)
 }
 
 /// Opens a source database read-only.
@@ -599,6 +821,48 @@ fn verdict_from_details(details: &str) -> Option<String> {
     asc_security_events::extract_verdict(&map)
 }
 
+/// Reads one batch of observability source rows after `last_rowid`, with each
+/// row's `rowid` for paging.
+///
+/// Databases without the optional correlation columns yield `NULL`s, mirroring
+/// the security-events reader.
+///
+/// # Errors
+///
+/// Propagates `rusqlite` failures mid-batch.
+pub fn read_observability_batch(
+    connection: &Connection,
+    last_rowid: i64,
+) -> Result<Vec<(i64, ObservabilitySourceRow)>, rusqlite::Error> {
+    let columns = observability_table_columns(connection)?;
+    let sql = format!(
+        "SELECT rowid AS _source_rowid_, hook, observed_at, observed_at_epoch, session_id, \
+         run_id, metrics_json, metadata_json, {call}, {tool} FROM observability_events \
+         WHERE rowid > ?1 ORDER BY rowid LIMIT {SOURCE_BATCH_SIZE}",
+        call = column_or_null(&columns, "call_id"),
+        tool = column_or_null(&columns, "tool_call_id"),
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let mapped = statement
+        .query_map([last_rowid], |row| {
+            let rowid: i64 = row.get("_source_rowid_")?;
+            let source_row = ObservabilitySourceRow {
+                hook: row.get("hook")?,
+                observed_at: row.get("observed_at")?,
+                observed_at_epoch: row.get("observed_at_epoch")?,
+                session_id: row.get("session_id")?,
+                run_id: row.get("run_id")?,
+                metrics_json: row.get("metrics_json")?,
+                metadata_json: row.get("metadata_json")?,
+                call_id: row.get("call_id")?,
+                tool_call_id: row.get("tool_call_id")?,
+            };
+            Ok((rowid, source_row))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(mapped)
+}
+
 /// Streams every `JSONL` record of a source, main log then backups.
 ///
 /// Records are read from the descriptors opened and checked at scan time,
@@ -611,9 +875,35 @@ fn verdict_from_details(details: &str) -> Option<String> {
 /// # Errors
 ///
 /// Returns an error only when a held descriptor cannot be rewound.
-pub fn for_each_jsonl_record<F>(scan: &JsonlScan, mut on_record: F) -> Result<(), String>
+pub fn for_each_jsonl_record<F>(scan: &JsonlScan, on_record: F) -> Result<(), String>
 where
     F: FnMut(Result<asc_security_events::SecurityEvent, String>),
+{
+    for_each_jsonl_line(scan, on_record)
+}
+
+/// Streams every observability `JSONL` record of a source, main log then
+/// backups (#6605 phase 5).
+///
+/// Malformed lines are reported instead of aborting, exactly like the
+/// security-events recovery stream.
+///
+/// # Errors
+///
+/// Returns an error only when a held descriptor cannot be rewound.
+pub fn for_each_observability_jsonl_record<F>(scan: &JsonlScan, on_record: F) -> Result<(), String>
+where
+    F: FnMut(Result<asc_observability::ObservabilityRecord, String>),
+{
+    for_each_jsonl_line(scan, on_record)
+}
+
+/// The line-walking core shared by both recovery streams, reading the held
+/// validated descriptors.
+fn for_each_jsonl_line<T, F>(scan: &JsonlScan, mut on_record: F) -> Result<(), String>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnMut(Result<T, String>),
 {
     for stream in &scan.streams {
         // A duplicated descriptor shares the original's offset, so rewinding
@@ -638,10 +928,8 @@ where
                 continue;
             }
             match serde_json::from_str(trimmed) {
-                Ok(event) => on_record(Ok(event)),
-                Err(err) => {
-                    on_record(Err(format!("{}: {err}", stream.path.display())));
-                }
+                Ok(record) => on_record(Ok(record)),
+                Err(err) => on_record(Err(format!("{}: {err}", stream.path.display()))),
             }
         }
     }

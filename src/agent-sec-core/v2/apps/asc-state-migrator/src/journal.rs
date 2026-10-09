@@ -34,6 +34,10 @@ pub struct RunRecord {
     pub totals: RunTotals,
     /// Event ids this run imported, for exact rollback.
     pub imported_event_ids: Vec<String>,
+    /// Destination row ids this run imported (or found already present) in
+    /// the observability system store, for exact rollback (#6605 phase 5).
+    #[serde(default)]
+    pub imported_observability_rowids: Vec<i64>,
     /// Whether the run has been rolled back.
     pub rolled_back: bool,
     /// When the run was rolled back, if it was.
@@ -78,6 +82,42 @@ pub struct RunSource {
     pub uid_conflicts: u64,
     /// Malformed `JSONL` records skipped during recovery.
     pub malformed_jsonl: u64,
+    /// Observability evidence, when the source carried observability streams
+    /// (#6605 phase 5).
+    #[serde(default)]
+    pub observability: Option<ObservabilitySourceStats>,
+}
+
+/// Per-source observability evidence inside a run record (#6605 phase 5).
+///
+/// There is no `uid_conflicts` counter: v1 observability rows record no uid,
+/// so there is nothing to compare the verified owner against.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObservabilitySourceStats {
+    /// Observability `SQLite` stream identity at import time.
+    pub sqlite_identity: Option<FileIdentity>,
+    /// Observability `SQLite` `WAL` sidecar identity at import time, when
+    /// the snapshot carried frames — the v1 observability writer reuses the
+    /// security store's `WAL`-mode `SqliteStore`, so a post-run writer can
+    /// commit solely to `observability.db-wal`.
+    #[serde(default)]
+    pub sqlite_wal_identity: Option<FileIdentity>,
+    /// Observability `JSONL` stream identity at import time.
+    pub jsonl_identity: Option<FileIdentity>,
+    /// Rows read from the observability `SQLite` stream.
+    pub sqlite_rows_read: u64,
+    /// Records read from the observability `JSONL` stream (recovery input).
+    pub jsonl_records_read: u64,
+    /// Rows imported into the observability system store.
+    pub imported: u64,
+    /// Rows already present in the observability system store.
+    pub duplicates_existing: u64,
+    /// Rows already imported by an earlier source in the same run.
+    pub duplicates_cross_source: u64,
+    /// Rows dropped by the retention cutoff.
+    pub retention_skipped: u64,
+    /// Malformed observability `JSONL` records skipped during recovery.
+    pub malformed_jsonl: u64,
 }
 
 /// Run-wide counters.
@@ -94,6 +134,24 @@ pub struct RunTotals {
     /// Rows whose recorded `uid` differed from the verified owner.
     pub uid_conflicts: u64,
     /// Malformed `JSONL` records skipped during recovery.
+    pub malformed_jsonl: u64,
+    /// Observability totals across sources (#6605 phase 5).
+    #[serde(default)]
+    pub observability: ObservabilityTotals,
+}
+
+/// Run-wide observability counters (#6605 phase 5).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObservabilityTotals {
+    /// Rows imported into the observability system store.
+    pub imported: u64,
+    /// Rows already present in the observability system store.
+    pub duplicates_existing: u64,
+    /// Rows already imported by an earlier source in the same run.
+    pub duplicates_cross_source: u64,
+    /// Rows dropped by the retention cutoff.
+    pub retention_skipped: u64,
+    /// Malformed observability `JSONL` records skipped during recovery.
     pub malformed_jsonl: u64,
 }
 
@@ -250,6 +308,7 @@ mod tests {
             sources: vec![],
             totals: RunTotals::default(),
             imported_event_ids: vec!["e1".to_owned()],
+            imported_observability_rowids: vec![7],
             rolled_back: false,
             rolled_back_at: None,
         }
@@ -299,5 +358,40 @@ mod tests {
             reloaded[0].rolled_back_at.as_deref(),
             Some("2026-10-08T01:00:00Z")
         );
+    }
+
+    /// A journal written before the observability fields existed (phase 1)
+    /// still loads: the new fields default, so verify and rollback keep
+    /// working on old evidence.
+    #[test]
+    fn a_phase_one_journal_line_still_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = journal_path(&temp.path().join("security-events.db"));
+        fs::write(
+            &path,
+            concat!(
+                r#"{"run_id":"r1","started_at":"2026-10-08T00:00:00Z","#,
+                r#""finished_at":"2026-10-08T00:00:01Z","#,
+                r#""destination":"/dest/security-events.db","retention_days":30,"#,
+                r#""sources":[{"dir":"/src","owner_uid":1001,"admin_mapped":false,"#,
+                r#""dir_uid":1001,"sqlite_identity":null,"jsonl_identity":null,"#,
+                r#""sqlite_rows_read":1,"jsonl_records_read":0,"imported":1,"#,
+                r#""duplicates_existing":0,"duplicates_cross_source":0,"#,
+                r#""retention_skipped":0,"uid_conflicts":0,"malformed_jsonl":0}],"#,
+                r#""totals":{"imported":1,"duplicates_existing":0,"#,
+                r#""duplicates_cross_source":0,"retention_skipped":0,"#,
+                r#""uid_conflicts":0,"malformed_jsonl":0},"#,
+                r#""imported_event_ids":["e1"],"rolled_back":false,"#,
+                r#""rolled_back_at":null}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let records = load(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].imported_observability_rowids.is_empty());
+        assert!(records[0].sources[0].observability.is_none());
+        assert_eq!(records[0].totals.observability.imported, 0);
     }
 }

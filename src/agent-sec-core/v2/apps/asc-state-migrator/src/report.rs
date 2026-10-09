@@ -13,6 +13,8 @@ use crate::journal::{RunSource, RunTotals};
 pub struct PlanReport {
     /// Destination database the apply would write to.
     pub destination: String,
+    /// Observability system store the apply would write to (#6605 phase 5).
+    pub observability_destination: String,
     /// Retention cutoff an apply would apply, in days (`None` = disabled).
     pub retention_days: Option<u32>,
     /// Validated sources with their counts.
@@ -40,8 +42,14 @@ pub struct SourcePlanEntry {
     pub jsonl_records: Option<u64>,
     /// Rotated `JSONL` backups found.
     pub jsonl_backups: usize,
-    /// Whether the directory also holds observability streams (deferred).
-    pub observability_deferred: bool,
+    /// Rows in the observability `SQLite` stream, when present (#6605 phase 5).
+    pub observability_sqlite_rows: Option<u64>,
+    /// Schema revision of the observability `SQLite` stream, when present.
+    pub observability_schema: Option<u32>,
+    /// Records in the observability `JSONL` stream, when present.
+    pub observability_jsonl_records: Option<u64>,
+    /// Rotated observability `JSONL` backups found.
+    pub observability_jsonl_backups: usize,
 }
 
 /// What `apply` did.
@@ -76,6 +84,10 @@ pub struct VerifyReport {
     pub destination: String,
     /// Result of `PRAGMA quick_check` on the destination.
     pub quick_check: String,
+    /// Observability system store (#6605 phase 5).
+    pub observability_destination: String,
+    /// Result of `PRAGMA quick_check` on the observability system store.
+    pub observability_quick_check: String,
     /// One entry per journaled run examined.
     pub runs: Vec<RunVerification>,
 }
@@ -91,7 +103,11 @@ pub struct RunVerification {
     pub expected_present: u64,
     /// Rows actually present.
     pub present: u64,
-    /// Whether expected and present agree.
+    /// Observability rows the journal says should be present (#6605 phase 5).
+    pub observability_expected_present: u64,
+    /// Observability rows actually present.
+    pub observability_present: u64,
+    /// Whether expected and present agree on both streams.
     pub ok: bool,
     /// Per-source file-identity checks.
     pub sources: Vec<SourceVerification>,
@@ -109,6 +125,16 @@ pub struct SourceVerification {
     pub sqlite_wal_unchanged: Option<bool>,
     /// Whether the `JSONL` file still has the journaled identity.
     pub jsonl_unchanged: Option<bool>,
+    /// Whether the observability `SQLite` file still has the journaled
+    /// identity, when the run used one (#6605 phase 5).
+    pub observability_sqlite_unchanged: Option<bool>,
+    /// Whether the snapshotted observability `WAL` sidecar still has the
+    /// journaled identity (`None` when the observability run had no
+    /// frame-bearing sidecar).
+    pub observability_sqlite_wal_unchanged: Option<bool>,
+    /// Whether the observability `JSONL` file still has the journaled
+    /// identity, when the run used one.
+    pub observability_jsonl_unchanged: Option<bool>,
 }
 
 /// What `rollback` removed.
@@ -129,6 +155,10 @@ pub struct RolledBackRun {
     pub requested: u64,
     /// Rows actually deleted.
     pub removed: u64,
+    /// Observability rows the journal recorded for the run (#6605 phase 5).
+    pub observability_requested: u64,
+    /// Observability rows actually deleted.
+    pub observability_removed: u64,
 }
 
 use std::fmt::Write as _;
@@ -145,6 +175,11 @@ pub fn render_plan(report: &PlanReport) -> String {
         out,
         "destination: {} (retention {retention})",
         report.destination
+    );
+    let _ = writeln!(
+        out,
+        "observability destination: {}",
+        report.observability_destination
     );
     if report.sources.is_empty() {
         let _ = writeln!(out, "sources: none");
@@ -174,10 +209,18 @@ pub fn render_plan(report: &PlanReport) -> String {
                 source.jsonl_backups
             );
         }
-        if source.observability_deferred {
+        if let Some(rows) = source.observability_sqlite_rows {
             let _ = writeln!(
                 out,
-                "  observability: present, deferred to the owner-aware schema"
+                "  observability sqlite: {rows} rows (schema rev {})",
+                source.observability_schema.unwrap_or(0)
+            );
+        }
+        if let Some(records) = source.observability_jsonl_records {
+            let _ = writeln!(
+                out,
+                "  observability jsonl: {records} records (+{} backups)",
+                source.observability_jsonl_backups
             );
         }
     }
@@ -209,6 +252,18 @@ pub fn render_apply(report: &ApplyReport) -> String {
             source.uid_conflicts,
             source.malformed_jsonl
         );
+        if let Some(observability) = &source.observability {
+            let _ = writeln!(
+                out,
+                "  observability: imported {}, already-present {}, cross-source {}, \
+                 retention-skipped {}, malformed-jsonl {}",
+                observability.imported,
+                observability.duplicates_existing,
+                observability.duplicates_cross_source,
+                observability.retention_skipped,
+                observability.malformed_jsonl
+            );
+        }
     }
     let totals = &report.totals;
     let _ = writeln!(
@@ -221,6 +276,16 @@ pub fn render_apply(report: &ApplyReport) -> String {
         totals.retention_skipped,
         totals.uid_conflicts,
         totals.malformed_jsonl
+    );
+    let _ = writeln!(
+        out,
+        "observability totals: imported {}, already-present {}, cross-source {}, \
+         retention-skipped {}, malformed-jsonl {}",
+        totals.observability.imported,
+        totals.observability.duplicates_existing,
+        totals.observability.duplicates_cross_source,
+        totals.observability.retention_skipped,
+        totals.observability.malformed_jsonl
     );
     let _ = writeln!(out, "journal: {}", report.journal);
     for (dir, reason) in &report.rejected {
@@ -238,6 +303,11 @@ pub fn render_verify(report: &VerifyReport) -> String {
         "destination {} quick_check: {}",
         report.destination, report.quick_check
     );
+    let _ = writeln!(
+        out,
+        "observability {} quick_check: {}",
+        report.observability_destination, report.observability_quick_check
+    );
     if report.runs.is_empty() {
         let _ = writeln!(out, "runs: none journaled yet");
     }
@@ -249,17 +319,28 @@ pub fn render_verify(report: &VerifyReport) -> String {
         };
         let _ = writeln!(
             out,
-            "run {}: {} present {} of {} expected{state}",
+            "run {}: {} present {} of {} expected, observability {} of {}{state}",
             run.run_id,
             if run.ok { "ok" } else { "MISMATCH" },
             run.present,
-            run.expected_present
+            run.expected_present,
+            run.observability_present,
+            run.observability_expected_present
         );
         for source in &run.sources {
             for (label, unchanged) in [
                 ("sqlite", source.sqlite_unchanged),
                 ("sqlite wal", source.sqlite_wal_unchanged),
                 ("jsonl", source.jsonl_unchanged),
+                (
+                    "observability sqlite",
+                    source.observability_sqlite_unchanged,
+                ),
+                (
+                    "observability sqlite wal",
+                    source.observability_sqlite_wal_unchanged,
+                ),
+                ("observability jsonl", source.observability_jsonl_unchanged),
             ] {
                 if let Some(unchanged) = unchanged {
                     let _ = writeln!(
@@ -290,8 +371,12 @@ pub fn render_rollback(report: &RollbackReport) -> String {
     for run in &report.runs {
         let _ = writeln!(
             out,
-            "run {}: removed {} of {} journaled rows",
-            run.run_id, run.removed, run.requested
+            "run {}: removed {} of {} journaled rows, {} of {} observability rows",
+            run.run_id,
+            run.removed,
+            run.requested,
+            run.observability_removed,
+            run.observability_requested
         );
     }
     let _ = writeln!(out, "sources were not modified");

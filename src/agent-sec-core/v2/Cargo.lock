@@ -585,6 +585,7 @@ name = "asc-state-migrator"
 version = "0.13.2"
 dependencies = [
  "asc-event-log",
+ "asc-observability",
  "asc-persistence-sqlite",
  "asc-security-events",
  "asc-sqlite-kernel",
