@@ -83,7 +83,11 @@ pub fn run(cli: &Cli) -> Result<(), MigratorError> {
         Command::Verify { run_id } => {
             let destination = import::resolve_destination(cli.common.destination.as_deref())?;
             let report = import::verify(&destination, run_id.as_deref())?;
-            let quick_check_ok = report.quick_check == "ok";
+            // Both destinations must be intact: a corruption diagnostic in
+            // either store fails the command even when every journaled run
+            // still matches.
+            let quick_check_ok =
+                report.quick_check == "ok" && report.observability_quick_check == "ok";
             let runs_ok = report.runs.iter().all(|run| run.ok);
             emit(&report, &report::render_verify(&report), cli.common.json);
             if !quick_check_ok || !runs_ok {

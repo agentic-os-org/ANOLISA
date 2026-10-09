@@ -90,6 +90,30 @@ pub fn open_destination(path: &Path) -> Result<SqliteStore, crate::MigratorError
     Ok(store)
 }
 
+/// Opens the observability system store read-only for `verify`, without
+/// creating or converging anything.
+///
+/// # Errors
+///
+/// Fails when the store file does not exist: verification is read-only, so a
+/// missing database is an error, not something to create.
+pub fn open_destination_readonly(path: &Path) -> Result<SqliteStore, crate::MigratorError> {
+    if !path.is_file() {
+        return Err(crate::MigratorError::DestinationUnusable {
+            path: path.display().to_string(),
+            reason: "observability destination does not exist; run apply first".to_owned(),
+        });
+    }
+    Ok(SqliteStore::new(
+        path,
+        true,
+        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION,
+        SYSTEM_OBSERVABILITY_TABLES,
+        None,
+        asc_observability::OBSERVABILITY_LOG_PREFIX,
+    )?)
+}
+
 /// The content identity of one observability row under one owner.
 ///
 /// Every field is compared byte for byte; the epoch column is derived from the
@@ -429,5 +453,11 @@ pub fn identity_matches(dir: &str, file: &str, identity: &FileIdentity) -> bool 
     let Ok(meta) = fs::symlink_metadata(&path) else {
         return false;
     };
-    meta.dev() == identity.dev && meta.ino() == identity.ino
+    // The full captured identity: an in-place append keeps dev/ino but grows
+    // the file, so size and mtime are what distinguish real drift from a
+    // replaced file.
+    meta.dev() == identity.dev
+        && meta.ino() == identity.ino
+        && meta.size() == identity.size
+        && meta.mtime() == identity.mtime
 }
