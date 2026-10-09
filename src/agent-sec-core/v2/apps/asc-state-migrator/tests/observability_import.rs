@@ -1,8 +1,12 @@
 //! End-to-end tests of the observability import (#6605 phase 5).
 //!
-//! Everything runs as the current user with `chown`-able files, mirroring
-//! `state_migrator.rs`. Observability sources are seeded with the v1 table
-//! contract (revision 1, no owner column) and a `JSONL` recovery stream.
+//! Fixtures own their files as the requested uid when the suite runs as
+//! root and as the current user otherwise, mirroring `state_migrator.rs`,
+//! so the suite also passes at an unprivileged uid. Genuinely two-owner
+//! scenarios express their owners through the explicit owner map
+//! (production `--map-owner`) instead of `CAP_CHOWN`. Observability sources
+//! are seeded with the v1 table contract (revision 1, no owner column) and
+//! a `JSONL` recovery stream.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
@@ -15,6 +19,23 @@ use asc_state_migrator::journal;
 use rusqlite::Connection;
 
 const DAY: f64 = 86_400.0;
+
+/// The uid the fixtures can actually chown files to: the requested uid when
+/// the suite runs as root, otherwise the current (unprivileged) user.
+fn fixture_uid(wanted: u32) -> u32 {
+    if is_root() { wanted } else { current_uid() }
+}
+
+fn is_root() -> bool {
+    current_uid() == 0
+}
+
+fn current_uid() -> u32 {
+    let probe = tempfile::tempdir().unwrap();
+    let file = probe.path().join("uid-probe");
+    fs::write(&file, b"uid").unwrap();
+    fs::metadata(&file).unwrap().uid()
+}
 
 const OBS_V1_SCHEMA: &str = "CREATE TABLE observability_events (id INTEGER NOT NULL PRIMARY \
      KEY, hook TEXT NOT NULL, observed_at TEXT NOT NULL, observed_at_epoch FLOAT NOT NULL, \
@@ -112,7 +133,7 @@ fn seed_observability_source(
              verdict, details) VALUES ('e1', 'sandbox_prehook', 'exec', 'succeeded', \
              '2026-10-01T00:00:00Z', 1790000000.0, '', 4242, ?1, NULL, NULL, NULL, NULL, NULL, \
              '{}')",
-            rusqlite::params![i64::from(uid)],
+            rusqlite::params![i64::from(fixture_uid(uid))],
         )
         .unwrap();
         drop(conn);
@@ -124,10 +145,10 @@ fn seed_observability_source(
 
     for entry in fs::read_dir(dir).unwrap().flatten() {
         let path = entry.path();
-        chown(&path, Some(uid), None).unwrap();
+        chown(&path, Some(fixture_uid(uid)), None).unwrap();
         make_old(&path);
     }
-    chown(dir, Some(uid), None).unwrap();
+    chown(dir, Some(fixture_uid(uid)), None).unwrap();
     make_old(dir);
 }
 
@@ -139,6 +160,24 @@ fn discovery_for(destination: &Path, sources: &[PathBuf]) -> DiscoveryOptions {
         tmp_root: None,
         destination_dir: destination.parent().unwrap().to_path_buf(),
     }
+}
+
+/// Discovery with an explicit owner map, mirroring production `--map-owner`:
+/// the mapped uid is the verified owner, so genuinely two-owner scenarios
+/// stay testable at an unprivileged uid (the fixtures cannot `chown` to a
+/// foreign uid without `CAP_CHOWN`).
+fn discovery_for_owners(
+    destination: &Path,
+    sources: &[PathBuf],
+    owners: &[(&Path, u32)],
+) -> DiscoveryOptions {
+    let specs: Vec<String> = owners
+        .iter()
+        .map(|(dir, uid)| format!("{}={}", dir.display(), uid))
+        .collect();
+    let mut options = discovery_for(destination, sources);
+    options.owner_map = OwnerMap::parse(&specs).expect("owner map");
+    options
 }
 
 fn scan_all(options: &DiscoveryOptions) -> Vec<asc_state_migrator::source::SourceScan> {
@@ -193,6 +232,7 @@ fn columns_of(destination: &Path, table: &str) -> Vec<String> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One cohesive end-to-end scenario; splitting would hide the flow.
 fn apply_imports_observability_under_the_verified_owner() {
     let home = tempfile::tempdir().unwrap();
     let destination = home.path().join("dest/security-events.db");
@@ -241,7 +281,11 @@ fn apply_imports_observability_under_the_verified_owner() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source_a.clone(), source_b.clone()]);
+    let options = discovery_for_owners(
+        &destination,
+        &[source_a.clone(), source_b.clone()],
+        &[(&source_a, 1001), (&source_b, 1002)],
+    );
     let report = import::apply(
         &scan_all(&options),
         &[],
@@ -348,7 +392,11 @@ fn identical_content_under_different_owners_is_not_a_duplicate() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source_a, source_b]);
+    let options = discovery_for_owners(
+        &destination,
+        &[source_a.clone(), source_b.clone()],
+        &[(&source_a, 1001), (&source_b, 1002)],
+    );
     let report = import::apply(
         &scan_all(&options),
         &[],
@@ -439,7 +487,7 @@ fn observability_import_is_idempotent_across_reruns_and_rolls_back_exactly() {
     // Sources are untouched, ownership unchanged.
     let db = source.join("observability.db");
     assert!(db.exists());
-    assert_eq!(fs::metadata(&db).unwrap().uid(), 1001);
+    assert_eq!(fs::metadata(&db).unwrap().uid(), fixture_uid(1001));
     assert_eq!(sqlite_count(&db, "observability_events"), 2);
 
     let verification = import::verify(&destination, None).unwrap();
@@ -542,7 +590,7 @@ fn observability_jsonl_recovery_is_explicit_and_fills_gaps() {
         )
         .unwrap();
     assert_eq!(metrics, "{\"user_input\":\"jsonl only\"}");
-    assert_eq!(owner, 1001);
+    assert_eq!(owner, i64::from(fixture_uid(1001)));
 }
 
 #[test]
@@ -800,7 +848,7 @@ fn a_v1_shaped_observability_destination_converges_without_losing_rows() {
         .unwrap();
     assert_eq!(owners.len(), 2, "the pre-existing row survived convergence");
     assert_eq!(owners[0], None, "the v1 row keeps its NULL owner");
-    assert_eq!(owners[1], Some(1001));
+    assert_eq!(owners[1], Some(i64::from(fixture_uid(1001))));
 }
 
 fn obs_verify_cli(destination: &Path) -> asc_state_migrator::cli::Cli {
@@ -1062,7 +1110,7 @@ fn a_fresh_observability_wal_sidecar_marks_the_source_live() {
     fs::write(&wal, b"fresh writer evidence").unwrap();
     // v1 writes the sidecar as the directory's owner; every stream file the
     // migrator reads is held to that same ownership contract.
-    chown(&wal, Some(1001), None).unwrap();
+    chown(&wal, Some(fixture_uid(1001)), None).unwrap();
 
     let options = discovery_for(&destination, std::slice::from_ref(&source));
     let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
@@ -1144,7 +1192,7 @@ fn apply_reads_the_validated_observability_database_not_a_replacement() {
             "before_agent_run".to_owned(),
             "s-1".to_owned(),
             "r-1".to_owned(),
-            1001
+            i64::from(fixture_uid(1001))
         )],
         "the import must read the validated database, not the replacement: {rows:?}"
     );
@@ -1201,7 +1249,7 @@ fn observability_jsonl_recovery_reads_the_validated_log_not_a_replacement() {
             "before_agent_run".to_owned(),
             "s-1".to_owned(),
             "r-1".to_owned(),
-            1001
+            i64::from(fixture_uid(1001))
         )],
         "recovery must read the validated log, not the replacement: {rows:?}"
     );
@@ -1307,7 +1355,7 @@ fn an_observability_wal_only_append_after_the_run_reports_drift() {
         std::mem::forget(conn);
     }
     let wal = source.join("observability.db-wal");
-    chown(&wal, Some(1001), None).unwrap();
+    chown(&wal, Some(fixture_uid(1001)), None).unwrap();
     make_old(&wal);
     make_old(&source.join("observability.db"));
 
