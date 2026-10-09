@@ -263,7 +263,10 @@ struct Attribution {
     #[serde(default)]
     title: Option<String>,
     /// Agent's actual final conclusion, quoted verbatim from the last step's
-    /// response — used to populate the "关键矛盾" panel deterministically.
+    /// response. Anchored to that step's text before the "关键矛盾" panel uses
+    /// it: a quote the transcript does not carry is replaced by the genuine
+    /// final response, so the panel never speaks for the agent with words it
+    /// never wrote.
     #[serde(default)]
     actual_conclusion: Option<String>,
     /// Other candidates the evaluator considers plausible, sorted by
@@ -2110,15 +2113,15 @@ fn build_contra(steps: &[Step], attr: &Attribution) -> Option<CausalContra> {
         .filter(|s| !s.message.is_empty())
         .map(|s| format!("用户原始任务：{}", truncate(&s.message, 400)))?;
 
-    // "Said" = what the agent delivered. Prefer the LLM-quoted actual
-    // conclusion (verbatim from the last response); fall back to the
-    // verdict/outcome_note which summarize the delivery failure in a way
-    // the user can still contrast with their intent.
-    let said = attr
-        .actual_conclusion
-        .clone()
-        .filter(|c| !c.trim().is_empty())
-        .map(|c| format!("agent 最终交付：{}", truncate(&c, 400)))
+    // "Said" = what the agent delivered. `actual_conclusion` is a quote the
+    // evaluator was told to copy verbatim from the final step, but a quote is
+    // model output like any other: left unverified it can paraphrase or invent
+    // a delivery and put it under this panel's authority. The quote is
+    // therefore anchored to the transcript — kept only when the final agent
+    // step actually carries it, otherwise replaced by that step's genuine
+    // response — so the contrast never rests on the evaluator's words alone.
+    // The verdict/outcome_note fallbacks remain for rounds with no agent text.
+    let said = final_delivery(steps, attr)
         .or_else(|| {
             attr.verdict
                 .clone()
@@ -2137,6 +2140,60 @@ fn build_contra(steps: &[Step], attr: &Attribution) -> Option<CausalContra> {
     } else {
         Some(CausalContra { saw, said })
     }
+}
+
+/// The agent's final delivery for the contra panel, anchored to the transcript.
+///
+/// Prefers the evaluator's `actual_conclusion` when it is genuinely quoted
+/// from the final agent step's message or observation text; otherwise excerpts
+/// that step's own message. Returns `None` when the round has no agent step or
+/// that step carries no text to show, leaving the evaluation fallbacks to speak.
+fn final_delivery(steps: &[Step], attr: &Attribution) -> Option<String> {
+    let last_agent = steps.iter().rev().find(|s| is_agent(s))?;
+    if let Some(quote) = attr
+        .actual_conclusion
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+    {
+        if quote_appears_in(quote, last_agent) {
+            return Some(format!("agent 最终交付：{}", truncate(quote, 400)));
+        }
+    }
+    let genuine = last_agent.message.trim();
+    if genuine.is_empty() {
+        return None;
+    }
+    Some(format!("agent 最终交付：{}", truncate(genuine, 400)))
+}
+
+/// Whether `quote` is a contiguous excerpt of the step's message or observation
+/// text.
+///
+/// The evaluator copies a "关键片段" and may differ in whitespace or wrap it in
+/// quotation marks, so both sides are whitespace-collapsed and the quote's
+/// surrounding marks trimmed before containment is checked — the same
+/// formatting variance the claim review accepts, without letting through text
+/// the transcript does not carry.
+fn quote_appears_in(quote: &str, step: &Step) -> bool {
+    const MARKS: &[char] = &['「', '」', '『', '』', '“', '”', '"', '\''];
+    let needle = collapse_whitespace(quote.trim_matches(MARKS));
+    if needle.is_empty() {
+        return false;
+    }
+    let mut corpus = collapse_whitespace(&step.message);
+    for result in results_of(step) {
+        corpus.push(' ');
+        corpus.push_str(&collapse_whitespace(&grounding::outcome::result_text(
+            result,
+        )));
+    }
+    corpus.contains(&needle)
+}
+
+/// Collapses every whitespace run to a single space.
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// Detail shown for a failed step: the error text if captured, else the step's
