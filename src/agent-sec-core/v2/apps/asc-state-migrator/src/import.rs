@@ -322,6 +322,10 @@ impl SourceImport<'_> {
     /// Reads the source's `SQLite` stream in batches and inserts every row
     /// that survives the retention cutoff and the run-wide dedup.
     ///
+    /// The connection opens the snapshot taken through the descriptor that
+    /// passed validation, so a source directory swapped after the scan
+    /// cannot redirect the import.
+    ///
     /// # Errors
     ///
     /// Propagates source read and destination insert failures.
@@ -330,7 +334,7 @@ impl SourceImport<'_> {
         scan: &crate::source::SqliteScan,
         stats: &mut RunSource,
     ) -> Result<(), crate::MigratorError> {
-        let src = source::open_read_only(&scan.path)?;
+        let src = source::open_read_only(scan.snapshot_db())?;
         let mut last_rowid = 0i64;
         loop {
             let batch = source::read_batch(&src, last_rowid)?;
