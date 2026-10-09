@@ -1742,6 +1742,12 @@ fn build_case(
     attr: &Attribution,
     index: &grounding::evidence::GroundingIndex,
 ) -> Result<CausalCase, String> {
+    // The evaluator's outcome is free-form text; every outcome-keyed decision
+    // below (and the dashboard's own `outcome === 'fail'` checks) keys on the
+    // canonical pair, so the variant spellings a model produces are folded
+    // here, once, before anything reads the value.
+    let outcome = normalize_outcome(attr.outcome.as_deref());
+
     let mut nodes: Vec<CausalNode> = Vec::new();
     let mut edges: Vec<CausalEdge> = Vec::new();
     let mut timeline: Vec<String> = Vec::new();
@@ -1787,7 +1793,7 @@ fn build_case(
     // round accuses something. A live capture stumbled eight times on one SQL
     // quoting mistake, adapted, and answered correctly; drawing all eight buried
     // the onset rather than pointing at it.
-    let alleging = is_alleging(attr.outcome.as_deref(), index);
+    let alleging = is_alleging(Some(outcome.as_str()), index);
     let mut failed_steps: std::collections::HashMap<usize, (String, Option<String>, String)> =
         std::collections::HashMap::new();
     for v in &index.call_verdicts {
@@ -1925,7 +1931,7 @@ fn build_case(
                     // Anchor override: the agent's last step becomes "shipped"
                     // (fail) or "good" (success) so the chain has an endpoint.
                     if !is_user(step) && Some(*step_idx) == last_agent_idx {
-                        if attr.outcome.as_deref() == Some("fail") {
+                        if outcome == "fail" {
                             "shipped".to_string()
                         } else {
                             "good".to_string()
@@ -1958,7 +1964,7 @@ fn build_case(
                 if Some(*step_idx) == first_user_idx {
                     "用户任务".to_string()
                 } else if Some(*step_idx) == last_agent_idx {
-                    if attr.outcome.as_deref() == Some("fail") {
+                    if outcome == "fail" {
                         "问题交付".to_string()
                     } else {
                         "最终结论".to_string()
@@ -1990,7 +1996,7 @@ fn build_case(
                 } else if Some(*step_idx) == last_agent_idx {
                     format!(
                         "agent 交付的最终结论{}",
-                        if attr.outcome.as_deref() == Some("fail") {
+                        if outcome == "fail" {
                             "（未达标）"
                         } else {
                             ""
@@ -2060,7 +2066,7 @@ fn build_case(
     // printed "失败形态：走了弯路，但最后结果是对的" under a ❌.
     let turn_issue_str = attr
         .turn_issue
-        .filter(|single_turn| !single_turn && attr.outcome.as_deref() == Some("fail"))
+        .filter(|single_turn| !single_turn && outcome == "fail")
         .map(|_| "错误结论直接交付给了用户".to_string());
 
     Ok(CausalCase {
@@ -2085,7 +2091,7 @@ fn build_case(
         // was the "needs human review" hedge this panel must not show.
         verdict: attr.verdict.clone().unwrap_or_default(),
         root_one: attr.root_one.clone().unwrap_or_default(),
-        outcome: attr.outcome.clone().unwrap_or_else(|| "success".into()),
+        outcome,
         outcome_note: attr.outcome_note.clone(),
         turn_issue: turn_issue_str,
         attrib: normalize_attrib(attr.attrib.as_deref()),
@@ -2248,6 +2254,28 @@ fn normalize_attrib(value: Option<&str>) -> String {
     match lowered.as_str() {
         "model" | "skill" | "prompt" | "agent" => lowered,
         _ => "model".to_string(),
+    }
+}
+
+/// Map the evaluator's free-form `outcome` onto the canonical pair the case,
+/// its rendering decisions, and the dashboard's `outcome === 'fail'` checks all
+/// key on.
+///
+/// `normalize_kind` exists because "the evaluator sometimes returns Chinese
+/// labels or capitalized English"; `outcome` is the same class of free-form
+/// value with the same variance — and compared exactly, a one-word variant
+/// ("failed") flipped every outcome-keyed decision to the success side: the
+/// endpoint node rendered "good" with the "最终结论" label, the failure chain
+/// was withheld, the turn_issue marker was lost, and the dashboard showed
+/// "✅ 最终办成了". Only recognized failure spellings map to `"fail"`; anything
+/// else stays `"success"`, exactly what an unrecognized value meant before.
+fn normalize_outcome(value: Option<&str>) -> String {
+    let Some(lowered) = value.map(|s| s.trim().to_ascii_lowercase()) else {
+        return "success".to_string();
+    };
+    match lowered.as_str() {
+        "fail" | "failed" | "failure" | "失败" => "fail".to_string(),
+        _ => "success".to_string(),
     }
 }
 
