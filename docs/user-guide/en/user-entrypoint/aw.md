@@ -99,6 +99,16 @@ runs commands before and after tools; it installs no security policy. Use the
 same `aw-provider/v1alpha1` policy configuration across supported adapters.
 The native Hook output dialect and event coverage remain framework-specific.
 
+## Upgrade the service
+
+This build uses local protocol `aw-service/v1alpha2`. A daemon from an older
+build is rejected with `protocol_version` before Agent binding or callbacks.
+Before replacing the executable, exit its Agent sessions and use the **old**
+`aw stop --config FILE` (or `--socket ABSOLUTE_PATH`) to stop each old daemon.
+Then update the CLI and daemon together and launch again. Do not delete a live
+socket or its audit history. The AW configuration and Provider protocol remain
+`aw/v1alpha1` and `aw-provider/v1alpha1`.
+
 ## Connect your programs
 
 Each named object in `spec.providers` describes a program. An event step refers

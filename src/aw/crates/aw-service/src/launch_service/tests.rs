@@ -137,3 +137,60 @@ fn external_absence_has_no_filesystem_or_process_side_effects() {
     .is_err());
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
 }
+
+#[test]
+fn old_protocol_daemon_is_rejected_before_reuse_or_replacement() {
+    use std::{os::unix::net::UnixListener, thread};
+
+    for startup in ["on_demand", "external"] {
+        let fixture = Fixture::new();
+        let mut value = config();
+        value["spec"]["daemon"]["state_dir"] = json!(fixture.0.join("state"));
+        value["spec"]["daemon"]["startup"] = json!(startup);
+        let document = bytes(&value);
+        let paths = resolve(&document, None).unwrap();
+        files::private_directory(&paths.state_dir).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let inode = fs::metadata(&paths.socket).unwrap().ino();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result = thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                // The old daemon accepts status discovery but cannot parse the
+                // new native_environment field in later callback requests.
+                for _ in 0..2 {
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline);
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(error) => panic!("fixture accept failed: {error}"),
+                        }
+                    };
+                    let request: Value = crate::ipc::read(&mut stream, deadline).unwrap();
+                    assert_eq!(request["operation"]["method"], "status");
+                    crate::ipc::write(&mut stream, &json!({
+                        "api_version":"aw-service/v1alpha1",
+                        "identity":{"generation":"old-daemon", "config_revision":paths.config_revision},
+                        "result":{"pid":std::process::id(), "audit_healthy":true},
+                        "error":null, "audit_key":null,
+                    }), deadline).unwrap();
+                    if request["api_version"] != "aw-service/v1alpha1" {
+                        break;
+                    }
+                }
+            });
+            let result = ensure_service(&document, Path::new("/must-not-be-executed"), deadline);
+            server.join().unwrap();
+            result
+        });
+        assert!(
+            matches!(result, Err(crate::Error::Rejected(ref code)) if code == "protocol_version")
+        );
+        assert_eq!(fs::metadata(&paths.socket).unwrap().ino(), inode);
+        assert!(!paths.state_dir.join("service.log").exists());
+    }
+}

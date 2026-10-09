@@ -26,7 +26,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha1`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha2`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -76,6 +76,10 @@ Rust 客户端通过 `Error::Attempt` 暴露该记录键。
 启用尚不支持的事件、结构化 `ask`、结果替换、最终检查或更强执行保证会被拒绝。成功响应
 中的空效果列表不增加限制，也不授予原生权限。成功的策略阻断与调用失败后
 `failure_action` 为 `block` 是两种不同结果。
+
+本地协议 v1alpha2 在 status 发现阶段拒绝 v1alpha1 daemon，不会继续绑定或回调。
+升级前先退出旧会话并用旧版命令停止服务，再一起更新 CLI 和 daemon；不得替换仍在
+使用的 socket。该版本隔离了回调环境的线协议变更，配置和 Provider 协议保持不变。
 
 ## 共享事件生命周期
 

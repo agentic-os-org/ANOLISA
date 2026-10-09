@@ -88,6 +88,14 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
 `aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
 
+## 升级服务
+
+本版本使用本地协议 `aw-service/v1alpha2`。旧版 daemon 会在 Agent 绑定和回调前
+被拒绝，返回 `protocol_version`。替换可执行文件前，先退出其 Agent 会话，再用
+**旧版** `aw stop --config FILE`（或 `--socket ABSOLUTE_PATH`）停止每个旧服务；
+随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。
+AW 配置和 Provider 协议仍分别为 `aw/v1alpha1`、`aw-provider/v1alpha1`。
+
 ## 接入自己的程序
 
 `spec.providers` 中的每个命名对象描述一个程序，事件步骤通过 `provider` 引用

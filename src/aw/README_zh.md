@@ -49,6 +49,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 `--native-settings`，拒绝 `--native-profile`、`--native-state-dir` 和 `aw install`。
 `install` 用于分派持久化原生 Hook 安装，当前版本没有支持它的 Adapter；它不安装
 AW 或 Agent 软件。完整命令及参数支持表见使用指南。
+升级前须用旧版 AW 停止旧 daemon；当前 CLI 会拒绝旧本地协议。升级步骤见使用指南。
 
 ## sec-core Provider
 

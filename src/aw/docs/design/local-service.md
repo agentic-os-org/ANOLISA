@@ -29,7 +29,7 @@ service.
 ## Local protocol
 
 [wire.rs](../../crates/aw-service/src/wire.rs) defines the experimental
-`aw-service/v1alpha1` protocol. It is separate from the Provider stdio protocol
+`aw-service/v1alpha2` protocol. It is separate from the Provider stdio protocol
 `aw-provider/v1alpha1`. Each connection carries one length-framed JSON request
 and one response; a frame is limited to 8 MiB. Native stdin and normalized event data each retain
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
@@ -92,6 +92,12 @@ rejects enabled unsupported events, structured `ask`, result replacement,
 final guards and stronger execution guarantees. A successful empty effect list
 adds no restriction and grants no native permission. A successful policy block
 is distinct from a failed invocation whose `failure_action` is `block`.
+
+Protocol v1alpha2 rejects v1alpha1 daemons during status discovery, before any
+binding or callback. Stop old sessions and their daemons using the old binary
+before upgrading the CLI and daemon together; never replace a live socket.
+This separates the callback-environment wire change from the unchanged
+configuration and Provider protocols.
 
 ## Shared event lifetime
 

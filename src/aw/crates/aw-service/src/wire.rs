@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha1";
+pub const VERSION: &str = "aw-service/v1alpha2";
 
 /// Configuration snapshot and daemon lifetime to which every mutable request binds.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -55,6 +55,8 @@ accepts `--native-settings` with `aw run`; it rejects `--native-profile`,
 `--native-state-dir` and `aw install`. The `install` command dispatches persistent
 native Hook setup, with no supporting adapter in this build; it does not install
 AW or an Agent. See the user guide for the command and option support table.
+Before upgrading, stop old daemon instances with the old AW executable; the
+current CLI rejects the previous local protocol. See the user guide for upgrade steps.
 
 ## sec-core Provider
 

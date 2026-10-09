@@ -73,7 +73,7 @@ cargo build --locked -p aw-provider --example policy
 
 [使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md#运行本地服务演示)提供前台
 服务与独立客户端的完整演示，以及状态目录和审计历史的清理说明。服务使用
-`aw-service/v1alpha1` 本地协议，Provider 继续使用 `aw-provider/v1alpha1`；二者
+`aw-service/v1alpha2` 本地协议，Provider 继续使用 `aw-provider/v1alpha1`；二者
 分别版本化。
 
 ## 运行时验收
