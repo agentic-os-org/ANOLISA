@@ -527,6 +527,122 @@ fn a_confirmed_failure_stays_marked_even_when_the_evaluator_placed_it() {
     );
 }
 
+/// `outcome` is a free-form LLM string, and every outcome-keyed decision in the
+/// case compared it with `== Some("fail")` exactly — the endpoint node's kind,
+/// its label and plain text, the failure chain, the turn_issue marker, and the
+/// dashboard's six `outcome === 'fail'` checks. A one-word variant ("failed")
+/// flipped all of them to the success side while the evaluator had judged the
+/// round a failure. `normalize_kind` exists for precisely this class of
+/// variance ("the evaluator sometimes returns Chinese labels or capitalized
+/// English; we normalize everything"); `outcome` was the one enum left out.
+#[test]
+fn an_outcome_variant_still_marks_the_round_as_failed() {
+    use agentsight_atif::{ATIF_SCHEMA_VERSION, Agent, Step, StepSource};
+
+    let step = |step_id: usize, source: StepSource, message: &str| Step {
+        step_id,
+        source,
+        message: message.to_string(),
+        timestamp: None,
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    };
+    // A round with no tool calls, no user turn (the shape real Qoder
+    // transcripts take: they record only the tool loop), and a clean final
+    // message — so the only thing that can mark it a failure is the
+    // evaluator's own outcome, and the final agent step is the chain's
+    // endpoint.
+    let doc = AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.into(),
+        agent: Agent {
+            name: "test".into(),
+            version: "0".into(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+        steps: vec![
+            step(1, StepSource::Agent, "正在移动文件"),
+            step(
+                2,
+                StepSource::Agent,
+                "已把甲和乙移到归档目录；丙在源目录里不存在，无法移动，请确认文件名。",
+            ),
+        ],
+        session_id: None,
+        trajectory_id: None,
+        notes: None,
+        final_metrics: None,
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    };
+
+    // "failed" — one word away from the documented "fail".
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "failed",
+        "verdict": "交付与任务不符",
+        "root_one": "未核对文件是否存在",
+        "attrib": "model",
+        "turn_issue": false
+    }))
+    .expect("attribution fixture parses");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "文件没有全部移过去".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let mut case_ = build_case(
+        &doc,
+        &doc.steps,
+        &req,
+        &Verdicts::default(),
+        &attr,
+        &empty_index(),
+    )
+    .expect("case builds from a well-formed trajectory");
+    gate_by_evidence(&mut case_, &empty_index());
+
+    assert_eq!(
+        case_.outcome, "fail",
+        "a failure verdict spelled 'failed' must still be a failure"
+    );
+    let endpoint = case_
+        .nodes
+        .iter()
+        .rev()
+        .find(|n| n.kind == "shipped" || n.kind == "good")
+        .expect("the final agent step should be the chain's endpoint");
+    assert_eq!(
+        endpoint.kind, "shipped",
+        "the endpoint node must record the failed delivery"
+    );
+    assert_eq!(
+        endpoint.tag, "问题交付",
+        "the endpoint's tag must name the failed delivery"
+    );
+    assert!(
+        endpoint.plain.contains("未达标"),
+        "the endpoint's plain text must flag the undelivered requirement, got {:?}",
+        endpoint.plain
+    );
+    assert_eq!(
+        case_.turn_issue.as_deref(),
+        Some("错误结论直接交付给了用户"),
+        "the session-level failure marker must survive the outcome variant"
+    );
+}
+
 #[test]
 fn a_sound_round_shows_no_failure_chain() {
     let doc = broken_sql_trajectory();
