@@ -342,7 +342,7 @@ fn retention_cuts_at_import_time_and_can_be_disabled() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let with_cutoff = import::apply(
         &scan_all(&options),
         &[],
@@ -403,7 +403,7 @@ fn world_writable_and_hardlinked_stream_files_are_rejected() {
     perms.set_mode(0o666);
     fs::set_permissions(&db, perms).unwrap();
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert!(scans.is_empty());
     assert!(rejected[0].reason.contains("world-writable"));
@@ -744,7 +744,7 @@ fn verify_reports_sources_that_grew_in_place_after_the_run() {
     let source = home.path().join("a/.agent-sec-core");
     seed_source(&source, 1001, &[("e1", now, 1001)], &[], false);
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     import::apply(
         &scan_all(&options),
         &[],
@@ -800,7 +800,7 @@ fn bare_verify_checks_the_latest_run_only() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let first = import::apply(
         &scan_all(&options),
         &[],
@@ -920,7 +920,7 @@ fn a_fresh_wal_sidecar_marks_the_source_live() {
     // stream file it reads to that same ownership contract.
     chown(&wal, Some(1001), None).unwrap();
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
     assert!(scans.is_empty(), "the live source must not scan");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
@@ -945,7 +945,7 @@ fn apply_reads_the_validated_database_not_a_replacement() {
     let source = home.path().join("a/.agent-sec-core");
     seed_source(&source, 1001, &[("legit", now, 1001)], &[], false);
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let scans = scan_all(&options);
 
     // Between validation and the import passes the directory owner replaces
@@ -990,7 +990,7 @@ fn jsonl_recovery_reads_the_validated_log_not_a_replacement() {
         false,
     );
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     let scans = scan_all(&options);
 
     // Same race on the recovery stream: after validation the main log is
@@ -1276,7 +1276,7 @@ fn a_wal_only_append_after_the_run_reports_drift() {
     make_old(&wal);
     make_old(&source.join("security-events.db"));
 
-    let options = discovery_for(&destination, &[source.clone()]);
+    let options = discovery_for(&destination, std::slice::from_ref(&source));
     import::apply(
         &scan_all(&options),
         &[],
