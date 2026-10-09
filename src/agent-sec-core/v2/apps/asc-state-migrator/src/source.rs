@@ -476,8 +476,8 @@ pub fn validate_and_scan(
         jsonl_streams = Some(streams);
     }
 
-    let observability = scan_observability(source, &mut newest_mtime, open_jsonl)
-        .map_err(reject)?;
+    let observability =
+        scan_observability(source, &mut newest_mtime, open_jsonl).map_err(reject)?;
 
     if !force
         && let Some(mtime) = newest_mtime

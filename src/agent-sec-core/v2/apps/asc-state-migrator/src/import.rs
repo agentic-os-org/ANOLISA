@@ -774,12 +774,9 @@ fn verify_run(
                 .sqlite_identity
                 .as_ref()
                 .map(|identity| identity_matches(&item.dir, "security-events.db", identity)),
-            sqlite_wal_unchanged: item
-                .sqlite_wal_identity
-                .as_ref()
-                .map(|identity| {
-                    wal_identity_matches(&item.dir, "security-events.db-wal", identity)
-                }),
+            sqlite_wal_unchanged: item.sqlite_wal_identity.as_ref().map(|identity| {
+                wal_identity_matches(&item.dir, "security-events.db-wal", identity)
+            }),
             jsonl_unchanged: item
                 .jsonl_identity
                 .as_ref()
@@ -795,9 +792,7 @@ fn verify_run(
                 .observability
                 .as_ref()
                 .and_then(|observability| observability.sqlite_wal_identity.as_ref())
-                .map(|identity| {
-                    wal_identity_matches(&item.dir, "observability.db-wal", identity)
-                }),
+                .map(|identity| wal_identity_matches(&item.dir, "observability.db-wal", identity)),
             observability_jsonl_unchanged: item
                 .observability
                 .as_ref()
