@@ -693,7 +693,8 @@ pub fn verify(
     })?)?;
 
     let observability_destination = crate::observability::destination_for(destination);
-    let observability_store = crate::observability::open_destination(&observability_destination)?;
+    let observability_store =
+        crate::observability::open_destination_readonly(&observability_destination)?;
     let observability_quick_check =
         required(observability_store.with_connection(true, |conn| {
             conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))

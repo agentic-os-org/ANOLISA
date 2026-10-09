@@ -802,3 +802,407 @@ fn a_v1_shaped_observability_destination_converges_without_losing_rows() {
     assert_eq!(owners[0], None, "the v1 row keeps its NULL owner");
     assert_eq!(owners[1], Some(1001));
 }
+
+fn obs_verify_cli(destination: &Path) -> asc_state_migrator::cli::Cli {
+    use asc_state_migrator::cli::{Cli, Command, CommonArgs};
+    Cli {
+        command: Command::Verify { run_id: None },
+        common: CommonArgs {
+            destination: Some(destination.to_path_buf()),
+            sources: Vec::new(),
+            map_owner: Vec::new(),
+            discover_homes: None,
+            no_discover_homes: true,
+            discover_tmp: None,
+            no_discover_tmp: true,
+            retention_days: 30,
+            observability_retention_days: 7,
+            no_retention_cutoff: false,
+            sqlite_only: false,
+            recover_observability_jsonl: false,
+            force: false,
+            writer_grace: 300,
+            json: false,
+        },
+    }
+}
+
+#[test]
+fn verify_needs_an_existing_observability_destination_and_creates_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let observability_destination = home.path().join("dest/observability.db");
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"list files\"}",
+            None,
+        )],
+        "",
+        true,
+    );
+
+    let options = discovery_for(&destination, &[source]);
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30), Some(7), false),
+    )
+    .unwrap();
+    assert!(observability_destination.is_file());
+
+    fs::remove_file(&observability_destination).unwrap();
+
+    match asc_state_migrator::run(&obs_verify_cli(&destination)) {
+        Err(asc_state_migrator::error::MigratorError::DestinationUnusable { path, reason }) => {
+            assert!(path.ends_with("observability.db"), "got {path}");
+            assert!(reason.contains("does not exist"), "got {reason}");
+        }
+        other => panic!("expected DestinationUnusable, got {other:?}"),
+    }
+    assert!(
+        !observability_destination.exists(),
+        "verify is read-only: the observability store must not reappear"
+    );
+    assert!(destination.is_file(), "the security store is untouched");
+}
+
+#[test]
+fn verify_fails_the_exit_status_when_the_observability_store_is_corrupt() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let observability_destination = home.path().join("dest/observability.db");
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"list files\"}",
+            None,
+        )],
+        "",
+        true,
+    );
+
+    let options = discovery_for(&destination, &[source]);
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30), Some(7), false),
+    )
+    .unwrap();
+
+    // A rogue table on its own page lets quick_check fail while every
+    // observability_events page stays intact, so only the integrity verdict
+    // can fail the command.
+    let conn = Connection::open(&observability_destination).unwrap();
+    conn.execute_batch("CREATE TABLE rogue_probe(t); INSERT INTO rogue_probe VALUES (1);")
+        .unwrap();
+    let root: i64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'rogue_probe'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    let page_size: usize = {
+        let conn = Connection::open(&observability_destination).unwrap();
+        let raw: i64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+        usize::try_from(raw).unwrap()
+    };
+    let mut bytes = fs::read(&observability_destination).unwrap();
+    let root_page = usize::try_from(root).unwrap();
+    let offset = root_page.saturating_sub(1).saturating_mul(page_size);
+    // An invalid b-tree page type: quick_check reports it, queries that do
+    // not touch the page still succeed.
+    bytes[offset] = 0;
+    fs::write(&observability_destination, bytes).unwrap();
+
+    let verification = import::verify(&destination, None).unwrap();
+    assert_ne!(
+        verification.observability_quick_check, "ok",
+        "the corrupted observability page must be reported"
+    );
+    assert_eq!(
+        verification.quick_check, "ok",
+        "the security store is intact"
+    );
+    assert!(
+        verification.runs.iter().all(|run| run.ok),
+        "the journaled rows are still present: {:?}",
+        verification.runs
+    );
+
+    match asc_state_migrator::run(&obs_verify_cli(&destination)) {
+        Err(asc_state_migrator::error::MigratorError::Usage(message)) => {
+            assert!(
+                message.contains("integrity"),
+                "the observability quick_check verdict must fail the command, got {message}"
+            );
+        }
+        other => panic!("expected Usage error, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_reports_observability_sources_that_grew_in_place_after_the_run() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let jsonl = format!(
+        "{{\"hook\": \"before_agent_run\", \"observedAt\": \"{}\", \"metadata\": \
+         {{\"sessionId\": \"s-1\", \"runId\": \"r-1\"}}, \"metrics\": {{\"user_input\": \
+         \"db row\"}}}}\n",
+        iso_of(now),
+    );
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"db row\"}",
+            None,
+        )],
+        &jsonl,
+        false,
+    );
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30), Some(7), false),
+    )
+    .unwrap();
+
+    // An in-place append keeps dev/ino but grows the file and bumps mtime.
+    let obs_jsonl = source.join("observability.jsonl");
+    let before = fs::symlink_metadata(&obs_jsonl).unwrap();
+    {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&obs_jsonl)
+            .unwrap();
+        file.write_all(&[0u8; 16]).unwrap();
+    }
+    let after = fs::symlink_metadata(&obs_jsonl).unwrap();
+    assert_eq!(before.dev(), after.dev());
+    assert_eq!(before.ino(), after.ino());
+    assert!(after.size() > before.size());
+
+    let verification = import::verify(&destination, None).unwrap();
+    assert_eq!(verification.runs.len(), 1);
+    assert!(
+        verification.runs[0].sources[0]
+            .observability_jsonl_unchanged
+            .is_some_and(|unchanged| !unchanged),
+        "an in-place append is source drift and must be reported: {:?}",
+        verification.runs[0].sources
+    );
+    assert!(
+        verification.runs[0].ok,
+        "source drift is reported, not a destination mismatch"
+    );
+}
+
+#[test]
+fn a_fresh_observability_wal_sidecar_marks_the_source_live() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"list files\"}",
+            None,
+        )],
+        "",
+        false,
+    );
+    // The v1 observability writer shares the security store's WAL-mode
+    // SqliteStore: active commits land in `observability.db-wal` while the
+    // main database keeps its aged timestamp.
+    let wal = source.join("observability.db-wal");
+    fs::write(&wal, b"fresh writer evidence").unwrap();
+    // v1 writes the sidecar as the directory's owner; every stream file the
+    // migrator reads is held to that same ownership contract.
+    chown(&wal, Some(1001), None).unwrap();
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    assert!(scans.is_empty(), "the live source must not scan");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert!(
+        rejected[0].reason.contains("stop v1 writers"),
+        "grace rejection: {}",
+        rejected[0].reason
+    );
+
+    // --force still reaches the data.
+    let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch());
+    assert_eq!(scans.len(), 1);
+}
+
+#[test]
+fn apply_reads_the_validated_observability_database_not_a_replacement() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"legit\"}",
+            None,
+        )],
+        "",
+        false,
+    );
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let scans = scan_all(&options);
+
+    // Between validation and the import passes the directory owner replaces
+    // the validated observability database wholesale - with one that even
+    // fails the per-file checks. The import must read the object that passed
+    // validation, not the path's new tenant.
+    let replacement = home.path().join("replacement-observability.db");
+    {
+        let conn = Connection::open(&replacement).unwrap();
+        conn.execute_batch(OBS_V1_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        insert_obs_row(
+            &conn,
+            &(
+                "before_agent_run",
+                now,
+                "s-swapped",
+                "r-swapped",
+                "{\"user_input\":\"swapped in\"}",
+                None,
+            ),
+        );
+    }
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o666)).unwrap();
+    fs::rename(&replacement, source.join("observability.db")).unwrap();
+
+    import::apply(
+        &scans,
+        &[],
+        &destination,
+        &apply_options(Some(30), Some(7), false),
+    )
+    .unwrap();
+
+    let rows = observability_rows(&home.path().join("dest/observability.db"));
+    assert_eq!(
+        rows,
+        vec![(
+            "before_agent_run".to_owned(),
+            "s-1".to_owned(),
+            "r-1".to_owned(),
+            1001
+        )],
+        "the import must read the validated database, not the replacement: {rows:?}"
+    );
+}
+
+#[test]
+fn observability_jsonl_recovery_reads_the_validated_log_not_a_replacement() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    let jsonl = format!(
+        "{{\"hook\": \"before_agent_run\", \"observedAt\": \"{}\", \"metadata\": \
+         {{\"sessionId\": \"s-1\", \"runId\": \"r-1\"}}, \"metrics\": {{\"user_input\": \
+         \"legit recovery\"}}}}\n",
+        iso_of(now),
+    );
+    seed_observability_source(&source, 1001, &[], &jsonl, false);
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    let scans = scan_all(&options);
+
+    // The recovery stream is replaced after validation, this time by a
+    // symlink to another user's data, which a pathname open would follow.
+    let victim = home.path().join("victim-observability.jsonl");
+    fs::write(
+        &victim,
+        format!(
+            "{{\"hook\": \"before_agent_run\", \"observedAt\": \"{}\", \"metadata\": \
+             {{\"sessionId\": \"s-swapped\", \"runId\": \"r-swapped\"}}, \"metrics\": \
+             {{\"user_input\": \"swapped in\"}}}}\n",
+            iso_of(now + 10.0),
+        ),
+    )
+    .unwrap();
+    let log = source.join("observability.jsonl");
+    fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink(&victim, &log).unwrap();
+
+    import::apply(
+        &scans,
+        &[],
+        &destination,
+        &apply_options(Some(30), Some(7), true),
+    )
+    .unwrap();
+
+    let rows = observability_rows(&home.path().join("dest/observability.db"));
+    assert_eq!(
+        rows,
+        vec![(
+            "before_agent_run".to_owned(),
+            "s-1".to_owned(),
+            "r-1".to_owned(),
+            1001
+        )],
+        "recovery must read the validated log, not the replacement: {rows:?}"
+    );
+}
