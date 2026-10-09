@@ -479,9 +479,7 @@ pub fn validate_and_scan(
     let observability =
         scan_observability(source, &mut newest_mtime, open_jsonl).map_err(reject)?;
 
-    if !force
-        && let Some(mtime) = newest_mtime
-    {
+    if !force && let Some(mtime) = newest_mtime {
         // File mtimes in epoch seconds fit f64 exactly for any date this
         // filesystem can represent, so the cast is lossless in practice.
         #[allow(clippy::cast_precision_loss)]
