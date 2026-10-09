@@ -1065,7 +1065,7 @@ fn a_fresh_observability_wal_sidecar_marks_the_source_live() {
     chown(&wal, Some(1001), None).unwrap();
 
     let options = discovery_for(&destination, &[source.clone()]);
-    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch());
+    let (scans, rejected, _) = import::scan_sources(&options, false, 300, current_epoch(), true);
     assert!(scans.is_empty(), "the live source must not scan");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
     assert!(
@@ -1075,7 +1075,7 @@ fn a_fresh_observability_wal_sidecar_marks_the_source_live() {
     );
 
     // --force still reaches the data.
-    let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch());
+    let (scans, _, _) = import::scan_sources(&options, true, 300, current_epoch(), true);
     assert_eq!(scans.len(), 1);
 }
 
@@ -1204,5 +1204,150 @@ fn observability_jsonl_recovery_reads_the_validated_log_not_a_replacement() {
             1001
         )],
         "recovery must read the validated log, not the replacement: {rows:?}"
+    );
+}
+
+/// `--sqlite-only` must not let a damaged observability `JSONL` log reject
+/// the source either: the scan skips it, and the import uses the
+/// observability `SQLite` stream.
+#[test]
+fn obs_sqlite_only_scans_ignore_a_damaged_observability_jsonl() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"row\"}",
+            None,
+        )],
+        "",
+        true,
+    );
+    let foreign = home.path().join("foreign.jsonl");
+    fs::write(&foreign, "{}\n").unwrap();
+    std::os::unix::fs::symlink(&foreign, source.join("observability.jsonl")).unwrap();
+
+    let options = discovery_for(&destination, &[source]);
+    let (scans, rejected, _) = import::scan_sources(&options, true, 300, current_epoch(), false);
+    assert!(
+        rejected.is_empty(),
+        "a sqlite-only scan must skip the observability JSONL stream: {rejected:?}"
+    );
+    let observability = scans[0]
+        .observability
+        .as_ref()
+        .expect("obs streams scanned");
+    assert!(
+        observability.jsonl.is_none(),
+        "a sqlite-only scan must not open the observability JSONL stream"
+    );
+    assert!(observability.sqlite.is_some());
+
+    let mut sqlite_only = apply_options(Some(30), Some(7), false);
+    sqlite_only.jsonl_recovery = false;
+    import::apply(&scans, &[], &destination, &sqlite_only).unwrap();
+    let rows = observability_rows(&home.path().join("dest/observability.db"));
+    assert_eq!(rows.len(), 1, "the observability SQLite stream imports");
+}
+
+/// A post-run writer that commits only to the observability `WAL` keeps the
+/// main observability database byte-identical, so the run must journal (and
+/// verify) the `WAL` identity it snapshotted.
+#[test]
+fn an_observability_wal_only_append_after_the_run_reports_drift() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("dest/security-events.db");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    let now = current_epoch();
+    let source = home.path().join("a/.agent-sec-core");
+    seed_observability_source(
+        &source,
+        1001,
+        &[(
+            "before_agent_run",
+            now,
+            "s-1",
+            "r-1",
+            "{\"user_input\":\"main\"}",
+            None,
+        )],
+        "",
+        true,
+    );
+    // Leave un-checkpointed frames behind so the run journals the
+    // observability WAL identity alongside the main database.
+    {
+        let conn = Connection::open(source.join("observability.db")).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        insert_obs_row(
+            &conn,
+            &(
+                "after_tool_call",
+                now,
+                "s-1",
+                "r-1",
+                "{\"user_input\":\"wal-only\"}",
+                None,
+            ),
+        );
+        // No clean close: the connection never checkpoints.
+        std::mem::forget(conn);
+    }
+    let wal = source.join("observability.db-wal");
+    chown(&wal, Some(1001), None).unwrap();
+    make_old(&wal);
+    make_old(&source.join("observability.db"));
+
+    let options = discovery_for(&destination, &[source.clone()]);
+    import::apply(
+        &scan_all(&options),
+        &[],
+        &destination,
+        &apply_options(Some(30), Some(7), false),
+    )
+    .unwrap();
+
+    // Positive control before disturbing anything.
+    let verification = import::verify(&destination, None).unwrap();
+    assert_eq!(
+        verification.runs[0].sources[0].observability_sqlite_wal_unchanged,
+        Some(true),
+        "an untouched observability WAL reports unchanged: {:?}",
+        verification.runs[0].sources
+    );
+
+    // WAL-only append: the main observability database keeps its bytes.
+    let before = fs::metadata(source.join("observability.db")).unwrap();
+    {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new().append(true).open(&wal).unwrap();
+        file.write_all(&[0u8; 32]).unwrap();
+    }
+    let after = fs::metadata(source.join("observability.db")).unwrap();
+    assert_eq!(
+        (before.size(), before.mtime()),
+        (after.size(), after.mtime()),
+        "the fixture must only disturb the observability WAL"
+    );
+
+    let verification = import::verify(&destination, None).unwrap();
+    assert_eq!(
+        verification.runs[0].sources[0].observability_sqlite_wal_unchanged,
+        Some(false),
+        "a WAL-only append after the run must report drift: {:?}",
+        verification.runs[0].sources
     );
 }
