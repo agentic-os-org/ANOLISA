@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod error;
 pub mod import;
 pub mod journal;
+pub(crate) mod observability;
 pub mod report;
 pub mod source;
 
@@ -67,6 +68,11 @@ pub fn run(cli: &Cli) -> Result<(), MigratorError> {
             let apply_options = ApplyOptions {
                 retention_days: retention_days(&cli.common),
                 jsonl_recovery: !cli.common.sqlite_only,
+                observability_retention_days: observability_retention_days(&cli.common),
+                // `--sqlite-only` means no JSONL stream of either kind: the
+                // scan already skipped the observability log.
+                observability_jsonl_recovery: cli.common.recover_observability_jsonl
+                    && !cli.common.sqlite_only,
                 now_epoch: asc_sqlite_kernel::current_epoch(),
             };
             let report = import::apply(&scans, &rejected, &destination, &apply_options)?;
@@ -125,6 +131,16 @@ fn retention_days(common: &CommonArgs) -> Option<u32> {
         None
     } else {
         Some(common.retention_days)
+    }
+}
+
+/// The observability cutoff shares the global disable switch but keeps the
+/// stream's own default window (7 days in v1).
+fn observability_retention_days(common: &CommonArgs) -> Option<u32> {
+    if common.no_retention_cutoff {
+        None
+    } else {
+        Some(common.observability_retention_days)
     }
 }
 

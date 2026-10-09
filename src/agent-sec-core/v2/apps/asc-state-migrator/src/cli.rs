@@ -69,6 +69,12 @@ pub struct CommonArgs {
     #[arg(long, value_name = "DAYS", default_value_t = 30, global = true)]
     pub retention_days: u32,
 
+    /// Drop source observability records older than this many days at import
+    /// time, matching the observability stream's own retention window.
+    /// Defaults to the v1 default of 7 (#6605 phase 5).
+    #[arg(long, value_name = "DAYS", default_value_t = 7, global = true)]
+    pub observability_retention_days: u32,
+
     /// Import records of any age.
     #[arg(long, global = true)]
     pub no_retention_cutoff: bool,
@@ -76,6 +82,13 @@ pub struct CommonArgs {
     /// Only read each source's `SQLite` stream; skip `JSONL` gap recovery.
     #[arg(long, global = true)]
     pub sqlite_only: bool,
+
+    /// Recover observability rows the source `SQLite` stream is missing from
+    /// its `JSONL` stream. Off by default: the observability stream has no
+    /// stable id, so recovery matches rows by content and stays an explicit
+    /// operator decision (#6605 phase 5).
+    #[arg(long, global = true)]
+    pub recover_observability_jsonl: bool,
 
     /// Proceed even when a source was modified recently.
     #[arg(long, global = true)]
@@ -132,8 +145,16 @@ mod tests {
             Some(std::path::Path::new("/tmp"))
         );
         assert_eq!(cli.common.retention_days, 30);
+        assert_eq!(
+            cli.common.observability_retention_days, 7,
+            "the observability stream keeps a 7-day window in v1"
+        );
         assert!(!cli.common.no_retention_cutoff);
         assert!(!cli.common.sqlite_only);
+        assert!(
+            !cli.common.recover_observability_jsonl,
+            "observability JSONL recovery is an explicit decision"
+        );
         assert_eq!(cli.common.writer_grace, 300);
     }
 
@@ -148,12 +169,17 @@ mod tests {
             "/srv/old=1001",
             "--retention-days",
             "7",
+            "--observability-retention-days",
+            "30",
+            "--recover-observability-jsonl",
             "--json",
         ])
         .expect("parses");
         assert_eq!(cli.common.sources, [PathBuf::from("/srv/old")]);
         assert_eq!(cli.common.map_owner, ["/srv/old=1001".to_owned()]);
         assert_eq!(cli.common.retention_days, 7);
+        assert_eq!(cli.common.observability_retention_days, 30);
+        assert!(cli.common.recover_observability_jsonl);
     }
 
     #[test]

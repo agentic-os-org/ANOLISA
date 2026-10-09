@@ -12,5 +12,7 @@ pub mod writer;
 pub use policy::ObservabilityFaultPolicy;
 pub use reader::ObservabilityReader;
 pub use repository::ObservabilityEventRepository;
-pub use table::OBSERVABILITY_TABLES;
+pub use table::{
+    OBSERVABILITY_TABLES, SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION, SYSTEM_OBSERVABILITY_TABLES,
+};
 pub use writer::{ObservabilitySqliteWriter, ObservabilityWriterError};

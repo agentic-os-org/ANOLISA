@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 asc-event-log = { workspace = true }
+asc-observability = { workspace = true }
 asc-persistence-sqlite = { workspace = true }
 asc-security-events = { workspace = true }
 asc-sqlite-kernel = { workspace = true }
