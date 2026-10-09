@@ -2146,10 +2146,18 @@ fn build_contra(steps: &[Step], attr: &Attribution) -> Option<CausalContra> {
 ///
 /// Prefers the evaluator's `actual_conclusion` when it is genuinely quoted
 /// from the final agent step's message or observation text; otherwise excerpts
-/// that step's own message. Returns `None` when the round has no agent step or
-/// that step carries no text to show, leaving the evaluation fallbacks to speak.
+/// that step's own message. The delivery is the last agent step that actually
+/// speaks: rounds may end in bookkeeping heartbeats whose empty message is not
+/// a delivery (the same no-op case `build_contra`'s observation axis skips),
+/// and anchoring against a heartbeat would reject a genuine quote from the
+/// real final response, demoting the panel to the evaluator's verdict.
+/// Returns `None` when no agent step carries a message, leaving the
+/// evaluation fallbacks to speak.
 fn final_delivery(steps: &[Step], attr: &Attribution) -> Option<String> {
-    let last_agent = steps.iter().rev().find(|s| is_agent(s))?;
+    let last_agent = steps
+        .iter()
+        .rev()
+        .find(|s| is_agent(s) && !s.message.trim().is_empty())?;
     if let Some(quote) = attr
         .actual_conclusion
         .as_deref()
@@ -2161,34 +2169,32 @@ fn final_delivery(steps: &[Step], attr: &Attribution) -> Option<String> {
         }
     }
     let genuine = last_agent.message.trim();
-    if genuine.is_empty() {
-        return None;
-    }
     Some(format!("agent 最终交付：{}", truncate(genuine, 400)))
 }
 
-/// Whether `quote` is a contiguous excerpt of the step's message or observation
-/// text.
+/// Whether `quote` is a contiguous excerpt of one transcript field — the
+/// step's message, or one observation result's text.
 ///
 /// The evaluator copies a "关键片段" and may differ in whitespace or wrap it in
 /// quotation marks, so both sides are whitespace-collapsed and the quote's
 /// surrounding marks trimmed before containment is checked — the same
 /// formatting variance the claim review accepts, without letting through text
-/// the transcript does not carry.
+/// the transcript does not carry. Containment is per field: a quote that only
+/// matches when two fields are concatenated spans their seam, and no
+/// transcript entry actually carries it — that splice is precisely the
+/// fabricated exhibit this anchor exists to reject.
 fn quote_appears_in(quote: &str, step: &Step) -> bool {
     const MARKS: &[char] = &['「', '」', '『', '』', '“', '”', '"', '\''];
     let needle = collapse_whitespace(quote.trim_matches(MARKS));
     if needle.is_empty() {
         return false;
     }
-    let mut corpus = collapse_whitespace(&step.message);
-    for result in results_of(step) {
-        corpus.push(' ');
-        corpus.push_str(&collapse_whitespace(&grounding::outcome::result_text(
-            result,
-        )));
+    if collapse_whitespace(&step.message).contains(&needle) {
+        return true;
     }
-    corpus.contains(&needle)
+    results_of(step).iter().any(|result| {
+        collapse_whitespace(&grounding::outcome::result_text(result)).contains(&needle)
+    })
 }
 
 /// Collapses every whitespace run to a single space.

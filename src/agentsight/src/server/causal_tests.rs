@@ -921,12 +921,17 @@ fn partial_move_trajectory() -> AtifTrajectory {
 /// Runs the pipeline over [`partial_move_trajectory`] against a mock LLM that
 /// answers with the given attribution `actual_conclusion`.
 fn contra_panel_for(actual_conclusion: &str) -> CausalContra {
+    contra_panel_for_trajectory(partial_move_trajectory(), actual_conclusion)
+}
+
+/// Runs the pipeline over the given trajectory against a mock LLM that
+/// answers with the given attribution `actual_conclusion`.
+fn contra_panel_for_trajectory(doc: AtifTrajectory, actual_conclusion: &str) -> CausalContra {
     let base = responding_llm_sequence(vec![
         combined_response(),
         attribution_response(actual_conclusion),
     ]);
     let client = LlmClient::with_config(base, "test-key", "test-model");
-    let doc = partial_move_trajectory();
     let req = CausalRequest {
         session_id: "s".into(),
         round_index: None,
@@ -981,6 +986,176 @@ fn a_genuinely_quoted_final_conclusion_is_kept() {
     assert!(
         !contra.said.contains("agent 交付评估"),
         "a genuine quote must not be demoted to the evaluation fallback: {}",
+        contra.said
+    );
+}
+
+/// A round whose final agent step both speaks and observes: the message is
+/// the delivery, the observation result is separate transcript text. Used to
+/// pin that the delivery anchor never accepts a quote stitched across the
+/// seam of two fields — text no single transcript entry carries.
+fn message_and_result_trajectory() -> AtifTrajectory {
+    use agentsight_atif::{ATIF_SCHEMA_VERSION, Agent, Observation, ObservationResult};
+
+    let step = |step_id: usize, source: StepSource, message: &str| Step {
+        step_id,
+        source,
+        message: message.to_string(),
+        timestamp: None,
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    };
+
+    let mut speaking = step(
+        2,
+        StepSource::Agent,
+        "已把甲和乙移到归档目录；丙在源目录里不存在，无法移动，请确认文件名。",
+    );
+    speaking.observation = Some(Observation {
+        results: vec![ObservationResult {
+            source_call_id: None,
+            content: Some(serde_json::Value::String(
+                "归档目录现在共收纳了两个文件".into(),
+            )),
+            subagent_trajectory_ref: None,
+            extra: None,
+        }],
+    });
+
+    AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.into(),
+        agent: Agent {
+            name: "test".into(),
+            version: "0".into(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+        steps: vec![
+            step(1, StepSource::User, "把甲、乙、丙三个文件移到归档目录"),
+            speaking,
+        ],
+        session_id: None,
+        trajectory_id: None,
+        notes: None,
+        final_metrics: None,
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    }
+}
+
+/// A quote that starts at the end of the agent's message and finishes in the
+/// next observation result matches only the concatenation of the two fields,
+/// never an individual transcript entry. Such a splice is exactly the
+/// fabricated exhibit the anchor exists to reject: no step actually wrote it.
+#[test]
+fn a_quote_stitched_across_fields_is_not_the_delivery() {
+    let contra = contra_panel_for_trajectory(
+        message_and_result_trajectory(),
+        "「请确认文件名。 归档目录现在共收纳了两个文件」",
+    );
+
+    assert!(
+        !contra.said.contains("归档目录现在共收纳了两个文件"),
+        "a quote no single field carries must not be shown as the delivery: {}",
+        contra.said
+    );
+    assert!(
+        contra.said.contains("已把甲和乙移到归档目录"),
+        "the panel must show the step's genuine message instead: {}",
+        contra.said
+    );
+}
+
+/// A round that ends in bookkeeping: the substantive agent response is
+/// followed by a heartbeat step whose message is empty — the same no-op case
+/// `build_contra`'s observation axis already skips.
+fn heartbeat_terminated_trajectory() -> AtifTrajectory {
+    use agentsight_atif::{ATIF_SCHEMA_VERSION, Agent, Observation, ObservationResult};
+
+    let step = |step_id: usize, source: StepSource, message: &str| Step {
+        step_id,
+        source,
+        message: message.to_string(),
+        timestamp: None,
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    };
+
+    let mut heartbeat = step(3, StepSource::Agent, "");
+    heartbeat.observation = Some(Observation {
+        results: vec![ObservationResult {
+            source_call_id: None,
+            content: Some(serde_json::Value::String("HEARTBEAT_OK".into())),
+            subagent_trajectory_ref: None,
+            extra: None,
+        }],
+    });
+
+    AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.into(),
+        agent: Agent {
+            name: "test".into(),
+            version: "0".into(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+        steps: vec![
+            step(1, StepSource::User, "把甲、乙、丙三个文件移到归档目录"),
+            step(
+                2,
+                StepSource::Agent,
+                "已把甲和乙移到归档目录；丙在源目录里不存在，无法移动，请确认文件名。",
+            ),
+            heartbeat,
+        ],
+        session_id: None,
+        trajectory_id: None,
+        notes: None,
+        final_metrics: None,
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    }
+}
+
+/// The evaluator quotes the final *substantive* response, but the round then
+/// ends in an empty-message heartbeat. Selecting the heartbeat as the
+/// delivery step would reject the genuine quote (the heartbeat carries none
+/// of it) and demote the panel to the evaluator's verdict — the delivery
+/// selection must skip trailing no-op steps, exactly as the panel's own
+/// comment calls out.
+#[test]
+fn a_genuine_quote_survives_a_trailing_heartbeat_step() {
+    let contra = contra_panel_for_trajectory(
+        heartbeat_terminated_trajectory(),
+        "「已把甲和乙移到归档目录；丙在源目录里不存在」",
+    );
+
+    assert!(
+        contra.said.contains("已把甲和乙移到归档目录"),
+        "the quote is genuinely from the final substantive response: {}",
+        contra.said
+    );
+    assert!(
+        !contra.said.contains("agent 交付评估"),
+        "must not be demoted to the evaluator's verdict fallback: {}",
         contra.said
     );
 }
