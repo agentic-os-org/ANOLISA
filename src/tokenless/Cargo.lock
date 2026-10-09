@@ -1017,6 +1017,7 @@ name = "tokenless-ccr"
 version = "0.8.4"
 dependencies = [
  "blake3",
+ "libc",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.18",
