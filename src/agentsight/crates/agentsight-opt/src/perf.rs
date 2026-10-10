@@ -36,25 +36,14 @@ const FRAG_GAP_MIN_SECS: f64 = 3.0;
 
 /// Compute performance statistics from an ATIF trajectory.
 pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
-    let Some(origin) = trajectory.origin_ts() else {
-        return Ok(PerfStats {
-            wall_secs: 0.0,
-            tool_secs: 0.0,
-            model_secs: 0.0,
-            idle_secs: 0.0,
-            tool_count: 0,
-            tool_calls: vec![],
-            top_slow: vec![],
-            idle_gaps: vec![],
-            frag_idle_secs: 0.0,
-        });
-    };
+    let origin = trajectory.origin_ts();
 
     let tool_calls = collect_tool_calls_with(trajectory, CMD_TRUNCATE_CHARS);
 
     let wall_secs = trajectory
         .last_ts()
-        .map(|t| (t - origin).as_seconds_f64())
+        .zip(origin)
+        .map(|(t, origin)| (t - origin).as_seconds_f64())
         .unwrap_or(0.0);
 
     let tool_secs: f64 = tool_calls.iter().map(|c| c.dur).sum();

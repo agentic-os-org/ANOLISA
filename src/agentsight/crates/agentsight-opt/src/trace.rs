@@ -169,10 +169,7 @@ pub fn collect_tool_calls(traj: &AtifTrajectory) -> Vec<ToolCallRecord> {
 /// Same as [`collect_tool_calls`] with a custom command summary length.
 pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<ToolCallRecord> {
     let steps = &traj.steps;
-    let origin = match traj.origin_ts() {
-        Some(t) => t,
-        None => return vec![],
-    };
+    let origin = traj.origin_ts();
 
     let mut out = Vec::new();
     for (i, step) in steps.iter().enumerate() {
@@ -184,7 +181,8 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
         let per_call = if n > 0 { window / n as f64 } else { 0.0 };
         let start = step
             .end_ts()
-            .map(|t| (t - origin).as_seconds_f64())
+            .zip(origin)
+            .map(|(t, origin)| (t - origin).as_seconds_f64())
             .unwrap_or(0.0);
 
         // Match observations to calls by id; positional fallback only for
