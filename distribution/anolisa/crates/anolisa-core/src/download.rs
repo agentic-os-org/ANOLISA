@@ -381,20 +381,7 @@ fn stream_http_once_and_hash(
     dst: &Path,
     read_timeout: Duration,
 ) -> Result<String, DownloadError> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(HTTP_CONNECT_TIMEOUT)
-        .timeout_read(read_timeout)
-        .build();
-    let response = agent.get(url).call().map_err(|err| match err {
-        ureq::Error::Status(status, _) => DownloadError::HttpStatus {
-            url: url.to_string(),
-            status,
-        },
-        ureq::Error::Transport(transport) => DownloadError::Network {
-            url: url.to_string(),
-            reason: transport.to_string(),
-        },
-    })?;
+    let response = fetch_http_following_redirects(url, read_timeout)?;
     let mut input = response.into_reader();
     stream_reader_and_hash(&mut input, dst, Path::new(url)).map_err(|err| match err {
         // Only a read failure from the network side is a Network error and
@@ -407,6 +394,54 @@ fn stream_http_once_and_hash(
             reason: source.to_string(),
         },
         other => other,
+    })
+}
+
+/// Follow redirects manually so the environment proxy is re-resolved for each
+/// hop. Automatic redirects are disabled because a hop across the `no_proxy`
+/// boundary (for example a mirror redirecting to a private address) must route
+/// through the correct proxy or direct path.
+fn fetch_http_following_redirects(
+    url: &str,
+    read_timeout: Duration,
+) -> Result<ureq::Response, DownloadError> {
+    let mut current = url.to_string();
+    for _ in 0..=5 {
+        let agent = crate::proxy::agent_for(&current, HTTP_CONNECT_TIMEOUT, read_timeout).map_err(
+            |err| DownloadError::Network {
+                url: current.clone(),
+                reason: err.0,
+            },
+        )?;
+        let response = agent.get(&current).call().map_err(|err| match err {
+            ureq::Error::Status(status, _) => DownloadError::HttpStatus {
+                url: current.clone(),
+                status,
+            },
+            ureq::Error::Transport(transport) => DownloadError::Network {
+                url: current.clone(),
+                reason: transport.to_string(),
+            },
+        })?;
+        if !matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let location = response
+            .header("Location")
+            .ok_or_else(|| DownloadError::Network {
+                url: current.clone(),
+                reason: "redirect has no Location header".to_string(),
+            })?;
+        current = crate::proxy::resolve_redirect(&current, location).map_err(|err| {
+            DownloadError::Network {
+                url: current.clone(),
+                reason: err.0,
+            }
+        })?;
+    }
+    Err(DownloadError::Network {
+        url: url.to_string(),
+        reason: "too many redirects".to_string(),
     })
 }
 

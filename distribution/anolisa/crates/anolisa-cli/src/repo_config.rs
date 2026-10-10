@@ -840,17 +840,7 @@ fn repo_config_url() -> String {
 }
 
 fn fetch_repo_config_body(url: &str) -> Result<String, RepoConfigProvisionError> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(HTTP_CONNECT_TIMEOUT)
-        .timeout_read(HTTP_READ_TIMEOUT)
-        .build();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|err| RepoConfigProvisionError::Fetch {
-            url: url.to_string(),
-            reason: err.to_string(),
-        })?;
+    let response = fetch_repo_config_following_redirects(url)?;
     let mut body = String::new();
     response
         .into_reader()
@@ -871,6 +861,51 @@ fn fetch_repo_config_body(url: &str) -> Result<String, RepoConfigProvisionError>
         });
     }
     Ok(body)
+}
+
+/// Follow redirects manually so the environment proxy is re-resolved for each
+/// hop (see `anolisa_core::proxy::agent_for`), matching the RPM transport's
+/// per-hop proxy resolution.
+fn fetch_repo_config_following_redirects(
+    url: &str,
+) -> Result<ureq::Response, RepoConfigProvisionError> {
+    let mut current = url.to_string();
+    for _ in 0..=5 {
+        let agent =
+            anolisa_core::proxy::agent_for(&current, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
+                .map_err(|err| RepoConfigProvisionError::Fetch {
+                    url: current.clone(),
+                    reason: err.0,
+                })?;
+        let response =
+            agent
+                .get(&current)
+                .call()
+                .map_err(|err| RepoConfigProvisionError::Fetch {
+                    url: current.clone(),
+                    reason: err.to_string(),
+                })?;
+        if !matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let location =
+            response
+                .header("Location")
+                .ok_or_else(|| RepoConfigProvisionError::Fetch {
+                    url: current.clone(),
+                    reason: "redirect has no Location header".to_string(),
+                })?;
+        current = anolisa_core::proxy::resolve_redirect(&current, location).map_err(|err| {
+            RepoConfigProvisionError::Fetch {
+                url: current.clone(),
+                reason: err.0,
+            }
+        })?;
+    }
+    Err(RepoConfigProvisionError::Fetch {
+        url: url.to_string(),
+        reason: "too many redirects".to_string(),
+    })
 }
 
 /// Monotonic, process-wide counter mixed into [`repo_config_tmp_path_for`]

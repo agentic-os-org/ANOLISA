@@ -75,6 +75,7 @@ dependencies = [
  "anolisa-env",
  "anolisa-platform",
  "chrono",
+ "env_proxy",
  "flate2",
  "fs2",
  "nix",
@@ -89,6 +90,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "ureq",
+ "url",
  "uuid",
  "xattr",
 ]
