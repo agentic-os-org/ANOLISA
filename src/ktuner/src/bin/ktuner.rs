@@ -715,13 +715,13 @@ fn cmd_why(param: &str) -> Result<i32> {
 }
 
 /// The value a parameter currently holds, read the way every other consumer
-/// reads it: the shared [`tuner::active_value`] — the same reading the rules
+/// reads it: the shared [`tuner::active_value_for_path`] — the same reading the rules
 /// store as a recommendation's `current`, the ledger now records as an
 /// original, and `classify_readback` returns as the effective value. Keeping
 /// one implementation in the library is what makes the claim true: a second
 /// copy here would drift the moment either side learned a new file shape.
-fn active_value(value: &str) -> String {
-    tuner::active_value(value)
+fn active_value(path: &str, value: &str) -> String {
+    tuner::active_value_for_path(path, value)
 }
 
 fn why_with(
@@ -757,8 +757,7 @@ fn why_with(
     let path = tuner::param_to_path(&normalized);
     match read_current(&path) {
         Ok(Some(val)) => {
-            let output =
-                json!({ "param": normalized, "current": active_value(&val), "status": "optimal" });
+            let output = json!({ "param": normalized, "current": active_value(&path, &val), "status": "optimal" });
             Ok((output, 0))
         }
         Ok(None) => anyhow::bail!("parameter not found: {param}"),
@@ -2201,6 +2200,38 @@ mod tests {
                 json!({ "param": param, "current": active, "status": "optimal" })
             );
         }
+    }
+
+    #[test]
+    fn why_preserves_literal_brackets_in_proc_scalar_strings() {
+        let eval = evaluation(Vec::new());
+        let mut mismatches = Vec::new();
+        for (param, path) in [
+            ("kernel.hostname", "/proc/sys/kernel/hostname"),
+            ("kernel/domainname", "/proc/sys/kernel/domainname"),
+        ] {
+            for value in [
+                "[production]",
+                "node[production]",
+                "release[blue",
+                "release [blue]",
+                "[]",
+                "[none]",
+            ] {
+                let current = CurrentFile::new(&format!("{value}\n"));
+                let (output, code) =
+                    why_with(param, &eval, |actual| Ok(current.read_for(actual, path)))
+                        .expect("read a temporary proc string fixture");
+                assert_eq!(code, 0);
+                if output["current"] != json!(value) {
+                    mismatches.push((param, value, output["current"].clone()));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "literal strings changed: {mismatches:?}"
+        );
     }
 
     #[test]

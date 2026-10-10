@@ -243,20 +243,10 @@ pub fn apply_one(rec: &Recommendation) -> Result<AppliedFix> {
     })
 }
 
-/// The value a parameter currently holds, read the way every other consumer
-/// reads it. sysfs option lists (`block/*/scheduler`,
-/// `transparent_hugepage/*`) render every choice and bracket the ACTIVE one,
-/// so the value is that token — the same reading the rules store as a
-/// recommendation's `current`. Multi-value sysctls (`net.ipv4.tcp_rmem`,
-/// `kernel.sem`) are separated by TABs in the file, while the rules publish
-/// them through read_sysctl_string's single-space join, so the fields are
-/// collapsed here too. The `why` fallback, the ledger's original
-/// ([`read_previous`]) and the read-back's effective value all render through
-/// this one reader, so no surface can disagree with another about the same
-/// knob's value: publishing the raw line flipped the format of `current`
-/// exactly when the recommendation disappeared (the system became optimal),
-/// and the ledger recorded the TAB-separated original that `fix` printed and
-/// `rollback --list` republished while `why` kept the single-space form.
+/// Render an option-list reading, with whitespace-separated fields collapsed.
+/// Bracketed tokens denote the active option. Use [`active_value_for_path`]
+/// when the source path is known, since proc sysctl strings may contain
+/// literal brackets rather than an option selection.
 pub fn active_value(value: &str) -> String {
     let trimmed = value.trim();
     let active = trimmed
@@ -264,6 +254,16 @@ pub fn active_value(value: &str) -> String {
         .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
         .unwrap_or(trimmed);
     active.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Render a known parameter path, preserving literal brackets in proc sysctls.
+/// Other paths retain [`active_value`]'s option-list interpretation.
+pub fn active_value_for_path(path: &str, value: &str) -> String {
+    if path.starts_with("/proc/sys/") {
+        value.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        active_value(value)
+    }
 }
 
 // Recommendations are gathered before locking and may describe an older
@@ -276,7 +276,7 @@ fn read_previous(param: &str) -> Result<String> {
     // every other consumer publishes: the kernel renders multi-value sysctls
     // TAB-separated, and a raw `previous` made `fix`'s output and
     // `rollback --list` disagree with `why`'s `current` about the same knob.
-    Ok(active_value(&value))
+    Ok(active_value_for_path(&path, &value))
 }
 
 // Write-only tunables (mode 0200, e.g. vm.drop_caches / vm.compact_memory)
@@ -474,7 +474,7 @@ pub fn write_and_verify(param: &str, value: &str) -> Result<WriteOutcome> {
 /// and no read-back exists to diverge from.
 fn readback_verdict(path: &str, value: &str) -> ReadbackVerdict {
     match fs::read_to_string(path) {
-        Ok(s) => classify_readback(value, s.trim()),
+        Ok(s) => classify_readback_for_path(path, value, s.trim()),
         Err(_) => ReadbackVerdict::Verified {
             effective: value.to_string(),
         },
@@ -507,6 +507,16 @@ pub enum ReadbackVerdict {
 /// unbracketed does NOT count. Otherwise we compare tokens (tolerating a
 /// single written value against a multi-token read-back that leads with it —
 /// a confirmed write, not a clamp).
+fn classify_readback_for_path(path: &str, value: &str, readback_trimmed: &str) -> ReadbackVerdict {
+    // proc_dostring accepts literal brackets; only option-list readers assign
+    // selection meaning to them. The source path is known at every caller.
+    if path.starts_with("/proc/sys/") {
+        classify_scalar_readback(value, readback_trimmed)
+    } else {
+        classify_readback(value, readback_trimmed)
+    }
+}
+
 fn classify_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
     if readback_trimmed.contains('[') {
         if readback_trimmed.contains(&format!("[{value}]")) {
@@ -523,6 +533,10 @@ fn classify_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
             .to_string();
         return ReadbackVerdict::Clamped { effective: active };
     }
+    classify_scalar_readback(value, readback_trimmed)
+}
+
+fn classify_scalar_readback(value: &str, readback_trimmed: &str) -> ReadbackVerdict {
     let rec_tokens: Vec<&str> = value.split_whitespace().collect();
     let read_tokens: Vec<&str> = readback_trimmed.split_whitespace().collect();
     if rec_tokens == read_tokens {
@@ -1320,7 +1334,7 @@ fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
 /// (param, applied, previous) triple plus the value live in the kernel now.
 ///
 /// `live` is read from the entry's own path — the file a restore writes —
-/// and rendered through [`active_value`], the reader every other surface
+/// and rendered through [`active_value_for_path`], the reader every other surface
 /// uses; `drifted` compares it against `applied` with the same equality the
 /// write path uses (`live_reading` below). Both are `None` (JSON null) when
 /// the path cannot be read: a device that is gone, a module that is not
@@ -1339,9 +1353,9 @@ pub struct RollbackPreview {
 /// `(None, None)` when the path cannot be read — a device that is gone, a
 /// module that is not loaded, a write-only tunable, unreadable content.
 ///
-/// The value is rendered through [`active_value`], the single reader `why`,
+/// The value is rendered through [`active_value_for_path`], the reader `why`,
 /// the ledger's original and the write read-back share, and `drifted` reuses
-/// [`classify_readback`], the equality the write path itself uses to decide
+/// `classify_readback_for_path`, the equality the write path uses to decide
 /// whether a write took. Sharing both is what keeps a kernel-rendered value
 /// (a bracketed sysfs option, a TAB-separated multi-value sysctl, the
 /// leading-token echo of a scalar) from being reported as drift, and keeps
@@ -1352,10 +1366,10 @@ fn live_reading(path: &str, applied: &str) -> (Option<String>, Option<bool>) {
     match fs::read_to_string(path) {
         Ok(raw) => {
             let drifted = matches!(
-                classify_readback(applied, raw.trim()),
+                classify_readback_for_path(path, applied, raw.trim()),
                 ReadbackVerdict::Clamped { .. }
             );
-            (Some(active_value(&raw)), Some(drifted))
+            (Some(active_value_for_path(path, &raw)), Some(drifted))
         }
         Err(_) => (None, None),
     }
@@ -2147,6 +2161,104 @@ pub fn auto_rollback_on_degradation(result: &VerifyResult) -> Result<Option<Roll
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn path_reading_preserves_proc_scalar_brackets() {
+        for param in ["kernel.hostname", "kernel/domainname"] {
+            let path = param_to_path(param);
+            for value in [
+                "[production]",
+                "node[production]",
+                "release[blue",
+                "release [blue]",
+                "[]",
+                "[none]",
+            ] {
+                assert_eq!(active_value_for_path(&path, &format!("{value}\n")), value);
+                assert_eq!(
+                    classify_readback_for_path(&path, value, value),
+                    ReadbackVerdict::Verified {
+                        effective: value.to_string(),
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn proc_scalar_clamp_retains_the_complete_readback() {
+        let path = param_to_path("kernel.hostname");
+        for (requested, actual) in [
+            ("production", "[production]"),
+            ("[production]", "[staging]"),
+            ("node[production]", "node[staging]"),
+            ("release[blue", "release[green"),
+        ] {
+            assert_eq!(
+                classify_readback_for_path(&path, requested, actual),
+                ReadbackVerdict::Clamped {
+                    effective: actual.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn path_reading_keeps_sysfs_and_unknown_option_lists() {
+        for path in [
+            "/sys/block/sda/queue/scheduler",
+            "/tmp/ktuner-option-fixture",
+        ] {
+            for readback in ["[none]", "mq-deadline [none] kyber"] {
+                assert_eq!(active_value_for_path(path, readback), "none");
+                assert_eq!(
+                    classify_readback_for_path(path, "none", readback),
+                    ReadbackVerdict::Verified {
+                        effective: "none".into(),
+                    }
+                );
+            }
+        }
+        let thp = param_to_path("transparent_hugepage/enabled");
+        let readback = "always [madvise] never";
+        assert_eq!(active_value_for_path(&thp, readback), "madvise");
+        assert_eq!(
+            classify_readback_for_path(&thp, "never", readback),
+            ReadbackVerdict::Clamped {
+                effective: "madvise".into(),
+            }
+        );
+        assert_eq!(active_value("[none]"), "none");
+    }
+
+    #[test]
+    fn proc_path_reading_keeps_numeric_and_leading_token_contracts() {
+        let path = param_to_path("net.ipv4.tcp_rmem");
+        let readback = "4096\t131072\t6291456\n";
+        assert_eq!(
+            active_value_for_path(&path, readback),
+            "4096 131072 6291456"
+        );
+        assert_eq!(
+            classify_readback_for_path(&path, "4096 131072 6291456", readback),
+            ReadbackVerdict::Verified {
+                effective: "4096 131072 6291456".into(),
+            }
+        );
+        assert_eq!(
+            classify_readback_for_path(&path, "4096 131072 10000000", readback),
+            ReadbackVerdict::Clamped {
+                effective: "4096 131072 6291456".into(),
+            }
+        );
+        let congestion = param_to_path("net.ipv4.tcp_congestion_control");
+        assert_eq!(
+            classify_readback_for_path(&congestion, "bbr", "bbr cubic"),
+            ReadbackVerdict::Verified {
+                effective: "bbr".into(),
+            }
+        );
+    }
+
     #[test]
     fn persistence_preserves_literal_interface_dots() {
         for proto in ["ipv4", "ipv6"] {
