@@ -840,10 +840,13 @@ fn repo_config_url() -> String {
 }
 
 fn fetch_repo_config_body(url: &str) -> Result<String, RepoConfigProvisionError> {
-    let agent = ureq::AgentBuilder::new()
+    let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(HTTP_CONNECT_TIMEOUT)
-        .timeout_read(HTTP_READ_TIMEOUT)
-        .build();
+        .timeout_read(HTTP_READ_TIMEOUT);
+    if let Some(proxy) = anolisa_core::env_proxy_for(url) {
+        builder = builder.proxy(proxy);
+    }
+    let agent = builder.build();
     let response = agent
         .get(url)
         .call()

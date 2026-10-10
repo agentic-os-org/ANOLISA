@@ -381,10 +381,13 @@ fn stream_http_once_and_hash(
     dst: &Path,
     read_timeout: Duration,
 ) -> Result<String, DownloadError> {
-    let agent = ureq::AgentBuilder::new()
+    let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(HTTP_CONNECT_TIMEOUT)
-        .timeout_read(read_timeout)
-        .build();
+        .timeout_read(read_timeout);
+    if let Some(proxy) = crate::proxy::env_proxy_for(url) {
+        builder = builder.proxy(proxy);
+    }
+    let agent = builder.build();
     let response = agent.get(url).call().map_err(|err| match err {
         ureq::Error::Status(status, _) => DownloadError::HttpStatus {
             url: url.to_string(),

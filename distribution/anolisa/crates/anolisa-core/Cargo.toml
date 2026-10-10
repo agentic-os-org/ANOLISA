@@ -19,6 +19,7 @@ semver.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 ureq.workspace = true
+env_proxy.workspace = true
 flate2.workspace = true
 tar.workspace = true
 fs2.workspace = true
