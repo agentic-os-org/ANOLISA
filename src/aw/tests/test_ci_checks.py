@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Union
 from unittest.mock import patch
 
 AW = Path(__file__).resolve().parents[1]
@@ -418,6 +419,55 @@ class GateTests(GateFixture):
             os.kill(pid, signal.SIGKILL)
             self.fail("owned descendant remained running after timeout")
 
+    def _simulate_descendant_status(self, status: Union[str, OSError]) -> None:
+        original_read_text = Path.read_text
+        pid = 424242
+
+        def read_text(path: Path, *args: object, **kwargs: object) -> str:
+            if path == self.root / "child.pid":
+                return str(pid)
+            if path == Path(f"/proc/{pid}/stat"):
+                if isinstance(status, OSError):
+                    raise status
+                return f"{pid} (fixture) {status}"
+            return original_read_text(path, *args, **kwargs)
+
+        with (
+            patch.object(gate, "run", side_effect=subprocess.TimeoutExpired("fixture", 1)),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", read_text),
+            patch.object(time, "monotonic", side_effect=[0.0, 0.1, 2.1]),
+            patch.object(time, "sleep"),
+            patch.object(os, "kill") as kill,
+        ):
+            try:
+                self.test_timeout_stops_an_ignoring_descendant()
+            finally:
+                if status == "S":
+                    kill.assert_called_once_with(pid, signal.SIGKILL)
+                else:
+                    kill.assert_not_called()
+
+    def test_descendant_disappearing_during_stat_read_is_stopped(self) -> None:
+        for error in (
+            FileNotFoundError("reaped before open"),
+            ProcessLookupError("reaped during read"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self._simulate_descendant_status(error)
+
+    def test_descendant_zombie_is_stopped(self) -> None:
+        self._simulate_descendant_status("Z")
+
+    def test_descendant_read_failure_remains_an_error(self) -> None:
+        for error in (PermissionError("cannot inspect process"), OSError("read failed")):
+            with self.subTest(error=type(error).__name__), self.assertRaises(type(error)):
+                self._simulate_descendant_status(error)
+
+    def test_descendant_still_running_remains_a_failure(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "owned descendant remained running"):
+            self._simulate_descendant_status("S")
+
     def test_canonical_vectors_fail_even_with_python_optimization(self) -> None:
         script = self.root / "check_canonical.py"
         shutil.copyfile(AW / "tests/check_canonical.py", script)
@@ -439,6 +489,7 @@ class GateTests(GateFixture):
                     self.assertEqual(result.returncode == 0, valid, result.stderr)
                     if vector == damaged:
                         self.assertIn("Python canonical digest differs", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
