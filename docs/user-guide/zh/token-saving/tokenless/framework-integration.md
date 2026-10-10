@@ -339,6 +339,9 @@ receipt 已经记录 profile 名称，因此 disable 不再接受 `--profile`。
 
 ### OpenCode
 
+Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
+仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
+
 OpenCode 启动时会自动加载配置目录下的 Plugin。通过 ANOLISA 管理安装时，使用：
 
 ```bash
