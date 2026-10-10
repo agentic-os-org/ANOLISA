@@ -8,15 +8,17 @@ Usage:
 
 Requirements:
     - source_dir must contain [Content_Types].xml at its root
+    - The resolved output path must be outside source_dir
     - All XML files are re-validated for well-formedness before packing
 
 The resulting xlsx is a valid ZIP archive with correct OOXML structure.
 """
 
-import sys
 import os
-import zipfile
+import sys
 import xml.etree.ElementTree as ET
+import zipfile
+from pathlib import Path
 
 
 def validate_xml_files(source_dir: str) -> list[str]:
@@ -37,6 +39,12 @@ def validate_xml_files(source_dir: str) -> list[str]:
 def pack(source_dir: str, xlsx_path: str) -> None:
     if not os.path.isdir(source_dir):
         print(f"ERROR: Directory not found: {source_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # Opening an output in the source tree can overwrite a part or cause the
+    # archive to include itself during the subsequent directory walk.
+    if Path(xlsx_path).resolve().is_relative_to(Path(source_dir).resolve()):
+        print("ERROR: Output must be outside the source directory.", file=sys.stderr)
         sys.exit(1)
 
     content_types = os.path.join(source_dir, "[Content_Types].xml")
