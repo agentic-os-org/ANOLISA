@@ -23,24 +23,9 @@ ignored、向量错误及命令失败均返回非零。每条命令都有超时�
 依赖，Schema 校验只读取随包资源。检查入口、本地服务、Provider Host 执行、命令执行及 FileJournal 要求 Linux；
 本门禁不认证其他操作系统或最低支持版本。
 
-[AW CI](../../.github/workflows/aw-ci.yml) 响应分支 push、pull request、merge group
-和手动触发，校验候选提交；PR 校验合成的 merge 结果。无关变化明确返回 no-op；
-范围判定错误、意外跳过或受测提交不一致均使 `AW / required` 失败。仓库管理员
-需要在分支保护中选择该检查才能强制执行。工作流取消不代表门禁通过。
-
-上游 CI 使用自部署 `anolisa-k8s-general-ci-x64` runner；fork CI 使用 GitHub 托管
-Ubuntu 24.04。范围判断与完整验证分别执行：
-
-- `AW / scope` 仅检出门禁脚本及其测试，保留完整 Git 历史，以判断整个 PR 的改动
-  和基线推进带入合并结果的变化。使用 runner 自带的 Python 3.9 或更新版本运行
-  范围判定及 required 结果测试，无需安装 Python 或 Node.js。
-- `AW / contracts` 保留浅历史的完整工作树，供 Cargo 枚举包文件；使用 Python
-  3.12.3、Node.js 24.15.0 和固定 Rust 工具链运行完整门禁，包括全部门禁行为测试。
-- `AW / required` 仅检出门禁脚本，使用 runner 自带的 Python 3.9 或更新版本
-  核对 job 结果及候选 SHA。
-
-两个控制 job 使用 sparse checkout 限制文件内容的下载范围，同时保留范围判定所需的提交。
-三个 job 的超时限制仍分别为 5、25、5 分钟。本地验证另使用 Linux ARM64。
+PR 修改 `src/aw/**` 或 AW CI 工作流时，[AW CI](../../.github/workflows/aw-ci.yml)
+会对候选合并提交运行上述检查。提交 AW 改动前，请先在 Linux 上运行上面的命令。
+CI 失败时，从任务日志中找到失败的命令，再到本地 `src/aw` 目录单独运行，定位问题。
 
 ## Crate 职责
 

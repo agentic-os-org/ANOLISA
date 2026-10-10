@@ -27,31 +27,10 @@ downloads uncached dependencies; schema validation reads only bundled resources.
 The runner, local service, Provider Host execution, command execution and FileJournal require Linux;
 this gate does not certify other operating systems or minimum supported versions.
 
-[AW CI](../../.github/workflows/aw-ci.yml) runs on branch pushes, pull requests,
-merge groups and manual dispatch. It checks the candidate commit, including the
-merge result for pull requests. Unrelated changes produce an explicit no-op;
-scope errors, unexpected skips and mismatched tested commits fail `AW / required`.
-Repository administrators must select that check in branch protection to enforce
-it. A cancelled workflow is not a passing gate.
-
-Upstream CI uses the self-hosted `anolisa-k8s-general-ci-x64` runner; fork CI
-uses GitHub-hosted Ubuntu 24.04. The jobs separate scope selection from full
-validation:
-
-- `AW / scope` checks out the gate script and its tests, retaining full Git
-  history for the complete PR diff and base-branch changes in the merge result.
-  It runs scope and required-result tests with the runner's Python 3.9 or newer;
-  it does not install Python or Node.js.
-- `AW / contracts` retains a full working tree with shallow history for Cargo's
-  package-file discovery. It runs the complete gate, including all gate behavior
-  tests, with Python 3.12.3, Node.js 24.15.0 and the pinned Rust toolchain.
-- `AW / required` checks out only the gate script and verifies the job results
-  and candidate SHA with the runner's Python 3.9 or newer.
-
-Sparse checkout limits downloaded file contents in the two control jobs while
-preserving the commits needed for scope selection. Job timeouts remain 5, 25 and
-5 minutes respectively.
-Local validation also uses Linux ARM64.
+For pull requests that change `src/aw/**` or the AW CI workflow,
+[AW CI](../../.github/workflows/aw-ci.yml) runs these checks against the candidate
+merge commit. Run the command above on Linux before submitting AW changes. If CI
+fails, find the failing command in the job log and rerun it locally from `src/aw`.
 
 ## Crate boundaries
 
