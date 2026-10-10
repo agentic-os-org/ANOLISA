@@ -91,7 +91,7 @@ impl Transport<'_> {
             let input = serde_json::to_vec(request.as_value())
                 .map_err(|_| aw_provider::Error::Invalid("request encoding failed"))?;
             check(self.deadline, self.cancelled)?;
-            let output = aw_exec::run(
+            let output = aw_exec::run_cooperative(
                 self.command,
                 &input,
                 self.limits,

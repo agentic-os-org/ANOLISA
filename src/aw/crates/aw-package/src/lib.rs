@@ -1,4 +1,4 @@
-//! Native Preview package contracts, installation and dual-Agent configuration.
+//! Native Preview package contracts, installation and selected-Agent configuration.
 //! Configuration and mutable runtime state remain outside immutable prefixes.
 
 mod configuration;
@@ -7,7 +7,7 @@ mod install;
 mod manifest;
 pub mod package;
 
-pub use configuration::{configure, Settings};
+pub use configuration::{configure, document, Policy, Settings};
 pub use install::{install, install_cancellable, uninstall, uninstall_cancellable};
 pub use manifest::{digest, inspect, Component, Manifest, Payload};
 

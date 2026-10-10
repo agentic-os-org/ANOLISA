@@ -211,6 +211,7 @@ pub(super) fn run(
     limits: Limits,
     deadline: Instant,
     cancelled: &AtomicBool,
+    cooperative: bool,
 ) -> Result<Output, Error> {
     check_stop(deadline, cancelled)?;
     if input.len() > limits.input_bytes {
@@ -221,8 +222,17 @@ pub(super) fn run(
     }
     let mut child = OwnedChild::spawn(command)?;
     let result = exchange(&mut child, input, limits, deadline, cancelled);
+    let terminated = if cooperative && result.is_err() {
+        child.terminate()
+    } else {
+        Ok(())
+    };
     // Never report an execution result while group cleanup remains unverified.
     let status = child.cleanup().map_err(|source| Error::Cleanup {
+        pid: child.id(),
+        source,
+    })?;
+    terminated.map_err(|source| Error::Cleanup {
         pid: child.id(),
         source,
     })?;

@@ -9,6 +9,12 @@ AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以
 AW Preview提供核心包和Provider包，通过`aw-package`安装。当前包含sec-core Provider，
 并提供Qoder和OpenClaw共用一份配置的示例，详见[Preview安装与演示](../../docs/user-guide/zh/user-entrypoint/aw-preview.md)。
 
+AW core 可独立构建与初始化，无需 sec-core。`aw-build` 默认只构建 core；
+`--component all` 保留组合分发路径。`aw-package configure` 默认允许单 Agent、
+无 Provider；通过 `--provider sec-core` 或 `--provider command` 显式启用。
+布尔判断脚本只返回 true/false，effect 放在 YAML 中，AW 负责 Provider 握手
+和响应关联。见[布尔判断脚本](../../docs/user-guide/zh/user-entrypoint/aw.md#布尔判断脚本)。
+
 ## 当前可用范围
 
 | 能力 | 可用状态 |

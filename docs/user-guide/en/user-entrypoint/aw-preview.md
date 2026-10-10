@@ -2,7 +2,7 @@
 
 [中文版](../../zh/user-entrypoint/aw-preview.md)
 
-Use one AW configuration to apply sec-core checks to Qoder and OpenClaw shell commands. The AW and sec-core components in this Preview ship as native Rust binaries; building, installing and running them do not require Python. Custom Providers or hook scripts have their own runtime dependencies. OpenClaw still needs Node.js, and both Agents need their own model accounts.
+Install AW core to run your existing Qoder or OpenClaw with no Provider. Add sec-core or your own boolean policy command when needed, using one AW configuration. The AW and sec-core components in this Preview ship as native Rust binaries; building, installing and running them do not require Python. Custom Providers or hook scripts have their own runtime dependencies. OpenClaw still needs Node.js, and both Agents need their own model accounts.
 
 This Preview is not yet published through `anolisa install` or RPM. Download artifacts from a successful manual **CI / AW Packages** run of the reviewed source commit. PR artifacts ending in `-validation` are merge-candidate checks, not distributable releases.
 
@@ -13,18 +13,46 @@ Use Linux with glibc 2.39 or newer (Ubuntu 24.04), on the matching CPU architect
 ```bash
 sha256sum -c SHA256SUMS
 AW_PREVIEW_VERSION=0.1.0-preview.1
-AW_PREVIEW_BUNDLE="aw-all-in-one-$AW_PREVIEW_VERSION-linux-$(uname -m)"
+AW_PREVIEW_BUNDLE="aw-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_PREVIEW_BUNDLE.tar.gz"
 sudo install -d -m 755 /opt/aw-preview
 export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
 sudo "./$AW_PREVIEW_BUNDLE/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
 ```
 
-The build produces three packages. `aw-core` contains `aw` and `aw-package`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-all-in-one` contains exactly the same two components. For split installation, extract core and Provider and run each bundle’s `aw-package install` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
+The default build produces core only; `--component all` produces three packages. `aw-core` contains `aw` and `aw-package`; `aw-provider-sec-core` contains the Provider and Rust V2 sec-core CLI/daemon; `aw-all-in-one` contains exactly the same two components. For split installation, extract core and Provider and run each bundle’s `aw-package install` against the same new prefix, **core first**. Do not install all-in-one into that prefix afterward.
 
 The installer verifies hashes, modes, architecture, version and source commit, refuses replacements and records ownership in `.aw-packages`. Ctrl-C (SIGINT) or SIGTERM during installation rolls back this invocation’s writes so installation can be retried; forced termination (SIGKILL) is outside automatic rollback. Checksums detect corruption; they are not publisher signatures. Install parents must belong to the installer user and must not be writable by other users. Root owns the system backend installation; when connecting to an existing backend, a user-owned prefix is also supported.
 
-## 2. Start sec-core
+## Use core without a Provider
+
+Install only the Agent you need: Qoder CLI **1.1.64**, or OpenClaw **2026.9.6** with Node.js. For Qoder, generate a base configuration as your regular user:
+
+```bash
+export AW_PREVIEW_PREFIX="/opt/aw-preview/0.1.0-preview.1"
+export AW_QODER=/absolute/path/to/qodercli
+export AW_DEMO="$HOME/aw-preview"
+install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
+"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+  --config "$AW_DEMO/aw-core.yaml" --state-dir "$AW_DEMO/core-state" \
+  --qoder "$AW_QODER"
+"$AW_PREVIEW_PREFIX/bin/aw" validate --config "$AW_DEMO/aw-core.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw" run --config "$AW_DEMO/aw-core.yaml" --agent qoder
+```
+
+For OpenClaw alone, replace `--qoder "$AW_QODER"` with `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`; supply the native settings and state options described in step 5 when launching. You can also provide both Agent entrypoints. No sec-core socket or Provider package is required. Empty `providers` and `events` mean no AW policy checks or per-tool AW audit; native permissions and existing Hooks/plugins still apply. AW still creates an instance and starts/reuses its shared service. Exit the Agent and stop that service with `aw stop --config "$AW_DEMO/aw-core.yaml"`.
+
+## 2. Optionally install and start sec-core
+
+Skip steps 2–5 for core-only use. For the security demo, install the matching extension into the core prefix first:
+
+```bash
+AW_PREVIEW_VERSION=0.1.0-preview.1
+AW_PREVIEW_PROVIDER="aw-provider-sec-core-$AW_PREVIEW_VERSION-linux-$(uname -m)"
+export AW_PREVIEW_PREFIX="/opt/aw-preview/$AW_PREVIEW_VERSION"
+tar -xzf "$AW_PREVIEW_PROVIDER.tar.gz"
+sudo "./$AW_PREVIEW_PROVIDER/aw-package" install --prefix "$AW_PREVIEW_PREFIX"
+```
 
 In a separate terminal, start the installed backend as root. Keep it in the foreground; Ctrl-C stops it. Configuration and data stay outside the immutable package prefix.
 
@@ -52,11 +80,11 @@ export AW_DEMO="$HOME/aw-preview"
 install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace" "$AW_DEMO/openclaw"
 "$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
   --config "$AW_DEMO/aw.yaml" --state-dir "$AW_DEMO/state" \
-  --socket /run/aw-preview-sec/daemon.sock --qoder "$AW_QODER" \
+  --provider sec-core --socket /run/aw-preview-sec/daemon.sock --qoder "$AW_QODER" \
   --node "$AW_NODE" --openclaw "$AW_OPENCLAW"
 ```
 
-Qoder and Node entrypoints must be executable by the current user; the OpenClaw `.mjs` file must be readable and does not need execute permission. Keep the configuration and socket paths short enough for Unix sockets (less than 108 bytes). The configuration file must not be the state directory or one of its ancestors; an existing state path must be a directory owned by the current user with mode `0700`. `configure` holds a shared package lock through validation and publication, including for a regular user reading a root-owned prefix. An active installation or uninstall causes a retryable lock error. It rechecks installed file hashes and permission modes, refusing missing or modified payloads. It writes a private temporary file before exclusively publishing the configuration; a failed write leaves no partial configuration and can be retried. Both Agent bindings share the same Provider and before/after steps: Qoder `Bash` and OpenClaw `exec` both map their `/command` input to the sec-core Bash scanner. A risky command or a failed before-check blocks execution; after-checks observe the results reported by each framework (OpenClaw also reports blocked tool results). Other tools are not scanned. This provides native Hook enforcement, not an OS sandbox or cross-framework approval service.
+Qoder and Node entrypoints must be executable by the current user; the OpenClaw `.mjs` file must be readable and does not need execute permission. Keep the configuration and socket paths short enough for Unix sockets (less than 108 bytes). The configuration file must not be the state directory or one of its ancestors; an existing state path must be a directory owned by the current user with mode `0700`. `configure` holds a shared package lock through validation and publication, including for a regular user reading a root-owned prefix. An active installation or uninstall causes a retryable lock error. It rechecks core and the explicitly selected Provider file hashes and permission modes, refusing missing or modified required payloads. A Provider installed but not selected adds no initialization dependency. Without `--provider`, configuration has no policy; `--socket` requires explicit `--provider sec-core` so old security commands cannot silently generate an unprotected configuration. It writes a private temporary file before exclusively publishing the configuration; a failed write leaves no partial configuration and can be retried. Both Agent bindings share the same Provider and before/after steps: Qoder `Bash` and OpenClaw `exec` both map their `/command` input to the sec-core Bash scanner. A risky command or a failed before-check blocks execution; after-checks observe the results reported by each framework (OpenClaw also reports blocked tool results). Other tools are not scanned. This provides native Hook enforcement, not an OS sandbox or cross-framework approval service.
 
 ## 4. Test Qoder
 
@@ -131,6 +159,6 @@ cargo run --locked --release --manifest-path src/aw/Cargo.toml \
   --output "$PWD/target/aw-preview-packages"
 ```
 
-The Rust builder compiles locked release binaries, checks native ELF architecture, and generates three archives and `SHA256SUMS`. Failed or cancelled publication removes only the links created by that run, allowing retry; cleanup failures report exact remaining paths. The installed-package CI test exercises the real sec-core scanner, both tool mappings and audit recovery with synthetic events; it does not claim native Agent coverage. Native model turns remain explicit acceptance as above. The general AW development gate retains Python test tooling outside the delivery path.
+The Rust builder compiles locked release binaries, checks native ELF architecture, and generates only the selected archives and `SHA256SUMS`. The default is `--component core`, which never builds or reads sec-core; use `--component sec-core` for the extension or `--component all` for all three packages. The extension still requires core from the same source commit and version at installation. Failed or cancelled publication removes only the links created by that run, allowing retry; cleanup failures report exact remaining paths. The installed-package CI test exercises the real sec-core scanner, both tool mappings and audit recovery with synthetic events; it does not claim native Agent coverage. Native model turns remain explicit acceptance as above. The general AW development gate retains Python test tooling outside the delivery path.
 
 Package CI runs for changes to the package crate, AW manifests, this guide and its workflow. Changes elsewhere in AW/sec-core require a manual run on the exact source commit before distribution. Successful PR artifacts are retained for three days; manual artifacts for fourteen. Failed runs retain diagnostics but do not publish packages. Archives are rebuildable but not guaranteed byte-identical; a unified release channel is future work.

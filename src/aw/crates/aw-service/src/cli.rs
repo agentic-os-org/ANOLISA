@@ -3,6 +3,7 @@
 mod adapter;
 mod adapters;
 mod hook;
+mod policy;
 mod qoder;
 mod readiness;
 mod run;
@@ -101,6 +102,11 @@ pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
         "run" => run::launch(args),
         "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
+        "policy" => {
+            args.check(&[], false)?;
+            policy::run()?;
+            Ok(Exit::Code(0))
+        }
         _ => Err("unknown launch command".into()),
     }
 }

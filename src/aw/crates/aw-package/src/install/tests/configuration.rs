@@ -17,10 +17,12 @@ fn configuration_holds_a_read_lock_through_publication() {
         prefix: &f.prefix,
         config: &config,
         state: &state,
-        socket: Path::new("/run/aw-test/sec.sock"),
-        qoder: Path::new("/bin/true"),
-        node: Path::new("/bin/true"),
-        openclaw: Path::new("/bin/true"),
+        policy: crate::Policy::SecCore {
+            socket: Path::new("/run/aw-test/sec.sock"),
+        },
+        qoder: Some(Path::new("/bin/true")),
+        node: Some(Path::new("/bin/true")),
+        openclaw: Some(Path::new("/bin/true")),
     };
     let held = paths::lock(&f.prefix).unwrap();
     assert!(
@@ -76,10 +78,12 @@ fn configuration_rejects_state_file_collisions_before_publication() {
             prefix: &f.prefix,
             config: &config,
             state,
-            socket: Path::new("/run/aw-test/sec.sock"),
-            qoder: Path::new("/bin/true"),
-            node: Path::new("/bin/true"),
-            openclaw: Path::new("/bin/true"),
+            policy: crate::Policy::SecCore {
+                socket: Path::new("/run/aw-test/sec.sock"),
+            },
+            qoder: Some(Path::new("/bin/true")),
+            node: Some(Path::new("/bin/true")),
+            openclaw: Some(Path::new("/bin/true")),
         };
         assert!(crate::configure(&settings)
             .unwrap_err()
@@ -105,10 +109,12 @@ fn configuration_requires_an_existing_private_state_directory() {
         prefix: &f.prefix,
         config: &config,
         state: &state,
-        socket: Path::new("/run/aw-test/sec.sock"),
-        qoder: Path::new("/bin/true"),
-        node: Path::new("/bin/true"),
-        openclaw: Path::new("/bin/true"),
+        policy: crate::Policy::SecCore {
+            socket: Path::new("/run/aw-test/sec.sock"),
+        },
+        qoder: Some(Path::new("/bin/true")),
+        node: Some(Path::new("/bin/true")),
+        openclaw: Some(Path::new("/bin/true")),
     };
     for mode in [0o755, 0o710, 0o777, 0o1700, 0o2700, 0o4700] {
         fs::set_permissions(&state, Permissions::from_mode(mode)).unwrap();
@@ -147,10 +153,12 @@ fn configuration_checks_launcher_access_and_accepts_readable_scripts() {
         prefix: &f.prefix,
         config: &config,
         state: &state,
-        socket: Path::new("/run/aw-test/sec.sock"),
-        qoder: &qoder,
-        node: &node,
-        openclaw: &openclaw,
+        policy: crate::Policy::SecCore {
+            socket: Path::new("/run/aw-test/sec.sock"),
+        },
+        qoder: Some(&qoder),
+        node: Some(&node),
+        openclaw: Some(&openclaw),
     };
     for path in [&qoder, &node] {
         fs::set_permissions(path, Permissions::from_mode(0o600)).unwrap();
@@ -188,10 +196,10 @@ fn one_configuration_maps_both_agents_and_rejects_long_socket() {
         prefix: &f.prefix,
         config: &config,
         state: &state,
-        socket: &socket,
-        qoder: Path::new("/bin/true"),
-        node: Path::new("/bin/true"),
-        openclaw: Path::new("/bin/true"),
+        policy: crate::Policy::SecCore { socket: &socket },
+        qoder: Some(Path::new("/bin/true")),
+        node: Some(Path::new("/bin/true")),
+        openclaw: Some(Path::new("/bin/true")),
     };
     // Keep Unix sockets short even when the test checkout lives in a long directory.
     let runtime = tempfile::tempdir().unwrap();
@@ -199,7 +207,7 @@ fn one_configuration_maps_both_agents_and_rejects_long_socket() {
     let state = runtime.path().join("state");
     settings.state = &state;
     let socket = runtime.path().join("sec.sock");
-    settings.socket = &socket;
+    settings.policy = crate::Policy::SecCore { socket: &socket };
     crate::configure(&settings).unwrap();
     let value: serde_json::Value = serde_yaml_ng::from_slice(&fs::read(&config).unwrap()).unwrap();
     assert_eq!(value["spec"]["agents"].as_object().unwrap().len(), 2);
@@ -213,7 +221,7 @@ fn one_configuration_maps_both_agents_and_rejects_long_socket() {
     assert!(crate::configure(&settings).is_err());
     fs::remove_file(&config).unwrap();
     let long = runtime.path().join("s".repeat(108));
-    settings.socket = &long;
+    settings.policy = crate::Policy::SecCore { socket: &long };
     assert!(crate::configure(&settings)
         .unwrap_err()
         .to_string()
@@ -262,10 +270,12 @@ fn configure_rejects_damaged_payloads_and_allows_retry() {
                     prefix: &f.prefix,
                     config: &config,
                     state: &runtime.path().join("state"),
-                    socket: Path::new("/run/aw-test/sec.sock"),
-                    qoder: Path::new("/bin/true"),
-                    node: Path::new("/bin/true"),
-                    openclaw: Path::new("/bin/true"),
+                    policy: crate::Policy::SecCore {
+                        socket: Path::new("/run/aw-test/sec.sock"),
+                    },
+                    qoder: Some(Path::new("/bin/true")),
+                    node: Some(Path::new("/bin/true")),
+                    openclaw: Some(Path::new("/bin/true")),
                 };
                 assert!(crate::configure(&settings)
                     .unwrap_err()

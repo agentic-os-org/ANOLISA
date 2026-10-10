@@ -101,6 +101,77 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 随后一起更新 CLI 和 daemon，再次启动。不要删除仍在使用的 socket 或审计历史。
 AW 配置和 Provider 协议仍分别为 `aw/v1alpha1`、`aw-provider/v1alpha1`。
 
+## 布尔判断脚本
+
+简单规则只需从 stdin 读取一个标准化事件 JSON，在 stdout 输出 JSON 布尔值
+`true` 或 `false`，然后以退出码 0 结束。`true` 表示命中规则，AW 请求配置中的
+effect；`false` 不请求 effect，也不覆盖原生权限。诊断可写 stderr，不进入 Provider
+回复或审计。内置 `aw policy` 桥接负责 `describe`、`validate_config`、`invoke`、
+request ID 和摘要；用户脚本无需实现这些方法或字段。完整结构化 Provider 继续使用
+现有协议，不将握手方法改为可选。
+
+例如，将以下规则保存为 `$AW_DEMO/check.py`。Python 是这个自选脚本的依赖，
+不是 AW core 的依赖：
+
+```python
+import json
+import sys
+
+def contains(value):
+    if isinstance(value, str):
+        return "12345" in value
+    if isinstance(value, list):
+        return any(contains(item) for item in value)
+    if isinstance(value, dict):
+        return any(contains(item) for item in value.values())
+    return False
+
+event = json.load(sys.stdin)
+print(json.dumps(contains(event["tool"]["input"])))
+```
+
+沿用[安装指南](aw-preview.md)中的前缀与路径，由工具生成完整 YAML，无需手工拼装
+Provider 和步骤。只提供所需 Agent 入口；本例声明两个框架：
+
+```bash
+"$AW_PREVIEW_PREFIX/bin/aw-package" configure --prefix "$AW_PREVIEW_PREFIX" \
+  --config "$AW_DEMO/aw-command.yaml" --state-dir "$AW_DEMO/command-state" \
+  --qoder "$AW_QODER" --node "$AW_NODE" --openclaw "$AW_OPENCLAW" \
+  --provider command --check /usr/bin/python3 --effect block \
+  --reason-code parameter_contains_12345 -- "$AW_DEMO/check.py"
+"$AW_PREVIEW_PREFIX/bin/aw" validate --config "$AW_DEMO/aw-command.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw" run --config "$AW_DEMO/aw-command.yaml" --agent qoder
+```
+
+无需 sec-core 包或 daemon。同一份生成配置可配合 `--agent openclaw` 及其已有原生
+profile 参数使用。两个框架向脚本提供相同的标准化工具字段，由 AW 将 block 翻译为
+各自的原生 Hook 回复。生成的 Provider transport 执行
+`["/absolute/prefix/bin/aw", "policy"]`；命令与命中后的 effect 位于
+`spec.providers.command.config`：
+
+```yaml
+config:
+  version: 1
+  argv: [/usr/bin/python3, /absolute/path/check.py]
+  timeout_ms: 1000
+  on_true:
+    type: block
+    reason_code: parameter_contains_12345
+```
+
+`on_true.type` 支持 `block` 或 `observe`；`block` 只适用于工具前，`observe` 也可
+配置在工具后。生成器创建一个必需的工具前步骤，设置 `on_error: block`、2,000 ms
+Provider 超时和 1,000 ms 命令超时。非零退出、超时、输出超限或非布尔响应都是
+Provider 错误，不会当作 false；按步骤的失败策略处理。布尔输出含空白限 32 字节，
+stderr 限 65,536 字节。argv 按字面传递，不插入隐式 shell。握手方法校验配置，
+不执行用户命令。`aw validate` 检查期望配置文档；运行时准入还会在安装策略步骤前
+校验桥接的私有配置。
+
+`configure` 只新建私有文件，不覆盖已有文件。移除策略时，不传 `--provider`
+（或传 `--provider none`）生成新的基础文档，退出旧 Agent、停止其服务后显式切换
+配置。Provider 与关联步骤一起移除；修改运行服务的文件不会触发重新加载。
+通用的已有 YAML 编辑不属于此命令。
+
 ## 接入自己的程序
 
 `spec.providers` 中的每个命名对象描述一个程序，事件步骤通过 `provider` 引用

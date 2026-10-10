@@ -50,7 +50,7 @@ jobs:
           cargo test --locked --manifest-path src/aw/Cargo.toml -p aw-package
           cargo run --locked --release --manifest-path src/aw/Cargo.toml \
             -p aw-package --bin aw-build -- --version 0.1.0-preview.1 \
-            --output "$AW_PREVIEW_DIR/packages"
+            --output "$AW_PREVIEW_DIR/packages" --component all
       - name: Verify installed packages and service lifecycle
         shell: bash
         run: |
@@ -62,6 +62,14 @@ jobs:
           chmod 700 "$root"
           runtime="$(mktemp -d /tmp/aw-preview.XXXXXX)"
           trap 'mkdir -p "$root/demo"; cp -a "$runtime/demo/." "$root/demo/" 2>/dev/null || true; rm -rf "$runtime"' EXIT
+          aw-core-*/aw-package install --prefix "$root/core-only"
+          mkdir -m 700 "$runtime/core"
+          "$root/core-only/bin/aw-package" configure --prefix "$root/core-only" \
+            --config "$runtime/core/aw.yaml" --state-dir "$runtime/core/state" \
+            --qoder /bin/true
+          "$root/core-only/bin/aw" validate --config "$runtime/core/aw.yaml"
+          test ! -e "$root/core-only/libexec"
+          "$root/core-only/bin/aw-package" uninstall --prefix "$root/core-only"
           aw-core-*/aw-package install --prefix "$root/split"
           aw-provider-sec-core-*/aw-package install --prefix "$root/split"
           aw-all-in-one-*/aw-package install --prefix "$root/combined"

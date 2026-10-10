@@ -2,6 +2,8 @@
 #![cfg(target_os = "linux")]
 
 // Reuse the bounded daemon/process owner; its Qoder-specific helpers are unused.
+#[path = "support/command_policy.rs"]
+mod command_policy;
 #[allow(dead_code)]
 #[path = "launcher/support.rs"]
 mod support;
@@ -95,6 +97,47 @@ fn command(fixture: &Fixture) -> Command {
         .arg("--native-state-dir")
         .arg(fixture.root.join("profile"));
     command
+}
+
+#[test]
+fn zero_provider_gateway_is_ready_and_keeps_native_tools() {
+    let fixture = Fixture::new();
+    let config = document(&fixture);
+    let service = Service::start(&fixture, &config);
+    let report = fixture.successful(command(&fixture));
+    assert_eq!(report["blocked"], false);
+    assert!(fixture.root.join("tool-ran").exists());
+    let generated: Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("generated.json")).unwrap()).unwrap();
+    assert_eq!(
+        generated["plugins"]["entries"]["aw-native-hooks"]["config"]["hooks"],
+        json!({"before":[],"after":[]})
+    );
+    assert_eq!(
+        generated["plugins"]["entries"]["existing"]["config"]["marker"],
+        "kept"
+    );
+    service.released(&fixture);
+}
+
+#[test]
+fn same_boolean_policy_blocks_matching_inputs_and_failures_in_openclaw() {
+    for (input, blocked) in [
+        ("printf control", false),
+        ("printf 12345", true),
+        ("invalid", true),
+    ] {
+        let fixture = Fixture::new();
+        let mut config = document(&fixture);
+        command_policy::configure(&fixture, &mut config);
+        let service = Service::start(&fixture, &config);
+        let mut launch = command(&fixture);
+        launch.env("FAKE_SCENARIO", input);
+        let report = fixture.successful(launch);
+        assert_eq!(report["blocked"], blocked, "{input}");
+        assert_eq!(fixture.root.join("tool-ran").exists(), !blocked);
+        service.released(&fixture);
+    }
 }
 
 #[test]

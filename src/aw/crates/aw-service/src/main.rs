@@ -29,12 +29,13 @@ fn run() -> cli::Result<cli::Exit> {
     let mut args = std::env::args().skip(1);
     let command = args
         .next()
-        .ok_or("expected run, install, validate, serve, status, request or stop")?;
+        .ok_or("expected run, install, validate, policy, serve, status, request or stop")?;
     if command == "--help" {
         println!(
             "aw run --config FILE --agent TARGET [--native-settings JSON_FILE] [--native-profile PROFILE] [--native-state-dir DIRECTORY] -- [AGENT_ARGS]\n\
 aw install --config FILE --agent TARGET [--native-profile PROFILE]\n\
 aw validate --config FILE\n\
+aw policy < provider-request.json\n\
 aw serve --config FILE --state-dir ABSOLUTE_DIR\n\
 aw status|stop (--config FILE | --socket ABSOLUTE_PATH)\n\
 aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
@@ -46,7 +47,10 @@ install dispatches native Hook installation; it does not install AW or an Agent.
         return Ok(cli::Exit::Code(0));
     }
     let args = cli::Arguments::parse(args)?;
-    if matches!(command.as_str(), "run" | "hook" | "install") {
+    if command == "policy" {
+        install_stop_signals()?;
+    }
+    if matches!(command.as_str(), "run" | "hook" | "install" | "policy") {
         return cli::dispatch(&command, &args);
     }
     let flags = &args.flags;
@@ -70,17 +74,7 @@ install dispatches native Hook installation; it does not install AW or an Agent.
                 println!("configuration valid");
             } else {
                 let server = Server::bind(bytes, PathBuf::from(required("--state-dir")?))?;
-                // SAFETY: handlers only set a lock-free atomic; no child reaping is installed.
-                unsafe {
-                    let mut action: libc::sigaction = std::mem::zeroed();
-                    action.sa_sigaction = stop as *const () as usize;
-                    libc::sigemptyset(&mut action.sa_mask);
-                    if libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) != 0
-                        || libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) != 0
-                    {
-                        return Err(std::io::Error::last_os_error().into());
-                    }
-                }
+                install_stop_signals()?;
                 eprintln!("AW service listening on {}", server.socket_path().display());
                 server.run(&STOP)?;
             }
@@ -143,4 +137,19 @@ install dispatches native Hook installation; it does not install AW or an Agent.
         }
     }
     Ok(cli::Exit::Code(0))
+}
+
+fn install_stop_signals() -> cli::Result<()> {
+    // SAFETY: handlers only set a lock-free atomic; no child reaping is installed.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = stop as *const () as usize;
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) != 0
+            || libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
 }

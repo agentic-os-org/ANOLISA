@@ -258,32 +258,34 @@ fn early_stdin_close_reports_partial_delivery_and_keeps_output() {
 
 #[test]
 fn runtime_cancellation_kills_and_reaps_the_started_child() {
-    let directory = Directory::new();
-    let cancelled = AtomicBool::new(false);
-    let (result, started, cancelled_at) = thread::scope(|scope| {
-        let setter = scope.spawn(|| {
-            let started = wait_until_exists(
-                &directory.0.join("leader.pid"),
+    for execute in [run, aw_exec::run_cooperative] {
+        let directory = Directory::new();
+        let cancelled = AtomicBool::new(false);
+        let (result, started, cancelled_at) = thread::scope(|scope| {
+            let setter = scope.spawn(|| {
+                let started = wait_until_exists(
+                    &directory.0.join("leader.pid"),
+                    Instant::now() + NORMAL_TIMEOUT,
+                );
+                let cancelled_at = Instant::now();
+                cancelled.store(true, Ordering::Release);
+                (started, cancelled_at)
+            });
+            let result = execute(
+                &directory.command("wait"),
+                b"",
+                limits(0, 0, 0),
                 Instant::now() + NORMAL_TIMEOUT,
+                &cancelled,
             );
-            let cancelled_at = Instant::now();
-            cancelled.store(true, Ordering::Release);
-            (started, cancelled_at)
+            let (started, cancelled_at) = setter.join().unwrap();
+            (result, started, cancelled_at)
         });
-        let result = run(
-            &directory.command("wait"),
-            b"",
-            limits(0, 0, 0),
-            Instant::now() + NORMAL_TIMEOUT,
-            &cancelled,
-        );
-        let (started, cancelled_at) = setter.join().unwrap();
-        (result, started, cancelled_at)
-    });
-    assert!(started, "fixture never reached runtime cancellation point");
-    assert!(matches!(result, Err(Error::Cancelled)));
-    assert!(cancelled_at.elapsed() < CLEANUP_ALLOWANCE);
-    directory.assert_reaped();
+        assert!(started, "fixture never reached runtime cancellation point");
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(cancelled_at.elapsed() < CLEANUP_ALLOWANCE);
+        directory.assert_reaped();
+    }
 }
 
 #[test]

@@ -11,6 +11,13 @@ use std::{
 };
 
 pub(crate) fn receipts(prefix: &Path) -> Result<BTreeMap<String, Component>> {
+    selected_receipts(prefix, None)
+}
+
+pub(crate) fn selected_receipts(
+    prefix: &Path,
+    selected: Option<&[&str]>,
+) -> Result<BTreeMap<String, Component>> {
     let directory = prefix.join(".aw-packages");
     paths::absolute(&directory)?;
     let mut components = BTreeMap::new();
@@ -23,6 +30,13 @@ pub(crate) fn receipts(prefix: &Path) -> Result<BTreeMap<String, Component>> {
             .extension()
             .is_some_and(|extension| extension == "json")
         {
+            if selected.is_some_and(|names| {
+                !names
+                    .iter()
+                    .any(|name| path.file_stem().is_some_and(|stem| stem == *name))
+            }) {
+                continue;
+            }
             paths::absolute(&path)?;
             let value: Component = serde_json::from_reader(File::open(&path)?)?;
             require(

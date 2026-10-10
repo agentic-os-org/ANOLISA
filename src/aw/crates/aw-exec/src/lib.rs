@@ -140,7 +140,37 @@ pub fn run(
 ) -> Result<Output, Error> {
     #[cfg(target_os = "linux")]
     {
-        linux::run(command, input, limits, deadline, cancelled)
+        linux::run(command, input, limits, deadline, cancelled, false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, input, limits, deadline, cancelled);
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
+/// Run a cooperative wrapper, notifying it before forced cleanup on transport failure.
+///
+/// Shares [`run`]'s byte, deadline and process-group guarantees. On failure, sends
+/// SIGTERM and allows up to 250 ms for the wrapper to cancel its nested commands,
+/// then performs the same forced group cleanup with its separate one-second budget.
+/// The wrapper must install a SIGTERM handler before spawning nested commands and
+/// use [`run`] for those commands so their cancellation does not add another grace.
+/// Successful exchanges keep immediate cleanup. Uncooperative wrappers and escaped
+/// descendants retain [`run`]'s limitations; this does not create a sandbox.
+///
+/// # Errors
+/// Returns the same errors as [`run`], including unverifiable termination/cleanup.
+pub fn run_cooperative(
+    command: &CommandSpec,
+    input: &[u8],
+    limits: Limits,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Output, Error> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::run(command, input, limits, deadline, cancelled, true)
     }
     #[cfg(not(target_os = "linux"))]
     {

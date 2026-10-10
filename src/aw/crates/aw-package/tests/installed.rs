@@ -107,10 +107,10 @@ fn installed_binaries_scan_and_recover_audit() {
         prefix: &prefix,
         config: &config,
         state: &state,
-        socket: &socket,
-        qoder: Path::new("/bin/true"),
-        node: Path::new("/bin/true"),
-        openclaw: Path::new("/bin/true"),
+        policy: aw_package::Policy::SecCore { socket: &socket },
+        qoder: Some(Path::new("/bin/true")),
+        node: Some(Path::new("/bin/true")),
+        openclaw: Some(Path::new("/bin/true")),
     })
     .unwrap();
     let provider = prefix.join("libexec/aw/providers/sec-core");

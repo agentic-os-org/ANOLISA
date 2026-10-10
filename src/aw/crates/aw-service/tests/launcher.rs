@@ -1,6 +1,8 @@
 //! CLI-to-service hook bridge contracts; fake-host scheduling is not native adoption.
 #![cfg(target_os = "linux")]
 
+#[path = "support/command_policy.rs"]
+mod command_policy;
 #[path = "launcher/support.rs"]
 mod support;
 
@@ -23,6 +25,43 @@ fn hooks(report: &Value, event: &str) -> Vec<Value> {
         .as_array()
         .unwrap()
         .clone()
+}
+
+#[test]
+fn zero_provider_launch_keeps_native_tools_without_aw_policy_hooks() {
+    let fixture = Fixture::new();
+    let document = fixture.document();
+    let service = Service::start(&fixture, &document);
+    let report =
+        fixture.successful(fixture.launch(&["--run-id", "no-provider", "--agent-exit", "0"], None));
+    assert_eq!(report["tool_executed"], true);
+    assert!(hooks(&report, "PreToolUse").is_empty());
+    assert!(hooks(&report, "PostToolUse").is_empty());
+    assert!(fixture.root.join("tool-no-provider").exists());
+    service.released(&fixture);
+}
+
+#[test]
+fn boolean_command_blocks_on_match_and_errors_without_sec_core() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    command_policy::configure(&fixture, &mut document);
+    let service = Service::start(&fixture, &document);
+    for (id, command, blocked) in [
+        ("allow", "printf control", false),
+        ("match", "printf 12345", true),
+        ("error", "invalid", true),
+    ] {
+        let report =
+            fixture.successful(fixture.launch(&["--run-id", id, "--tool-command", command], None));
+        assert_eq!(report["tool_executed"], !blocked, "{id}");
+        assert_eq!(fixture.root.join(format!("tool-{id}")).exists(), !blocked);
+        assert_eq!(
+            hooks(&report, "PreToolUse")[0]["status"],
+            if blocked { 2 } else { 0 }
+        );
+        service.released(&fixture);
+    }
 }
 
 #[test]

@@ -12,6 +12,13 @@ AW Preview provides core and Provider packages installed with `aw-package`. It
 currently includes the sec-core Provider and an example sharing one configuration
 between Qoder and OpenClaw; see [Preview installation and demo](../../docs/user-guide/en/user-entrypoint/aw-preview.md).
 
+AW core can be built and initialized without sec-core. `aw-build` defaults to
+core; select `--component all` for the existing combined distribution.
+`aw-package configure` accepts one Agent and no Provider by default; select
+`--provider sec-core` or `--provider command` explicitly. Boolean commands return
+only true/false, with effects declared in YAML; AW supplies the Provider handshake
+and response correlation. See [boolean policy commands](../../docs/user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
+
 ## Available today
 
 | Capability | Availability |

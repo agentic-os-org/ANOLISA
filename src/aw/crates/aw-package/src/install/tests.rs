@@ -8,6 +8,7 @@ struct Fixture {
     _directory: tempfile::TempDir,
     root: PathBuf,
     prefix: PathBuf,
+    state: PathBuf,
     core: PathBuf,
     provider: PathBuf,
     combined: PathBuf,
@@ -28,6 +29,7 @@ impl Fixture {
         Self {
             _directory: directory,
             prefix: root.join("installed"),
+            state: root.join("state"),
             root,
             core,
             provider,
@@ -674,3 +676,4 @@ fn already_cancelled_install_does_not_create_prefix() {
 }
 
 mod configuration;
+mod standalone;
