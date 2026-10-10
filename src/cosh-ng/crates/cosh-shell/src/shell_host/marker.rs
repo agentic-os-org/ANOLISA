@@ -154,4 +154,36 @@ mod tests {
         );
         assert!(NON_INTERACTIVE_PAGER_PREFIX.ends_with(' '));
     }
+
+    /// The login replay must source the system profile before the baseline
+    /// `command_not_found_handle` capture, and the user's own login files
+    /// after it. A real-login-identity Bash starts in posix mode and reads no
+    /// startup files itself, so a system-provided handler (for example a
+    /// distribution's command-not-found integration reached through
+    /// /etc/profile) only exists after the system pass. Capturing the
+    /// baseline before that pass would adopt the system handler as a user
+    /// handler and reroute natural-language input away from interception
+    /// into plain command execution.
+    #[test]
+    fn bash_marker_captures_command_not_found_baseline_after_system_profile_replay() {
+        let script = bash_marker_script();
+        let baseline = script
+            .find("_COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE=\"$(declare -f command_not_found_handle")
+            .unwrap_or_else(|| panic!("missing baseline handler capture"));
+        let system_pass = script
+            .find("  source /etc/profile\n")
+            .unwrap_or_else(|| panic!("missing system profile replay"));
+        let user_pass = script
+            .find("source ~/.bash_profile")
+            .unwrap_or_else(|| panic!("missing user login file replay"));
+
+        assert!(
+            system_pass < baseline,
+            "system profile replay must precede the baseline handler capture"
+        );
+        assert!(
+            baseline < user_pass,
+            "user login file replay must follow the baseline handler capture"
+        );
+    }
 }
