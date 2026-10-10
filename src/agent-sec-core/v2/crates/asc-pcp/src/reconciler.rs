@@ -27,7 +27,7 @@ pub struct BindingReconciler {
 impl BindingReconciler {
     /// Routes are stable configuration references, never endpoint credentials.
     /// The caller must serialize all calls for a Binding in the same store.
-    /// Temporary results never survive a call.
+    /// The scheduling caller retains unresolved storage work between calls.
     /// # Errors
     /// Rejects invalid retry configuration or a missing Apply Client factory.
     pub fn new(
@@ -68,8 +68,8 @@ impl BindingReconciler {
     /// bookkeeping. In production, one Runtime `WorkQueue` per store owns this rule.
     /// # Errors
     /// Storage failure or exhausted CAS contention never implies remote failure
-    /// or success. Temporary outcomes
-    /// are discarded on return; the next call recovers from repository facts.
+    /// or success. The schedule retains unresolved writes and outcomes until they
+    /// are confirmed; process restart recovers from durable target responsibilities.
     /// # Panics
     /// Resumes a port panic after attempting terminal bookkeeping.
     /// The caller must catch the attempt panic, inspect committed state and finish
@@ -79,25 +79,41 @@ impl BindingReconciler {
         id: &ResourceId,
         schedule: &mut crate::AttemptSchedule,
     ) -> Result<Disposition, StoreError> {
-        let mut slot = ExecutionSlot::default();
+        let mut slot = std::mem::take(&mut schedule.slot);
         // Keep call-local completion data available for panic bookkeeping.
         // The caller retains the Running entry throughout this unwind boundary.
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.reconcile_attempt(id, &mut slot, schedule)
         }));
         match result {
-            Ok(result) => result,
+            Ok(result) => {
+                if result.is_err() {
+                    if slot.attempt_counted && !slot.remote_started {
+                        schedule.attempts_started = schedule.attempts_started.saturating_sub(1);
+                        slot.attempt_counted = false;
+                    }
+                    if !slot.actual_outcome {
+                        slot.pending = None;
+                    }
+                    schedule.slot = slot;
+                }
+                result
+            }
             Err(payload) => {
                 // Preserve an actual completion over the provisional panic
-                // failure within this call. If storage fails too, discard the
-                // temporary result on exit and recover from registered facts.
+                // failure. Retain unresolved receipts when bookkeeping also fails.
                 let _ = catch_unwind(AssertUnwindSafe(|| {
+                    if slot.unconfirmed.is_some() {
+                        self.state.resolve(&mut slot.unconfirmed)?;
+                    }
                     if let Some(outcome) = slot.pending.clone() {
+                        slot.actual_outcome = true;
                         self.commit(&outcome, &mut slot.completion)?;
                         slot.pending = None;
                     }
                     Ok::<_, StoreError>(())
                 }));
+                schedule.slot = slot;
                 // The owner catches this attempt failure without stopping other Bindings.
                 resume_unwind(payload)
             }
@@ -110,17 +126,33 @@ impl BindingReconciler {
         slot: &mut ExecutionSlot,
         schedule: &mut crate::AttemptSchedule,
     ) -> Result<Disposition, StoreError> {
+        if slot.unconfirmed.is_some() {
+            self.state.resolve(&mut slot.unconfirmed)?;
+        }
+        if let Some(outcome) = slot.pending.clone() {
+            let disposition = self.commit(&outcome, &mut slot.completion)?;
+            schedule.status_version = outcome.expected.status_version.checked_add(1);
+            slot.pending = None;
+            return Ok(disposition);
+        }
+        slot.remote_started = false;
+        slot.attempt_counted = false;
+        self.state.repository.check_writable()?;
         let Some(mut record) = self.state.read(id)? else {
             return Ok(Disposition::Skipped);
         };
         schedule.observe(&record.binding);
+        schedule.status_version = Some(record.status_version);
         // Caller serialization guarantees any earlier invocation has exited.
         // Recovery preserves budget and cannot overwrite a newer CRUD intent.
         if record.binding.status.phase.is_reconciling() {
-            if !self
-                .state
-                .recover(&record, self.clock.now_ms(), self.retry, schedule)?
-            {
+            if !self.state.recover(
+                &record,
+                self.clock.now_ms(),
+                self.retry,
+                schedule,
+                &mut slot.unconfirmed,
+            )? {
                 return Ok(Disposition::Superseded);
             }
             let Some(latest) = self.state.read(id)? else {
@@ -137,7 +169,11 @@ impl BindingReconciler {
         {
             return Ok(Disposition::Skipped);
         }
-        let mut expected = ExpectedBinding::from_binding(&record.binding);
+        let mut expected = ExpectedBinding::from_snapshot(&record);
+        expected.status_version = record
+            .status_version
+            .checked_add(1)
+            .ok_or(StoreError::Invalid)?;
         expected.status = expected
             .status
             .start_reconcile()
@@ -157,9 +193,14 @@ impl BindingReconciler {
                 "RECONCILE_WORKER_PANICKED",
             )),
         });
-        let claimed = self
-            .state
-            .claim(&record, self.clock.now_ms(), self.retry, schedule);
+        slot.attempt_counted = true;
+        let claimed = self.state.claim(
+            &record,
+            self.clock.now_ms(),
+            self.retry,
+            schedule,
+            &mut slot.unconfirmed,
+        );
         let claimed = match claimed {
             Ok(Some(claimed)) => claimed,
             other => {
@@ -167,23 +208,29 @@ impl BindingReconciler {
                 return other.map(|_| Disposition::Superseded);
             }
         };
-        let Some(report) = self.execute(&claimed)? else {
+        let Some(report) = self.execute(&claimed, slot)? else {
             slot.pending = None;
             return Ok(Disposition::Superseded);
         };
         slot.pending = Some(self.outcome(&claimed, report, schedule)?);
+        slot.actual_outcome = true;
         schedule.next_attempt_at = slot.pending.as_ref().and_then(|o| o.next_attempt_at);
         let disposition = self.commit(
             slot.pending.as_ref().ok_or(StoreError::Invalid)?,
             &mut slot.completion,
         )?;
         slot.pending = None;
+        schedule.status_version = claimed.status_version.checked_add(1);
         Ok(disposition)
     }
 
-    fn execute(&self, record: &ReconcileRecord) -> Result<Option<DeploymentReport>, StoreError> {
+    fn execute(
+        &self,
+        record: &ReconcileRecord,
+        slot: &mut ExecutionSlot,
+    ) -> Result<Option<DeploymentReport>, StoreError> {
         if record.binding.status.phase == BindingStatus::Deleting {
-            return self.delete(record);
+            return self.delete(record, slot);
         }
         let (saved, client) = match self.prepare(record) {
             Ok(saved) => saved,
@@ -215,12 +262,15 @@ impl BindingReconciler {
         let mut touched = previous.clone();
         touched.push(target.clone());
         if !self.state.register(
-            &ExpectedBinding::from_binding(&record.binding),
+            &ExpectedBinding::from_snapshot(record),
             Some(&saved),
             &touched,
+            &mut slot.unconfirmed,
         )? {
             return Ok(None);
         }
+        self.state.repository.check_writable()?;
+        slot.remote_started = true;
         let report = if saved.is_update {
             client.update(&previous, &saved.prepared)
         } else {
@@ -289,16 +339,21 @@ impl BindingReconciler {
         ))
     }
 
-    fn delete(&self, record: &ReconcileRecord) -> Result<Option<DeploymentReport>, StoreError> {
+    fn delete(
+        &self,
+        record: &ReconcileRecord,
+        slot: &mut ExecutionSlot,
+    ) -> Result<Option<DeploymentReport>, StoreError> {
         let targets: Vec<_> = record
             .deployments
             .iter()
             .map(|d| d.target.clone())
             .collect();
         if !self.state.register(
-            &ExpectedBinding::from_binding(&record.binding),
+            &ExpectedBinding::from_snapshot(record),
             None,
             &targets,
+            &mut slot.unconfirmed,
         )? {
             return Ok(None);
         }
@@ -313,7 +368,9 @@ impl BindingReconciler {
             observations: vec![],
             error: None,
         };
+        self.state.repository.check_writable()?;
         for (route, targets) in groups {
+            slot.remote_started = true;
             let report = self.client_factories.get(route).map_or_else(
                 || failed("RECONCILE_TARGET_UNAVAILABLE"),
                 |factory| match factory.open() {
@@ -369,7 +426,7 @@ impl BindingReconciler {
         };
         let next_status = next_status.map_err(|_| StoreError::Invalid)?;
         Ok(AttemptOutcome {
-            expected: ExpectedBinding::from_binding(&record.binding),
+            expected: ExpectedBinding::from_snapshot(record),
             observations: report.observations,
             next_status,
             next_attempt_at,

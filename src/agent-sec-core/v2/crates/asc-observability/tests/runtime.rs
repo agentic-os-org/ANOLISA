@@ -37,6 +37,8 @@ fn runtime_filters_do_not_disable_context_or_export_arbitrary_messages() {
             assert_eq!(before.agent["session_id"], "session");
             tracing::error!(target: "asc_runtime_test", "DO_NOT_EXPORT_SECRET_PAYLOAD");
             asc_observability::diagnostic("test_context_readable");
+            tracing::debug!(target: "asc_observability::diagnostic", component = "policy_runtime",
+                binding_id = "test-binding", "policy attempt diagnostic");
             tracing::info_span!(target: "asc_runtime_test", "test.child").in_scope(|| {
                 assert_eq!(snapshot().trace_id, before.trace_id);
                 assert_ne!(snapshot().span_id, before.span_id);
@@ -49,7 +51,7 @@ fn runtime_filters_do_not_disable_context_or_export_arbitrary_messages() {
         return;
     }
     for sampler in ["always_on", "always_off"] {
-        for filter in ["off", "info"] {
+        for filter in ["off", "info", "debug"] {
             let mut command = Command::new(std::env::current_exe().unwrap());
             for (key, _) in std::env::vars_os() {
                 if key.to_string_lossy().starts_with("OTEL_") {
@@ -83,22 +85,36 @@ fn runtime_filters_do_not_disable_context_or_export_arbitrary_messages() {
                     .lines()
                     .any(|line| line == "background_storage_warning")
             );
-            assert_eq!(stderr.contains("test_context_readable"), filter == "info");
-            if filter == "info" {
-                let records: Vec<serde_json::Value> = stderr
-                    .lines()
-                    .filter(|line| line.starts_with('{'))
-                    .map(|line| {
-                        let record: serde_json::Value = serde_json::from_str(line).unwrap();
-                        serde_json::from_str(record["fields"]["correlation"].as_str().unwrap())
-                            .unwrap()
-                    })
-                    .collect();
-                assert_eq!(records.len(), 2);
-                assert_eq!(records[0]["trace_id"], records[1]["trace_id"]);
-                assert_ne!(records[0]["span_id"], records[1]["span_id"]);
-                assert_eq!(records[0]["span_id"], records[1]["request_span_id"]);
+            assert_eq!(stderr.contains("test_context_readable"), filter != "off");
+            assert_eq!(
+                stderr.contains("policy attempt diagnostic"),
+                filter == "debug"
+            );
+            if filter != "off" {
+                check_log_correlation(&stderr);
             }
         }
     }
+}
+
+fn check_log_correlation(stderr: &str) {
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .filter_map(|line| {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(record["trace_id"].as_str().unwrap().len(), 32);
+            assert_eq!(record["span_id"].as_str().unwrap().len(), 16);
+            record["fields"]["correlation"].as_str().map(|value| {
+                let correlation: serde_json::Value = serde_json::from_str(value).unwrap();
+                assert_eq!(record["trace_id"], correlation["trace_id"]);
+                assert_eq!(record["span_id"], correlation["span_id"]);
+                correlation
+            })
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["trace_id"], records[1]["trace_id"]);
+    assert_ne!(records[0]["span_id"], records[1]["span_id"]);
+    assert_eq!(records[0]["span_id"], records[1]["request_span_id"]);
 }

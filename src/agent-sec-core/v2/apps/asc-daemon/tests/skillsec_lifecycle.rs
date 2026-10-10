@@ -160,10 +160,9 @@ fn rpc_context_reaches_skill_audit_without_leaking_into_telemetry_or_the_next_re
     );
     let outputs = Arc::new(Outputs::default());
     let dispatcher = asc_daemon_handler::DaemonDispatcher::new(
-        asc_pap::PapService::new(
-            Arc::new(asc_pap_repository_memory::ProcessLocalPapRepository::default()),
-            Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-        ),
+        asc_pap::PapService::new(Arc::new(
+            asc_pap_repository_memory::ProcessLocalPapRepository::default(),
+        )),
         Arc::new(asc_daemon_core::RootManagedPrincipalPolicy::default()),
         asc_daemon::skill_application(
             Finalizer::new(outputs.clone(), outputs.clone(), outputs.clone()),

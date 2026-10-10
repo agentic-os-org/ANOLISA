@@ -17,10 +17,10 @@ use asc_daemon_core::{PrincipalPolicy, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_daemon_service::ShutdownToken;
 use asc_event_sink::ConfiguredSecurityEventSinks;
-use asc_pap::PapService;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+use asc_pap::{PapRepository, PapService, ScopeDiscovery};
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_runtime::reconciliation::ReconciliationRuntime;
+use asc_policy_types::scope::ScopeStatus;
 use asc_security_events::config::daemon_security_event_paths;
 
 use crate::sinks::EventSinkAdapter;
@@ -60,20 +60,34 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let paths = asc_security_events::config::DaemonDataDirEnv::from_process();
+    let data_dir = paths.override_dir.as_ref().unwrap_or(&paths.system_dir);
+    let repository = match SqlitePolicyRepository::open(&data_dir.join("policy-state.db")) {
+        Ok(repository) => Arc::new(repository),
+        Err(problem) => {
+            report_error(&telemetry, &problem);
+            telemetry.shutdown(Duration::from_secs(2));
+            return ExitCode::FAILURE;
+        }
+    };
+    // Keep database ownership even if the outer Tokio drain times out.
+    let _database_lease = repository.lease();
     // Retain the singleton through the outer Tokio blocking-task shutdown window.
-    let outcome =
-        match run_with_shutdown_timeout(run(*cli, &lease, &telemetry), RUNTIME_SHUTDOWN_TIMEOUT) {
-            Ok((exit_code, event_sinks)) => {
-                if let Some(sinks) = event_sinks {
-                    sinks.close();
-                }
-                exit_code
+    let outcome = match run_with_shutdown_timeout(
+        run(*cli, &lease, &telemetry, repository),
+        RUNTIME_SHUTDOWN_TIMEOUT,
+    ) {
+        Ok((exit_code, event_sinks)) => {
+            if let Some(sinks) = event_sinks {
+                sinks.close();
             }
-            Err(problem) => {
-                report_error(&telemetry, &problem);
-                ExitCode::FAILURE
-            }
-        };
+            exit_code
+        }
+        Err(problem) => {
+            report_error(&telemetry, &problem);
+            ExitCode::FAILURE
+        }
+    };
     telemetry.shutdown(Duration::from_secs(2));
     outcome
 }
@@ -84,6 +98,7 @@ async fn run(
     cli: Cli,
     lease: &RuntimeLease,
     telemetry: &asc_observability::TelemetryRuntime,
+    repository: Arc<SqlitePolicyRepository>,
 ) -> (ExitCode, Option<sinks::DurableSinks>) {
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
@@ -103,7 +118,6 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    let repository = Arc::new(ProcessLocalPapRepository::default());
     let pii_rules = match load_pii_rules(cli.pii_rules.as_deref(), telemetry) {
         Ok(rules) => Arc::new(rules),
         Err(error) => {
@@ -139,16 +153,32 @@ async fn run(
         report_error(telemetry, &error);
         return (ExitCode::FAILURE, Some(durable_sinks));
     }
-    let policy_runtime = start_policy_runtime(repository.clone(), telemetry);
-    let enqueuer: Arc<dyn asc_pap::BindingReconcileEnqueuer> = policy_runtime.as_ref().map_or_else(
-        || {
-            Arc::new(asc_daemon::UnavailableReconciliation)
-                as Arc<dyn asc_pap::BindingReconcileEnqueuer>
-        },
-        |runtime| runtime.enqueuer(),
-    );
-    let pap = PapService::new(repository, Arc::new(PolicyTemplateCompiler))
-        .with_reconcile_enqueuer(enqueuer);
+    // Exclusive DB ownership proves no pre-crash discovery worker can still write.
+    if let Err(error) = recover_deleting_scopes(repository.as_ref()) {
+        report_error(telemetry, &error);
+        let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+        return (ExitCode::FAILURE, Some(durable_sinks));
+    }
+    let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            report_error(telemetry, &error);
+            let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+            return (ExitCode::FAILURE, Some(durable_sinks));
+        }
+    };
+    let pap =
+        PapService::new(repository.clone()).with_reconcile_enqueuer(policy_runtime.enqueuer());
+    // The sink clone has no registry, avoiding a worker/service ownership cycle.
+    let discovery_registry = Arc::new(asc_daemon::ScopeDiscoveryRegistry::new(Arc::new(
+        pap.clone(),
+    )));
+    if let Err(error) = recover_active_scopes(repository.as_ref(), discovery_registry.as_ref()) {
+        report_error(telemetry, &error);
+        drain_runtimes(skill_worker, discovery_registry, policy_runtime).await;
+        return (ExitCode::FAILURE, Some(durable_sinks));
+    }
+    let pap = pap.with_scope_discovery(discovery_registry.clone());
     let principal_policy = Arc::new(RootManagedPrincipalPolicy::with_admin_uids(
         cli.policy_admin_uids,
     ));
@@ -161,13 +191,9 @@ async fn run(
         ),
         skillfs.clone(),
     ));
-    telemetry
-        .report("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
 
     let shutdown = ShutdownToken::new();
-    let health_task = policy_runtime
-        .as_ref()
-        .map(|runtime| watch_policy_health(runtime.enqueuer(), telemetry.reporter()));
+    let health_task = watch_policy_health(policy_runtime.enqueuer(), telemetry.reporter());
     let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     let result = serve(
         cli.bootstrap,
@@ -177,11 +203,9 @@ async fn run(
     )
     .await;
     signal_task.abort();
-    if let Some(health_task) = health_task {
-        health_task.abort();
-    }
+    health_task.abort();
     // UDS has stopped admission and completed its request drain before workers stop.
-    let exit_code = if drain_runtimes(skill_worker, policy_runtime).await {
+    let exit_code = if drain_runtimes(skill_worker, discovery_registry, policy_runtime).await {
         match result {
             Ok(_) => ExitCode::SUCCESS,
             Err(problem) => {
@@ -196,16 +220,55 @@ async fn run(
     (exit_code, Some(durable_sinks))
 }
 
-fn start_policy_runtime(
-    repository: Arc<ProcessLocalPapRepository>,
-    telemetry: &asc_observability::TelemetryRuntime,
-) -> Option<ReconciliationRuntime> {
-    match asc_daemon::start_policy_reconciliation(repository) {
-        Ok(runtime) => Some(runtime),
-        Err(error) => {
-            telemetry.report("asc-daemon: reconciliation unavailable; Binding mutations disabled");
-            report_error(telemetry, &error);
-            None
+#[tracing::instrument(
+    skip_all,
+    target = "asc_daemon",
+    name = "policy.recovery.deleting_scopes"
+)]
+fn recover_deleting_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap::PapError> {
+    let mut cursor = None;
+    loop {
+        let scopes = repository.scan_scopes(cursor.as_ref(), 128)?;
+        if scopes.is_empty() {
+            return Ok(());
+        }
+        for scope in scopes {
+            cursor = Some(scope.scope_id.clone());
+            if scope.status == ScopeStatus::Deleting {
+                repository.finish_scope_discovery(&scope.scope_id)?;
+                tracing::debug!(
+                    target: "asc_observability::diagnostic", component = "policy_recovery",
+                    scope_id = %scope.scope_id, "deleting scope recovery barrier committed"
+                );
+            }
+        }
+    }
+}
+
+#[tracing::instrument(
+    skip_all,
+    target = "asc_daemon",
+    name = "policy.recovery.active_scopes"
+)]
+fn recover_active_scopes(
+    repository: &dyn PapRepository,
+    discovery: &dyn ScopeDiscovery,
+) -> Result<(), asc_pap::PapError> {
+    let mut cursor = None;
+    loop {
+        let scopes = repository.scan_scopes(cursor.as_ref(), 128)?;
+        if scopes.is_empty() {
+            return Ok(());
+        }
+        for scope in scopes {
+            cursor = Some(scope.scope_id.clone());
+            if scope.status == ScopeStatus::Active {
+                discovery.start(&repository.scope_discovery_seed(&scope.scope_id)?)?;
+                tracing::debug!(
+                    target: "asc_observability::diagnostic", component = "policy_recovery",
+                    scope_id = %scope.scope_id, "active scope discovery restored"
+                );
+            }
         }
     }
 }
@@ -259,17 +322,33 @@ fn recover_and_start_skills(
 
 async fn drain_runtimes(
     worker: Arc<asc_daemon::SkillWorker>,
-    policy: Option<ReconciliationRuntime>,
+    discovery_registry: Arc<asc_daemon::ScopeDiscoveryRegistry>,
+    policy: ReconciliationRuntime,
 ) -> bool {
     // Both joins remain tracked by Tokio after timeout; process exit is the final cutoff.
     let skill = tokio::task::spawn_blocking(move || worker.shutdown());
     let policy =
-        tokio::task::spawn_blocking(move || policy.map_or(Ok(()), ReconciliationRuntime::shutdown));
+        tokio::task::spawn_blocking(move || stop_background_jobs(&discovery_registry, policy));
     let (skill, policy) = tokio::join!(
         tokio::time::timeout(Duration::from_secs(65), skill),
         tokio::time::timeout(Duration::from_secs(30), policy),
     );
-    matches!(skill, Ok(Ok(Ok(())))) && matches!(policy, Ok(Ok(Ok(()))))
+    matches!(skill, Ok(Ok(Ok(())))) && matches!(policy, Ok(Ok(true)))
+}
+
+fn stop_background_jobs(
+    discovery_registry: &asc_daemon::ScopeDiscoveryRegistry,
+    policy_runtime: ReconciliationRuntime,
+) -> bool {
+    let discovery_ok = match discovery_registry.shutdown() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(target: "asc_process_diagnostic", %error, "scope discovery shutdown failed");
+            false
+        }
+    };
+    let policies_ok = policy_runtime.shutdown().is_ok();
+    discovery_ok && policies_ok
 }
 
 fn event_finalizer(

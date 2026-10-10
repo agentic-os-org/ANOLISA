@@ -231,6 +231,7 @@ impl Drop for ReconciliationRuntime {
     }
 }
 
+#[tracing::instrument(skip_all, name = "policy.reconcile", fields(binding_id = %id))]
 fn run_attempt(
     repository: &dyn BindingStateRepository,
     reconciler: &dyn ReconcileAttempt,
@@ -244,8 +245,32 @@ fn run_attempt(
     let mut schedule = queue.take_schedule(&id);
     let mut original = None;
     let result = catch_unwind(AssertUnwindSafe(|| {
-        original = repository.get_binding_state(&id)?;
-        let result = reconciler.reconcile(&id, &mut schedule);
+        let result = if let Some((expected, write)) = &schedule.pending_termination {
+            // Confirm this exact terminal write before admitting another attempt.
+            let result = repository.compare_exchange_binding_state(expected, write)?;
+            schedule.pending_termination = None;
+            Ok(if result == WriteResult::Conflict {
+                Disposition::Superseded
+            } else {
+                Disposition::Completed
+            })
+        } else {
+            original = repository.get_binding_state(&id)?;
+            tracing::debug!(
+                target: "asc_observability::diagnostic", component = "policy_runtime",
+                binding_id = %id,
+                scope_id = ?original.as_ref().map(|state| &state.binding.spec.scope.scope_id),
+                phase = ?original.as_ref().map(|state| state.binding.status.phase),
+                status_version = ?original.as_ref().map(|state| state.status_version),
+                "binding attempt started"
+            );
+            reconciler.reconcile(&id, &mut schedule)
+        };
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_runtime",
+            binding_id = %id, result = ?result,
+            "binding attempt finished"
+        );
         Ok::<_, StoreError>(scheduling_decision(
             repository,
             &id,
@@ -255,19 +280,26 @@ fn run_attempt(
             schedule.next_attempt_at,
         ))
     }));
+    let pending_storage = schedule.has_pending_storage();
+    let owned_version = schedule
+        .status_version
+        .or_else(|| original.as_ref().map(|r| r.status_version));
     queue.save_schedule(&id, schedule);
     let (deadline, auto_retry) = match result {
         Ok(Ok(decision)) => decision,
         Ok(Err(error)) => (
             Some(error_retry_at(&id, error, clock.now_ms(), storage_retry)),
-            true,
+            matches!(error, StoreError::Contended | StoreError::Invalid),
         ),
+        Err(_) if pending_storage => (Some(retry_at(clock.now_ms(), storage_retry)), false),
         Err(_) => {
             finish_failed(
                 repository,
                 queue,
                 id,
                 original.as_ref(),
+                owned_version,
+                retry_at(clock.now_ms(), storage_retry),
                 "RECONCILE_WORKER_PANICKED",
             );
             return;
@@ -279,6 +311,8 @@ fn run_attempt(
             queue,
             id,
             original.as_ref(),
+            owned_version,
+            retry_at(clock.now_ms(), storage_retry),
             "RECONCILE_RETRY_EXHAUSTED",
         );
     }
@@ -291,6 +325,8 @@ fn finish_failed(
     queue: &WorkQueue,
     id: ResourceId,
     original: Option<&BindingStateSnapshot>,
+    owned_version: Option<i64>,
+    storage_retry_at: u64,
     code: &str,
 ) {
     let confirmed = catch_unwind(AssertUnwindSafe(|| -> Result<bool, StoreError> {
@@ -320,7 +356,8 @@ fn finish_failed(
                     | BindingStatus::DeleteFailed
             )
         };
-        if current.binding.spec.binding_revision != original.binding.spec.binding_revision
+        if Some(current.status_version) != owned_version
+            || current.binding.spec.binding_revision != original.binding.spec.binding_revision
             || deleting(current.binding.status.phase) != deleting(original.binding.status.phase)
         {
             // A newer intent wins even if its post-commit notification is delayed.
@@ -339,9 +376,27 @@ fn finish_failed(
         let write = BindingStateWrite::patch(ReconciliationPatch {
             status: Some(status),
             deployments: None,
+            ..Default::default()
         });
-        match repository.compare_exchange_binding_state(&current, &write)? {
-            WriteResult::Applied | WriteResult::AlreadyApplied => Ok(true),
+        queue
+            .state
+            .lock()
+            .unwrap()
+            .schedules
+            .entry(id.clone())
+            .or_default()
+            .pending_termination = Some((current.clone(), write.clone()));
+        let result = repository.compare_exchange_binding_state(&current, &write)?;
+        queue
+            .state
+            .lock()
+            .unwrap()
+            .schedules
+            .entry(id.clone())
+            .or_default()
+            .pending_termination = None;
+        match result {
+            WriteResult::Applied(_) | WriteResult::AlreadyApplied(_) => Ok(true),
             WriteResult::Conflict => {
                 // Never retry this old failure write against a fresh snapshot.
                 let _ = queue.enqueue(&id);
@@ -353,7 +408,20 @@ fn finish_failed(
     if !terminal {
         tracing::warn!(target: "asc_process_diagnostic", "binding reconciliation {id}: termination unconfirmed ({code})");
     }
-    queue.finish_terminalization(id, terminal);
+    if !terminal
+        && queue
+            .state
+            .lock()
+            .unwrap()
+            .schedules
+            .get(&id)
+            .is_some_and(AttemptSchedule::has_pending_storage)
+    {
+        // The timer owns storage backoff; this does not spend an automatic retry.
+        queue.finish(id, Some(storage_retry_at), false);
+    } else {
+        queue.finish_terminalization(id, terminal);
+    }
 }
 
 fn scheduling_decision(
@@ -387,7 +455,10 @@ fn scheduling_decision(
     };
     match decision {
         Ok(decision) => decision,
-        Err(error) => (Some(error_retry_at(id, error, now, delay)), true),
+        Err(error) => (
+            Some(error_retry_at(id, error, now, delay)),
+            matches!(error, StoreError::Contended | StoreError::Invalid),
+        ),
     }
 }
 

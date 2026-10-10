@@ -3,14 +3,30 @@
 文档类型：`[TARGET V2]` 详细设计。本文定义目标行为、代码归属及分阶段验收要求；
 实现进度和验证结果由对应 PR、CI 与验收报告记录。
 
+持久化实施以 [Policy SQLite 持久化与崩溃恢复设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)
+为准：新建 `asc-policy-repository-sqlite`，Deployment 首版保存在 Binding 行内，内部
+`status_version` 保护生命周期 CAS，部署观察独立合并。daemon 已使用该后端；
+关闭重开、存储故障和 SIGKILL 恢复证据见该文档第 9 节，真实 PEP 与物理断电另验。
+
+SCOPE-CR-002 已接入实现，并由 SQLite 保存：不可变 Scope 快照、系统 Binding 准入、停止发现后
+异步清理和 Scope 显式重试。当前协议及测试入口见上述生命周期契约；旧 changed-spec
+测试继续覆盖底层 revision/CAS 兼容能力，不表示开放用户 Binding mutation。
+
+对象和意图来源以 [Policy/Scope/Binding 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)
+为准：Policy 有 revision 且只保存 current；Scope 是无 revision 的不可变 Assignment，
+保存完整策略快照；Binding 不开放用户 mutation。本文旧 PAP Binding CRUD、changed-spec
+UPDATE 与 Scope revision 相关流程保留为历史实现基线。新入口由 Scope/实例生命周期
+产生 Binding 意图，复用本 Runtime 的调度、条件写和目标清理机制。
+
 本文遵循 [Rust 迁移架构](AGENT_SEC_RUST_MIGRATION_zh.md)，补充并局部替代
 [原详细方案](BINDING_RECONCILER_DESIGN_AND_IMPLEMENTATION_zh.md)的调度和存储提案。
 它不是新增的 V1 行为契约，也不是当前 daemon、SQL 或真实 PEP 的验收报告。
 
-交付边界：Runtime 集成 PR 完成 Runtime 实现与 daemon 接线，以单元、组件集成和调度竞争测试
+初始交付边界：Runtime 集成 PR 完成 Runtime 实现与 daemon 接线，以单元、组件集成和调度竞争测试
 验收；完整 CLI→daemon→Reconciler→mock AgentSight 端到端测试单独开 PR；系统性
 error injection、进程崩溃和重启恢复测试在 persistent Repository 就绪后实施。
 后两类测试不作为 Runtime 集成 PR 的完成门禁，具体分配见第 10 节。
+SQLite 阶段现已实现故障注入与进程崩溃恢复测试，当前证据以持久化设计第 9 节为准。
 
 ## 1. 设计边界
 
@@ -20,17 +36,18 @@ error injection、进程崩溃和重启恢复测试在 persistent Repository 就
 3. WorkQueue 使用 FIFO 待领取队列和按 ID 索引的调度状态表；同 Binding 只有一个本地执行者。
 4. 新 Delete 可以提前唤醒等待重试的 Binding，但不强制中断正在进行的同步 Client 调用。
 5. deployment 必须能独立更新，更新不得携带或替换 Binding spec；不增加全局 `resourceVersion`。
-6. 每次 reconcile 都重新读取最新 Binding，并从当前意图的起点执行。plan、prepared 和
-   Client 返回结果只在本次调用内使用，不跨调用缓存，不落库，不实现断点续做。
+6. 每次新远端尝试都读取最新 Binding 并重新 translate/prepare。plan、prepared 不跨调用
+   缓存、不落库；存储失败时保留原写入及已获得的结果，先确认提交再开始下一次远端尝试。
 7. “重新开始”不清空已存在或可能存在的目标。部署身份、清理依据和已确认观察仍须保存。
-8. 持久化采用 Binding 主表加关联 deployment 表作为实施建议；两表不是 SQL 局部更新的必要条件，
-   而是对一对多目标、部分清理及独立生命周期的直接表达。
+8. Deployment 保存于 Binding 行内 JSON 数组；事务读取最新聚合，按窄 patch 条件更新，
+   不接受调用方携带的旧 spec 覆盖当前值。
 9. 继续保持 spec-only revision、不可撤销删除、确认全部目标不存在后移除 Binding 的既有语义。
 10. dirty 只表示运行期间又收到通知，任务退出后需重新排队；自动重试、dirty、新请求及
     进程重启全部采用同一执行路径，不增加 restart 标记或续做模式。
 
-重试预算、终态错误和下次时间是业务控制记录，不是翻译/准备的计算缓存。本设计保留
-“新意图重置、幂等通知和进程重启不重置预算”的约定；从头计算不代表重新获得无限预算。
+重试预算和下次时间是进程内控制记录，终态错误由 Repository 保存；它们不是翻译/准备
+的计算缓存。新意图重置预算，幂等通知不重置；进程重启按第 8.1 节从零开始。
+单次重新执行不重置预算。
 
 ## 2. 组件职责
 
@@ -40,11 +57,11 @@ error injection、进程崩溃和重启恢复测试在 persistent Repository 就
 | `asc-policy-runtime` | 通知合并、排队、worker、到期与恢复调度 |
 | `asc-pcp` | 同步单次 `reconcile(id)`；每次重新读取、计算和执行，返回结果及重试条件 |
 | Repository | 保持 spec 与部署责任独立；一致读取可聚合，写入按所属字段和目标进行条件更新 |
-| 单次临时数据 | plan、prepared request、create/update 判断及 Client 返回结果仅存活于本次调用，不进入 SQL schema |
+| 临时数据 | plan、prepared 和 Client 实例只在本次调用内使用；未确认写入及实际 outcome 保留在进程内 AttemptSchedule，确认后释放 |
 | 时间与恢复 | 预算和 deadline 仅存 WorkQueue，重启重置；状态、错误和目标责任由 Repository 保留 |
 
-源码入口：[内存布局](../../v2/crates/asc-pap-repository-memory/src/lib.rs)、
-[部署存储适配](../../v2/crates/asc-pap-repository-memory/src/binding_state.rs)、
+源码入口：[SQLite 布局](../../v2/crates/asc-policy-repository-sqlite/src/table.rs)、
+[部署存储适配](../../v2/crates/asc-policy-repository-sqlite/src/reconciliation.rs)、
 [共享存储类型](../../v2/crates/asc-policy-repository/src/lib.rs)、
 [单次核心](../../v2/crates/asc-pcp/src/reconciler.rs)、
 [daemon 装配](../../v2/apps/asc-daemon/src/reconciliation.rs)。局部写接口明确字段所有权并减少
@@ -66,11 +83,11 @@ v2/crates/asc-policy-runtime/
 
 | 位置 | 职责 |
 |---|---|
-| `v2/crates/asc-pcp/src/` | 单次认领、重新翻译/准备、远端执行、结果合并和退避计算；本次 slot 仅用于异常收尾，不含执行锁或跨调用缓存；中断尝试的领域恢复决策也归此处 |
+| `v2/crates/asc-pcp/src/` | 单次认领、重新翻译/准备、远端执行、结果合并和退避计算；slot 保存异常收尾及未确认存储操作，不缓存 prepared；中断尝试的领域恢复决策也归此处 |
 | `v2/crates/asc-policy-repository/src/` | 持久化数据、一致读、局部条件写和显式事务端口；不含队列或 prepared 缓存 |
 | `v2/crates/asc-pap/src/` | CRUD 语义、原子接受意图；声明窄 `BindingReconcileEnqueuer` 输出端口，提交后通知 |
 | `v2/crates/asc-pap-repository-memory/src/` | 首阶段实现相同局部更新语义；不依赖核心实现，不承担执行缓存 |
-| `v2/crates/asc-persistence-sqlite/src/policy.rs` 与 `src/policy/`（拟建） | 后续 Binding/deployment 表、事务、扫描和数据库适配；SQLite migration 随该工作包定义 |
+| `v2/crates/asc-policy-repository-sqlite/src/` | Policy、Scope、Binding 三表、事务、写回执、严格打开和恢复扫描 |
 | `v2/apps/asc-daemon/src/reconciliation.rs` | 接收共享 Repository，选择并构造具体 Adapter/Client、核心与 Runtime；main 接 PAP notifier、健康和生命周期 |
 | `v2/apps/asc-daemon/tests/` | Runtime 集成阶段验证装配与生命周期的直接消费者；完整 CLI/daemon 进程链路归独立 E2E PR |
 | `v2/fixtures/reconciliation/` | 核心、调度、存储及恢复的完整数据/trace fixture；不同证据层分别记录 |
@@ -211,8 +228,10 @@ sequenceDiagram
     W->>Q: finish(ID, result)，同时检查 dirty
 ```
 
-只有 Binding 写意图触发下发/删除。GET/LIST 不触发；Policy/Scope 更新不自动改写已有
-Binding 快照。PAP 的 no-op 不重置业务预算；重复通知到达核心仍受最新状态、预算和时间约束。
+只有已保存的 Binding 意图触发下发/删除。新模型中该意图由 Scope 创建后的实例发现、
+实例退出/失配和 Scope 删除产生，用户没有 Binding mutation 入口。GET/LIST 不触发；
+Policy 更新/删除不改变 Scope 内的快照，Scope 本身不可更新。no-op 和重复发现通知
+不重置业务预算；核心仍受最新状态、预算和时间约束。
 
 ### 5.1 Delete 在不同时间到达
 
@@ -230,21 +249,17 @@ APPLY_FAILED。Delete 清理全部仍可能存在的目标，包含旧 revision 
 
 ### 6.1 表与字段所有权
 
-建议 SQL 阶段使用两张表，以下是逻辑字段而非已冻结 DDL：
+SQLite 使用 `policies`、`scopes`、`bindings` 三张表。Deployment 是 Binding 聚合的内部
+JSON 数组，phase/error/status_version 和写回执单独保存；精确 DDL 见
+[持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
 
-| 表 | 内容 | 写权限 |
-|---|---|---|
-| `bindings` | ID、spec、spec revision、status（phase 与安全 error） | PAP 修改 spec 和请求意图；核心只条件更新完整 status |
-| `binding_deployments` | Binding ID、目标 route/ID、来源 revision、cleanup、presence、最近确认信息 | 核心按具体目标登记、更新观察和确认回收 |
+PAP 写管理意图但保留 deployments 与 reconcile 回执；核心的窄 patch 不携带 spec。
+事务内读取最新聚合，status 比较原 expected_version，目标观察验证已有登记及原部署集合。
+同 Binding 的单执行者拥有观察合并权限；比较部署集合只用于检测意外并发写，不能替代所有权。
+目标身份含 route、ID 与 cleanup，旧 revision 的清理责任不能被过滤。AgentSight cleanup 的
+endpoint 必须与当前 Client 配置一致，不能把旧责任发给另一服务。
 
-唯一目标键由 Binding ID 和 Client 的不透明目标身份组成；不得用当前 revision 过滤掉旧清理责任。
-route 必须仍指向原目标配置，不能因配置切换将旧 cleanup 发给另一服务。
-
-SQL `SET` 只更新指定列，同表分列也能保护 spec。分表的理由是一对多和部署记录的独立生命周期，
-不是“没有 resourceVersion 就必须分表”。禁止把整个 Binding+deployments JSON 读出修改后整列覆盖。
-一致读取仍可返回聚合视图，但写接口不再接受包含 spec/prepared 的完整替换对象。
-
-### 6.2 拟议存储操作
+### 6.2 存储操作
 
 下面的名称表达端口职责；生命周期判断、错误分类和退避计算仍归核心，Repository 只实现
 条件谓词、字段更新和事务，不复制一套 reconcile 状态机。
@@ -252,23 +267,15 @@ SQL `SET` 只更新指定列，同表分列也能保护 spec。分表的理由�
 | 操作 | 原子边界 |
 |---|---|
 | PAP 写意图 | 检查当前 Binding，按准入规则更新 spec/status 并清除旧错误；保留 deployments |
-| 条件认领 | 调用方先检查内存到期时间及预算；事务检查 ID/revision/Pending，更新 running 并清除 error；不写 spec |
+| 条件认领 | 调用方先检查内存到期时间及预算；事务检查 ID/revision/status_version/Pending，更新 running 并清除 error；不写 spec |
 | `register_targets` | 检查执行仍被允许，登记本次将操作的目标及 UNKNOWN；提交后才允许目标修改 |
 | `record_observations` | 只合并已登记且归属有效的目标记录；不修改 spec；可单独调用 |
-| `commit_attempt` | 显式事务：合并目标观察；仅在认领的 revision/status 仍匹配时更新状态和错误 |
-| `finalize_delete` | 同一事务检查删除意图、所有目标均确认不存在，再移除 Binding 和关联记录 |
+| `commit_attempt` | 显式事务：合并目标观察；仅在认领的 revision/status_version/status 仍匹配时更新状态和错误 |
+| `finalize_delete` | 同一事务检查删除意图、所有目标均确认不存在，再移除 Binding 和关联记录；若是最后一条 Binding，且父 Scope 已进入 Deleting 并停止 discovery，同时删除 Scope |
 
-例如状态更新可使用：
-
-```sql
-UPDATE bindings
-SET status = :next_status
-WHERE binding_id = :id
-  AND revision = :expected_revision
-  AND status = :expected_status;
-```
-
-受影响行数为 0 表示条件不匹配，不表示远端失败。真实完成事务还需更新相应重试/错误字段。
+实现使用 `BEGIN IMMEDIATE` 事务，在 Rust 中检查原 ID/revision/status_version/status，
+再写入最新聚合；不是把事务外旧快照无条件写回。真实 phase/error 变化递增 status_version，
+no-op 和仅 deployment 观察不增版。条件不匹配不表示远端失败。
 旧 Apply 与新 Delete 相遇时，`commit_attempt` 可以成功保存目标观察，同时返回 lifecycle
 未匹配；不能因为状态条件不匹配而回滚掉合法观察，也不能为了保存观察而覆盖新意图。
 
@@ -276,17 +283,20 @@ WHERE binding_id = :id
 不新增全局 resourceVersion，也不把 spec revision 当成状态计数器。这个方案依赖单 host
 daemon ownership；将来允许多个进程同时写同一 Binding 时，必须另行定义跨进程执行约束。
 所有涉及“目标清空 + 删除 Binding”的检查和修改必须同事务，不能用两次独立调用假装原子。
+Scope 删除流程也在该事务中收尾：全部子 Binding 删除后，移除已停止 discovery 的 Scope
+及其快照。无子 Binding 时由停止 discovery 的完成操作直接删除 Scope；Active Scope 变空仍保留。
 
 数据库写结果不确定时，明确提交回执/事务结果查询或幂等确认的契约；不得重试一条会把
 新 PENDING_DELETE 改回旧状态的无条件写。控制性回执可以记录操作 ID，但不得夹带完整
 Binding 快照、Adapter plan 或 prepared 请求来变相持久化计算缓存。
 
-## 7. 每次从头执行，不做断点续做
+## 7. 远端尝试与存储确认
 
 ### 7.1 单一执行路径
 
 无论首次通知、自动重试、dirty、新请求还是进程重启，worker 都只调用 `reconcile(id)`。
-不提供 Resume/Restart 两种模式，不维护步骤游标或跨调用执行缓存。
+不提供 Resume/Restart 两种模式，不维护远端步骤游标。若上次写入尚未确认，先重放
+原 write_id/条件/patch 核实回执，完成存储收尾后才允许下一次远端尝试。
 
 ```text
 读取最新 Binding spec/status、重试控制与 deployment
@@ -297,21 +307,22 @@ Binding 快照、Adapter plan 或 prepared 请求来变相持久化计算缓存�
     → Apply：先登记本次目标身份与 UNKNOWN；Delete：保留既有目标责任
     → Client.create/update/delete
     → 提交目标观察及条件状态更新
-    → 返回本次结果，释放临时数据
+    → 提交已确认则返回结果；存储失败则保留原写入与 outcome，释放 worker 等待存储恢复
 ```
 
-plan、prepared、create/update 判断和 Client 返回值只在一次调用中存活。同一调用内部
-prepare 产生的请求必须原样交给 Client，不能在发送前偷偷改写身份；下一次调用则重新准备。
-无需 `SavedApply` 缓存或跨调用 `pending outcome`。WorkQueue 保持 Running，直到实际调用和
-本次收尾退出。核心的局部 `slot` 仅保存本次结果及待写回凭据，供可捕获的 panic 收尾使用；
-调用退出后丢弃，进程崩溃时不会写回。
+plan、prepared、create/update 判断只在一次远端尝试中存活。同一调用内部 prepare 的请求
+必须原样交给 Client；下一次远端尝试重新准备并读取凭据。核心的 slot 保存原 expected
+快照、write_id、patch 及已获得的 outcome，用于存储重试和可捕获的 panic 收尾。
+存储等待期间释放 worker，但该 Binding 的逻辑所有权继续保留；不能被补扫或新通知替换。
+进程崩溃会丢失这个临时 slot，重启仅依据 SQLite 内的责任与回执恢复。
 
 ### 7.2 保留什么，重新计算什么
 
 | 内容 | 跨调用处理 |
 |---|---|
 | 最新 spec/status | 每次从 Repository 读取，不使用旧 Binding 副本 |
-| Adapter plan / Client prepared / 本次返回结果 | 不缓存、不落库；本次退出后释放 |
+| Adapter plan / Client prepared | 不缓存、不落库；远端尝试退出后释放 |
+| 未确认 write / 实际 outcome | 存储失败时在 AttemptSchedule 内保留原内容；确认后释放，不落库、不跨进程 |
 | deployment 的身份、cleanup、已确认观察 | 保留，作为外部目标责任；每次读取最新记录 |
 | 重试次数、退避 | WorkQueue 持有 AttemptSchedule；自动重试保留，新请求/重启重置 |
 | 状态及错误 | Repository 中的 BindingView.status 是唯一来源；认领时清除旧错误 |
@@ -326,19 +337,18 @@ create/update 的选择也根据最新目标集合及具体 Client 契约重新�
 可重试的 Client 失败先提交观察和 Pending/error，再返回 RetryAt；重试次数与 deadline 保留在调用方的内存进度；worker 释放执行资源，
 到期后重新调用整个流程。dirty 只保证当前调用退出后再次排队，不承担缓存失效语义。
 
-若结果提交失败，本次调用可以使用其仍持有的结果进行有界的事务重试；这不构成跨调用
-断点。调用返回 StoreError 后不保留待补写结果，下次只能依据 Repository 重新判断：
+若写入失败，保留原 write_id、原 expected_version/条件、patch 和实际 outcome。
+下一次调度先检查存储并重放原写入确认回执，不创建替代 write_id，不改用最新版本强行完成旧操作。
 
-- 存储不可用时停止新的目标修改，报告健康问题，并有界安排存储恢复检查。
-- 若上次结果实际已提交，读取保存的 pending/终态，不能无条件重发请求。
-- 若仍为 APPLYING/DELETING，必须先确认旧本地调用已完整退出，再条件恢复为 pending
-  或预算耗尽的 FAILED；保留已消耗次数，不把本进程仍在运行的任务当成 orphan。
-- 若新 Delete 已提交，保留其意图和预算，直接进入删除路径；旧 Apply 不能将其改回。
-- 远端结果未确认写入时保留 UNKNOWN/旧目标责任。后续可能重复远端请求，不能承诺
-  “只补写、不重复 Client 调用”；能否核对或安全重放由具体 Client 的契约保证。
+- BUSY、FULL、只读或 I/O 故障暂停新的目标修改；退避释放 worker，保留 Binding 逻辑所有权。
+- 存储重试不消耗远端或自动重试预算；已发出的远端尝试仍计数。
+- 原写入已提交则通过 AlreadyApplied 确认；尚未提交则按原条件写入或报告冲突。
+- 旧结果合法观察可独立合并；新的 Delete/status_version 不会被旧 Ready 或失败覆盖。
+- 损坏与不兼容关闭该 Repository 的写入和目标 I/O，需要人工修复及重新启动。
+- 真正进程崩溃时 slot 丢失；恢复 UNKNOWN/旧目标责任后按 Client 契约安全重放。
 
-目标登记必须先于修改性 I/O，且包含足够清理信息。这样即使丢弃本次结果，也不会把可能
-已经创建的目标当成不存在。部分结果能提交时应提交；从头执行不允许主动删除已有部署责任。
+目标登记必须先于修改性 I/O，且包含足够清理信息。部分结果能提交时应提交；存储故障和
+重新执行都不能主动删除已有部署责任。存储恢复细节见 SQLite 设计第 7 节。
 
 ## 8. 重启恢复及 Client 验收边界
 
@@ -378,38 +388,40 @@ tick 仍为 O(entries) 扫描。当前没有高负载性能证据，不引入额
 | 远端部分/全部成功、观察提交前 | 本地只有 UNKNOWN 或旧观察；重新准备后按 Client 契约核对/安全重放 |
 | 结果事务已提交 | 按保存的 pending/终态判断后续动作，不无条件重做已完成 Binding |
 
-从头执行不承诺 exactly-once，也无法消除“远端成功但本地不知道”的窗口。结果未提交且
-调用已退出时，即使进程未崩溃也不保留可补写缓存；后续依据持久化事实核对或安全重放。
+从头执行不承诺 exactly-once，也无法消除“远端成功但本地不知道”的窗口。同进程的
+存储失败先确认原写入；真正进程崩溃后临时结果不复存在，依据持久责任核对或安全重放。
 
 ### 8.3 重新准备与安全重放的 Client 契约
 
-AgentSight `PreparedRequest` 在本次调用中保存 boot ID、包含 process start time 的请求字节及
-请求摘要。Client 在下发前校验请求完整性，并检查当前进程身份仍与本次 prepare 一致。
-这些数据随本次调用结束而释放，不作为下一次执行的断点。
+Assignment Binding 保存发现时的固定进程身份。Apply 在 prepare 和请求前核对 boot ID、
+PID namespace、PID、start time；PID reuse 拒绝旧 Binding 下发，PID selector 不跟随新实例。
+名称/path selector 可以为新匹配实例创建独立 Binding，恢复 seed 保留已知但暂时不可读的实例。
 
-`TargetRef.cleanup` 只包含 schema version 1、Binding ID 和 Binding revision，用于推导删除
-目标。它不保存 boot ID、PID、process start time 或请求摘要，也不承担跨次身份比对。
-每次重试都按当前进程状态重新 prepare；首版不保证不同尝试解析到同一个进程实例。
-核心对不透明 TargetRef 的一致性检查仅覆盖实际保留的目标 ID、路由及清理参数。
+AgentSight `PreparedRequest` 保留本次身份、请求字节和摘要，Client 校验完整性后发送；
+下一次远端尝试重新 prepare，不能用数据库存放请求体或凭据。
+`TargetRef.cleanup` schema version 2 保存 Binding ID/revision 和规范化非敏感 endpoint。
+使用 cleanup 的 create/update/delete 都在 HTTP/preflight 前比较 endpoint；不从库中地址建立
+连接，不将 endpoint 变化当作目标不存在，不接受缺少 endpoint 的旧编码。
+每次 factory 创建 Client 时重新读取凭据，同 endpoint 的 token 轮换不改变目标责任。
 
-Delete 使用原 cleanup，不要求原进程仍然存活；已登记的 UNKNOWN 和清理责任继续保留。
-源码见 [Client reconciliation](../../v2/crates/asc-agentsight-client/src/client/reconciliation.rs)。
-组件测试分别验证 Cleanup 的最小字段、重新准备采用当前身份，以及本次准备后身份改变时
-拒绝下发。远端重复请求的处理仍由 Client/目标协议决定；跨重启恢复及系统性 error injection
-等待 persistent Repository，不以本次校验宣称已解决跨次进程身份连续性。
+Delete 使用已登记的 cleanup，不要求原进程存活。源码见
+[Client reconciliation](../../v2/crates/asc-agentsight-client/src/client/reconciliation.rs)，
+测试见 [factory](../../v2/crates/asc-agentsight-client/tests/factory.rs)。地址相同但远端实例被替换、
+真实 AgentSight 重放行为及内核执行需要独立验收。
 
 ## 9. 后台服务生命周期
 
-- **触发**：PAP 提交后通知、retry 到期、补偿扫描；SQL 阶段增加启动恢复。
+- **触发**：PAP 提交后通知、retry 到期、补偿扫描及 SQLite 启动恢复。
 - **readiness**：Binding 写准入前，Runtime 和通知入口必须可用，启动恢复已建立所有权。
-  Policy/Scope CRUD 不检查 reconciliation；各自 Repository 操作返回真实存储错误。
-  这不是整个 daemon 的启动条件。Client 凭据与远端状态在尝试内检查。
+  创建 Scope 需要 discovery 与 Runtime 可用；Policy 写入、查询和 Scope 删除分别处理
+  Repository/通知错误，不以单个 Binding 的业务失败关闭准入。
+  SQLite 打开、恢复装配或 Runtime 启动失败会阻止 daemon 开放 UDS；Client 凭据与远端状态在尝试内检查。
   恢复枚举可与有界 worker 协作，不能等待所有目标 READY 才宣布服务可接受请求。
 - **失败边界**：单 Binding 的业务 FAILED、存储/数据错误及 CAS 耗尽不使整个服务失败。
-  单次错误由 WaitingRetry 保留重试责任，队列预算耗尽后先写 Failed 再释放 slot，无法确认时才由 Exhausted 阻止补扫重启；不另存 storage_errors 集合。不能写入 Binding 错误时
+  存储故障由 WaitingRetry 保留原写入和逻辑所有权，不消耗队列/远端预算；业务失败仍按预算先写 Failed 再释放 slot。不能写入 Binding 错误时
   输出安全诊断，不宣称远端失败。单次 reconcile panic 经核心收尾后在 worker 调用边界捕获；
   原意图仍 Pending/Running 时条件写 Failed（RECONCILE_WORKER_PANICKED）；确认成功或已终态/缺失则移除条目。
-  无法确认则保留 Exhausted，worker 继续处理其它 ID。调度中的 Skipped 查询也在单 Binding panic 隔离边界内。收尾查询错误或
+  有未确认存储操作时继续存储退避；其它无法确认的异常保留 Exhausted，worker 继续处理其它 ID。调度中的 Skipped 查询也在单 Binding panic 隔离边界内。收尾查询错误或
   panic 视为结果未确认；dirty 始终优先。补扫失败影响 health，但不关闭写准入。
   Runtime 停止、timer/scanner 或 worker 队列内部维护代码 panic/join 失败关闭新的 Binding 写准入，
   保留已有意图；Policy/Scope CRUD 和读查询独立处理。
@@ -434,16 +446,18 @@ Delete 按保存的 route 各创建一个实例，同路由的目标共用它。
 目标地址、默认 token 文件及凭据读取由 Client 所有，不暴露到 daemon/CLI 参数或 CRUD request。
 凭据缺失、暂时不可读或内容无效作为本次 Binding 的 retryable failure，下一次尝试重新读文件；
 连接失败沿用 Client 的重试分类。两者均不阻止 daemon 启动，也不降低 queue 健康。
-Runtime 初始化失败时，daemon 记录安全错误并继续开放 UDS；注入不可用的通知入口，
-仅对 Binding mutation 返回既有准入错误，保留 Policy/Scope CRUD、读查询和其它服务。
+Runtime 初始化失败时，daemon 记录安全错误并退出，不开放 UDS。
 单次 reconcile panic 不关闭服务；timer/scanner 或 worker 调度代码异常关闭 Binding mutation
 准入并停止领取，但不主动关闭 daemon。首版不自动重建失败的
 Runtime，需通过进程重启恢复服务，不能把未启动的通知入口设为 None 后接受写请求。
-这不改变内存 Repository 重启丢失意图和目标记录的限制。
+数据库 lease 保留到外层 Tokio drain 结束；超时后由进程退出截断未完成调用，重启按持久责任恢复。
 
 ## 10. 内部变更记录与验收
 
 ### 10.1 设计变更记录
+
+下列 CR-010～021 保留原阶段历史。SQLite 阶段由本文第 6～9 节覆盖：原 slot 仅用于单次
+收尾的限制扩展为存储确认期间保留；cleanup 增加 endpoint；Runtime 启动失败终止 daemon。
 
 | 编号 | 原提案 | 新目标 |
 |---|---|---|
@@ -506,19 +520,18 @@ Client 初始化边界由 `asc-pcp/tests/client_initialization.rs` 和
 | RRT-009 | 旧 revision/status 不推进新生命周期，合法观察可独立提交 | 内存 Repository/核心竞争测试 | SQL 事务竞争验证 |
 | RRT-010 | 登记先于 Client；确认全部目标不存在后原子删除；登记失败不调用远端 | 正常路径的顺序/删除原子性组件测试 | 登记失败、事务失败注入 |
 | RRT-011 | 无 dirty 的自动重试也重新读取并执行 translate/prepare，不复用上次对象；本次准备结果原样交给 Client | 重算次数、完整输入、身份校验、安全重放和调用顺序的组件测试 | — |
-| RRT-012 | 存储写入与跨调用上下文无 plan/prepared/body/pending outcome；每次及新进程均重新计算 | 数据模型、单次生命周期和内存写接口测试 | SQL schema 与真实新进程验证 |
+| RRT-012 | SQL 无 plan/prepared/body/outcome；新远端尝试与新进程均重新计算，存储等待保留原 write/outcome | 数据模型、单次生命周期和内存写接口测试 | SQL schema 与真实新进程验证 |
 | RRT-013 | 重启恢复 running、pending、部分目标，终态不自动重试 | 不作 Runtime 集成阶段门禁 | SQL 关闭重开、进程终止与恢复 |
 | RRT-014 | 重建队列重置次数和 deadline；Failed 不自动重试 | BQA-011 及已有终态跳过测试 | 持久化状态与部署责任恢复另验 |
 | RRT-015 | 远端成功但观察未提交保留 UNKNOWN，重新准备及身份变化按 Client 恢复契约处理 | 不作 Runtime 集成阶段系统性注入门禁 | 提交窗口注入、PID/boot/route 变化及 Client 恢复契约 |
 | RRT-016 | 取消/停机及异常保留 ownership 至真实退出，health 正确 | 正常取消、drain/join、生命周期组件测试 | worker panic、存储故障、强制退出等注入 |
 | RRT-017 | dirty/新通知及自动重试均走从头执行路径；读取新 spec 时 Client 只收到新请求；Delete 不调用 Adapter | Queue/核心/Runtime 组件与竞争测试 | — |
-| RRT-018 | 结果提交失败不伪造完成、不遗忘目标；调用退出后无补写缓存；恢复存储中的状态后从头执行，不覆盖新 Delete 或重置预算 | 恢复交接契约与按新语义更新的相关回归 | 模糊提交、dirty 竞争及 UNKNOWN 安全重放注入 |
+| RRT-018 | 结果提交失败保留原 write/outcome；先核实原回执，不覆盖新 Delete、不消耗存储等待预算、不重复已确认完成的远端调用 | 恢复交接契约与按新语义更新的相关回归 | 模糊提交、dirty 竞争及 UNKNOWN 安全重放注入 |
 
 Queue 竞争使用 barrier/虚拟时间，不用真实 sleep 猜时序。组件测试可用 scripted
 Client 返回 RetryAt 所需结果，不引入完整进程链路的系统性 error injection 框架。
-延期新增系统性故障注入不代表跳过已有核心/Client 的相关错误分支回归。被 CR-014 替代的
-缓存复用、只补记账不重发断言须改为每次重算及安全重放断言；目标责任、最新意图和预算
-保护继续验证。被修改的接口须同步完整 fixtures 和直接消费者。
+已有核心/Client 错误分支继续回归。每次新远端尝试重新准备；同进程结果提交失败先确认
+原写入，真正进程崩溃才依赖持久责任安全重放。接口同步完整 fixtures 和直接消费者。
 
 存储测试比较完整 spec、目标记录、retry 控制与未发生的写入。后续跨重启测试必须丢弃
 上次调用的全部临时数据，不能把旧 prepared 或结果对象带过去。mock HTTP 只证明本地协议组合，

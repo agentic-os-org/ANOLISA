@@ -99,7 +99,7 @@ revision、搜索路径、已有测试和未自动验证项；不使用构建产
    daemon 构造可信 Principal。客户端自报的 UID、role、scope 只能作为不可信输入。
 4. QueryScope 由服务端生成并与请求 filter 求交。普通 principal 只能访问 owner scope，
    auditor/admin 才能跨 UID。
-5. CLI/TUI 不得直读 SQLite，不得绕过 daemon 直接调用 Compiler、PCP 或 Repository。
+5. CLI/TUI 不得直读 SQLite，不得绕过 daemon 直接调用 PCP 或 Repository。
 6. 恢复完成后 daemon 才进入 READY；shutdown 先停止 admission，再 drain 或 checkpoint。
 
 ### 3.3 运行时与领域边界
@@ -116,9 +116,8 @@ revision、搜索路径、已有测试和未自动验证项；不使用构建产
   cancellation、finalizer 和 observation projection。
 - 具体 security capability 实现 CapabilityExecutor；不得使用 SecurityBackend 统称
   capability、context provider、enforcement adapter 和 persistence adapter。
-- Policy Compiler/PAP、Policy Runtime、PCP 与 security capability 通过稳定的
-  Evidence/AttributeBundle、PreparedPolicy、Binding、Receipt 等合同协作；capability 不依赖
-  Policy Compiler，PCP 不依赖 compiler。
+- PAP、Policy Runtime、PCP 与 security capability 通过稳定的
+  Evidence/AttributeBundle、PreparedPolicy、Binding、Receipt 等合同协作；模板校验由 Policy 领域负责，目标 DSL 由 Adapter 生成。
 - Repository、Client、Sink 是 adapter port。具体 SQLite、HTTP、AgentSight 或模型实现由
   asc-daemon 装配，不反向渗入 domain/runtime crate。
 - JobSupervisor 首版只负责已注册长期 task 的 ownership、取消、shutdown、轻量 health 和
@@ -245,7 +244,7 @@ asc-state-migrator 必须定义并验证：
 - 产品入口：asc-daemon、agent-sec-cli、asc-state-migrator；
 - daemon：asc-daemon-protocol、asc-daemon-service、asc-daemon-handler、asc-daemon-core；
 - action：asc-action-types、asc-evidence-types、asc-action-runtime 和各 asc-capability-*；
-- policy：asc-policy-types、asc-policy-target-contracts、asc-policy-repository、asc-policy-engine、asc-policy-runtime、asc-pap、asc-pcp；
+- policy：asc-policy-types、asc-policy-target-contracts、asc-policy-repository、asc-policy-runtime、asc-pap、asc-pcp；模板在 types 中校验，由目标 Adapter 从 Binding 快照直接编译；
   其中 asc-policy-target-contracts 只定义共享 Adapter/Client trait，依赖纯数据契约
   asc-policy-types；Reconciler 与具体 PEP 实现均依赖该共享层，而不互相依赖实现。
 - data：asc-security-events、asc-observability、asc-session、asc-state、
@@ -337,7 +336,7 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 - 两个不同 UID/Agent 通过同一 system socket 访问且 owner scope 隔离；
 - caller 自报 UID/role/scope 不能提升权限；
 - normal principal 不能跨 owner 查询，auditor/admin 受显式授权；
-- CLI/TUI 无直接 SQLite、Compiler 或 PCP 绕过路径；
+- CLI/TUI 无直接 SQLite 或 PCP 绕过路径；
 - 外部 job 保留 owner principal，内置任务使用 System principal。
 
 ### 7.3 安全事件与 tracing
@@ -388,7 +387,7 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 | 为“全 Rust”静默破坏外部接口 | compatibility inventory、versioned replacement、change record |
 | crate 并行导致 contract 漂移 | 每任务固定 direct dependency revision，消费者 contract test |
 | system daemon 引入跨 UID 数据泄露 | trusted Principal、server QueryScope、多 UID E2E |
-| CLI 或 TUI 绕过 daemon 授权 | 禁止直读 SQLite/Compiler/PCP，架构依赖检查和黑盒测试 |
+| CLI 或 TUI 绕过 daemon 授权 | 禁止直读 SQLite/PCP，架构依赖检查和黑盒测试 |
 | timeout/断开后副作用状态不明 | supervisor ownership、operation status/receipt、禁止客户端重放 |
 | audit 自动复制敏感字段 | 每 action 显式 projector，默认 deny，隐私 fixture |
 | OTel 故障影响安全功能 | tracing/export 与 ActionResult、SecurityEvent sink 隔离 |
@@ -398,7 +397,7 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 ### OTel tracing 基础切片落地
 
 `asc-observability` 已提供统一 OTel Context、Agent Baggage、兼容输入及只读关联快照；
-CLI/client/daemon/PAP/compiler 已接线，产品 main 启用 runtime feature 和可选 OTLP。
+CLI/client/daemon/PAP 已接线，产品 main 启用 runtime feature 和可选 OTLP。
 该基础设施不依赖尚未落地的 Action Runtime、安全事件 Rust sink 或本地链路重组。
 协议/部署/中间件契约同步记录 TARGET V2 条款，V1 实现继续仅作为冻结输入 oracle。
 实施、验收边界及 server-first/caller-first 回滚顺序见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。

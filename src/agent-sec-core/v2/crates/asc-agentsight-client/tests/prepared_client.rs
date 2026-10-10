@@ -39,27 +39,27 @@ fn existing_prepared_attribution_is_replayed_without_rewriting() {
 }
 
 #[test]
-fn scope_revision_is_optional_provenance_and_does_not_change_prepared_request() {
+fn plans_reject_scope_revision_and_pin_all_process_identity_fields() {
     let wire = Wire::new([]);
     let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
-    let original = client.prepare_apply(&plan(7)).unwrap();
-    for revision in [Some(4), None] {
+    assert!(client.prepare_apply(&plan(7)).is_ok());
+    for field in ["startTime", "bootId", "pidNamespace"] {
         let mut input = plan(7);
         let mut value: Value = serde_json::from_slice(&input.content).unwrap();
-        if let Some(revision) = revision {
-            value["source"]["scopeRevision"] = json!(revision);
-        } else {
-            value["source"]
-                .as_object_mut()
-                .unwrap()
-                .remove("scopeRevision");
-        }
+        value["scope"]["process"][field] = match field {
+            "startTime" => json!(987_655),
+            "bootId" => json!("20000000-0000-4000-8000-000000000002"),
+            _ => json!("pid:[43]"),
+        };
         input.content = serde_json::to_vec(&value).unwrap();
-        assert_eq!(client.prepare_apply(&input).unwrap(), original);
+        assert_eq!(
+            client.prepare_apply(&input).unwrap_err().code,
+            "AGENTSIGHT_PROCESS_IDENTITY_CHANGED"
+        );
     }
     let mut invalid = plan(7);
     let mut value: Value = serde_json::from_slice(&invalid.content).unwrap();
-    value["source"]["scopeRevision"] = json!(0);
+    value["source"]["scopeRevision"] = json!(1);
     invalid.content = serde_json::to_vec(&value).unwrap();
     assert_eq!(
         client.prepare_apply(&invalid).unwrap_err().code,

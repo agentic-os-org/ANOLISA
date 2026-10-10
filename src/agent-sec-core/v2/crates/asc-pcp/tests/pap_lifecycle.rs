@@ -3,21 +3,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use asc_foundation_types::Revision;
-use asc_pap::{PapError, PapRepository, PapService, PolicyCompiler};
+use asc_pap::{PapError, PapRepository, PapService};
 use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_pcp::*;
-use asc_policy_types::authoring::TemplateEnvelope;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
-use asc_policy_types::error::ValidationError;
-use asc_policy_types::policy::PolicyEnvelope;
 use asc_policy_types::target::{AdapterFault, TargetBindingPlan, TranslationOutcome};
-
-struct UnusedCompiler;
-impl PolicyCompiler for UnusedCompiler {
-    fn lower(&self, _: &TemplateEnvelope) -> Result<PolicyEnvelope, ValidationError> {
-        panic!("Binding operations must use the stored Policy snapshot")
-    }
-}
 
 #[derive(Default)]
 struct Script {
@@ -98,7 +88,7 @@ impl TargetDeploymentClient for Client {
 }
 struct Rig {
     repo: Arc<ProcessLocalPapRepository>,
-    pap: PapService<ProcessLocalPapRepository, UnusedCompiler>,
+    pap: PapService<ProcessLocalPapRepository>,
     client: Arc<Client>,
     core: BindingReconciler,
     binding: BindingView,
@@ -108,35 +98,25 @@ impl Rig {
         Self::with_revision(1)
     }
     fn with_revision(revision: u32) -> Self {
-        let repo = Arc::new(ProcessLocalPapRepository::default());
         let mut spec: PreparedBinding = serde_json::from_str(include_str!(
             "../../asc-policy-types/tests/fixtures/prepared-binding.json"
         ))
         .unwrap();
-        spec.scope.revision = Revision::new(1).unwrap();
-        repo.put_policy(&spec.policy).unwrap();
-        repo.put_scope(&spec.scope).unwrap();
-        let pap = PapService::new(repo.clone(), Arc::new(UnusedCompiler));
-        let binding = pap
-            .create_binding(
-                &spec.policy.policy_id,
-                spec.policy.revision,
-                &spec.scope.scope_id,
-                spec.scope.revision,
-            )
-            .unwrap();
-        let mut binding = binding;
-        binding.spec.binding_revision = Revision::new(revision).unwrap();
+        spec.binding_revision = Revision::new(revision).unwrap();
+        let binding = BindingView {
+            spec: spec.clone(),
+            status: BindingStatus::PendingApply.into(),
+        };
         let repo = Arc::new(
             ProcessLocalPapRepository::with_binding_states(vec![ReconcileRecord {
+                status_version: 1,
                 binding: binding.clone(),
                 deployments: vec![],
             }])
             .unwrap(),
         );
         repo.put_policy(&spec.policy).unwrap();
-        repo.put_scope(&spec.scope).unwrap();
-        let pap = PapService::new(repo.clone(), Arc::new(UnusedCompiler));
+        let pap = PapService::new(repo.clone()).with_scope_discovery(Arc::new(Discovery));
         let client = Arc::new(Client::default());
         let adapter = |binding: &PreparedBinding| -> Result<TranslationOutcome, AdapterFault> {
             Ok(TranslationOutcome::Translated(TargetBindingPlan {
@@ -175,15 +155,19 @@ impl Rig {
             .unwrap()
             .unwrap()
     }
+    fn delete(&self) -> Result<BindingView, PapError> {
+        self.pap.delete_scope(&self.binding.spec.scope.scope_id)?;
+        self.pap.get_binding(&self.binding.spec.binding_id)
+    }
     fn apply(&self) -> Result<BindingView, PapError> {
         let spec = &self.binding.spec;
-        self.pap.update_binding(
-            &spec.binding_id,
-            &spec.policy.policy_id,
-            spec.policy.revision,
-            &spec.scope.scope_id,
-            spec.scope.revision,
-        )
+        if self.pap.get_scope(&spec.scope.scope_id)?.status
+            == asc_policy_types::scope::ScopeStatus::Deleting
+        {
+            return Err(PapError::OperationInProgress);
+        }
+        self.pap.retry_scope(&spec.scope.scope_id)?;
+        self.pap.get_binding(&spec.binding_id)
     }
 }
 
@@ -230,7 +214,7 @@ fn deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fres
         Disposition::Completed
     );
     let ready = rig.state();
-    let pending = rig.pap.delete_binding(id).unwrap();
+    let pending = rig.delete().unwrap();
     assert_eq!(pending.spec, ready.binding.spec);
     assert_eq!(rig.state().deployments, ready.deployments);
     assert_eq!(rig.state().binding.status.error, None);
@@ -245,11 +229,12 @@ fn deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fres
     let failed = rig.state();
     assert_eq!(failed.binding.status.phase, BindingStatus::DeleteFailed);
     assert_eq!(rig.apply(), Err(PapError::OperationInProgress));
-    assert_eq!(rig.pap.delete_binding(id).unwrap(), pending);
+    assert_eq!(rig.delete().unwrap(), failed.binding);
+    rig.pap.retry_scope(&spec.scope.scope_id).unwrap();
     assert_eq!(rig.state().deployments, failed.deployments);
     assert_eq!(rig.state().binding.status.error, None);
     let retry = rig.state();
-    assert_eq!(rig.pap.delete_binding(id).unwrap(), pending);
+    assert_eq!(rig.delete().unwrap(), pending);
     assert_eq!(
         rig.state(),
         retry,
@@ -265,7 +250,7 @@ fn deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fres
     assert_eq!(rig.repo.get_binding_state(id).unwrap(), None);
     assert_eq!(rig.pap.get_binding(id), Err(PapError::NotFound));
     assert_eq!(rig.apply(), Err(PapError::NotFound));
-    assert_eq!(rig.pap.delete_binding(id), Err(PapError::NotFound));
+    assert_eq!(rig.delete(), Err(PapError::NotFound));
     assert!(rig.pap.list_bindings(100, 0).unwrap().items.is_empty());
     assert_eq!(
         rig.core
@@ -273,15 +258,23 @@ fn deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fres
             .unwrap(),
         Disposition::Skipped
     );
-    let fresh = rig
+    let scope = rig
         .pap
-        .create_binding(
-            &spec.policy.policy_id,
-            spec.policy.revision,
-            &spec.scope.scope_id,
-            spec.scope.revision,
+        .create_scope_assignment(
+            &spec.scope.selector,
+            &[asc_policy_types::scope::PolicyReference {
+                policy_id: spec.policy.policy_id.clone(),
+                policy_revision: spec.policy.revision,
+            }],
         )
         .unwrap();
+    asc_pap::ScopeBindingSink::sync_instances(
+        &rig.pap,
+        &scope.scope_id,
+        std::slice::from_ref(&spec.scope.process),
+    )
+    .unwrap();
+    let fresh = rig.pap.list_bindings(100, 0).unwrap().items.remove(0);
     assert_ne!(fresh.spec.binding_id, *id);
     assert_eq!(fresh.spec.binding_revision.get(), 1);
     assert_eq!(
@@ -307,22 +300,13 @@ fn spec_change_clears_prepared_but_keeps_previous_target_for_cleanup() {
         .reconcile(id, &mut asc_pcp::AttemptSchedule::default())
         .unwrap();
     let ready = rig.state();
-    let scope = rig
-        .pap
-        .update_scope(
-            &rig.binding.spec.scope.scope_id,
-            &asc_policy_types::scope::ScopeSelector::Pid { pid: 9000 },
-        )
-        .unwrap();
-    let next = rig
-        .pap
-        .update_binding(
-            id,
-            &rig.binding.spec.policy.policy_id,
-            rig.binding.spec.policy.revision,
-            &scope.scope_id,
-            scope.revision,
-        )
+    // Internal revision compatibility: persisted older revisions may still require cleanup.
+    let mut next = ready.binding.clone();
+    next.spec.binding_revision = Revision::new(2).unwrap();
+    next.spec.scope.process.start_time += 1;
+    next.status = BindingStatus::PendingApply.into();
+    rig.repo
+        .update_binding(Some(&(&ready).into()), &next)
         .unwrap();
     assert_eq!(next.spec.binding_revision.get(), 2);
     assert_eq!(rig.state().deployments, ready.deployments);
@@ -353,24 +337,14 @@ fn maximum_revision_allows_same_spec_retry_and_delete_but_rejects_spec_change() 
         Disposition::Failed { .. }
     ));
     assert_eq!(rig.apply().unwrap(), rig.binding);
-    let scope = rig
-        .pap
-        .update_scope(
-            &rig.binding.spec.scope.scope_id,
-            &asc_policy_types::scope::ScopeSelector::Pid { pid: 9000 },
-        )
-        .unwrap();
+    let before = rig.state();
+    let mut changed = before.binding.clone();
+    changed.spec.scope.process.start_time += 1;
     assert_eq!(
-        rig.pap.update_binding(
-            id,
-            &rig.binding.spec.policy.policy_id,
-            rig.binding.spec.policy.revision,
-            &scope.scope_id,
-            scope.revision
-        ),
-        Err(PapError::RevisionExhausted)
+        rig.repo.update_binding(Some(&(&before).into()), &changed),
+        Err(PapError::Conflict)
     );
-    assert_eq!(rig.pap.delete_binding(id).unwrap().spec, rig.binding.spec);
+    assert_eq!(rig.delete().unwrap().spec, rig.binding.spec);
     assert_eq!(
         rig.core
             .reconcile(id, &mut asc_pcp::AttemptSchedule::default())
@@ -378,4 +352,14 @@ fn maximum_revision_allows_same_spec_retry_and_delete_but_rejects_spec_change() 
         Disposition::Completed
     );
     assert_eq!(rig.pap.get_binding(id), Err(PapError::NotFound));
+}
+
+struct Discovery;
+impl asc_pap::ScopeDiscovery for Discovery {
+    fn start(&self, _: &asc_pap::ScopeDiscoverySeed) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
+    fn stop(&self, _: &asc_foundation_types::ResourceId) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
 }

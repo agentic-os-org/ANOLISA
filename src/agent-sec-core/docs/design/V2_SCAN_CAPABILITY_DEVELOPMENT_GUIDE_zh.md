@@ -57,7 +57,7 @@
 | `v2/crates/asc-foundation-types/` | `identifier.rs`、`revision.rs` 中的共享值类型 | 按需要复用；扫描专属类型放在 Action 领域 |
 
 当前 `MethodId` 只有 `Pap`，`AccessPolicy` 只有 `PolicyAdministrator`。
-`v2/apps/asc-daemon/src/main.rs` 装配的是 `PapService`、编译器和 process-local Repository。
+`v2/apps/asc-daemon/src/main.rs` 装配的是 `PapService` 和 SQLite Repository。
 `v2/crates/action/`、`v2/crates/data/`、`v2/apps/asc-cli/` 尚不存在。
 
 具体入口见 [dispatcher.rs](../../v2/crates/asc-daemon-handler/src/dispatcher.rs)、
@@ -99,7 +99,7 @@ flowchart LR
 - 公共扫描 request/output 放在 `asc-action-types`；不要为 RPC 再复制一套领域模型和默认值。
 - `asc-action-runtime` 定义 `CapabilityExecutor` port，不依赖具体 Capability。
 - Capability 依赖 Action 合同、executor port 和所需 Client port，不依赖 daemon-core、
-  transport、PAP 或 Policy Compiler。
+  transport 或 PAP。
 - `apps/asc-daemon` 装配具体 Executor、模型 Client 和事件 Repository/Sink。
 - 扫描返回 verdict 不等于 Hook 已阻断操作，也不等于 AgentSight 已执行内核强制。
 

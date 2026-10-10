@@ -157,11 +157,22 @@ impl UreqAgentSightTransport {
 }
 
 impl AgentSightTransport for UreqAgentSightTransport {
+    #[tracing::instrument(skip_all, name = "policy.agentsight.http", fields(
+        http.request.method = ?request.method,
+        url.path = %request.path,
+        http.response.status_code = tracing::field::Empty,
+    ))]
     fn send(
         &self,
         request: &AgentSightHttpRequest,
     ) -> Result<AgentSightHttpResponse, AgentSightTransportError> {
         validate_request(request)?;
+        let started = std::time::Instant::now();
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_agentsight",
+            method = ?request.method, path = %request.path,
+            "AgentSight HTTP request started"
+        );
         let url = format!("{}{}", self.base_url, request.path);
         let builder = match request.method {
             AgentSightHttpMethod::Get => self.agent.get(&url),
@@ -177,14 +188,25 @@ impl AgentSightTransport for UreqAgentSightTransport {
                 .send_bytes(request.body.as_deref().unwrap_or_default()),
             AgentSightHttpMethod::Get | AgentSightHttpMethod::Delete => builder.call(),
         };
-        match result {
+        let response = match result {
             Ok(response) | Err(ureq::Error::Status(_, response)) => read_response(response),
             Err(ureq::Error::Transport(_)) => Err(AgentSightTransportError::Unavailable),
+        };
+        if let Ok(response) = &response {
+            tracing::Span::current().record("http.response.status_code", response.status);
         }
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_agentsight",
+            method = ?request.method, path = %request.path,
+            status = ?response.as_ref().ok().map(|response| response.status),
+            error = ?response.as_ref().err(), elapsed_ms = started.elapsed().as_millis(),
+            "AgentSight HTTP request finished"
+        );
+        response
     }
 }
 
-fn normalize_base_url(base_url: &str) -> Result<String, AgentSightClientConfigError> {
+pub(crate) fn normalize_base_url(base_url: &str) -> Result<String, AgentSightClientConfigError> {
     if base_url.is_empty()
         || base_url.len() > MAX_BASE_URL_BYTES
         || base_url

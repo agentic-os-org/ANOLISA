@@ -168,7 +168,7 @@ fn prepare_rejects_an_unsupported_plan_format_before_target_io() {
     let wire = Wire::new([]);
     let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
     let mut input = plan(7);
-    input.format = "agentsight.actplane.binding.v2".to_owned();
+    input.format = "agentsight.actplane.binding.v999".to_owned();
     let error = client.prepare_apply(&input).unwrap_err();
     assert_eq!(error.kind, AgentSightClientErrorKind::Rejected);
     assert_eq!(error.code, "AGENTSIGHT_UNSUPPORTED_PLAN_FORMAT");

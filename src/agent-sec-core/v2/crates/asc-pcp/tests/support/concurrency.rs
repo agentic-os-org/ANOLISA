@@ -152,7 +152,7 @@ fn run_case(case: ThreadCase) {
                 harness
                     .repository
                     .compare_exchange_reconcile_intent(
-                        &ExpectedBinding::from_binding(&before.binding),
+                        &ExpectedBinding::from_snapshot(&before),
                         desired
                     )
                     .unwrap()

@@ -65,7 +65,26 @@ pub fn args_for(request: &Value, directory: &Path, socket: &Path) -> Vec<OsStrin
                 std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
                 args.extend([OsString::from("--file"), path.into_os_string()]);
             }
+            "policyTemplates" => {
+                assert_eq!(value.as_array().unwrap().len(), 1);
+                args.extend([
+                    "--policy-id".into(),
+                    value[0]["policyId"].as_str().unwrap().into(),
+                    "--policy-revision".into(),
+                    value[0]["policyRevision"].to_string().into(),
+                ]);
+            }
             "selector" => {
+                if value["kind"] == "process" {
+                    let matcher = &value["match"];
+                    let (flag, input) = if matcher["processName"].is_string() {
+                        ("--process-name", &matcher["processName"])
+                    } else {
+                        ("--executable", &matcher["executable"])
+                    };
+                    args.extend([flag.into(), input.as_str().unwrap().into()]);
+                    continue;
+                }
                 let (option, number) = if value["kind"] == "pid" {
                     ("--pid", &value["pid"])
                 } else {

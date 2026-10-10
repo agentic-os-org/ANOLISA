@@ -2,13 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asc_daemon_protocol::method;
 use asc_daemon_protocol::{
-    CreateBindingParams, CreatePolicyParams, CreateScopeParams, DaemonRequest, DaemonResponse,
-    ErrorCode, ListParams, ListResult, RequestId, ResourceParams, RevisionParams,
-    UpdateBindingParams, UpdatePolicyParams, UpdateScopeParams, error_code,
+    CreatePolicyParams, CreateScopeParams, DaemonRequest, DaemonResponse, ErrorCode, ListParams,
+    ListResult, RequestId, ResourceParams, RevisionParams, UpdatePolicyParams, error_code,
 };
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
-use asc_policy_types::scope::{PreparedScope, ScopeSelector};
+use asc_policy_types::scope::{PreparedScope, ScopeDeletion, ScopeSelector};
 use serde_json::{Value, json};
 
 #[test]
@@ -37,24 +36,14 @@ fn every_pap_method_has_frozen_input_and_output_types() {
             method::POLICY_SCOPES_CREATE => {
                 (round_trip::<CreateScopeParams>(params), "PreparedScope")
             }
-            method::POLICY_SCOPES_UPDATE => {
-                (round_trip::<UpdateScopeParams>(params), "PreparedScope")
-            }
-            method::POLICY_BINDINGS_CREATE => {
-                (round_trip::<CreateBindingParams>(params), "BindingView")
-            }
-            method::POLICY_BINDINGS_UPDATE => {
-                (round_trip::<UpdateBindingParams>(params), "BindingView")
-            }
             method::POLICY_TEMPLATES_GET | method::POLICY_TEMPLATES_DELETE => {
                 (round_trip::<RevisionParams>(params), "PreparedPolicy")
             }
-            method::POLICY_SCOPES_GET | method::POLICY_SCOPES_DELETE => {
-                (round_trip::<RevisionParams>(params), "PreparedScope")
+            method::POLICY_SCOPES_GET | method::POLICY_SCOPES_RETRY => {
+                (round_trip::<ResourceParams>(params), "PreparedScope")
             }
-            method::POLICY_BINDINGS_GET | method::POLICY_BINDINGS_DELETE => {
-                (round_trip::<ResourceParams>(params), "BindingView")
-            }
+            method::POLICY_SCOPES_DELETE => (round_trip::<ResourceParams>(params), "ScopeDeletion"),
+            method::POLICY_BINDINGS_GET => (round_trip::<ResourceParams>(params), "BindingView"),
             method::POLICY_TEMPLATES_LIST => (
                 round_trip::<ListParams>(params),
                 "ListResult<PreparedPolicy>",
@@ -83,7 +72,12 @@ fn method_results_reuse_complete_domain_contracts() {
     ))
     .unwrap();
     let policy = binding.policy.clone();
-    let scope = binding.scope.clone();
+    let scope = PreparedScope {
+        scope_id: binding.scope.scope_id.clone(),
+        selector: binding.scope.selector.clone(),
+        policy_snapshots: vec![policy.clone()],
+        status: asc_policy_types::scope::ScopeStatus::Active,
+    };
     let binding = BindingView {
         spec: binding,
         status: (BindingStatus::PendingApply).into(),
@@ -110,7 +104,7 @@ fn method_results_reuse_complete_domain_contracts() {
 fn authored_params_reject_server_owned_or_legacy_fields() {
     let mut policy = json!({
         "policyName": "protect-important-files",
-        "template": {"kind": "prevent_file_deletion", "files": ["/important"]}
+        "template": {"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/important"}, "where": {"operation": {"eq": "delete"}}}]}
     });
     policy["revision"] = json!(1);
     assert!(serde_json::from_value::<CreatePolicyParams>(policy).is_err());
@@ -126,17 +120,11 @@ fn authored_params_reject_server_owned_or_legacy_fields() {
         assert!(
             serde_json::from_value::<CreateScopeParams>(json!({"selector": selector})).is_err()
         );
-        assert!(
-            serde_json::from_value::<UpdateScopeParams>(json!({
-                "scopeId": "existing-scope",
-                "selector": selector
-            }))
-            .is_err()
-        );
     }
 
     let invalid_outbound = CreateScopeParams {
         selector: ScopeSelector::Pid { pid: 0 },
+        policy_templates: vec![],
     };
     assert!(serde_json::to_value(invalid_outbound).is_err());
 }
@@ -158,7 +146,7 @@ fn request_and_response_envelopes_are_strict_and_mutually_exclusive() {
     }
     for invalid in [
         r#"{"method":"policy.templates.list","params":{"limit":1,"limit":2}}"#,
-        r#"{"method":"policy.templates.create","params":{"policyName":"invalid","template":{"kind":"prevent_file_deletion","files":["/a"],"files":["/b"]}}}"#,
+        r#"{"method":"policy.templates.create","params":{"policyName":"invalid","template":{"specVersion":"0.1","rules":[],"rules":[]}}}"#,
     ] {
         assert!(serde_json::from_str::<DaemonRequest>(invalid).is_err());
     }
@@ -257,7 +245,7 @@ fn complete_crud_scenario_freezes_every_registered_method_and_domain_result() {
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
-        ["binding_id", "policy_id", "request_id", "scope_id"]
+        ["policy_id", "request_id", "scope_id"]
             .into_iter()
             .collect()
     );
@@ -282,13 +270,16 @@ fn complete_crud_scenario_freezes_every_registered_method_and_domain_result() {
         ),
     ]);
     let steps = fixture["steps"].as_array().unwrap();
-    assert_eq!(steps.len(), method::PAP_METHODS.len());
+    assert_eq!(steps.len(), method::PAP_METHODS.len() - 1);
     assert_eq!(
         steps
             .iter()
             .map(|step| step["request"]["method"].as_str().unwrap())
             .collect::<BTreeSet<_>>(),
-        method::PAP_METHODS.into_iter().collect::<BTreeSet<_>>()
+        method::PAP_METHODS
+            .into_iter()
+            .filter(|m| *m != method::POLICY_BINDINGS_GET)
+            .collect::<BTreeSet<_>>()
     );
 
     for step in steps {
@@ -354,6 +345,7 @@ fn invalid_request_fixture_covers_every_registered_crud_method() {
         cases
             .iter()
             .map(|case| case["request"]["method"].as_str().unwrap())
+            .filter(|method| method::PAP_METHODS.contains(method))
             .collect::<BTreeSet<_>>(),
         method::PAP_METHODS.into_iter().collect::<BTreeSet<_>>()
     );
@@ -381,20 +373,17 @@ fn decode_params(method_name: &str, params: &Value) {
         method::POLICY_TEMPLATES_CREATE => assert_canonical_value::<CreatePolicyParams>(params),
         method::POLICY_TEMPLATES_UPDATE => assert_canonical_value::<UpdatePolicyParams>(params),
         method::POLICY_SCOPES_CREATE => assert_canonical_value::<CreateScopeParams>(params),
-        method::POLICY_SCOPES_UPDATE => assert_canonical_value::<UpdateScopeParams>(params),
-        method::POLICY_BINDINGS_CREATE => assert_canonical_value::<CreateBindingParams>(params),
-        method::POLICY_BINDINGS_UPDATE => assert_canonical_value::<UpdateBindingParams>(params),
-        method::POLICY_TEMPLATES_GET
-        | method::POLICY_TEMPLATES_DELETE
-        | method::POLICY_SCOPES_GET
-        | method::POLICY_SCOPES_DELETE => assert_canonical_value::<RevisionParams>(params),
-        method::POLICY_BINDINGS_GET | method::POLICY_BINDINGS_DELETE => {
-            assert_canonical_value::<ResourceParams>(params);
+        method::POLICY_TEMPLATES_GET | method::POLICY_TEMPLATES_DELETE => {
+            assert_canonical_value::<RevisionParams>(params);
         }
+        method::POLICY_SCOPES_GET
+        | method::POLICY_SCOPES_DELETE
+        | method::POLICY_SCOPES_RETRY
+        | method::POLICY_BINDINGS_GET => assert_canonical_value::<ResourceParams>(params),
         method::POLICY_TEMPLATES_LIST
         | method::POLICY_SCOPES_LIST
         | method::POLICY_BINDINGS_LIST => assert_canonical_value::<ListParams>(params),
-        unexpected => panic!("unregistered CRUD fixture method {unexpected}"),
+        unexpected => panic!("unregistered method {unexpected}"),
     }
 }
 
@@ -404,14 +393,11 @@ fn decode_result(method_name: &str, result: &Value) {
         | method::POLICY_TEMPLATES_UPDATE
         | method::POLICY_TEMPLATES_GET
         | method::POLICY_TEMPLATES_DELETE => assert_canonical_value::<PreparedPolicy>(result),
-        method::POLICY_SCOPES_CREATE
-        | method::POLICY_SCOPES_UPDATE
-        | method::POLICY_SCOPES_GET
-        | method::POLICY_SCOPES_DELETE => assert_canonical_value::<PreparedScope>(result),
-        method::POLICY_BINDINGS_CREATE
-        | method::POLICY_BINDINGS_UPDATE
-        | method::POLICY_BINDINGS_GET
-        | method::POLICY_BINDINGS_DELETE => assert_canonical_value::<BindingView>(result),
+        method::POLICY_SCOPES_CREATE | method::POLICY_SCOPES_RETRY | method::POLICY_SCOPES_GET => {
+            assert_canonical_value::<PreparedScope>(result);
+        }
+        method::POLICY_SCOPES_DELETE => assert_canonical_value::<ScopeDeletion>(result),
+        method::POLICY_BINDINGS_GET => assert_canonical_value::<BindingView>(result),
         method::POLICY_TEMPLATES_LIST => {
             assert_canonical_value::<ListResult<PreparedPolicy>>(result);
         }

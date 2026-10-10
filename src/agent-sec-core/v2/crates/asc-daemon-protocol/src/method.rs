@@ -14,26 +14,20 @@ pub const POLICY_TEMPLATES_GET: &str = "policy.templates.get";
 pub const POLICY_TEMPLATES_LIST: &str = "policy.templates.list";
 /// Delete one exact current Policy revision.
 pub const POLICY_TEMPLATES_DELETE: &str = "policy.templates.delete";
-/// Create one Scope identity from an authored selector.
+/// Create an immutable assignment with exact Policy snapshots.
 pub const POLICY_SCOPES_CREATE: &str = "policy.scopes.create";
-/// Update one existing Scope identity.
-pub const POLICY_SCOPES_UPDATE: &str = "policy.scopes.update";
-/// Read one exact current Scope revision.
+/// Retry failed work owned by one Scope.
+pub const POLICY_SCOPES_RETRY: &str = "policy.scopes.retry";
+/// Read an assignment and its lifecycle status.
 pub const POLICY_SCOPES_GET: &str = "policy.scopes.get";
 /// List current Scopes.
 pub const POLICY_SCOPES_LIST: &str = "policy.scopes.list";
-/// Delete one exact current Scope revision.
+/// Stop discovery and request cleanup of all owned Bindings.
 pub const POLICY_SCOPES_DELETE: &str = "policy.scopes.delete";
-/// Create one Binding Apply intent.
-pub const POLICY_BINDINGS_CREATE: &str = "policy.bindings.create";
-/// Update one existing Binding and request Apply.
-pub const POLICY_BINDINGS_UPDATE: &str = "policy.bindings.update";
 /// Read one current Binding spec and lifecycle status.
 pub const POLICY_BINDINGS_GET: &str = "policy.bindings.get";
 /// List current Bindings and lifecycle statuses.
 pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
-/// Request deletion of one current Binding.
-pub const POLICY_BINDINGS_DELETE: &str = "policy.bindings.delete";
 
 /// Append one observability record using `OTel` attribution.
 pub const OBS_RECORD: &str = "obs.record";
@@ -50,22 +44,19 @@ pub const ACTION_PROMPT_SCAN_WARMUP: &str = "action.prompt_scan.warmup";
 pub const ACTION_SKILL_SEC: &str = "action.skill_sec";
 
 /// Complete PAP method inventory for this protocol version.
-pub const PAP_METHODS: [&str; 15] = [
+pub const PAP_METHODS: [&str; 12] = [
     POLICY_TEMPLATES_CREATE,
     POLICY_TEMPLATES_UPDATE,
     POLICY_TEMPLATES_GET,
     POLICY_TEMPLATES_LIST,
     POLICY_TEMPLATES_DELETE,
     POLICY_SCOPES_CREATE,
-    POLICY_SCOPES_UPDATE,
+    POLICY_SCOPES_RETRY,
     POLICY_SCOPES_GET,
     POLICY_SCOPES_LIST,
     POLICY_SCOPES_DELETE,
-    POLICY_BINDINGS_CREATE,
-    POLICY_BINDINGS_UPDATE,
     POLICY_BINDINGS_GET,
     POLICY_BINDINGS_LIST,
-    POLICY_BINDINGS_DELETE,
 ];
 
 /// Complete Action-capability method inventory for this protocol version.
@@ -97,8 +88,8 @@ pub enum PolicyMethod {
 pub enum ScopeMethod {
     /// Create.
     Create,
-    /// Update.
-    Update,
+    /// Retry failed owned work.
+    Retry,
     /// Get.
     Get,
     /// List.
@@ -110,16 +101,10 @@ pub enum ScopeMethod {
 /// One Binding operation resolved from its exact wire method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingMethod {
-    /// Create Apply intent.
-    Create,
-    /// Update and request Apply.
-    Update,
     /// Get current state.
     Get,
     /// List current state.
     List,
-    /// Request Delete.
-    Delete,
 }
 
 /// One PAP operation resolved before parameter decoding.
@@ -203,15 +188,12 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         POLICY_TEMPLATES_LIST => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::List))),
         POLICY_TEMPLATES_DELETE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Delete))),
         POLICY_SCOPES_CREATE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Create))),
-        POLICY_SCOPES_UPDATE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Update))),
+        POLICY_SCOPES_RETRY => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Retry))),
         POLICY_SCOPES_GET => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Get))),
         POLICY_SCOPES_LIST => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::List))),
         POLICY_SCOPES_DELETE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Delete))),
-        POLICY_BINDINGS_CREATE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Create))),
-        POLICY_BINDINGS_UPDATE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Update))),
         POLICY_BINDINGS_GET => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Get))),
         POLICY_BINDINGS_LIST => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::List))),
-        POLICY_BINDINGS_DELETE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Delete))),
         OBS_RECORD => Some(MethodId::ObservabilityRecord),
         ACTION_CODE_SCAN => Some(MethodId::Action(ActionMethod::CodeScan)),
         ACTION_PII_SCAN => Some(MethodId::Action(ActionMethod::PiiScan)),

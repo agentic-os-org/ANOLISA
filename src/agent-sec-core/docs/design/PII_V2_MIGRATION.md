@@ -248,7 +248,7 @@ flowchart TD
 The trusted PEP entry triggers PDP evaluation. PDP calls PIP for information needed
 to decide; PIP reuses the phase-1 execution/audit service. The PIP scope covers
 acquisition, projection and evidence validity, not all underlying runtime/storage
-components. No direct policy-compiler dependency is introduced in the detector.
+components. The detector owns PII recognition; policy evaluation remains a separate concern.
 PEP reports outcomes to PDP, closing the decision/enforcement lifecycle; it does not
 re-run the original decision automatically for every result or claim to undo side effects.
 

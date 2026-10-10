@@ -42,7 +42,6 @@ asc-daemon-handler = { workspace = true }
 asc-daemon-service = { workspace = true }
 asc-pap = { workspace = true }
 asc-pap-repository-memory = { workspace = true }
-asc-policy-engine = { workspace = true }
 uuid = { workspace = true }
 
 [lints]

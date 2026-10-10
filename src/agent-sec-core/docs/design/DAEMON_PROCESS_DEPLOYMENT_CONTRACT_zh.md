@@ -283,12 +283,12 @@ CLI 装配选择 `0666`，可复用 bootstrap 保持私有 `0600` 默认值。�
 `asc-daemon/tests/bootstrap.rs` 验证真实进程 scan 成功及 PAP 授权；系统运行目录、默认
 socket 权限和跨 UID 接入的部署测试沿用 `tests/v2/e2e/test_daemon_process_e2e.py`。
 
-当前 PAP 由 `PolicyTemplateCompiler` 和过渡性的 process-local Repository 组成。Policy、Scope
-和 Binding CRUD 可在同一 daemon 生命周期内经真实 UDS 执行，但所有状态在进程重启后丢失，
-进程启动时会 best-effort 输出该限制（诊断背压规则见 §11）。这些结果只证明 protocol、identity、authorization 和应用装配的
-integration slice，不表示 durable persistence、target enforcement 或 application READY。
+当前 PAP 校验 PolicyTemplate 并将 Policy、Scope 和 Binding 保存到 SQLite Repository。
+启动恢复 discovery 和 reconcile，持久化与恢复验收见
+[Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
+真实 UDS 测试验证 protocol、identity、authorization 和应用装配，不代表真实 target enforcement。
 Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
-`RejectionEncoder` 投影，正常依赖图不包含 PAP、Repository 或 Compiler。
+`RejectionEncoder` 投影，正常依赖图不包含 PAP 或 Repository。
 framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 transaction 或其它共享阻塞
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
@@ -448,7 +448,7 @@ CRUD request 不传递目标凭据。每次 reconcile 尝试创建 Client 并读
 
 启动顺序是构造 Repository、Client factory/核心并尝试启动 Runtime，再开放 UDS 请求。
 Runtime 初始化失败时记录安全错误并注入不可用通知入口，Binding mutation 返回既有准入错误；
-Policy/Scope CRUD、读查询及其它 daemon 服务继续工作。不能以不注入通知入口的方式静默接受 Binding 写请求。目标尚未
+Policy CRUD、Scope 查询/删除及其它 daemon 服务继续工作。不能以不注入通知入口的方式静默接受新 Scope。目标尚未
 READY 或暂时不可连接也不阻止 daemon 启动。shutdown 先停止 UDS 新准入并 drain 已准入请求，再停止 Runtime
 领取和扫描，最多等待 30s join 活跃调用；随后沿用进程外层 1s Tokio shutdown 上限。超时
 不会伪装成同步调用已取消或清理成功。单次 reconcile panic 在 worker 调用边界隔离：
@@ -462,10 +462,14 @@ READY 或暂时不可连接也不阻止 daemon 启动。shutdown 先停止 UDS �
 | ID | 必须验证 | 可执行 fixture |
 |---|---|---|
 | DPROC-020 | 默认凭据不参与 daemon 启动；PAP 读查询和信号退出可用；reconciliation 不可用时仅拒绝 Binding 写入，Policy/Scope CRUD 仍可完成 | `v2/apps/asc-daemon/tests/bootstrap.rs`；`tests/reconciliation.rs::unavailable_reconciliation_only_rejects_binding_writes` |
-| DPROC-021 | daemon 注入真实 Adapter/核心/Runtime，PAP 接受后下发，Delete 清理及 owned shutdown | `v2/apps/asc-daemon/tests/reconciliation.rs::configured_composition_delivers_pap_intent_and_joins_its_workers` |
+| DPROC-021 | daemon 注入真实 Adapter/核心/Runtime，PAP 接受后下发，Delete 清理及 owned shutdown；真实 CLI/daemon 经生产 Client 发出完整 HTTP 请求 | `v2/apps/asc-daemon/tests/reconciliation.rs::configured_composition_delivers_pap_intent_and_joins_its_workers`；`tests/v2/e2e/test_policy_delivery_e2e.py::test_discovered_binding_delivers_saved_revision_and_cleans_up` |
 
-DPROC-021 是进程内装配验收，Client 使用 scripted port；完整 CLI→daemon 进程 E2E 是单独 PR，
-不能由此宣称真实 AgentSight/kernel 生效或持久化恢复通过。
+DPROC-021 的 Rust 组合测试使用 scripted Client；Python E2E 使用真实 CLI/daemon、SQLite、
+procfs、Adapter 和生产 Client，仅 AgentSight HTTP 服务端为 mock。mock 监听默认地址，
+验证 health→apply→delete 请求，apply 内容与既有 fixture 完整比较，仅替换动态身份字段。
+已有 token 文件保留；文件不存在时独占创建测试 token 并在结束后删除。不新增 daemon 配置参数。
+测试要求隔离的 root E2E 环境及空闲的 7396 端口；不能由此宣称真实 AgentSight/kernel
+生效或崩溃恢复通过。
 
 ## 10. 当前实现证据
 
@@ -596,3 +600,25 @@ RPM 安装套件通过 914 项，并单独通过修正后的 systemd 生命周�
 DPROC-022 的 executable fixture 为
 `tests/v2/e2e/test_observability_record_e2e.py::test_v1_cli_records_persist_and_survive_restart`；
 验证源码二进制的目录权限、双落盘与进程重启，不替代 RPM/systemd 或跨 UID 验收。
+
+## 13. [TARGET V2][IMPLEMENTED, PROCESS-LOCAL] 通过 Scope 启动 discovery
+
+对象语义见 [生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)（SCOPE-CR-002）：Policy
+保留 revision；Scope 无 revision，保存所选版本完整快照；系统自动创建并清理子 Binding。
+删除模板不撤销分配。Policy Administrator、可信 peer、UID/socket 和进程部署边界不变。
+
+```bash
+agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1
+agent-sec-cli --socket "$SOCKET" scope create --executable /opt/agent/bin/agent --policy-id "$POLICY_ID" --policy-revision 1
+agent-sec-cli --socket "$SOCKET" scope delete --scope-id "$SCOPE_ID"
+agent-sec-cli --socket "$SOCKET" scope retry --scope-id "$SCOPE_ID"
+```
+
+RPC 支持多策略，CLI 当前创建单策略 assignment。PID 也要求策略引用；cgroup 当前拒绝。
+Scope update、Scope revision 参数及手动 Binding mutation 已移除，应成套升级 CLI/daemon。
+新 Scope 要求 Reconciler readiness；Policy 操作、查询和 Scope 删除仍可受理。删除会关闭
+准入、join worker 并异步清理全部部署；响应 completed 为 true 才表示回收完成。
+
+单进程 Scope/Binding 快照不构成 daemon 重启恢复证据。procfs/runtime/Adapter 的 scripted
+Client 组合验证自动 Binding 和清理；bootstrap SIGTERM 验证任务停止，CLI/UDS 验证权限与
+公开接口。本节不声明 RPM/systemd 实测、真实 AgentSight 或 kernel enforcement。

@@ -2,6 +2,16 @@
 
 文档类型：`[TARGET V2]` 设计决定与取舍记录；实施进度和运行结果由 PR、CI 与验收报告记录。
 
+SCOPE-CR-002 已接入 process-local 实现：不可变 Scope 快照、系统 Binding 准入、停止发现后
+异步清理和 Scope 显式重试。当前协议及测试入口见上述生命周期契约；旧 changed-spec
+测试继续覆盖底层 revision/CAS 兼容能力，不表示开放用户 Binding mutation。
+
+最新对象语义见 [Policy/Scope/Binding 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)：
+Policy 有 revision、只保存 current；Scope 是无自身 revision 的不可变 Assignment，
+保存精确 Policy revision 的完整快照；Binding 的创建和删除由 Scope/实例生命周期驱动。
+本文手动 Binding CRUD、Scope revision 和可变 Binding 的讨论保留为历史设计依据，
+不再作为新产品入口；执行串行、条件写、目标记账和异步清理责任继续适用。
+
 [调度、存储与恢复详细设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
 记录 CR-010～CR-015 的目标约束。Runtime 集成使用 ready + entries、
 Queued/Running/WaitingRetry/Exhausted 和 dirty；deployment 独立局部更新，无全局 resourceVersion；
@@ -36,7 +46,7 @@ Client 单独可测试。
 核心、Client 组合、daemon 和持久化各层的具体执行结果见
 [验收报告](../../v2/fixtures/reconciliation/RESULTS.md)，不得跨层替代验证。
 
-## 已确认方向
+## 原实现已确认方向（对象入口由新生命周期契约替代）
 
 - PAP 同步保存 Binding；翻译和 PEP 下发由事件驱动的 Reconciler 异步执行。
 - `bindingRevision` 只标识 spec：创建为 1，spec 改变时递增；Delete、同 spec
@@ -59,8 +69,8 @@ Client 单独可测试。
 - 使用 exponential backoff 重试；达到配置的次数上限后停止自动重试，并将
   当前意图对应的 Binding 更新为 `APPLY_FAILED` 或 `DELETE_FAILED`，保存错误。
   已被新意图覆盖的旧任务不能写入当前 Binding 的失败状态。
-- Policy、Scope、Binding 继续只保留最新 revision 的完整副本；不能因恢复设计
-  默认引入历史对象全量存储。
+- Policy 只保留当前 revision；新 Scope 保存完整策略快照且无自身 revision。
+  既有 Scope 在来源 Policy 更新/删除后仍可生成 Binding，不引入历史模板全量存储。
 
 [请求状态表](../../v2/README.md)、PAP、Repository、协议与 fixtures 必须保持一致。
 PAP 区分创建和条件更新，防止旧写入复活已删除记录；最终删除按事务条件完成，

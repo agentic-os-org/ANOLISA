@@ -12,7 +12,7 @@ use asc_daemon_service::{
 };
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -51,10 +51,12 @@ async fn start(
     tokio::task::JoinHandle<()>,
     Arc<Mutex<Vec<Value>>>,
 ) {
-    let application = PapService::new(
-        Arc::new(ProcessLocalPapRepository::default()),
-        Arc::new(PolicyTemplateCompiler),
-    );
+    let repository = Arc::new(ProcessLocalPapRepository::default());
+    let application = PapService::new(repository);
+    let registry = Arc::new(asc_daemon::ScopeDiscoveryRegistry::new(Arc::new(
+        application.clone(),
+    )));
+    let application = application.with_scope_discovery(registry);
     let inner = Arc::new(DaemonDispatcher::new(
         application,
         Arc::new(TestPolicy(role)),
@@ -97,6 +99,94 @@ async fn start(
     .await
     .unwrap();
     (shutdown, task, requests)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scope_cli_creates_discovery_jobs_and_rejects_nonadministrators() {
+    for role in [PrincipalRole::PolicyAdministrator, PrincipalRole::LocalUser] {
+        let directory = common::Directory::new();
+        let socket = directory.0.join("daemon.sock");
+        let file = directory.0.join("template.json");
+        std::fs::write(
+            &file,
+            r#"{"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/protected"}, "where": {"operation": {"eq": "delete"}}}]}"#,
+        )
+        .unwrap();
+        let (shutdown, task, requests) = start(&socket, role).await;
+        let policy = if role == PrincipalRole::PolicyAdministrator {
+            let args: Vec<OsString> = vec![
+                "--socket".into(),
+                socket.clone().into_os_string(),
+                "policy".into(),
+                "create".into(),
+                "--name".into(),
+                "scope-policy".into(),
+                "--file".into(),
+                file.into_os_string(),
+            ];
+            let output = tokio::task::spawn_blocking(move || common::run(&args))
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        } else {
+            json!({"policyId":"10000000-0000-4000-8000-000000000001", "revision":1})
+        };
+        let args: Vec<OsString> = vec![
+            "--socket".into(),
+            socket.into_os_string(),
+            "scope".into(),
+            "create".into(),
+            "--process-name".into(),
+            "sleep".into(),
+            "--policy-id".into(),
+            policy["policyId"].as_str().unwrap().into(),
+            "--policy-revision".into(),
+            policy["revision"].to_string().into(),
+        ];
+        let mut previous_id = Value::Null;
+        for _ in 0..2 {
+            let args = args.clone();
+            let output = tokio::task::spawn_blocking(move || common::run(&args))
+                .await
+                .unwrap();
+            if role == PrincipalRole::PolicyAdministrator {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(
+                    result["selector"],
+                    json!({"kind":"process","match":{"processName":"sleep"}})
+                );
+                assert_eq!(result["policySnapshots"], json!([policy]));
+                assert!(result["scopeId"].is_string());
+                assert_ne!(result["scopeId"], previous_id);
+                previous_id = result["scopeId"].clone();
+            } else {
+                assert_eq!(output.status.code(), Some(1));
+                assert!(output.stdout.is_empty());
+                let result: Value = serde_json::from_slice(&output.stderr).unwrap();
+                assert_eq!(result["error"]["code"], "permission_denied");
+            }
+        }
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            if role == PrincipalRole::PolicyAdministrator {
+                3
+            } else {
+                2
+            }
+        );
+        shutdown.request();
+        task.await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -147,8 +237,6 @@ async fn real_cli_processes_execute_the_complete_frozen_pap_crud_scenario() {
         expected_requests.push(request);
     }
     assert_ne!(variables["policy_id"], variables["scope_id"]);
-    assert_ne!(variables["binding_id"], variables["scope_id"]);
-    assert_ne!(variables["binding_id"], variables["policy_id"]);
     let actual: Vec<_> = requests
         .lock()
         .unwrap()
@@ -296,7 +384,7 @@ async fn domain_validation_and_pagination_are_owned_by_the_daemon() {
     let directory = common::Directory::new();
     let socket = directory.0.join("daemon.sock");
     let (shutdown, task, requests) = start(&socket, PrincipalRole::PolicyAdministrator).await;
-    let request = json!({"method":"policy.templates.create","params":{"policyName":"", "template":{"kind":"prevent_file_deletion","files":["/work"]}}});
+    let request = json!({"method":"policy.templates.create","params":{"policyName":"", "template":{"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/work"}, "where": {"operation": {"eq": "delete"}}}]}}});
     let args = common::args_for(&request, &directory.0, &socket);
     let output = tokio::task::spawn_blocking(move || common::run(&args))
         .await
@@ -307,9 +395,15 @@ async fn domain_validation_and_pagination_are_owned_by_the_daemon() {
         serde_json::from_slice::<Value>(&output.stderr).unwrap()["error"]["code"],
         "invalid_argument"
     );
+    let create_policy = json!({"method":"policy.templates.create","params":{"policyName":"test", "template":{"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/work"}, "where": {"operation": {"eq": "delete"}}}]}}});
+    let args = common::args_for(&create_policy, &directory.0, &socket);
+    let output = tokio::task::spawn_blocking(move || common::run(&args))
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
     for pid in 1..=3 {
-        let request =
-            json!({"method":"policy.scopes.create","params":{"selector":{"kind":"pid","pid":pid}}});
+        let request = json!({"method":"policy.scopes.create","params":{"selector":{"kind":"pid","pid":pid},"policyTemplates":[{"policyId":policy["policyId"],"policyRevision":policy["revision"]}]}});
         let args = common::args_for(&request, &directory.0, &socket);
         assert!(
             tokio::task::spawn_blocking(move || common::run(&args))
@@ -330,7 +424,7 @@ async fn domain_validation_and_pagination_are_owned_by_the_daemon() {
     assert_eq!(result["items"].as_array().unwrap().len(), 1);
     assert_eq!(
         requests.lock().unwrap().len(),
-        5,
+        6,
         "CLI must not auto-page or perform hidden reads"
     );
     shutdown.request();
@@ -338,7 +432,7 @@ async fn domain_validation_and_pagination_are_owned_by_the_daemon() {
 }
 
 #[test]
-fn failed_binding_results_preserve_cli_stdout_and_mutation_exit_status() {
+fn failed_binding_queries_preserve_cli_stdout_and_success_exit_status() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 
@@ -348,7 +442,8 @@ fn failed_binding_results_preserve_cli_stdout_and_mutation_exit_status() {
     .unwrap();
     let methods: Value = serde_json::from_str(common::METHODS).unwrap();
     for case in cases {
-        for operation in ["create", "update", "delete", "get"] {
+        {
+            let operation = "get";
             let directory = common::Directory::new();
             let socket = directory.0.join("result.sock");
             let listener = UnixListener::bind(&socket).unwrap();
@@ -384,7 +479,7 @@ fn failed_binding_results_preserve_cli_stdout_and_mutation_exit_status() {
                 .output()
                 .unwrap();
             server.join().unwrap();
-            assert_eq!(output.status.code(), Some(i32::from(operation != "get")));
+            assert_eq!(output.status.code(), Some(0));
             assert!(output.stderr.is_empty());
             assert_eq!(
                 serde_json::from_slice::<Value>(&output.stdout).unwrap(),

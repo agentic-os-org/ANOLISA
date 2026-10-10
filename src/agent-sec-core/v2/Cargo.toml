@@ -32,10 +32,10 @@ members = [
     "crates/asc-pap-repository-memory",
     "crates/asc-pcp",
     "crates/asc-policy-runtime",
-    "crates/asc-policy-engine",
     "crates/asc-policy-target-contracts",
     "crates/asc-policy-types",
     "crates/asc-policy-repository",
+    "crates/asc-policy-repository-sqlite",
 ]
 
 [workspace.package]
@@ -47,6 +47,7 @@ repository = "https://github.com/alibaba/anolisa"
 publish = false
 
 [workspace.dependencies]
+asc-policy-repository-sqlite = { path = "crates/asc-policy-repository-sqlite" }
 asc-policy-runtime = { path = "crates/asc-policy-runtime" }
 asc-action-runtime = { path = "crates/asc-action-runtime" }
 asc-action-types = { path = "crates/asc-action-types" }
@@ -78,7 +79,6 @@ asc-pap-repository-memory = { path = "crates/asc-pap-repository-memory" }
 asc-pcp = { path = "crates/asc-pcp" }
 asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
 asc-policy-adapter-agentsight = { path = "crates/asc-policy-adapter-agentsight" }
-asc-policy-engine = { path = "crates/asc-policy-engine" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/asc-policy-repository" }
 asc-policy-types = { path = "crates/asc-policy-types" }
@@ -91,6 +91,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 fancy-regex = "0.16"
+fail = { version = "0.5.1", default-features = false }
 log = "0.4"
 nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
 regex = "1.10"

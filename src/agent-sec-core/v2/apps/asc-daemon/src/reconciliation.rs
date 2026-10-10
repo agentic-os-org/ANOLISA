@@ -1,11 +1,11 @@
 //! Target-specific composition only; queue and lifecycle implementation live in Policy Runtime.
 use asc_agentsight_client::AgentSightClientFactory;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_pcp::{
     BindingReconciler, RetryPolicy, StoreError, TargetDeploymentClient,
     TargetDeploymentClientFactory,
 };
 use asc_policy_adapter_agentsight::AgentSightAdapter;
+use asc_policy_repository::{BindingReconcileCatalog, BindingStateRepository};
 use asc_policy_runtime::reconciliation::{MonotonicClock, ReconciliationRuntime, RuntimeConfig};
 use asc_policy_types::binding::PreparedBinding;
 use std::collections::BTreeMap;
@@ -15,8 +15,10 @@ use std::sync::Arc;
 /// Target selection and construction belong here, not in the process entrypoint.
 /// # Errors
 /// Returns a Repository readiness or worker startup error.
-pub fn start_policy_reconciliation(
-    repository: Arc<ProcessLocalPapRepository>,
+pub fn start_policy_reconciliation<
+    R: BindingStateRepository + BindingReconcileCatalog + 'static,
+>(
+    repository: Arc<R>,
 ) -> Result<ReconciliationRuntime, StoreError> {
     start_policy_reconciliation_with_factory(
         repository,
@@ -28,15 +30,19 @@ pub fn start_policy_reconciliation(
 /// This permits component validation without host credentials or target I/O.
 /// # Errors
 /// Returns a core configuration, Repository readiness or worker startup error.
-pub fn start_policy_reconciliation_with_client(
-    repository: Arc<ProcessLocalPapRepository>,
+pub fn start_policy_reconciliation_with_client<
+    R: BindingStateRepository + BindingReconcileCatalog + 'static,
+>(
+    repository: Arc<R>,
     client: Arc<dyn TargetDeploymentClient>,
 ) -> Result<ReconciliationRuntime, StoreError> {
     start_policy_reconciliation_with_factory(repository, Arc::new(move || Ok(client.clone())))
 }
 
-fn start_policy_reconciliation_with_factory(
-    repository: Arc<ProcessLocalPapRepository>,
+fn start_policy_reconciliation_with_factory<
+    R: BindingStateRepository + BindingReconcileCatalog + 'static,
+>(
+    repository: Arc<R>,
     factory: Arc<dyn TargetDeploymentClientFactory>,
 ) -> Result<ReconciliationRuntime, StoreError> {
     let clock = Arc::new(MonotonicClock::default());

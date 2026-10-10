@@ -39,6 +39,7 @@ fn invalid_outcome_transitions_return_invalid_without_producing_a_write() {
         BindingStatus::Deleted,
     ] {
         let record = ReconcileRecord {
+            status_version: 1,
             binding: BindingView {
                 spec: serde_json::from_str(include_str!(
                     "../../asc-policy-types/tests/fixtures/prepared-binding.json"

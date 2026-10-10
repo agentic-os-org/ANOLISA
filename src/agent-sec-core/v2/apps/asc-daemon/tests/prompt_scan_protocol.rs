@@ -31,7 +31,7 @@ use asc_daemon_core::{ActionService, PeerCredentials, PrincipalPolicy, Principal
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+
 use serde_json::json;
 use tokio::net::UnixStream;
 
@@ -102,10 +102,7 @@ impl RunningDaemon {
         ));
         std::fs::create_dir(&directory).unwrap();
         let socket_path = directory.join("daemon.sock");
-        let application = PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        );
+        let application = PapService::new(Arc::new(ProcessLocalPapRepository::default()));
         let dispatcher = Arc::new(DaemonDispatcher::new(
             application,
             Arc::new(FixedRolePolicy(role)),

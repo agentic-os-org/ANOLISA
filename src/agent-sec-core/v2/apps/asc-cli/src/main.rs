@@ -5,8 +5,8 @@ use asc_cli::{
     Cli, InputError, Plan,
     capabilities::process_environment,
     output::{
-        render_binding_mutation, render_pii_scan, render_policy, render_prompt_warmup,
-        render_scan_code, render_scan_prompt, render_skill_sec, warn_multi_turn_incomplete,
+        render_pii_scan, render_policy, render_prompt_warmup, render_scan_code, render_scan_prompt,
+        render_skill_sec, warn_multi_turn_incomplete,
     },
 };
 
@@ -178,14 +178,6 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             .map_err(RunError::Output)
     } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
-    } else if matches!(
-        request.method.as_str(),
-        asc_daemon_protocol::method::POLICY_BINDINGS_CREATE
-            | asc_daemon_protocol::method::POLICY_BINDINGS_UPDATE
-            | asc_daemon_protocol::method::POLICY_BINDINGS_DELETE
-    ) {
-        render_binding_mutation(&response, &mut io::stdout().lock(), &mut io::stderr())
             .map_err(RunError::Output)
     } else {
         render_policy(&response, &mut io::stdout().lock(), &mut io::stderr())

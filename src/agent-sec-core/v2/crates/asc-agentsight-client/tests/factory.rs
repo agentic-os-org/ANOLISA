@@ -44,17 +44,81 @@ fn factory_defers_credentials_and_refreshes_them_between_attempts() {
     std::fs::write(&token_file, "first-token\n").unwrap();
     let first = factory.open().unwrap();
     std::fs::write(&token_file, "second-token\n").unwrap();
-    let second = factory.open().unwrap();
+    let equivalent = AgentSightClientFactory::new(
+        format!("http://{}/api/", listener.local_addr().unwrap()),
+        &token_file,
+    );
+    let second = equivalent.open().unwrap();
     let prepared: PreparedApply = serde_json::from_str(include_str!(
         "../../../fixtures/clients/agentsight/file-deletion/prepared-7.json"
     ))
     .unwrap();
-    let target = prepared.target;
+    let mut target = prepared.target.clone();
+    let mut cleanup: serde_json::Value = serde_json::from_slice(&target.cleanup).unwrap();
+    cleanup["endpoint"] = format!("http://{}/api", listener.local_addr().unwrap()).into();
+    target.cleanup = serde_json::to_vec(&cleanup).unwrap();
+    let mut mismatch = target.clone();
+    let mut changed = cleanup.clone();
+    changed["endpoint"] = "http://127.0.0.1:1/api".into();
+    mismatch.cleanup = serde_json::to_vec(&changed).unwrap();
+    for report in [
+        first.delete(&[mismatch.clone()]),
+        first.update(
+            &[mismatch.clone()],
+            &PreparedApply {
+                target: mismatch.clone(),
+                ..prepared.clone()
+            },
+        ),
+        first.create(&PreparedApply {
+            target: mismatch,
+            ..prepared.clone()
+        }),
+    ] {
+        assert_eq!(report.error.unwrap().code, "AGENTSIGHT_ENDPOINT_MISMATCH");
+        assert!(
+            !report
+                .observations
+                .iter()
+                .any(|o| o.presence == Presence::Absent)
+        );
+    }
+    let mut legacy = target.clone();
+    changed.as_object_mut().unwrap().remove("endpoint");
+    changed["schemaVersion"] = 1.into();
+    legacy.cleanup = serde_json::to_vec(&changed).unwrap();
+    assert_eq!(
+        first.delete(&[legacy]).error.unwrap().code,
+        "AGENTSIGHT_INVALID_TARGET_REFERENCE"
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     let expected_path = format!(
         "DELETE /api/enforcement/bindings/{} HTTP/1.1\r\n",
         target.id
     );
-    let server = std::thread::spawn(move || {
+    let server = serve_rotating_tokens(listener, expected_path);
+    for client in [first, second] {
+        let report = client.delete(std::slice::from_ref(&target));
+        assert_eq!(report.error, None);
+        assert_eq!(
+            report.observations,
+            vec![asc_policy_types::target::Observation {
+                target: target.clone(),
+                presence: Presence::Absent
+            }]
+        );
+    }
+    server.join().unwrap();
+}
+
+fn serve_rotating_tokens(
+    listener: TcpListener,
+    expected_path: String,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
         for token in ["first-token", "second-token"] {
             let deadline = Instant::now() + Duration::from_secs(5);
             let (mut stream, _) = loop {
@@ -98,17 +162,5 @@ fn factory_defers_credentials_and_refreshes_them_between_attempts() {
                 )
                 .unwrap();
         }
-    });
-    for client in [first, second] {
-        let report = client.delete(std::slice::from_ref(&target));
-        assert_eq!(report.error, None);
-        assert_eq!(
-            report.observations,
-            vec![asc_policy_types::target::Observation {
-                target: target.clone(),
-                presence: Presence::Absent
-            }]
-        );
-    }
-    server.join().unwrap();
+    })
 }

@@ -1,5 +1,12 @@
 # 首版 Binding Reconciler 验收标准
 
+对象以 [生命周期契约](../../../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md)为准：Scope
+无 revision，保存完整 Policy 快照；Binding 由系统管理。fixtures 已改为单策略 Binding +
+Scope 来源/实例身份，保留底层 changed-spec revision/CAS 回归；该兼容路径不是公开 API。
+PAP/Runtime 测试补充 Scope 所有权、模板快照独立、发现/删除竞争、失败重试及最终回收；
+真实 procfs + scripted Client 组合见 daemon `reconciliation.rs` 测试。历史 RESULTS 不代表
+本次本地测试或 durable recovery 结果。
+
 文档类型：`[TARGET V2]` 验收标准。核心与 Adapter/Client 组合使用 mock target 验证，
 不替代真实 AgentSight 或 kernel 验收。具体版本及运行结果见[执行报告](RESULTS.md)；
 Runtime 集成、完整 E2E 和持久化恢复按各自工作包验收。
@@ -82,7 +89,7 @@ AdapterFault 作为内部错误以安全 code 记录并按有界重试处理；C
 | 内容 | 要求 |
 |---|---|
 | `caseId` / variant | 对应第 4 节 ID；同一行要求的分支均有单独变体，不能只跑其中一个 |
-| initial records | 完整 BindingView/spec/IR/digest、部署记录、重试和错误；空集合显式给出 |
+| initial records | 完整 BindingView/spec、部署记录、重试和错误；空集合显式给出 |
 | trigger sequence | 核心调用、已接受意图的注入、时钟推进、竞争同步点及故障注入 |
 | dependency results | Adapter 完整输出、Client prepared/目标身份/逐目标结果、repository 故障 |
 | expected records | 完整最终 Binding 与运行记录；不能仅检查 status 或记录数量 |
@@ -107,7 +114,7 @@ PEP 身份都是 UUID。prepared 内容以字节或等价的无损编码比较�
 | `record.skip.ready`、`record.skip.applying` | 专门验证跳过逻辑的既有状态输入，不代表完整执行成功后的输出 |
 
 record 中的 status、attempts、deadline、error、deployment presence 保持显式可见；
-共享稳定 spec 和请求不需要为每种运行状态复制 Policy/IR。expected 独立声明，
+共享稳定 spec 和请求不需要为每种运行状态复制 PolicyTemplate 快照。expected 独立声明，
 不得从运行结果生成或由 Reconciler 的状态转换函数推导。新增 policy 的翻译样例
 归属 Adapter；核心矩阵仅在增加执行/记账语义时扩展，不按 policy 类型复制。
 

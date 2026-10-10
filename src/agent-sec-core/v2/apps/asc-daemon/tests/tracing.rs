@@ -5,7 +5,7 @@ use asc_daemon_core::{PeerCredentials, PrincipalPolicy, PrincipalRole};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider};
 use std::os::unix::fs::DirBuilderExt as _;
@@ -44,10 +44,7 @@ async fn tracing_span_remains_open_after_dispatch_timeout_until_work_finishes() 
     )
     .unwrap();
     let (release_tx, release_rx) = mpsc::channel();
-    let pap = PapService::new(
-        Arc::new(ProcessLocalPapRepository::default()),
-        Arc::new(PolicyTemplateCompiler),
-    );
+    let pap = PapService::new(Arc::new(ProcessLocalPapRepository::default()));
     let rules = Arc::new(PiiRuleSet::builtin().unwrap());
     let dispatcher = Arc::new(DaemonDispatcher::new(
         pap,

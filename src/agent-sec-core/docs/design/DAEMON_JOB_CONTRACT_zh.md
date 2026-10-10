@@ -564,3 +564,37 @@ trace-ID 或第二套审计输出。worker 意外退出时关闭队列准入，`
 `apps/asc-daemon/src/skill_worker.rs::unwinding_worker_closes_admission_and_reports_failed_health`。
 具体模块与验收边界见
 [SkillSec 第一阶段迁移](SKILL_SEC_PHASE_ONE_zh.md#第六批-skillfs-边界)。
+
+## 15. [TARGET V2][IMPLEMENTED, PROCESS-LOCAL] Scope 驱动进程发现
+
+遵循 [生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)（SCOPE-CR-002）。Scope 无 revision，
+保存不可变 selector 和完整策略快照。`ScopeDiscovery::start(scope)` 创建一个专属 worker，
+从 Scope 读取快照；Policy 更新/删除不影响后续匹配实例。
+
+- 创建立即扫描，此后每 2 秒扫描。每个 Scope 共用匹配缓存；boot、PID namespace、PID、
+  start time 区分实例，exe 路径/device/inode 与 comm 改变会重新匹配。
+- worker 每轮把完整已知实例集合交给 PAP，即使缓存命中也提交，使失败的准入可以重试。
+  Repository 原子检查 ACTIVE、去重并创建真实 Binding 意图，随后只通知 Binding ID。
+- 完整扫描确认退出或观察到失配时，系统请求旧 Binding 删除。局部读取失败保留已有实例；
+  清理责任保存在统一 Repository，不靠 discovery 缓存维护。PID selector 不跟随 PID reuse。
+- 删除 Scope 先关闭新子项准入，再取消/join worker，随后通知全部 Binding 清理。
+  即使 Apply 已执行也保留其副作用记账；全部子项清理完成才回收 Scope。重复删除不重置
+  预算；终态失败由 `scope retry` 显式重试，不由周期扫描刷新。
+- PAP clone 共享创建/删除互斥锁，避免删除后启动孤儿 worker；registry 容量仍为 32。
+  start 失败保证没有遗留 worker，再补偿 Scope 删除；返回原始启动错误，补偿失败记录
+  Scope ID 和两种错误供排查及显式删除，不构成跨进程事务保证。
+- shutdown 关闭准入、unpark 并 join，纳入 daemon drain。扫描降级/恢复记录日志；每轮有
+  `scope_discovery.scan` span。`process discovery selected new instances` 只描述进程选择，
+  实际下发状态以 PAP Binding 查询为准。
+
+Discovery 按 PID 缓存选中的完整 `ProcessIdentity`，保留 selector、PID pin 和匹配输入缓存。
+每轮向 PAP 提交全部选中实例，Repository 按持久化 Scope 中的 Policy 快照展开 Binding。
+日志中的 `instances_selected` 统计新增进程实例，与该 Scope 的 Policy 数量无关。
+PAP `BindingView` 是可查询/可下发/可清理的存储对象。
+Reconciler 继续拥有调度、CAS、串行目标调用、UNKNOWN 记账及有界重试，不新增另一套执行
+状态机。Scope、Binding、PID pin 和恢复实例由 SQLite 保存；匹配缓存和重试预算留在内存。
+恢复流程见 [Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
+
+验收包括 name/path/exec/PID reuse/局部读失败单元测试、registry 容量/停止测试，以及
+`procfs_discovery_uses_saved_policy_and_scope_delete_cleans_all_instances` 的真实 procfs、
+PAP/runtime/Adapter/scripted Client 组合。mock 结果不证明真实 kernel enforcement。

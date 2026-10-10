@@ -90,6 +90,8 @@ mod tests {
 
     const WIDGETS: &[TableSpec] = &[TableSpec {
         name: "widgets",
+        strict: false,
+        constraints: &[],
         columns: &[ColumnSpec {
             name: "id",
             definition: "TEXT PRIMARY KEY",

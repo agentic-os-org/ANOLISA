@@ -15,6 +15,9 @@ impl ProcessLocalPapRepository {
         let mut state = State::default();
         for record in records {
             record.binding.validate().map_err(|_| StoreError::Invalid)?;
+            if record.status_version < 1 {
+                return Err(StoreError::Invalid);
+            }
             for (index, deployment) in record.deployments.iter().enumerate() {
                 if deployment.presence == Presence::Absent
                     || record.deployments[..index]
@@ -23,6 +26,21 @@ impl ProcessLocalPapRepository {
                 {
                     return Err(StoreError::Invalid);
                 }
+            }
+            let owner = &record.binding.spec.scope;
+            let scope = state
+                .scopes
+                .entry(owner.scope_id.to_string())
+                .or_insert_with(|| asc_policy_types::scope::PreparedScope {
+                    scope_id: owner.scope_id.clone(),
+                    selector: owner.selector.clone(),
+                    policy_snapshots: Vec::new(),
+                    status: asc_policy_types::scope::ScopeStatus::Active,
+                });
+            if !scope.policy_snapshots.contains(&record.binding.spec.policy) {
+                scope
+                    .policy_snapshots
+                    .push(record.binding.spec.policy.clone());
             }
             let id = record.binding.spec.binding_id.to_string();
             if state
@@ -35,6 +53,7 @@ impl ProcessLocalPapRepository {
             state.binding_states.insert(
                 id,
                 BindingStateData {
+                    status_version: record.status_version,
                     deployments: record.deployments,
                     last_write: None,
                 },
@@ -61,78 +80,57 @@ impl BindingStateRepository for ProcessLocalPapRepository {
     ) -> Result<WriteResult, StoreError> {
         let id = expected.binding.spec.binding_id.as_str();
         let mut state = self.state.lock().map_err(|_| StoreError::Unavailable)?;
-        if let Some(last) = state
+        let digest = asc_policy_repository::write_digest(expected, write)?;
+        if let Some((write_id, previous_digest, receipt)) = state
             .binding_states
             .get(id)
-            .and_then(|r| r.last_write.as_ref())
-            && last.write_id == write.write_id
+            .and_then(|s| s.last_write.as_ref())
+            && *write_id == write.write_id
         {
-            return if last == write {
-                Ok(WriteResult::AlreadyApplied)
+            return if *previous_digest == digest {
+                Ok(WriteResult::AlreadyApplied(*receipt))
             } else {
                 Err(StoreError::Invalid)
             };
         }
-        let current = snapshot(&state, id);
-        if current.is_none() && write.next.is_none() {
-            return Ok(WriteResult::AlreadyApplied);
-        }
-        let Some(current) = current else {
-            return Ok(WriteResult::Conflict);
+        let Some(current) = snapshot(&state, id) else {
+            return Ok(if write.next.is_none() {
+                WriteResult::AlreadyApplied(asc_policy_repository::WriteReceipt {
+                    status_version: None,
+                    status_applied: true,
+                })
+            } else {
+                WriteResult::Conflict
+            });
         };
-        let patch = write.next.as_ref();
-        if current.binding.spec.binding_revision != expected.binding.spec.binding_revision
-            || current.binding.status.phase != expected.binding.status.phase
-            || (patch.is_none_or(|p| p.status.is_some())
-                && current.binding.status != expected.binding.status)
-            || (patch.is_none_or(|p| p.deployments.is_some())
-                && current.deployments != expected.deployments)
-        {
-            return Ok(WriteResult::Conflict);
-        }
-        if let Some(next) = &write.next {
-            // Validate before mutating either map.
-            if next
-                .status
-                .as_ref()
-                .is_some_and(|s| s.phase == asc_policy_types::binding::BindingStatus::Deleted)
-            {
-                return Err(StoreError::Invalid);
-            }
-            if let Some(deployments) = &next.deployments {
-                for (index, deployment) in deployments.iter().enumerate() {
-                    if deployment.presence == Presence::Absent
-                        || deployments[..index]
-                            .iter()
-                            .any(|d| d.target.same_identity(&deployment.target))
-                    {
-                        return Err(StoreError::Invalid);
-                    }
-                }
-            }
-            if let Some(status) = &next.status {
-                state
-                    .bindings
-                    .get_mut(id)
-                    .ok_or(StoreError::Invalid)?
-                    .status = status.clone();
-            }
-            let data = state.binding_states.entry(id.to_owned()).or_default();
-            if let Some(deployments) = &next.deployments {
-                data.deployments.clone_from(deployments);
-            }
-            data.last_write = Some(write.clone());
+        let (next, result) = asc_policy_repository::apply_binding_write(&current, expected, write)?;
+        let WriteResult::Applied(receipt) = result else {
+            return Ok(result);
+        };
+        if let Some(next) = next {
+            state.bindings.insert(id.to_owned(), next.binding);
+            state.binding_states.insert(
+                id.to_owned(),
+                BindingStateData {
+                    status_version: next.status_version,
+                    deployments: next.deployments,
+                    last_write: Some((write.write_id, digest, receipt)),
+                },
+            );
         } else {
+            let scope_id = current.binding.spec.scope.scope_id.to_string();
             state.bindings.remove(id);
             state.binding_states.remove(id);
+            crate::finalize_scope(&mut state, &scope_id);
         }
-        Ok(WriteResult::Applied)
+        Ok(result)
     }
 }
 fn snapshot(state: &State, id: &str) -> Option<BindingStateSnapshot> {
     let binding = state.bindings.get(id)?.clone();
     let data = state.binding_states.get(id);
     Some(BindingStateSnapshot {
+        status_version: data.map_or(1, |d| d.status_version),
         binding,
         deployments: data.map(|d| d.deployments.clone()).unwrap_or_default(),
     })

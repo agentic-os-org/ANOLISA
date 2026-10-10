@@ -9,6 +9,8 @@ use asc_sqlite_kernel::{ColumnSpec, IndexSpec, TableSpec};
 /// The single table this stream writes.
 pub const OBSERVABILITY_TABLES: &[TableSpec] = &[TableSpec {
     name: "observability_events",
+    strict: false,
+    constraints: &[],
     columns: COLUMNS,
     indexes: INDEXES,
     extra_columns: &[],

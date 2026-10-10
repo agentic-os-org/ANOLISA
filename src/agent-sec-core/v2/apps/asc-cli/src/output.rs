@@ -56,31 +56,6 @@ pub fn render_policy(
     }
 }
 
-/// Prints the complete Binding mutation result, including a failed lifecycle.
-/// GET/LIST remain successful queries even when a Binding has failed.
-///
-/// # Errors
-/// Returns output encoding or write failures.
-pub fn render_binding_mutation(
-    response: &DaemonResponse,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> io::Result<u8> {
-    let code = render_policy(response, stdout, stderr)?;
-    if let DaemonResponse::Success(success) = response
-        && matches!(
-            success
-                .result
-                .pointer("/status/phase")
-                .and_then(serde_json::Value::as_str),
-            Some("APPLY_FAILED" | "DELETE_FAILED")
-        )
-    {
-        return Ok(1);
-    }
-    Ok(code)
-}
-
 /// Renders a V1-compatible scan result rather than the daemon envelope.
 ///
 /// Action failures are complete scan results and remain parseable on stdout;
@@ -560,15 +535,10 @@ mod tests {
             let response: DaemonResponse = serde_json::from_value(
                 serde_json::json!({"requestId":"10000000-0000-4000-8000-000000000001", "result":case["binding"]})
             ).unwrap();
-            for mutation in [false, true] {
+            {
                 let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-                let code = if mutation {
-                    render_binding_mutation(&response, &mut stdout, &mut stderr)
-                } else {
-                    render_policy(&response, &mut stdout, &mut stderr)
-                }
-                .unwrap();
-                assert_eq!(code, u8::from(mutation));
+                let code = render_policy(&response, &mut stdout, &mut stderr).unwrap();
+                assert_eq!(code, 0);
                 assert!(stderr.is_empty());
                 assert_eq!(
                     serde_json::from_slice::<serde_json::Value>(&stdout).unwrap(),
@@ -581,7 +551,7 @@ mod tests {
                 serde_json::json!({"requestId":"10000000-0000-4000-8000-000000000001", "result":pending})
             ).unwrap();
             assert_eq!(
-                render_binding_mutation(&response, &mut Vec::new(), &mut Vec::new()).unwrap(),
+                render_policy(&response, &mut Vec::new(), &mut Vec::new()).unwrap(),
                 0
             );
         }

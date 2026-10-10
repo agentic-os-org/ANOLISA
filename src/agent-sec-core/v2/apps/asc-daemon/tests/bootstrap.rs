@@ -186,7 +186,10 @@ async fn daemon_refuses_to_bind_when_sqlite_event_storage_is_unusable() {
     let directory = create_runtime_directory();
     let socket_path = directory.join("daemon.sock");
     let data_dir = directory.join("data");
-    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data_dir)
+        .unwrap();
     std::fs::create_dir(data_dir.join("security-events.db")).unwrap();
     let child = configured_command(&directory)
         .env("AGENT_SEC_DATA_DIR", &data_dir)
@@ -220,7 +223,10 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
     let directory = create_runtime_directory();
     let socket_path = directory.join("daemon.sock");
     let data_dir = directory.join("data");
-    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data_dir)
+        .unwrap();
     std::fs::create_dir(data_dir.join("security-events.jsonl")).unwrap();
     let child = configured_command(&directory)
         .env("AGENT_SEC_DATA_DIR", &data_dir)
@@ -242,11 +248,6 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
     }
     wait_for_socket(&mut running).await;
     assert!(data_dir.join("security-events.db").exists());
-    let stderr = read_stderr(&running.directory);
-    assert!(
-        stderr.contains("JSONL security event log unavailable"),
-        "{stderr}"
-    );
 
     let signal = Command::new("/bin/kill")
         .arg("-TERM")
@@ -255,6 +256,94 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
         .unwrap();
     assert!(signal.success());
     assert!(wait_for_exit(&mut running).await.success());
+    // Socket readiness does not flush the asynchronous diagnostic writer.
+    let stderr = read_stderr(&running.directory);
+    assert!(
+        stderr.contains("JSONL security event log unavailable"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_scope_binary_starts_discovery_and_stops_it_on_sigterm() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let child = configured_command(&directory)
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .arg("--policy-admin-uid")
+        .arg(std::fs::metadata(&directory).unwrap().uid().to_string())
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    wait_for_socket(&mut running).await;
+    let policy = request(&running.socket_path, b"{\"method\":\"policy.templates.create\",\"params\":{\"policyName\":\"scope-policy\",\"template\":{\"specVersion\":\"0.1\",\"rules\":[{\"effect\":\"block\",\"category\":\"file\",\"action\":\"write\",\"target\":{\"type\":\"file\",\"path\":\"/protected\"},\"where\":{\"operation\":{\"eq\":\"delete\"}}}]}}}\n").await;
+    for _ in 0..2 {
+        let mut payload = serde_json::to_vec(&serde_json::json!({"method":"policy.scopes.create","params":{
+            "selector":{"kind":"process","match":{"executable":env!("CARGO_BIN_EXE_agent-sec-daemon")}},
+            "policyTemplates":[{"policyId":policy["result"]["policyId"],"policyRevision":policy["result"]["revision"]}]
+        }})).unwrap();
+        payload.push(b'\n');
+        let created = request(&running.socket_path, &payload).await;
+        assert!(created["result"]["scopeId"].is_string(), "{created}");
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if read_stderr(&running.directory).contains("selected new instances") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial scan should discover the daemon executable");
+    assert!(
+        Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(running.child.id().to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(wait_for_exit(&mut running).await.success());
+    assert!(!running.socket_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_removed_probe_option_rejects_before_binding_socket() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let config = directory.join("probes.json");
+    let child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .arg("--agent-probes")
+        .arg(config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    assert!(!wait_for_exit(&mut running).await.success());
+    assert!(!running.socket_path.exists());
+    assert!(read_stderr(&running.directory).contains("unknown argument: --agent-probes"));
 }
 
 async fn run_binary_scenario(configure_admin: bool) {
@@ -327,4 +416,141 @@ async fn run_binary_scenario(configure_admin: bool) {
 
     assert!(status.success());
     assert!(!running.socket_path.exists());
+}
+
+async fn pap_request(path: &Path, method: &str, params: Value) -> Value {
+    let mut payload =
+        serde_json::to_vec(&serde_json::json!({"method":method,"params":params})).unwrap();
+    payload.push(b'\n');
+    request(path, &payload).await
+}
+fn restart_command(directory: &Path, socket: &Path) -> Child {
+    configured_command(directory)
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .args(["serve", "--socket"])
+        .arg(socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(directory))
+        .spawn()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_policy_and_scope_survive_sigkill_and_database_lease_rejects_second_socket() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let child = restart_command(&directory, &socket_path);
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    wait_for_socket(&mut running).await;
+    let template = serde_json::json!({"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/protected"}, "where": {"operation": {"eq": "delete"}}}]});
+    let policy = pap_request(
+        &running.socket_path,
+        "policy.templates.create",
+        serde_json::json!({"policyName":"original","template":template}),
+    )
+    .await;
+    assert!(policy.get("error").is_none(), "{policy}");
+    let policy_id = policy["result"]["policyId"].clone();
+    // This impossible PID exercises real registry startup without contacting the host PEP.
+    let scope = pap_request(
+        &running.socket_path,
+        "policy.scopes.create",
+        serde_json::json!({
+            "selector": {"kind": "pid", "pid": u32::MAX},
+            "policyTemplates": [{"policyId": policy_id, "policyRevision": 1}]
+        }),
+    )
+    .await;
+    assert!(scope.get("error").is_none(), "{scope}");
+    let scope_id = scope["result"]["scopeId"].clone();
+    let updated = pap_request(
+        &running.socket_path,
+        "policy.templates.update",
+        serde_json::json!({"policyId":policy_id,"policyName":"updated","template":template}),
+    )
+    .await;
+    assert_eq!(updated["result"]["revision"], 2);
+    assert_database_lease_excludes_second_socket(&running.directory);
+    running.child.kill().unwrap();
+    running.child.wait().unwrap();
+    running.child = restart_command(&running.directory, &running.socket_path);
+    wait_for_socket(&mut running).await;
+    let restored = pap_request(
+        &running.socket_path,
+        "policy.scopes.get",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert_eq!(restored["result"], scope["result"]);
+    let current = pap_request(
+        &running.socket_path,
+        "policy.templates.get",
+        serde_json::json!({"id":policy_id,"revision":2}),
+    )
+    .await;
+    assert_eq!(current["result"], updated["result"]);
+    for response in [&restored, &current] {
+        let encoded = response.to_string();
+        assert!(!encoded.contains("statusVersion") && !encoded.contains("cleanup"));
+    }
+    let deleted = pap_request(
+        &running.socket_path,
+        "policy.scopes.delete",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert!(deleted.get("error").is_none(), "{deleted}");
+    let missing = pap_request(
+        &running.socket_path,
+        "policy.scopes.get",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], "not_found");
+    running.child.kill().unwrap();
+    running.child.wait().unwrap();
+    running.child = restart_command(&running.directory, &running.socket_path);
+    wait_for_socket(&mut running).await;
+    let missing = pap_request(
+        &running.socket_path,
+        "policy.scopes.get",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], "not_found");
+    let signal = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(running.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(signal.success());
+    assert!(wait_for_exit(&mut running).await.success());
+}
+
+fn assert_database_lease_excludes_second_socket(directory: &Path) {
+    let second_runtime = directory.join("second-runtime");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&second_runtime)
+        .unwrap();
+    let second = configured_command(directory)
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .args(["serve", "--socket"])
+        .arg(second_runtime.join("second.sock"))
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("Policy database already owned"),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
 }

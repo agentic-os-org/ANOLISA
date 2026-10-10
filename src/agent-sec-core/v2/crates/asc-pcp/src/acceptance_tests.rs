@@ -97,7 +97,7 @@ impl Harness {
             for desired in admission.desired {
                 let before = self.repository.read(&self.id)?.unwrap();
                 assert!(self.repository.compare_exchange_reconcile_intent(
-                    &ExpectedBinding::from_binding(&before.binding),
+                    &ExpectedBinding::from_snapshot(&before),
                     &desired,
                 )?);
                 script.trace.push("admit".into());

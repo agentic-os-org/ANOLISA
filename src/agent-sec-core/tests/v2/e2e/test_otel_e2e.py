@@ -240,7 +240,18 @@ def test_schema_and_frame_budgets_are_independent(otel):
             "method": "policy.templates.create",
             "params": {
                 "policyName": "must-not-exist",
-                "template": {"kind": "prevent_file_deletion", "files": ["/example"]},
+                "template": {
+                    "specVersion": "0.1",
+                    "rules": [
+                        {
+                            "effect": "block",
+                            "category": "file",
+                            "action": "write",
+                            "target": {"type": "file", "path": "/example"},
+                            "where": {"operation": {"eq": "delete"}},
+                        }
+                    ],
+                },
             },
             "traceContext": {"version": 2},
         }

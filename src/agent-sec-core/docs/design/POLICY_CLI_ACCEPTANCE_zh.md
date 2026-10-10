@@ -1,5 +1,10 @@
 # V2 Policy CLI 工作包验收记录
 
+SCOPE-CR-002 当前实现与验收入口见 [生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)。
+当前为 12 个 PAP 方法，Scope 保存无 revision 的完整策略快照，Binding 只读查询；
+Scope delete 返回完成标记，scope retry 重试所属失败。原 15-method 验收数字及旧源码基线
+在下文保留为历史记录，不代表当前 wire。
+
 | 属性 | 值 |
 | --- | --- |
 | 源码基线 | `main@8bf150c24482de42cf5f4be580b56d8c6bf3a376` |
@@ -23,7 +28,7 @@ asc-cli -> asc-daemon-client -> asc-daemon-protocol
         -> asc-daemon-protocol / asc-policy-types / asc-foundation-types
 ```
 
-CLI 与 client 不在运行时依赖 PAP、Repository、Compiler、daemon handler/service 或
+CLI 与 client 不在运行时依赖 PAP、Repository、daemon handler/service 或
 Reconciler。CLI 测试依赖服务端组件，仅用于真实 CLI 子进程与 UDS 集成。当前协议 crate
 已经与服务端实现分离，本变更不复制 domain DTO、不修改 PAP 协议。
 

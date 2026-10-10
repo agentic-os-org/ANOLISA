@@ -726,7 +726,7 @@ daemon handler：
 SecurityEvent `event_id` 保留自身身份，不因采用 OTel 而取消。字段替代须记录实际消费者及关联验收。
 
 query handler 必须把客户端 filter 与服务端 `QueryScope` 求交；CLI/TUI 不得绕过该 adapter
-直读 SQLite、Compiler 或 PCP。
+直读 SQLite 或 PCP。
 
 ## 11. 推荐 module 边界
 
@@ -748,8 +748,7 @@ crates/asc-observability/           # trajectory/read model/effect evidence
 crates/asc-persistence-sqlite/
 ```
 
-ActionRuntime 依赖 executor port，不依赖具体 capability；capability 不依赖 daemon-core 或
-Policy Compiler；asc-daemon 负责注入具体 capability、Repository 和 Client。不得建立一个
+ActionRuntime 依赖 executor port，不依赖具体 capability；capability 不依赖 daemon-core；asc-daemon 负责注入具体 capability、Repository 和 Client。不得建立一个
 通用 SecurityBackend、common/services/utils 层来模糊 bounded context。
 
 ## 12. 迁移策略
@@ -779,7 +778,7 @@ Policy Compiler；asc-daemon 负责注入具体 capability、Repository 和 Clie
 
 每个 capability 工作包交付 typed request/output、CapabilityExecutor、compatibility
 projector、audit projector 和 telemetry fixture。capability 不自行实现 lifecycle、event
-writer，也不依赖 daemon-core 或 Policy Compiler。
+writer，也不依赖 daemon-core 或 PAP。
 
 ### 工作包 D：daemon protocol 与 Action Slice
 

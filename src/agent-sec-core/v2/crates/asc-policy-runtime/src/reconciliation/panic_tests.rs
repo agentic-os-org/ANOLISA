@@ -4,6 +4,7 @@ use asc_policy_repository::{BindingStateWrite, Deployment, ReconcileCandidate, W
 
 fn registered(client: &Client, failed: bool) -> BindingStateSnapshot {
     let mut expected = record(1);
+    expected.status_version = if failed { 3 } else { 2 };
     expected.binding.status.phase = if failed {
         BindingStatus::ApplyFailed
     } else {
@@ -68,15 +69,16 @@ fn delete_during_attempt_panic_keeps_dirty_and_cleans_registered_target() {
         1,
     );
     let queue = service.enqueuer();
-    let pap = PapService::new(
-        repo.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(queue.clone());
+    let pap = PapService::new(repo.clone())
+        .with_reconcile_enqueuer(queue.clone())
+        .with_scope_discovery(Arc::new(Discovery));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let accepted = pap.delete_binding(&id(1)).unwrap();
+    pap.delete_scope(&record(1).binding.spec.scope.scope_id)
+        .unwrap();
+    let accepted = pap.get_binding(&id(1)).unwrap();
     let mut expected = registered(&client, false);
     expected.binding = accepted;
+    expected.status_version = 3;
 
     assert_eq!(repo.get_binding_state(&id(1)).unwrap(), Some(expected));
     assert_eq!(
@@ -152,6 +154,7 @@ fn committed_success_survives_attempt_panic_without_replay() {
         } else {
             let mut saved = registered(&client, false);
             saved.binding.status.phase = BindingStatus::Ready;
+            saved.status_version += 1;
             saved.deployments[0].presence = Presence::Present;
             saved.deployments[0].last_confirmed = Some(Presence::Present);
             Some(saved)
@@ -170,6 +173,7 @@ fn committed_success_survives_attempt_panic_without_replay() {
 }
 
 struct FailedBookkeeping {
+    allow_finish: AtomicBool,
     inner: Arc<ProcessLocalPapRepository>,
     failed: AtomicBool,
     read_fault: u8,
@@ -193,7 +197,8 @@ impl BindingStateRepository for FailedBookkeeping {
         expected: &BindingStateSnapshot,
         write: &BindingStateWrite,
     ) -> Result<WriteResult, StoreError> {
-        if expected.binding.spec.binding_id == id(1)
+        if !self.allow_finish.load(Ordering::SeqCst)
+            && expected.binding.spec.binding_id == id(1)
             && write.next.as_ref().is_some_and(|patch| {
                 patch
                     .status
@@ -218,13 +223,14 @@ impl BindingReconcileCatalog for FailedBookkeeping {
 }
 
 #[test]
-fn unconfirmed_panic_stops_only_that_binding_until_new_notification() {
+fn unconfirmed_panic_retains_result_while_other_bindings_progress() {
     // Verify readable Running state, read error, and a second port panic.
     for read_fault in 0..=2 {
         let inner = Arc::new(
             ProcessLocalPapRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
         );
         let repo = Arc::new(FailedBookkeeping {
+            allow_finish: AtomicBool::new(false),
             inner: inner.clone(),
             failed: AtomicBool::new(false),
             read_fault,
@@ -245,14 +251,25 @@ fn unconfirmed_panic_stops_only_that_binding_until_new_notification() {
         let queue = service.enqueuer();
         wait_until(|| {
             status(&inner, 2) == Some(BindingStatus::Ready)
-                && queue.state.lock().unwrap().entries.get(&id(1)) == Some(&Entry::Exhausted)
+                && matches!(
+                    queue.state.lock().unwrap().entries.get(&id(1)),
+                    Some(Entry::WaitingRetry { retries: 0, .. })
+                )
         });
         assert_eq!(
             inner.get_binding_state(&id(1)).unwrap(),
             Some(registered(&client, false))
         );
-        queue.tick(u64::MAX);
-        queue.discover_many([(id(1), None)], u64::MAX);
+        assert!(
+            queue
+                .state
+                .lock()
+                .unwrap()
+                .schedules
+                .get(&id(1))
+                .unwrap()
+                .has_pending_storage()
+        );
         assert!(queue.state.lock().unwrap().ready.is_empty());
         assert_eq!(
             *client.calls.lock().unwrap(),
@@ -262,14 +279,18 @@ fn unconfirmed_panic_stops_only_that_binding_until_new_notification() {
         assert!(queue.is_healthy());
         assert_eq!(queue.check_ready(), Ok(()));
         repo.failed.store(false, Ordering::SeqCst);
-        let pap = PapService::new(
-            inner.clone(),
-            Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-        )
-        .with_reconcile_enqueuer(queue.clone());
-        pap.delete_binding(&id(1)).unwrap();
+        repo.allow_finish.store(true, Ordering::SeqCst);
+        let pap = PapService::new(inner.clone())
+            .with_reconcile_enqueuer(queue.clone())
+            .with_scope_discovery(Arc::new(Discovery));
+        pap.delete_scope(&record(1).binding.spec.scope.scope_id)
+            .unwrap();
         wait_until(|| {
-            status(&inner, 1).is_none() && queue.state.lock().unwrap().entries.is_empty()
+            let state = queue.state.lock().unwrap();
+            if let Some(Entry::WaitingRetry { retry_at, .. }) = state.entries.get(&id(1)) {
+                clock.0.store(*retry_at, Ordering::SeqCst);
+            }
+            status(&inner, 1).is_none() && state.entries.is_empty()
         });
         assert_eq!(
             client.calls.lock().unwrap().last(),

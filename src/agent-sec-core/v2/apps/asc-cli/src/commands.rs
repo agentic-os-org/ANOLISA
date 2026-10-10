@@ -33,7 +33,7 @@ pub(crate) enum Command {
     /// Manage authored Policy templates.
     #[command(subcommand)]
     Policy(PolicyCommand),
-    /// Manage PID or cgroup Scope selectors.
+    /// Manage Scope process selectors and Policy assignments.
     #[command(subcommand)]
     Scope(ScopeCommand),
     /// Manage Binding desired state; acceptance does not imply enforcement.

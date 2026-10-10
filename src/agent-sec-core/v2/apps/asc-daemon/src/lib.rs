@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 mod actions;
+mod scope_discovery;
+pub use scope_discovery::{ScopeDiscoveryJob, ScopeDiscoveryRegistry};
 mod bootstrap;
 pub use actions::{scan_application, skill_application, skill_task_scope};
 mod cli;

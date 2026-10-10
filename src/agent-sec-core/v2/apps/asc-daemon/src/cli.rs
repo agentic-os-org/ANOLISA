@@ -15,6 +15,7 @@ Root is always authorized. --policy-admin-uid adds an administrator at startup.\
 Repeat this option for multiple UIDs; omitted means root only.\n\
 --skillsec-config selects a root-owned JSON configuration file.\n\
 PAP state is process-local until durable Repository integration lands.\n\
+Scopes start discovery jobs which create and reconcile their Bindings automatically.\n\
 PII rules: --pii-rules <ABSOLUTE_PATH>, default /etc/agent-sec/pii-checker/rules.yaml.\n\
 Rules are compiled at startup; restart to apply updates.\n";
 
@@ -255,6 +256,14 @@ mod tests {
                 Err(expected)
             );
         }
+    }
+
+    #[test]
+    fn removed_probe_startup_option_is_rejected() {
+        assert!(matches!(
+            Cli::parse_from(["daemon", "--agent-probes", "old.json"]),
+            Err(CliError::UnknownArgument(_))
+        ));
     }
 
     #[test]

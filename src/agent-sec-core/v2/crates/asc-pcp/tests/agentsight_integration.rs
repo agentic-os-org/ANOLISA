@@ -45,12 +45,13 @@ fn spec(revision: u32) -> PreparedBinding {
     ))
     .unwrap();
     spec.binding_revision = Revision::new(revision).unwrap();
-    spec.scope.revision = Revision::new(revision).unwrap();
+    spec.policy.policy_name = format!("prevent deletion {revision}");
     spec
 }
 
 fn initial() -> ReconcileRecord {
     ReconcileRecord {
+        status_version: 1,
         binding: BindingView {
             spec: spec(7),
             status: (BindingStatus::PendingApply).into(),
@@ -68,8 +69,9 @@ fn deployment(revision: u32, presence: Presence, confirmed: Option<Presence>) ->
     }
 }
 
-fn ready(revision: u32, _attempts: u32, _is_update: bool) -> ReconcileRecord {
+fn ready(revision: u32, attempts: u32, _is_update: bool) -> ReconcileRecord {
     ReconcileRecord {
+        status_version: i64::from(attempts) * 2 + 1,
         binding: {
             let mut binding = BindingView {
                 spec: spec(revision),
@@ -206,7 +208,7 @@ fn real_http_apply_then_uncertain_delete_and_retry() {
     desired.status = BindingStatus::PendingDelete.into();
     assert!(
         repo.compare_exchange_reconcile_intent(
-            &ExpectedBinding::from_binding(&ready(7, 1, false).binding),
+            &ExpectedBinding::from_snapshot(&ready(7, 1, false)),
             &desired
         )
         .unwrap()
@@ -216,6 +218,7 @@ fn real_http_apply_then_uncertain_delete_and_retry() {
         Disposition::RetryAt { at: 100 }
     );
     let failed = ReconcileRecord {
+        status_version: 6,
         binding: {
             let mut binding = desired.clone();
             binding.status.error = Some(Failure::new(
@@ -267,7 +270,7 @@ fn real_http_partial_update_retry_cleans_old_once_and_reuses_new_request() {
     };
     assert!(
         repo.compare_exchange_reconcile_intent(
-            &ExpectedBinding::from_binding(&ready(7, 1, false).binding),
+            &ExpectedBinding::from_snapshot(&ready(7, 1, false)),
             &desired
         )
         .unwrap()
@@ -279,6 +282,7 @@ fn real_http_partial_update_retry_cleans_old_once_and_reuses_new_request() {
     assert_eq!(
         repo.read(&id).unwrap(),
         Some(ReconcileRecord {
+            status_version: 6,
             binding: {
                 let mut binding = desired;
                 binding.status.error = Some(Failure::new(
@@ -296,7 +300,13 @@ fn real_http_partial_update_retry_cleans_old_once_and_reuses_new_request() {
         worker.reconcile(&id, &mut schedule).unwrap(),
         Disposition::Completed
     );
-    assert_eq!(repo.read(&id).unwrap(), Some(ready(8, 2, true)));
+    assert_eq!(
+        repo.read(&id).unwrap(),
+        Some(ReconcileRecord {
+            status_version: 8,
+            ..ready(8, 2, true)
+        })
+    );
     server.finish(5);
 }
 
@@ -320,7 +330,7 @@ fn same_revision_delete_during_real_http_apply_preserves_target_for_cleanup() {
                 assert!(
                     inspect
                         .compare_exchange_reconcile_intent(
-                            &ExpectedBinding::from_binding(&record.binding),
+                            &ExpectedBinding::from_snapshot(&record),
                             &desired
                         )
                         .unwrap()
@@ -341,6 +351,7 @@ fn same_revision_delete_during_real_http_apply_preserves_target_for_cleanup() {
     assert_eq!(
         repo.read(&id).unwrap(),
         Some(ReconcileRecord {
+            status_version: 3,
             binding: BindingView {
                 spec: spec(7),
                 status: BindingStatus::PendingDelete.into()
@@ -382,16 +393,13 @@ impl BindingStateRepository for FailFinishOnce {
 }
 
 #[test]
-fn result_storage_failure_reprepares_and_safely_replays_http() {
+fn result_storage_failure_retains_success_without_repeating_http() {
     let mut schedule = AttemptSchedule::default();
     let repo = Arc::new(ProcessLocalPapRepository::with_binding_states(vec![initial()]).unwrap());
     let inspect = repo.clone();
-    let server = MockHttp::start(
-        vec![health(), post(7, applied(7)), health(), post(7, applied(7))],
-        move |req| {
-            inspect_registered(&inspect, req);
-        },
-    );
+    let server = MockHttp::start(vec![health(), post(7, applied(7))], move |req| {
+        inspect_registered(&inspect, req);
+    });
     let wrapped = Arc::new(FailFinishOnce {
         repo: repo.clone(),
         fail: AtomicBool::new(true),
@@ -405,31 +413,30 @@ fn result_storage_failure_reprepares_and_safely_replays_http() {
     );
     let mut expected = ready(7, 1, false);
     expected.binding.status.phase = BindingStatus::Applying;
+    expected.status_version = 2;
     expected.deployments = vec![deployment(7, Presence::Unknown, None)];
     assert_eq!(repo.read(&id).unwrap(), Some(expected));
     assert_eq!(
         worker.reconcile(&id, &mut schedule).unwrap(),
-        Disposition::Skipped
+        Disposition::Completed
     );
     assert_eq!(schedule.attempts_started, 1);
     clock.0.store(100, Ordering::SeqCst);
     assert_eq!(
         worker.reconcile(&id, &mut schedule).unwrap(),
-        Disposition::Completed
+        Disposition::Skipped
     );
-    assert_eq!(repo.read(&id).unwrap(), Some(ready(7, 2, true)));
-    server.finish(4);
+    assert_eq!(repo.read(&id).unwrap(), Some(ready(7, 1, false)));
+    server.finish(2);
 }
 
 #[test]
-fn retry_prepares_current_process_identity_without_storing_it_in_cleanup() {
+fn retry_rejects_reused_process_identity_and_retains_unknown_cleanup() {
     let mut schedule = AttemptSchedule::default();
     for change_boot in [false, true] {
         let repo =
             Arc::new(ProcessLocalPapRepository::with_binding_states(vec![initial()]).unwrap());
         let wire = Wire::new([
-            Ok(response(200, HEALTH)),
-            Err(AgentSightTransportError::Unavailable),
             Ok(response(200, HEALTH)),
             Err(AgentSightTransportError::Unavailable),
         ]);
@@ -465,24 +472,20 @@ fn retry_prepares_current_process_identity_without_storing_it_in_cleanup() {
         clock.0.store(100, Ordering::SeqCst);
         assert_eq!(
             core.reconcile(&id, &mut schedule).unwrap(),
-            Disposition::RetryAt { at: 250 }
+            Disposition::Failed {
+                error: Failure::new(FailureKind::Rejected, "AGENTSIGHT_PROCESS_IDENTITY_CHANGED")
+            }
         );
         let after = repo.read(&id).unwrap().unwrap();
         assert_eq!(after.binding.spec, previous.binding.spec);
         assert_eq!(after.deployments, previous.deployments);
-        assert_eq!(schedule.attempts_started, 2);
-        let requests = wire.requests();
-        assert_eq!(requests.len(), 4);
-        let body: Value = serde_json::from_slice(requests[3].body.as_ref().unwrap()).unwrap();
-        assert_eq!(
-            body["process_start_time"],
-            if change_boot { 987_654 } else { 987_655 }
-        );
+        assert_eq!(wire.requests().len(), 2);
         let cleanup: Value = serde_json::from_slice(&after.deployments[0].target.cleanup).unwrap();
         assert_eq!(
             cleanup,
             serde_json::json!({
-                "schemaVersion": 1, "bindingId": id, "bindingRevision": 7
+                "schemaVersion": 2,
+                "endpoint": "http://127.0.0.1:7396/api", "bindingId": id, "bindingRevision": 7
             })
         );
         wire.consumed();

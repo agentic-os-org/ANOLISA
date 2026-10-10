@@ -429,6 +429,11 @@ next offset。items 按 `(timestamp_epoch, kind)` 升序排列：
 
 ### 6.11 **[TARGET V2]** PAP administration
 
+本节 15-method CRUD 表描述现有 V2 实现基线。新的对象目标以
+[生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)和第 14 节为准：保留 Policy update，
+Scope 无自身 revision 且不可更新；Binding 仅供用户查询。实施前不把旧方法表当作新目标，
+也不把目标文档变化解释为当前二进制已经移除相应方法。
+
 PAP administration 是新增的 V2 method family，不是九个 V1 method 之一。第一版接口采用
 互斥的 `{requestId,result}` 或 `{requestId,error}` 响应，不保留 POC 的 `poc.*` method、
 `ok/data/stdout/stderr/exit_code` envelope 或兼容分支。输入和输出以
@@ -437,7 +442,7 @@ PAP administration 是新增的 V2 method family，不是九个 V1 method 之一
 success 不得再包一层 `{policy}`、`{scope}` 或 `{binding}`。
 
 `v2/crates/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
-15 个 method 的有状态 CRUD 场景及完整 response value，包括 Canonical Policy IR、Scope
+15 个 method 的历史有状态 CRUD 场景及完整 response value、Scope
 template、Binding 内嵌快照、revision、status 和确定性 digest。daemon 生成的 request/resource
 UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 UUID 格式、CREATE 捕获值在后续
 请求/响应中的一致性，以及不同资源 identity 不混用。该 fixture 同时由 protocol 类型测试、
@@ -501,29 +506,32 @@ Delete 和 DeleteFailed 重试均保留 revision。Delete 保留完整 spec 与�
 允许在 Applying 时受理；PendingDelete/Deleting/DeleteFailed 拒绝所有 UPDATE，不能
 撤销删除。全部目标确认 Absent 后，Reconciler 原子移除 Binding 及运行记录；此后
 GET/UPDATE/DELETE 返回 not_found，LIST 不包含该 ID。重新部署须 CREATE 新 ID、revision 1。
-`Deleted` 只作内部完成标记，不作为持久化 current record。当前 daemon 尚未接入后台
-reconcile worker；硬删除行为由 PAP + Reconciler 内存组合测试验证。
+`Deleted` 只作内部完成标记，不作为持久化 current record。现有 daemon 已接入后台
+reconcile Runtime。当前 Scope 自动管理 Binding，生产使用 SQLite，最后一条 Binding 与
+已停止 discovery 的 Deleting Scope 同事务删除；恢复证据见
+[Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。内部 status_version、
+deployments 与写回执不进入公共响应。历史内存组合测试不作为真实 PEP 或物理断电验收。
 
-Policy CREATE/UPDATE 在 PAP 内同步调用 `PolicyCompiler::lower(TemplateEnvelope) ->
-PolicyEnvelope`。当前产品 compiler 只实现 `prevent_file_deletion`，其输入与完整 Canonical
-Policy IR 输出由
-`v2/crates/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
-`ResourceOperation::Delete + FileResolution::PathEntry`。该模板只覆盖对匹配目录项的删除操作，
-例如 unlink/rmdir；rename/move、link、truncate、内容修改和其它 namespace mutation 不在其
-保护范围内。其它 `PolicyTemplate` kind 在各自 lowering 与直接 Adapter conformance 完成前
-返回 `invalid_argument`，不得生成占位 IR。
+Policy CREATE/UPDATE 在 PAP 内校验 `PolicyTemplate` 并保存完整模板。
+PolicyTemplate 是可被多个 Scope 复用的策略；内容使用 `specVersion`、可选 description 和
+非空 rules，每条规则包含 effect/category/action/typed target 及可选 where/previous/because。
+当前定义文件目标和 read/write/exec 动作，合法但 AgentSight 不支持的规则可以保存。
+Adapter 只转换不带历史条件的 block + file/write + operation=delete 规则；任意一条不支持，
+整个 Binding 失败，错误码包含规则序号，不部分下发。旧 kind/files 格式拒绝。
+完整结构与校验边界见 [对象契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md#7-通用规则结构改造计划)；
+固定输出见 `v2/fixtures/adapters/agentsight/prevent-file-deletion/`。
 
-参数 object 拒绝未知字段。ScopeSelector 只包含正数 PID 或 cgroup ID；PreparedScope
+参数 object 拒绝未知字段。基线 ScopeSelector 支持正数 PID 或 cgroup ID；第 14 节
+SCOPE-CR-001 扩展 name/path process selector 与 policyTemplates assignment。PreparedScope
 必须显式包含 selector，缺失或 null 均拒绝，不再从 scopeId 推导执行域身份。
-PreparedScope 的输出仅含 `scopeId`、`revision`、`selector`；不再包含自动填充的
+Legacy PreparedScope 的输出含 `scopeId`、`revision`、`selector`，assignment 增加 `policyTemplates`；不再包含自动填充的
 `template` 或 `templateDigest`。读取时显式携带这两个已移除字段会被拒绝，不能
 把其中的 lifetime 等约束静默丢弃。Scope Update 直接按 selector 比较内容是否相同；
-PreparedPolicy 保留 policyId/policyName/revision/template/canonicalPolicy，移除
-templateDigest；Policy 的 authored template 保留，canonicalPolicy 不再含预留的 payloadDigest。
+PreparedPolicy 包含 policyId/policyName/revision/template。Scope 和 Binding 中的内嵌
+Policy 使用相同结构。
 PreparedBinding 只含 bindingId/bindingRevision/policy/scope，不再接受顶层
 executionDomainId。已删除的 Policy templateDigest 和 Binding executionDomainId
-（包括显式 null）均按未知字段拒绝；Policy/Scope 的 retired 和 canonicalPolicy 的
-payloadDigest 也不再接受。当前三个模型直接派生严格反序列化，不保留旧字段吞入逻辑。
+（包括显式 null）均按未知字段拒绝；Policy/Scope 的 retired 也不再接受。当前三个模型直接派生严格反序列化，不保留旧字段吞入逻辑。
 LIST 的 `limit` 为 `1..=1000`，`offset` 为 `u32`；total 是
 分页前总数。当前 aggregate byte budget 仍是 Repository/PAP/transport 联合 gate，在该 gate
 完成前 LIST 只达到 integration contract，不构成 distribution-ready 大数据量查询能力。
@@ -538,9 +546,9 @@ PAP error 稳定投影如下：无法构造成 method params 的字段、类型�
 identifier、revision、pagination 和 authored selector）→ `invalid_request`，同时返回最多 256
 字节的参数解码原因；任意层级 JSON object 的 duplicate key 在进入 `serde_json::Value` 前拒绝，
 按 malformed envelope 返回 `invalid_request / request envelope is invalid`。成功构造 params 后
-发生的 authoring/compiler validation → `invalid_argument`，message 为最多 256 字节的稳定
+发生的 template/selector validation → `invalid_argument`，message 为最多 256 字节的稳定
 `invalid policy name: <reason>`、`invalid policy: <authored-path>: <reason>` 或
-`invalid scope: <authored-path>: <reason>`，不得暴露 canonical IR path、输入内容或内部 error
+`invalid scope: <authored-path>: <reason>`，不得暴露 内部字段路径、输入内容或内部 error
 code。
 
 not found → `not_found`，并按操作对象稳定区分 `policy was not found`、
@@ -823,7 +831,7 @@ agent-sec-cli 触发 PyO3、Python backend 或第二套本地业务执行。
 | DPV1-017 | 八个 action method 的 timeout、queue/resource、access-log、blocking 和 cancellation metadata 已冻结并逐项验证 |
 | DPV1-018 | 多 UID 共用 system socket；trusted Principal/QueryScope 隔离 owner，`caller/trace_context` 不参与授权 |
 | DPV1-019 | CLI/TUI 不能用 RPC filter 绕过服务端 QueryScope，也不能直读 SQLite 替代授权查询 |
-| DPV1-020 | 15 个 PAP method 的 strict params、完整请求/响应 CRUD fixture、直接领域 result、错误投影、server-owned Principal；必跑 UDS integration 经 Dispatcher/PapHandler → PapService → Policy Compiler/Repository 执行完整 fixture，真实 `asc-daemon` 子进程通过启动管理员 UID 配置完成非 root 成功场景，同时验证默认拒绝；root 环境验证默认成功 |
+| DPV1-020 | 15 个 PAP method 的 strict params、完整请求/响应 CRUD fixture、直接领域 result、错误投影、server-owned Principal；必跑 UDS integration 经 Dispatcher/PapHandler → PapService → Repository 执行完整 fixture，真实 `asc-daemon` 子进程通过启动管理员 UID 配置完成非 root 成功场景，同时验证默认拒绝；root 环境验证默认成功 |
 
 协议测试必须使用 socket bytes 和解析后 JSON 比较；只测试某个 Python dataclass 或 Rust
 struct 的构造函数不足以证明 wire compatibility。
@@ -959,3 +967,41 @@ server frame proof。普通 V2 请求仍由原 closed envelope 解析，不接�
 完整输入、错误、部分成功语义、V1 CLI 兼容边界与 OBS-001..006 executable fixtures 见
 [V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md)。这不是 V1 新增 RPC，
 不改变本文 CURRENT V1 方法清单；本批没有新增查询接口。
+
+## 16. [TARGET V2][IMPLEMENTED, PROCESS-LOCAL] Scope assignment（SCOPE-CR-002）
+
+对象与生命周期权威定义为
+[Policy/Scope/Binding 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)。本节替代第 6.11
+节及 SCOPE-CR-001 中 Scope revision、引用阻止模板更新/删除和手动 Binding CRUD 语义。
+
+当前公开 12 个 PAP 方法：`policy.templates.{create,update,get,list,delete}`、
+`policy.scopes.{create,get,list,delete,retry}`、`policy.bindings.{get,list}`。
+Scope update、Binding mutation 返回 `unknown_method`；Scope revision 参数拒绝。
+
+```json
+{"method":"policy.scopes.create","params":{"selector":{"kind":"process","match":{"processName":"openclaw"}},"policyTemplates":[{"policyId":"policy-one","policyRevision":1}]}}
+```
+
+`policyTemplates` 对全部 selector 均必填，1–32 个不同 Policy；服务端解析并在提交锁内
+核对精确 current revision。并发更新/删除导致该版本不可用时返回 `not_found`，不替换版本。
+Scope 返回 `scopeId`、`selector`、`policySnapshots`（完整 PreparedPolicy）和 `status:ACTIVE`；
+没有 revision，不可 update。模板更新/删除不影响该 Scope 或未来实例。
+
+`match` 必须且只能包含 `processName` 或 `executable`。名称精确匹配 `/proc/PID/comm`
+（1–15 bytes），路径精确匹配 `/proc/PID/exe` 的规范化绝对路径；不做 glob/前缀匹配。
+PID selector 固定首次观察到的实例；当前拒绝 cgroup assignment。未配置发现、调度不可用或
+32 个 discovery jobs 容量耗尽时返回 unavailable。
+
+Scope get/delete/retry 参数均为 `{"id":"scope-id"}`。删除关闭准入、停止发现并清理所属
+Binding，返回 `{"scopeId":"scope-id","completed":false}`，完成时 completed 为 true。
+未完成 Scope 为 `DELETING`；重复 delete 不重置预算。全部 Binding 删除成功后，已停止
+discovery 的 Scope 及其快照随之删除；无 Binding 时停止 discovery 后直接删除 Scope。
+`scope retry` 返回 Scope 快照，仅重试所属终态失败 Binding。Binding 查询包含单策略快照、
+Scope 来源和固定进程身份，不包含完整 Scope 或 scopeRevision。
+
+编码后 Policy/Scope 单记录上限 1 MiB，列表条目预算 3 MiB。`total` 是分页前总数，
+下页 offset 按实际 items 数推进。方法/字段/错误由 `pap-methods.json`、
+`pap-invalid-requests.json`、`pap-crud-e2e.json` 冻结，CLI 与 daemon 成套升级。
+
+真实 procfs + scripted Client 组合验证自动下发/清理；UDS、CLI 和 bootstrap 验证公开接口。
+这不构成磁盘恢复、真实 AgentSight 或 kernel enforcement 证据。旧 Probe 入口继续拒绝。

@@ -1,0 +1,36 @@
+[package]
+name = "asc-policy-repository-sqlite"
+description = "Durable Policy, Scope and Binding repository"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+fault-injection = ["dep:fail", "fail/failpoints"]
+
+[dependencies]
+asc-foundation-types.workspace = true
+asc-pap.workspace = true
+asc-policy-repository.workspace = true
+asc-policy-types.workspace = true
+asc-sqlite-kernel.workspace = true
+fail = { workspace = true, optional = true }
+rusqlite.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+asc-agentsight-client.workspace = true
+asc-pcp.workspace = true
+tempfile.workspace = true
+asc-pap-repository-memory.workspace = true
+
+[lints]
+workspace = true

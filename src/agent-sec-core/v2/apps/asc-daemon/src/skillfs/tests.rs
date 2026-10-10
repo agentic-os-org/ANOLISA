@@ -48,10 +48,9 @@ fn start_bridge(
 
 fn ordinary_dispatcher(application: Arc<ActionService>) -> DaemonDispatcher {
     DaemonDispatcher::new(
-        asc_pap::PapService::new(
-            Arc::new(asc_pap_repository_memory::ProcessLocalPapRepository::default()),
-            Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-        ),
+        asc_pap::PapService::new(Arc::new(
+            asc_pap_repository_memory::ProcessLocalPapRepository::default(),
+        )),
         Arc::new(RootManagedPrincipalPolicy::default()),
         application,
     )
