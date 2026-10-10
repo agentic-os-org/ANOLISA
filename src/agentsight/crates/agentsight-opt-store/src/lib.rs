@@ -12,7 +12,7 @@ use agentsight_sqlite_lifecycle::{
     retention_cutoff_ns, CheckpointOutcome, ConnectionMode, ConnectionOptions, MaintenanceReport,
     MaintenanceStatus, SizeBasis, SizePolicy,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 /// Errors produced by [`OptimizationStore`].
@@ -100,7 +100,7 @@ impl OptimizationStore {
     /// Returns [`OptStoreError::Sqlite`] if the database cannot be opened or
     /// the schema cannot be created.
     pub fn new_with_path(path: &Path) -> Result<Self, OptStoreError> {
-        let conn = open_connection(path, ConnectionOptions::default())?;
+        let mut conn = open_connection(path, ConnectionOptions::default())?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS optimization_results (
                 session_id TEXT PRIMARY KEY,
@@ -115,7 +115,7 @@ impl OptimizationStore {
             )",
             [],
         )?;
-        Self::migrate(&conn)?;
+        Self::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             db_path: path.to_path_buf(),
@@ -146,17 +146,21 @@ impl OptimizationStore {
     /// `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists, so new
     /// dimension columns must be added explicitly. Idempotent: each column is
     /// only added when `PRAGMA table_info` says it is absent.
-    fn migrate(conn: &Connection) -> Result<(), OptStoreError> {
-        let existing = Self::column_names(conn)?;
+    fn migrate(conn: &mut Connection) -> Result<(), OptStoreError> {
+        // Serialize the schema snapshot with the ALTER: a second opener must
+        // re-check after the first migration commits instead of adding twice.
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = Self::column_names(&transaction)?;
         // (column, DDL) pairs — append here when a new dimension is introduced.
         for (column, ddl) in [(
             "summary",
             "ALTER TABLE optimization_results ADD COLUMN summary TEXT",
         )] {
             if !existing.iter().any(|c| c == column) {
-                conn.execute(ddl, [])?;
+                transaction.execute(ddl, [])?;
             }
         }
+        transaction.commit()?;
         Ok(())
     }
 
