@@ -23,6 +23,7 @@ pub struct Fixture {
     pub root: PathBuf,
     pub python: PathBuf,
     next: AtomicUsize,
+    native_profile: Option<PathBuf>,
 }
 impl Fixture {
     pub fn new() -> Self {
@@ -50,7 +51,19 @@ impl Fixture {
             root,
             python: fs::canonicalize(python).unwrap(),
             next: AtomicUsize::new(0),
+            native_profile: None,
         }
+    }
+    pub fn native_profile(&mut self) -> PathBuf {
+        // Workspace ancestors may be group-writable; /tmp is root-owned sticky.
+        let mut template = b"/tmp/aw-hermes-launcher-XXXXXX\0".to_vec();
+        // SAFETY: the terminated writable template creates an exclusively owned directory.
+        let path = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+        assert!(!path.is_null());
+        let path = PathBuf::from(unsafe { std::ffi::CStr::from_ptr(path) }.to_str().unwrap());
+        assert!(self.native_profile.is_none());
+        self.native_profile = Some(path.clone());
+        path
     }
     pub fn action(&self) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/launcher/action.py")
@@ -136,6 +149,9 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if let Some(profile) = &self.native_profile {
+            fs::remove_dir_all(profile).unwrap();
+        }
         fs::remove_dir_all(&self.root).unwrap();
     }
 }

@@ -200,7 +200,7 @@ class GateTests(GateFixture):
             ),
             (
                 "aw-service", self.root / "crates/aw-service",
-                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "sha2", "thiserror"],
+                ["aw-config", "aw-core", "aw-exec", "aw-host", "aw-provider", "libc", "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror"],
             ),
             (
                 "aw-provider-sec-core", self.root / "crates/aw-provider-sec-core",

@@ -7,8 +7,8 @@ its normal interface. You describe the programs and events in `aw.yaml`; AW
 starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
-The current Linux source build supports Qoder CLI 1.1.64, OpenClaw 2026.9.6
-and QwenPaw 2.2.2b4 / AgentScope 2.0.8.
+The current Linux source build supports Qoder CLI 1.1.64, OpenClaw 2026.9.6,
+QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`.
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
@@ -25,6 +25,7 @@ Agent or configure its model account; retain the framework's native configuratio
 | Keep a shared service and persistent execution metadata | ✅ On-demand or externally started service |
 | Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
 | Start QwenPaw through AW | ✅ the official App/API entrypoint |
+| Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, result replacement or OS enforcement | ❌ Not admitted by the current structured Provider path |
 | Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](aw-preview.md); not a stable release |
@@ -234,6 +235,89 @@ switch to the new configuration. Provider definitions and associated steps are
 removed together; editing a running service's file does not reload it. Generic
 editing of existing YAML is outside this command.
 
+## Start Hermes
+
+Use the official Hermes checkout at revision `952c941e741e922a9be8fc403c8944c6e96318bb`.
+Both installation and launch reject staged or unstaged changes to tracked files;
+commit or stash local changes and restore the pinned revision before retrying.
+The example uses `argv: [hermes, chat]`; select that installation's Python console
+script, such as `/absolute/hermes/venv/bin/hermes`, with an absolute Python
+shebang. Explicit paths and PATH lookup both require executable regular files;
+FIFOs, directories and non-executable files are rejected before native probes.
+Shell wrappers and `python -m` entrypoints are unsupported. AW uses that
+interpreter to enter the same native CLI process, preserving its arguments and
+working directory. Native profile loading determines the effective
+`HERMES_SAFE_MODE`, including profile `.env` overrides; safe mode is rejected,
+and plugin registration is required before chat can dispatch tools.
+Initialize its profile and model account through Hermes first. `aw install` is an
+explicit one-time installation of the native AW plugin in the selected profile.
+It saves the original configuration before enabling that plugin, retains unknown
+configuration fields, and refuses a conflicting non-AW plugin. The native YAML
+writer edits a private candidate before AW atomically exchanges it with the live
+config. The command reports the exact initial `backup` and a permanently retained
+`displaced` file (`<backup>.displaced`) containing the original inode, including
+later writes through an already-open descriptor. Stop native config writers
+during installation and rollback, and review both recovery files before restoring.
+A writer failure or conflict detected before publication leaves the live config
+unchanged; a conflict detected at the exchange boundary reports failure with the
+candidate already published and preserves the displaced content for review.
+Success also requires removing the config staging directory and syncing its parent.
+A cleanup or sync failure reports the already-published configuration and both
+recovery paths, without reporting success or rolling back.
+This exchange does not provide compare-and-swap against writers that ignore AW's
+lock. Installation does not hot-load or restart existing Hermes services.
+The canonical profile directory, configuration and bundled plugin files must
+be owned and not writable by others. If the profile has a `.env`, it must also
+be a caller-owned regular file without group/other write permission (0600 or 0644
+is accepted). AW checks it without following symlinks before any native probe,
+including `--version`, because importing the CLI loads that file.
+Every ancestor must belong to the caller or root and prevent group/other writes,
+except sticky directories such as `/tmp` that protect owned children. AW rejects
+unsafe paths without changing their permissions. Ctrl-C or SIGTERM cancels native
+installation probes/writers, removes staging copies and retains the signal exit status.
+Installation and launch probe errors remain visible before signal exit, including
+unverified process-group cleanup. Before probing or modifying the profile, installation
+validates configured native arguments using the same local-chat restrictions as launch.
+An executable-only `argv` remains supported; supply `chat` and its options after
+`aw run`'s `--` in that case.
+Chat `--help`/`-h` exits before plugin readiness, so AW rejects these options in
+configured arguments and arguments appended to `aw run`, before native probes or
+profile writes. Run `hermes chat --help` directly to view native help. Literal
+query values such as `--query=--help` remain supported.
+
+An AW upgrade can change the bundled plugin bytes. If launch or installation
+reports a mismatched or incomplete plugin, stop Hermes sessions and plugin writers, review
+`<profile>/plugins/aw-native-hooks`, and move that directory to a backup outside
+`<profile>/plugins`. Rerun the same `aw install` command to install matching files;
+the saved directory remains available for inspection or rollback.
+
+An empty `providers` and `events` configuration launches with zero AW callbacks.
+Existing native Hooks still run; AW records the session lifecycle without
+claiming per-tool policy checks or audit records. Explicit installation remains
+required.
+
+Subsequent `aw run` calls retain that profile's credentials, history and working
+directory. Native before/after callbacks run in Hermes registration order;
+a before block does not prevent later registered callbacks from running. Post
+callbacks also observe blocked and failed attempts. AW preserves native Hook
+parsing and the Agent's own approval flow; portable AW `ask` is not supported.
+This adapter covers local `chat`, not the native TUI, Gateway or ACP. AW
+pins the entrypoint with native `--cli`; full chat options are required, and
+profile/worktree/resume switches and option abbreviations are unsupported. Event
+budgets are limited to 55,000 ms and must fit the native callback timeout.
+
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
+
+The [neutral Hermes example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.hermes.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
 ## Connect your programs
 
 Each named object in `spec.providers` describes a program. An event step refers
@@ -326,29 +410,30 @@ The local endpoint is a same-user boundary, not a sandbox.
 | --- | --- |
 | `aw validate --config FILE` | Check syntax and static references without executing programs |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | Start the configured Agent and connect supported Hooks |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Dispatch persistent native Hook setup; no current adapter supports it, including Qoder and OpenClaw |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | Explicitly install the Hermes native plugin into an existing profile; Qoder, OpenClaw and QwenPaw reject this command |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | Run the service in the foreground |
 | `aw status --config FILE` or `aw status --socket ABSOLUTE_PATH` | Inspect the selected service without starting it |
 | `aw stop --config FILE` or `aw stop --socket ABSOLUTE_PATH` | Request graceful shutdown |
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | Send one developer operation JSON object from stdin; default 5,000 ms |
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
-the implementation. This build implements Qoder CLI 1.1.64, OpenClaw 2026.9.6
-and QwenPaw 2.2.2b4 / AgentScope 2.0.8. `aw install` validates the configuration
-and dispatches to that adapter;
-All three use temporary launch configuration and reject persistent installation.
+the implementation. This build implements Qoder CLI 1.1.64, OpenClaw 2026.9.6,
+QwenPaw 2.2.2b4 / AgentScope 2.0.8 and Hermes revision `952c941e`. `aw install`
+validates the configuration and dispatches to that adapter. Hermes supports
+persistent plugin installation; Qoder, OpenClaw and QwenPaw reject it.
 This command does not install AW packages or Agent software, start an Agent,
 or configure model credentials. `aw run` does not implicitly call `install`.
 
 | Adapter-specific option | Command | Current support |
 | --- | --- | --- |
 | `--native-settings JSON_FILE` | `run` | Qoder: optional extra JSON settings merged with generated Hooks; the original file remains unchanged. OpenClaw: required existing native JSON configuration |
-| `--native-profile PROFILE` | `run`, `install` | Adapter profile selector; no current adapter accepts it. Qoder rejects it for `run` and rejects `install` altogether |
+| `--native-profile PROFILE` | `run`, `install` | Hermes: required existing absolute profile for `run` and `install`. Qoder and OpenClaw reject it |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
 
 The shared command parser recognizes these adapter-specific options, but that
 alone does not enable them for a framework. QwenPaw rejects all these native
-override options and uses `QWENPAW_WORKING_DIR`. Hermes remains unsupported in this build. Pass supported AW options before `--`; arguments
+override options and uses `QWENPAW_WORKING_DIR`. Pass supported AW options before
+`--`; arguments
 after it are forwarded literally to the Agent. `install` accepts no Agent
 arguments. Use `aw --help` to see the command syntax and current support.
 

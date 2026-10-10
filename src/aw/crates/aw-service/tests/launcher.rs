@@ -3,6 +3,8 @@
 
 #[path = "support/command_policy.rs"]
 mod command_policy;
+#[path = "launcher/hermes_trust.rs"]
+mod hermes_trust;
 #[path = "launcher/support.rs"]
 mod support;
 
@@ -25,6 +27,191 @@ fn hooks(report: &Value, event: &str) -> Vec<Value> {
         .as_array()
         .unwrap()
         .clone()
+}
+
+#[test]
+fn hermes_install_rejects_configured_entrypoints_before_probing_or_writing() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    let profile = fixture.native_profile();
+    let original = b"unknown: keep\n";
+    fs::write(profile.join("config.yaml"), original).unwrap();
+    let executable = fixture.root.join("hermes");
+    fs::write(
+        &executable,
+        format!(
+            "#!{}\n# from hermes_cli.main import main\nimport os\nfrom pathlib import Path\n(Path(os.environ['FAKE_ROOT']) / 'probe-started').touch()\n",
+            fixture.python.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    for native in [
+        vec!["gateway"],
+        vec!["chat", "--safe-mode"],
+        vec!["chat", "--profile=other"],
+        vec!["chat", "--tui"],
+        vec!["chat", "--safe"],
+    ] {
+        let mut argv = vec![executable.to_str().unwrap()];
+        argv.extend(native);
+        let mut document = fixture.document();
+        document["spec"]["agents"] = json!({"hermes":{"adapter":"hermes","argv":argv}});
+        fixture.save(&document);
+        let mut command = fixture.command();
+        command
+            .args(["install", "--config"])
+            .arg(fixture.root.join("aw.json"))
+            .args(["--agent", "hermes", "--native-profile"])
+            .arg(&profile);
+        let output = fixture.run(command);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("local chat command only") || stderr.contains("is unsupported"),
+            "invalid entrypoint passed argument validation: {stderr}"
+        );
+        assert!(!fixture.root.join("probe-started").exists());
+        assert_eq!(fs::read(profile.join("config.yaml")).unwrap(), original);
+        assert_eq!(fs::read_dir(&profile).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn hermes_probes_and_install_writers_cancel_and_reap_on_signals() {
+    use std::os::unix::fs::PermissionsExt;
+    for probe in [
+        "run-version",
+        "run-identity",
+        "run-checkout",
+        "run-timeout",
+        "install-version",
+        "install-identity",
+        "install-checkout",
+        "plugins.disabled",
+        "plugins.enabled",
+    ] {
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let mut fixture = Fixture::new();
+            let python = fixture.root.join("python-fixture");
+            fs::write(&python, format!(r#"#!{}
+import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ['FAKE_ROOT'])
+selected = os.environ['HERMES_PROBE']
+probe = 'run-timeout' if '-c' in sys.argv else ('install-version' if selected == 'install-version' else 'run-version')
+if 'config' in sys.argv:
+    probe = sys.argv[-2]
+if probe == selected:
+    (root / 'probe.pid.tmp').write_text(str(os.getpid()))
+    (root / 'probe.pid.tmp').replace(root / 'probe.pid')
+    time.sleep(90)
+elif 'config' in sys.argv:
+    path = Path(os.environ['HERMES_HOME']) / 'config.yaml'
+    value = json.loads(path.read_text())
+    value['plugins'][probe.split('.')[1]] = json.loads(sys.argv[-1])
+    path.write_text(json.dumps(value))
+else:
+    print('Install directory: ' + str(root))
+"#, fixture.python.display())).unwrap();
+            let hermes = fixture.root.join("hermes");
+            fs::write(
+                &hermes,
+                format!(
+                    "#!{}\n# from hermes_cli.main import main\n",
+                    python.display()
+                ),
+            )
+            .unwrap();
+            let git = fixture.root.join("git");
+            fs::write(
+                &git,
+                format!(
+                    "#!{}\nimport os, sys, time\nfrom pathlib import Path\nprobe = '-identity' if 'rev-parse' in sys.argv else '-checkout'\nif os.environ['HERMES_PROBE'].endswith(probe):\n    root = Path(os.environ['FAKE_ROOT'])\n    (root / 'probe.pid.tmp').write_text(str(os.getpid()))\n    (root / 'probe.pid.tmp').replace(root / 'probe.pid')\n    time.sleep(90)\nif probe == '-identity':\n    print('952c941e741e922a9be8fc403c8944c6e96318bb')\n",
+                    fixture.python.display()
+                ),
+            )
+            .unwrap();
+            for file in [&python, &hermes, &git] {
+                fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let profile = fixture.native_profile();
+            let plugin = profile.join("plugins/aw-native-hooks");
+            fs::create_dir_all(&plugin).unwrap();
+            for directory in [profile.join("plugins"), plugin.clone()] {
+                fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let source =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adapters/hermes");
+            for name in ["plugin.yaml", "__init__.py"] {
+                fs::copy(source.join(name), plugin.join(name)).unwrap();
+                fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            fs::write(plugin.join(".aw-owned"), "aw-hermes-plugin/v1alpha1\n").unwrap();
+            let installing = !probe.starts_with("run-");
+            let original = if installing {
+                r#"{"plugins":{"enabled":[],"disabled":["aw-native-hooks"]},"unknown":"keep"}"#
+            } else {
+                r#"{"plugins":{"enabled":["aw-native-hooks"]},"unknown":"keep"}"#
+            };
+            fs::write(profile.join("config.yaml"), original).unwrap();
+            for file in [plugin.join(".aw-owned"), profile.join("config.yaml")] {
+                fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let mut document = fixture.document();
+            document["spec"]["agents"] =
+                json!({"hermes":{"adapter":"hermes","argv":[hermes,"chat"]}});
+            fixture.save(&document);
+            let mut command = fixture.command();
+            let mut paths = vec![fixture.root.clone()];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            command
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("HERMES_PROBE", probe);
+            command
+                .args([if installing { "install" } else { "run" }, "--config"])
+                .arg(fixture.root.join("aw.json"))
+                .args(["--agent", "hermes", "--native-profile"])
+                .arg(&profile);
+            let process = Process::spawn(&fixture, command);
+            let deadline = Instant::now() + TIMEOUT;
+            while !fixture.root.join("probe.pid").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "Hermes {probe} probe did not start: {}",
+                    fs::read_to_string(fixture.root.join("process-0.stderr")).unwrap()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            let pid: u32 = fs::read_to_string(fixture.root.join("probe.pid"))
+                .unwrap()
+                .parse()
+                .expect("probe must publish a complete PID");
+            let started = Instant::now();
+            process.signal(signal);
+            let output = process.finish();
+            assert_eq!(output.status.signal(), Some(signal));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("aw: ") && stderr.contains("command execution cancelled"),
+                "interrupted {probe} discarded its error: {stderr}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "Hermes {probe} signal {signal} left PID {pid}"
+            );
+            assert_eq!(
+                fs::read(profile.join("config.yaml")).unwrap(),
+                original.as_bytes()
+            );
+            assert!(fs::read_dir(&profile).unwrap().all(|entry| {
+                let name = entry.unwrap().file_name();
+                let name = name.to_str().unwrap();
+                !name.starts_with(".aw-config-") && !name.starts_with("config.yaml.aw-backup-")
+            }));
+        }
+    }
 }
 
 #[test]

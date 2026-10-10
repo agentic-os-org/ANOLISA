@@ -3,7 +3,8 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI, OpenClaw and QwenPaw through verified native entrypoints,
+Linux, it starts Qoder CLI, OpenClaw, QwenPaw and Hermes through verified native
+entrypoints,
 runs external Providers and keeps execution metadata independently of an Agent
 session. Native scheduling and permissions remain with the framework; the
 current interfaces are experimental.
@@ -30,6 +31,7 @@ and response correlation. See [boolean policy commands](../../docs/user-guide/en
 | Start or reuse a standalone service and query execution metadata | ✅ |
 | Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
 | Start QwenPaw through AW | ✅ the official App/API entrypoint |
+| Start Hermes through AW | ✅ local chat using an explicitly installed native plugin |
 | Start the remaining first-release frameworks | ❌ Separate adapter delivery |
 | Install a published AW package, request portable approval or enforce policy below native Hooks | ❌ |
 
@@ -65,7 +67,7 @@ limits; service status alone does not prove that Qoder adopted a policy.
 `aw --help` lists the launcher commands and adapter-specific options. Qoder
 accepts `--native-settings` with `aw run`; it rejects `--native-profile`,
 `--native-state-dir` and `aw install`. The `install` command dispatches persistent
-native Hook setup, with no supporting adapter in this build; it does not install
+native Hook setup, supported by Hermes; it does not install
 AW or an Agent. See the user guide for the command and option support table.
 Before upgrading, stop old daemon instances with the old AW executable; the
 current CLI rejects the previous local protocol. See the user guide for upgrade steps.
@@ -100,6 +102,34 @@ required working directory and supported tool lifecycle. From `src/aw`:
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
   --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
   -- --host 127.0.0.1 --port 8096
+```
+
+## Run Hermes
+
+Use Hermes official revision `952c941e` with no tracked file changes and its existing
+native model configuration. An existing profile `.env` must be a caller-owned
+regular file without group/other write permission.
+The Agent executable must be its installed Python console script, with an absolute
+Python shebang; shell wrappers are unsupported. AW requires plugin registration
+before chat starts and rejects effective `HERMES_SAFE_MODE` settings. Installation
+retains both the initial backup and the displaced configuration inode; review
+them before rollback, and stop native config writers during installation. Profile
+ancestors must prevent replacement by other users; interrupted installation
+cleans up its native writers and staging files. Interrupted install/run probes
+report their errors before restoring the signal status. Installation rejects
+unsupported configured entrypoints/options before probing or changing the profile;
+an executable-only `argv` can supply `chat` through `aw run --`.
+AW rejects chat `--help`/`-h` before native probes; run `hermes chat --help` directly.
+For a mismatched or incomplete bundled plugin, stop Hermes sessions, move `plugins/aw-native-hooks`
+to a backup outside the profile's `plugins` directory, then rerun `aw install`.
+The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
+required profile options and supported tool lifecycle. From `src/aw`:
+
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
 ```
 
 ## Integration and development
