@@ -10,7 +10,6 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
@@ -80,7 +79,7 @@ pub(super) trait Adapter: Sync {
     fn prepare(&self, input: LaunchInput) -> Result<Box<dyn PreparedLaunch>>;
     fn normalize(&self, binding: &HookBinding, event: &str, native: &Value) -> Result<Value>;
     fn reply(&self, blocked: bool) -> HookOutput;
-    fn install(&self, _args: &Arguments) -> Result<Exit> {
+    fn install(&self, _args: &Arguments, _config: &aw_config::Configuration) -> Result<Exit> {
         Err("this adapter has no persistent installation command".into())
     }
 }
@@ -89,6 +88,7 @@ pub(super) fn select(name: &str) -> Result<&'static dyn Adapter> {
     match name {
         "qoder" => Ok(&super::qoder::Qoder),
         "qwenpaw" => Ok(&super::adapters::qwenpaw::QwenPaw),
+        "hermes" => Ok(&super::adapters::hermes::Hermes),
         "openclaw" => Ok(&super::adapters::openclaw::OpenClaw),
         _ => Err(format!("unsupported launcher adapter: {name}").into()),
     }
@@ -102,7 +102,12 @@ pub(super) fn install(args: &Arguments) -> Result<Exit> {
     let name = config.as_value()["spec"]["agents"][target]["adapter"]
         .as_str()
         .ok_or("configured Agent target not found")?;
-    select(name)?.install(args)
+    let adapter = select(name)?;
+    super::run::install_signals()?;
+    match adapter.install(args, &config) {
+        Ok(exit) => Ok(super::run::interrupted().unwrap_or(exit)),
+        Err(error) => super::run::interrupted_error(error),
+    }
 }
 
 pub(super) fn version_output(command: &CommandSpec, args: &[OsString]) -> Result<String> {
@@ -128,7 +133,7 @@ pub(super) fn version_output_with_timeout(
             stderr_bytes: 4096,
         },
         Instant::now() + timeout,
-        &AtomicBool::new(false),
+        &super::run::CANCELLED,
     )?;
     if !output.status.success() {
         return Err("native version probe failed".into());
