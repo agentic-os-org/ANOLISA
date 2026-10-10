@@ -266,6 +266,50 @@ describe("SelectiveContextEngine", () => {
   });
 
   describe("reconcile via assemble", () => {
+    it.each([
+      { toolCallId: "call-b" },
+      { toolUseId: "use-b" },
+      { toolName: "write" },
+      { isError: true },
+    ])("archives changed tool-result identity %j only once", async (change) => {
+      const first: AgentMessage = { role: "toolResult", toolCallId: "call-a", toolUseId: "use-a", toolName: "read", isError: false, content: [{ type: "text", text: "same output" }] };
+      const second = { ...first, ...change };
+      await engine.assemble({ sessionId: "s1", messages: [first] });
+      await engine.assemble({ sessionId: "s1", messages: [second] });
+      await engine.afterTurn({ sessionId: "s1", messages: [second] });
+      const restored = new SelectiveContextEngine(db, { freshTailTurns: 3, dbPath: ":memory:", enabled: true });
+      await restored.assemble({ sessionId: "s1", messages: [{ ...second, timestamp: 999 }] });
+      expect(engine.getStore().getMessages("s1").map((m) => JSON.parse(m.rawMessage!))).toEqual([first, second]);
+      expect((await restored.assemble({ sessionId: "s1", messages: [] })).messages).toEqual([first, second]);
+    });
+
+    it("preserves tool IDs through overlapping repeated outputs and file reopen", async () => {
+      const directory = mkdtempSync(join(tmpdir(), "selective-identity-"));
+      const path = join(directory, "archive.db");
+      let fileDb = createConnection(path);
+      try {
+        const config = { freshTailTurns: 3, dbPath: path, enabled: true };
+        const writer = new SelectiveContextEngine(fileDb, config);
+        const results: AgentMessage[] = ["a", "b", "c", "d"].map((id) => ({ role: "toolResult", toolCallId: id, content: "same output" }));
+        await writer.assemble({ sessionId: "s1", messages: results.slice(0, 3) });
+        await writer.afterTurn({ sessionId: "s1", messages: results.slice(1) });
+        await writer.afterTurn({ sessionId: "s1", messages: results.slice(1) });
+        closeConnection(fileDb);
+        fileDb = createConnection(path);
+        const reader = new SelectiveContextEngine(fileDb, config);
+        expect((await reader.assemble({ sessionId: "s1", messages: [] })).messages).toEqual(results);
+      } finally {
+        closeConnection(fileDb);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps identity-free legacy tool records incremental", async () => {
+      engine.getStore().createMessage({ sessionId: "s1", seq: 1, turnSeq: 1, role: "tool", content: "legacy", tokenCount: 2 });
+      await engine.afterTurn({ sessionId: "s1", messages: [{ role: "toolResult", content: "legacy" }] });
+      expect(engine.getStore().getMessageCount("s1")).toBe(1);
+    });
+
     it("does not reimport a replacement across lifecycle calls or engine restart", async () => {
       const original: AgentMessage[] = [
         { role: "user", content: "q1" },

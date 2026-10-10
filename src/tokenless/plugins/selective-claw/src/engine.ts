@@ -18,10 +18,21 @@ import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
 
-type ReconcileMessage = { role: string; content: string };
+type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
+
+function toolIdentity(message: AgentMessage): string | null {
+  if (!["tool", "toolResult", "tool_result"].includes(message.role)) return null;
+  // Compare stable tool semantics; replay timestamps do not identify a result.
+  return JSON.stringify([
+    message.toolCallId ?? null,
+    message.toolUseId ?? null,
+    message.toolName ?? null,
+    message.isError ?? null,
+  ]);
+}
 
 function messagesMatch(left: ReconcileMessage, right: ReconcileMessage): boolean {
-  return left.role === right.role && left.content === right.content;
+  return left.role === right.role && left.content === right.content && left.toolIdentity === right.toolIdentity;
 }
 
 function suffixOverlap(stored: ReconcileMessage[], incoming: ReconcileMessage[]): number {
@@ -274,10 +285,15 @@ export class SelectiveContextEngine implements ContextEngine {
   }
 
   private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
-    const stored = this.store.getMessages(sessionId);
+    const stored = this.store.getMessages(sessionId).map((message) => ({
+      role: message.role,
+      content: message.content,
+      toolIdentity: toolIdentity(this.restoreMessage(message)),
+    }));
     const incoming = messages.map((message) => ({
       role: this.normalizeRole(message.role),
       content: this.extractContent(message),
+      toolIdentity: toolIdentity(message),
     }));
 
     let matchLen = 0;
