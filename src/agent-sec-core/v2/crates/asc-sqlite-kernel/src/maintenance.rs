@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock};
 
 use crate::error::KernelError;
+use crate::sink::MaintenanceOutcome;
 
 /// Default gate interval: once per day.
 pub const DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS: f64 = 24.0 * 60.0 * 60.0;
@@ -46,7 +47,8 @@ pub fn current_epoch() -> f64 {
 ///
 /// Returns whether maintenance ran **and** the marker was refreshed. Every
 /// failure path returns `false` rather than propagating, because v1 treats this
-/// as opportunistic housekeeping.
+/// as opportunistic housekeeping. Callers that must distinguish a closed gate
+/// from a contended or failed one use [`run_sqlite_maintenance_detailed`].
 ///
 /// The sequence is: cheap due check, non-blocking `flock` (skip if another
 /// process holds it), re-check under the lock, run, then write the marker
@@ -57,32 +59,62 @@ pub fn run_sqlite_maintenance_if_due(
     now: Option<f64>,
     maintenance: impl FnOnce() -> Result<(), KernelError>,
 ) -> bool {
+    matches!(
+        run_sqlite_maintenance_detailed(db_path, interval_seconds, now, maintenance),
+        MaintenanceOutcome::Ran
+    )
+}
+
+/// Runs `maintenance` at most once per interval per database path, with the
+/// gate's own failures surfaced.
+///
+/// The sequence matches [`run_sqlite_maintenance_if_due`]; only the reporting
+/// differs. A gate that is closed reports [`MaintenanceOutcome::NotDue`]. A
+/// lock held by another process reports [`MaintenanceOutcome::Contended`]. A
+/// failure to open or lock the lock file, a failure of `maintenance` itself,
+/// and a failure to write or rename the marker all report
+/// [`MaintenanceOutcome::Failed`] - none of them advance the marker, so the
+/// next attempt retries instead of waiting a full window.
+pub fn run_sqlite_maintenance_detailed(
+    db_path: &Path,
+    interval_seconds: Option<f64>,
+    now: Option<f64>,
+    maintenance: impl FnOnce() -> Result<(), KernelError>,
+) -> MaintenanceOutcome {
     let interval = interval_seconds.unwrap_or(DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS);
     let marker_path = maintenance_marker_path(db_path);
     let lock_path = maintenance_lock_path(db_path);
     let current_time = now.unwrap_or_else(current_epoch);
 
     if !maintenance_due(&marker_path, interval, current_time) {
-        return false;
+        return MaintenanceOutcome::NotDue;
     }
 
-    let Some(lock) = try_acquire_lock(&lock_path) else {
-        return false;
+    let lock = match try_acquire_lock_detailed(&lock_path) {
+        Ok(lock) => lock,
+        Err(LockError::Contended) => return MaintenanceOutcome::Contended,
+        Err(LockError::Failed(error)) => {
+            return MaintenanceOutcome::Failed(error.to_string());
+        }
     };
 
-    let ran = if maintenance_due(&marker_path, interval, current_time) {
-        if maintenance().is_ok() {
-            mark_complete(&marker_path, current_time).is_ok()
-        } else {
-            false
+    let outcome = if maintenance_due(&marker_path, interval, current_time) {
+        match maintenance() {
+            Ok(()) => match mark_complete(&marker_path, current_time) {
+                Ok(()) => MaintenanceOutcome::Ran,
+                Err(error) => MaintenanceOutcome::Failed(error.to_string()),
+            },
+            Err(error) => MaintenanceOutcome::Failed(error.to_string()),
         }
     } else {
-        false
+        // Another holder completed the pass between the first due check and
+        // taking the lock.
+        MaintenanceOutcome::NotDue
     };
 
     let _ = flock(&lock, FlockOperation::Unlock);
     drop(lock);
-    ran
+    outcome
 }
 
 /// Returns whether the gate is open at `now`.
@@ -123,16 +155,49 @@ fn mark_complete(marker_path: &Path, now: f64) -> Result<(), KernelError> {
     Ok(())
 }
 
+/// Why a non-blocking lock attempt could not be taken.
+enum LockError {
+    /// Another process holds the lock.
+    Contended,
+    /// The lock file could not be opened or locked.
+    Failed(KernelError),
+}
+
+/// Takes the advisory lock without blocking, reporting why it could not.
+///
+/// The lock file stays on disk: `flock` state belongs to the open descriptor, and
+/// unlinking lock files creates cross-process races. A held lock is
+/// [`LockError::Contended`]; any open or `flock` failure other than
+/// `EWOULDBLOCK` is [`LockError::Failed`].
+fn try_acquire_lock_detailed(lock_path: &Path) -> Result<std::fs::File, LockError> {
+    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(lock_path, flags, Mode::RUSR | Mode::WUSR).map_err(|error| {
+        LockError::Failed(KernelError::io(
+            "open",
+            lock_path,
+            std::io::Error::from_raw_os_error(error.raw_os_error()),
+        ))
+    })?;
+    let file = std::fs::File::from(fd);
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(file),
+        Err(error) if error == rustix::io::Errno::WOULDBLOCK => Err(LockError::Contended),
+        Err(error) => Err(LockError::Failed(KernelError::io(
+            "lock",
+            lock_path,
+            std::io::Error::from_raw_os_error(error.raw_os_error()),
+        ))),
+    }
+}
+
 /// Takes the advisory lock without blocking.
 ///
 /// The lock file stays on disk: `flock` state belongs to the open descriptor, and
-/// unlinking lock files creates cross-process races.
+/// unlinking lock files creates cross-process races. Returns `None` when the
+/// lock cannot be taken for any reason.
+#[cfg(test)]
 fn try_acquire_lock(lock_path: &Path) -> Option<std::fs::File> {
-    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC;
-    let fd = rustix::fs::open(lock_path, flags, Mode::RUSR | Mode::WUSR).ok()?;
-    let file = std::fs::File::from(fd);
-    flock(&file, FlockOperation::NonBlockingLockExclusive).ok()?;
-    Some(file)
+    try_acquire_lock_detailed(lock_path).ok()
 }
 
 #[cfg(test)]
@@ -317,6 +382,57 @@ mod tests {
         assert!(!ran.get(), "a contended lock must skip, not block");
 
         drop(held);
+        assert!(run_sqlite_maintenance_if_due(
+            &db,
+            Some(3600.0),
+            Some(1000.0),
+            always_ok
+        ));
+    }
+
+    #[test]
+    fn the_detailed_gate_reports_a_held_lock_as_contended() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        let held = try_acquire_lock(&maintenance_lock_path(&db)).expect("take lock");
+
+        assert_eq!(
+            run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok),
+            MaintenanceOutcome::Contended
+        );
+
+        drop(held);
+        assert_eq!(
+            run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok),
+            MaintenanceOutcome::Ran
+        );
+    }
+
+    #[test]
+    fn the_detailed_gate_reports_a_lock_open_failure() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        fs::create_dir(maintenance_lock_path(&db)).expect("block the lock path");
+
+        assert!(matches!(
+            run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok),
+            MaintenanceOutcome::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn the_detailed_gate_reports_a_marker_write_failure() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        fs::create_dir(maintenance_marker_path(&db)).expect("block the marker path");
+
+        assert!(matches!(
+            run_sqlite_maintenance_detailed(&db, Some(3600.0), Some(1000.0), always_ok),
+            MaintenanceOutcome::Failed(_)
+        ));
+        // The marker was not advanced, so the gate stays open for the next
+        // attempt.
+        fs::remove_dir(maintenance_marker_path(&db)).expect("unblock the marker path");
         assert!(run_sqlite_maintenance_if_due(
             &db,
             Some(3600.0),

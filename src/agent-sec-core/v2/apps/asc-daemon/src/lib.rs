@@ -13,6 +13,8 @@ mod bootstrap;
 pub use actions::{scan_application, skill_application, skill_task_scope};
 mod cli;
 mod reconciliation;
+/// The security-event `SQLite` retention background service.
+pub mod retention;
 mod runtime;
 mod signals;
 
@@ -20,6 +22,10 @@ pub use bootstrap::{BootstrapConfig, BootstrapError, default_service_config, ser
 pub use cli::{Cli, CliError, ParseOutcome};
 pub use reconciliation::{
     UnavailableReconciliation, start_policy_reconciliation, start_policy_reconciliation_with_client,
+};
+pub use retention::{
+    RETENTION_JOIN_TIMEOUT, RetentionPass, RetentionReport, RetentionSchedule, RetentionTask,
+    run_startup_catchup,
 };
 pub use runtime::{RuntimeError, run_with_shutdown_timeout};
 pub use signals::{ProcessSignals, SignalError};

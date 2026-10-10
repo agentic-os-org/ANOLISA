@@ -334,8 +334,25 @@ runner 工作目录的 owner、权限和 umask。
 服务 UID 与 root 是可信边界；客户端不得拥有目录写权限。显式 `--socket` 允许在另一
 安全目录建立隔离开发实例，不代表防止特权操作者故意创建第二个 namespace。
 
-当前正常退出包含 UDS drain 2s、SkillFS worker join 30s、reconciliation join 30s
-和 Tokio shutdown 1s 的上限；unit 另设 `TimeoutStopSec=75`，超时由 systemd 对 control group 发 SIGKILL。
+当前正常退出的停机预算：UDS drain 2s，随后 retention terminal join（65s）与 SkillFS
+worker join（65s）、reconciliation join（30s）并行等待、共享同一 65s stop deadline，再加
+Tokio shutdown 1s 与 telemetry shutdown 2s，合计约 70s；unit 另设 `TimeoutStopSec=75`（为
+security final pass 与观测余量保留），超时由 systemd 对 control group 发 SIGKILL。retention
+join 超时只跳过 security final pass（daemon 以 FAILURE 退出码报告该降级）；SkillFS worker
+drain 与 observability close 不受该超时影响，照常执行。
+
+security final pass 自身有明确的剩余预算：drains 完成后，final pass（含 observability
+同路径的 gated maintenance）必须在 stop deadline + Tokio shutdown 1s + 5s
+（`FINAL_PASS_BUDGET`）之内完成；剩余预算不足 2s（`FINAL_PASS_MIN_BUDGET`，见
+`SqliteSink::close_with_deadline`）时直接跳过该 pass、只关闭连接，gate marker 不前进，
+下次启动的 catch-up pass 补跑该 prune（与硬杀死同一恢复路径）。周期 pass 持续失败导致
+marker 未推进、final pass 需要重跑完整 prune 的场景因此被预算闸门挡住；在窗口内启动但
+超时的 pass 由 `TimeoutStopSec=75` 截断，同样落入硬杀死恢复路径。
+
+SIGTERM/SIGINT 在启动 catch-up 期间到达时不再挂起等待：信号任务先于 catch-up 启动，
+catch-up 与 shutdown 信号 `select!` 竞争；信号先到则放弃 admission（daemon 不进入
+serve，直接进入停机流程，退出码 0），in-flight catch-up pass 由 retention 任务继续
+持有直至终局 join，不会与 final pass 争抢 store mutex。
 SIGTERM/SIGINT 正常退出为 0，启动运行错误为 1，参数错误为 2；SIGHUP 消费但不 reload。
 `Restart=on-failure`、`RestartSec=2`、300s 内最多 5 次启动限制异常退出重启循环。
 Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 readiness 证据。

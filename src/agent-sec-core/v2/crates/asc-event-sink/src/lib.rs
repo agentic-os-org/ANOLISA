@@ -23,6 +23,7 @@ pub mod telemetry;
 #[cfg(test)]
 mod test_support;
 
+pub use asc_sqlite_kernel::MaintenanceOutcome;
 pub use configured::{ConfiguredObservabilitySinks, ConfiguredSecurityEventSinks};
 pub use error::SinkError;
 pub use security_events::log_event;

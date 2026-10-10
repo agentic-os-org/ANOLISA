@@ -12,6 +12,7 @@ mod sinks;
 
 use asc_action_runtime::Finalizer;
 use asc_capability_pii_scan::{CustomRuleStatus, PiiRuleSet};
+use asc_daemon::retention::{RetentionPass, RetentionReport, RetentionSchedule, RetentionTask};
 use asc_daemon::{Cli, ParseOutcome, ProcessSignals, run_with_shutdown_timeout, serve};
 use asc_daemon_core::{PrincipalPolicy, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
@@ -26,6 +27,29 @@ use asc_security_events::config::daemon_security_event_paths;
 use crate::sinks::EventSinkAdapter;
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// One shared stop deadline for the retention terminal join and the worker
+/// drains.
+///
+/// The unit's `TimeoutStopSec=75` must cover the UDS request drain (2s),
+/// this budget, the Tokio runtime shutdown (1s), the security final pass,
+/// and the telemetry shutdown (2s), so the retention join and the worker
+/// drains wait concurrently under one deadline instead of stacking two full
+/// budgets back to back (see `DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md`).
+const RUNTIME_DRAIN_BUDGET: Duration = Duration::from_secs(65);
+
+/// The wall-clock budget the security final pass may still claim when the
+/// drains are done.
+///
+/// `2s + 65s + 1s + 5s + 2s = 75s`: the final pass gets whatever the drains
+/// left of this window, and is skipped entirely when that remainder cannot
+/// fit it (see `SqliteSink::close_with_deadline` and
+/// `DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md`).
+const FINAL_PASS_BUDGET: Duration = Duration::from_secs(5);
+
+/// The telemetry runtime's own shutdown grace, reserved at the end of the
+/// unit stop budget.
+const TELEMETRY_SHUTDOWN: Duration = Duration::from_secs(2);
 
 fn main() -> ExitCode {
     install_panic_hook();
@@ -56,7 +80,7 @@ fn main() -> ExitCode {
         Ok(lease) => lease,
         Err(problem) => {
             report_error(&telemetry, &problem);
-            telemetry.shutdown(Duration::from_secs(2));
+            telemetry.shutdown(TELEMETRY_SHUTDOWN);
             return ExitCode::FAILURE;
         }
     };
@@ -66,7 +90,7 @@ fn main() -> ExitCode {
         Ok(repository) => Arc::new(repository),
         Err(problem) => {
             report_error(&telemetry, &problem);
-            telemetry.shutdown(Duration::from_secs(2));
+            telemetry.shutdown(TELEMETRY_SHUTDOWN);
             return ExitCode::FAILURE;
         }
     };
@@ -77,9 +101,9 @@ fn main() -> ExitCode {
         run(*cli, &lease, &telemetry, repository),
         RUNTIME_SHUTDOWN_TIMEOUT,
     ) {
-        Ok((exit_code, event_sinks)) => {
-            if let Some(sinks) = event_sinks {
-                sinks.close();
+        Ok((exit_code, shutdown_plan)) => {
+            if let Some(plan) = shutdown_plan {
+                plan.close();
             }
             exit_code
         }
@@ -88,7 +112,7 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     };
-    telemetry.shutdown(Duration::from_secs(2));
+    telemetry.shutdown(TELEMETRY_SHUTDOWN);
     outcome
 }
 
@@ -99,7 +123,7 @@ async fn run(
     lease: &RuntimeLease,
     telemetry: &asc_observability::TelemetryRuntime,
     repository: Arc<SqlitePolicyRepository>,
-) -> (ExitCode, Option<sinks::DurableSinks>) {
+) -> (ExitCode, Option<sinks::ShutdownPlan>) {
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
         return (ExitCode::FAILURE, None);
@@ -139,7 +163,10 @@ async fn run(
         Ok(bridge) => bridge,
         Err(error) => {
             report_error(telemetry, &error);
-            return (ExitCode::FAILURE, Some(durable_sinks));
+            return (
+                ExitCode::FAILURE,
+                Some(sinks::ShutdownPlan::full(durable_sinks)),
+            );
         }
     };
     let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone());
@@ -151,20 +178,29 @@ async fn run(
         recover_and_start_skills(&skill_sec, &actions, &skill_worker, executor, telemetry)
     {
         report_error(telemetry, &error);
-        return (ExitCode::FAILURE, Some(durable_sinks));
+        return (
+            ExitCode::FAILURE,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
     }
     // Exclusive DB ownership proves no pre-crash discovery worker can still write.
     if let Err(error) = recover_deleting_scopes(repository.as_ref()) {
         report_error(telemetry, &error);
         let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
-        return (ExitCode::FAILURE, Some(durable_sinks));
+        return (
+            ExitCode::FAILURE,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
     }
     let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
         Ok(runtime) => runtime,
         Err(error) => {
             report_error(telemetry, &error);
             let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
-            return (ExitCode::FAILURE, Some(durable_sinks));
+            return (
+                ExitCode::FAILURE,
+                Some(sinks::ShutdownPlan::full(durable_sinks)),
+            );
         }
     };
     let pap =
@@ -175,8 +211,12 @@ async fn run(
     )));
     if let Err(error) = recover_active_scopes(repository.as_ref(), discovery_registry.as_ref()) {
         report_error(telemetry, &error);
-        drain_runtimes(skill_worker, discovery_registry, policy_runtime).await;
-        return (ExitCode::FAILURE, Some(durable_sinks));
+        let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
+        drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
+        return (
+            ExitCode::FAILURE,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
     }
     let pap = pap.with_scope_discovery(discovery_registry.clone());
     let principal_policy = Arc::new(RootManagedPrincipalPolicy::with_admin_uids(
@@ -196,21 +236,63 @@ async fn run(
 
     let shutdown = ShutdownToken::new();
     let health_task = watch_policy_health(policy_runtime.enqueuer(), telemetry.reporter());
+    // The signal task is spawned before the retention catch-up so a stop
+    // signal arriving during the (unbounded) startup pass is observed at
+    // once: the catch-up then abandons admission and the daemon goes
+    // straight to the shutdown flow instead of making systemd wait out
+    // `TimeoutStopSec` and SIGKILL the process mid-catch-up.
     let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
-    let result = serve(
-        cli.bootstrap,
-        dispatcher,
-        Arc::new(JsonRejectionEncoder),
-        shutdown,
-    )
-    .await;
+    // The retention lifecycle: the startup catch-up pass runs to completion
+    // before `serve` admits requests (a stop signal abandons admission
+    // instead), and the periodic task owns the rest. This is the
+    // concurrency boundary the store mutex demands: the first pass may
+    // prune a large historical backlog, and request audit writes share the
+    // same connection mutex (see `retention` module docs and
+    // `DAEMON_JOB_CONTRACT_zh.md` section 11.5).
+    let (retention_task, admitted) =
+        start_retention(&durable_sinks.security, telemetry, shutdown.clone()).await;
+    let result = if admitted {
+        Some(
+            serve(
+                cli.bootstrap,
+                dispatcher,
+                Arc::new(JsonRejectionEncoder),
+                shutdown,
+            )
+            .await,
+        )
+    } else {
+        telemetry.report(
+            "agent-sec-daemon: shutdown requested during the startup retention catch-up; skipping admission",
+        );
+        None
+    };
     signal_task.abort();
     health_task.abort();
-    // UDS has stopped admission and completed its request drain before workers stop.
-    let exit_code = if drain_runtimes(skill_worker, discovery_registry, policy_runtime).await {
+    // Cancellation plus terminal join, concurrent with the worker drains
+    // under one shared stop deadline: serializing two full budgets back to
+    // back would exceed the unit's `TimeoutStopSec=75` and systemd would
+    // SIGKILL the process mid-drain. The bounded final pass in
+    // `ShutdownPlan::close()` must run only after the retention task - and
+    // any in-flight `spawn_blocking` pass it owns - has terminated, so the
+    // two can never contend for the same `SqliteStore` mutex. A bare
+    // `abort()` cannot guarantee that: the blocking closure keeps running
+    // past the abort.
+    let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
+    let (retention_joined, runtimes_drained) = tokio::join!(
+        retention_task.shutdown_by(stop),
+        drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop),
+    );
+    // A retention join timeout degrades only the security final pass: the
+    // worker drain and the observability close are independent of the
+    // security store and have run above regardless.
+    let mut exit_code = if runtimes_drained {
         match result {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(problem) => {
+            // A stop that won the startup race never admitted a request, so
+            // both it and a served run exit cleanly and systemd can finish
+            // the restart chain; only a served error fails the unit.
+            Some(Ok(_)) | None => ExitCode::SUCCESS,
+            Some(Err(problem)) => {
                 report_error(telemetry, &problem);
                 ExitCode::FAILURE
             }
@@ -219,7 +301,46 @@ async fn run(
         telemetry.report("asc-daemon: background worker drain failed or timed out");
         ExitCode::FAILURE
     };
-    (exit_code, Some(durable_sinks))
+    if !retention_joined {
+        telemetry.report(
+            "asc-daemon: retention task did not terminate within the shared drain budget; skipping the security final pass",
+        );
+        exit_code = ExitCode::FAILURE;
+    }
+    // The final retention pass must finish before the telemetry shutdown
+    // consumes the tail of the unit stop budget, so it gets an explicit
+    // deadline and is skipped when the remainder cannot fit it.
+    let final_pass_deadline = stop + RUNTIME_SHUTDOWN_TIMEOUT + FINAL_PASS_BUDGET;
+    (
+        exit_code,
+        Some(sinks::ShutdownPlan::new(
+            durable_sinks,
+            retention_joined,
+            Some(final_pass_deadline.into_std()),
+        )),
+    )
+}
+
+/// Builds the production retention pass and starts its lifecycle, with the
+/// startup catch-up racing the shutdown signal.
+///
+/// Returns the task handle plus whether `serve` may admit requests; see
+/// [`asc_daemon::retention::start_with_shutdown`].
+async fn start_retention(
+    sinks: &Arc<ConfiguredSecurityEventSinks>,
+    telemetry: &asc_observability::TelemetryRuntime,
+    shutdown: ShutdownToken,
+) -> (RetentionTask, bool) {
+    let pass: RetentionPass = {
+        let sinks = Arc::clone(sinks);
+        Arc::new(move |now| sinks.run_sqlite_retention(now))
+    };
+    let report: RetentionReport = {
+        let reporter = telemetry.reporter();
+        Arc::new(move |message| reporter(message))
+    };
+    asc_daemon::retention::start_with_shutdown(pass, RetentionSchedule::default(), report, shutdown)
+        .await
 }
 
 #[tracing::instrument(
@@ -326,14 +447,18 @@ async fn drain_runtimes(
     worker: Arc<asc_daemon::SkillWorker>,
     discovery_registry: Arc<asc_daemon::ScopeDiscoveryRegistry>,
     policy: ReconciliationRuntime,
+    stop: tokio::time::Instant,
 ) -> bool {
     // Both joins remain tracked by Tokio after timeout; process exit is the final cutoff.
     let skill = tokio::task::spawn_blocking(move || worker.shutdown());
     let policy =
         tokio::task::spawn_blocking(move || stop_background_jobs(&discovery_registry, policy));
+    // The reconciliation join keeps its own shorter cap, still bounded by the
+    // shared stop deadline.
+    let policy_stop = (tokio::time::Instant::now() + Duration::from_secs(30)).min(stop);
     let (skill, policy) = tokio::join!(
-        tokio::time::timeout(Duration::from_secs(65), skill),
-        tokio::time::timeout(Duration::from_secs(30), policy),
+        tokio::time::timeout_at(stop, skill),
+        tokio::time::timeout_at(policy_stop, policy),
     );
     matches!(skill, Ok(Ok(Ok(())))) && matches!(policy, Ok(Ok(true)))
 }
