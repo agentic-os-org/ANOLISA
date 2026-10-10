@@ -63,15 +63,23 @@ sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一�
 
 # 修复单个参数
 sudo ktuner fix vm.swappiness
+sudo ktuner fix vm.swappiness --dry-run   # 预览单个参数，不做实际变更
 
 # 解释某个参数为何应该改
 ktuner why net.core.somaxconn
 
-# 撤销 ktuner 做的所有改动，或单个已记录参数
+# 撤销 ktuner 做的所有改动，或点名的已记录参数
 sudo ktuner rollback          # 破坏性且终结：恢复并删除 ledger
 sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
-sudo ktuner rollback vm.swappiness   # 回滚单个已记录参数
+sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记录参数
 ```
+
+`sudo ktuner fix <param> --dry-run` 以与 `tune --dry-run` 相同的形态预览这一次
+单参数写入（`dry_run`、`status`、`blocked`、`would_apply`、`would_skip`），
+不写入任何东西并以 `0` 退出，便于改参数前先看清结果。它不需要 root；参数有会被
+内核清零的互斥孪生时在 `would_clear` 中列出；参数不在计划里、不可写或运行时危险时，
+与 `sudo ktuner fix <param>` 给出完全相同的 stderr JSON 与退出码，因此预检不会
+与被预览的命令不一致。
 
 所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、
 `1` check 发现可改进项或 rollback 仍有值未恢复、`2` 命令错误。
@@ -80,6 +88,12 @@ sudo ktuner rollback vm.swappiness   # 回滚单个已记录参数
 `sudo ktuner rollback <param>` 对命中的账本条目遵循同一套契约——账本同时记录互斥孪生时
 两者一起恢复（写任一半都会把另一半清零）——并在 JSON 中以 `param` 回显该条目；
 账本里没有的参数是命令错误（`2`）。
+
+位置参数可以给多个，一次撤掉多参数调优：整批在同一把账本锁内完成，持久化文件按剩余账本
+只重新生成一次，两个参数之间不会留下写了一半的状态。输出保留聚合计数键，把 `param` 换成
+`params`——每个参数解析出的账本 key，按输入顺序去重。每个名字都适用与单个参数相同的契约；
+只恢复了一部分的批退役已落地的条目、保留其余以便重试并退出 `1`，而任一名字不在账本里就在
+动任何东西之前拒绝整条命令（`2`），与单参数版本同一条命令错误。
 
 `tune --exclude <param>`（可重复）把点名的建议移出计划：不写入、不进回滚账本、
 不持久化。排除在 `--category` 与 `--conservative` 过滤之后生效；被排除项在输出中
@@ -91,6 +105,8 @@ sudo ktuner rollback vm.swappiness   # 回滚单个已记录参数
 ---
 
 网络 conf 参数中的网卡身份区分大小写。`net/ipv4/conf/Br0.100/forwarding` 和 `net.ipv4.conf.Br0.100.forwarding` 指向同一网卡；`br0.100` 是不同的身份。IPv6 遵循相同规则。网卡包含字面点时，持久化记录使用首个分隔符为斜杠的 sysctl.d 键，让 systemd 保留这些点。此行为支持已有有效记录或自定义库推荐；当前内置规则不生成逐 VLAN 推荐。
+
+`sudo ktuner rollback --list` 也会报告当前实际状态：每个待回滚条目新增 `live`（此刻从该条目路径读到的值；路径读不到时为 `null`——设备已消失、模块未加载）和 `drifted`（`live` 是否仍与记录的 `applied` 一致；没有可比较的 live 值时为 `null`）。两个字段都是对现有形态的新增——`count`、`pending` 以及记录的 `param`/`applied`/`previous` 取值都不变——读不到值不算错误，命令仍以 `0` 退出。取值的呈现与比较与 ktuner 其他输出一致，sysfs 选项列表或多值 sysctl 不会被误报为漂移。
 
 ## 权限边界
 

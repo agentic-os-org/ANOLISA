@@ -25,7 +25,8 @@ fn rollback_list_cli_contract() {
         return;
     }
     // Root: exit 0 with structured JSON — count is a number, pending is an
-    // array of string triples (empty on this container, which has no ledger).
+    // array of entries carrying the recorded triple plus the live reading
+    // (empty on this container, which has no ledger).
     let out = ktuner().args(["rollback", "--list"]).output().unwrap();
     assert!(
         out.status.success(),
@@ -41,5 +42,117 @@ fn rollback_list_cli_contract() {
         assert!(entry["param"].is_string());
         assert!(entry["applied"].is_string());
         assert!(entry["previous"].is_string());
+        // The live reading is a string or an explicit null; the comparison is
+        // a bool or null. Both keys are always present on every entry.
+        assert!(entry["live"].is_string() || entry["live"].is_null());
+        assert!(entry["drifted"].is_boolean() || entry["drifted"].is_null());
+        assert_eq!(entry.as_object().unwrap().len(), 5, "entry keys: {entry}");
     }
+}
+
+/// End-to-end contract on a private fixture: run the real binary in a mount
+/// namespace with a hand-built ledger, and assert that `--list` publishes
+/// exactly the five documented keys per entry, that an unreadable path is
+/// reported as null inside the JSON (never printed, never an error, stderr
+/// empty, exit code untouched), and that a changed value is flagged.
+///
+/// Requires root and mount namespaces (the gate `rollback_exit.rs` uses), so
+/// it is ignored by default; it touches only isolated fixture files.
+#[test]
+#[ignore = "requires root and mount namespaces; writes only isolated fixture files"]
+fn rollback_list_reports_live_drift_without_extra_output() {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    assert_eq!(unsafe { libc::geteuid() }, 0, "requires root");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!("ktuner-list-{}-{nonce}", std::process::id()));
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch = Scratch(scratch);
+    fs::create_dir_all(scratch.0.join("varlib/ktuner")).expect("ledger directory");
+    fs::create_dir(scratch.0.join("etc")).expect("isolated persistence directory");
+
+    let still_live = scratch.0.join("still-live");
+    let moved = scratch.0.join("moved");
+    let gone = scratch.0.join("gone");
+    fs::write(&still_live, "1").expect("live value");
+    fs::write(&moved, "20").expect("drifted value");
+    fs::write(
+        scratch.0.join("varlib/ktuner/rollback.json"),
+        serde_json::json!({"version": 1, "entries": {
+            "vm.swappiness": {"previous": "60", "applied": "1", "path": still_live},
+            "vm.dirty_ratio": {"previous": "20", "applied": "0", "path": moved},
+            "block/sda/scheduler": {"previous": "mq-deadline", "applied": "none", "path": gone},
+        }})
+        .to_string(),
+    )
+    .expect("ledger");
+
+    let out = Command::new("unshare")
+        .args([
+            "--mount",
+            "--propagation",
+            "private",
+            "sh",
+            "-c",
+            "mount --bind \"$1\" /var/lib && mount --bind \"$2\" /etc && exec \"$3\" rollback --list",
+            "rollback-list-test",
+        ])
+        .arg(scratch.0.join("varlib"))
+        .arg(scratch.0.join("etc"))
+        .arg(env!("CARGO_BIN_EXE_ktuner"))
+        .output()
+        .expect("run isolated rollback --list");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "an unreadable live value is reported in the JSON, never on stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(
+        body.as_object().unwrap().len(),
+        2,
+        "no top-level key beyond count and pending: {body}"
+    );
+    let pending = body["pending"].as_array().expect("pending is an array");
+    assert_eq!(pending.len(), 3, "the entry set is unchanged: {body}");
+    for entry in pending {
+        let keys: Vec<&str> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["applied", "drifted", "live", "param", "previous"],
+            "entry keys, in the documented alphabetical order: {entry}"
+        );
+    }
+    assert_eq!(pending[0]["param"], "block/sda/scheduler");
+    assert!(pending[0]["live"].is_null(), "{body}");
+    assert!(pending[0]["drifted"].is_null(), "{body}");
+    assert_eq!(pending[1]["param"], "vm.dirty_ratio");
+    assert_eq!(pending[1]["live"], "20");
+    assert_eq!(pending[1]["drifted"], true);
+    assert_eq!(pending[2]["param"], "vm.swappiness");
+    assert_eq!(pending[2]["live"], "1");
+    assert_eq!(pending[2]["drifted"], false);
 }

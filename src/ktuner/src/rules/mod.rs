@@ -2028,6 +2028,12 @@ fn eval_rq_affinity_at(
 /// `threadirqs` kernel parameter (`include/linux/interrupt.h`:511-519 and
 /// `kernel/irq/manage.c`:27-36 in v6.6, :28-35 in 7.3-rc6). A kernel built
 /// without CONFIG_IRQ_FORCED_THREADING reads false in both files.
+///
+/// Only the kernel-parameter region of the command line decides: the kernel
+/// stops parsing at a bare `--` and hands the rest to init
+/// (`Documentation/admin-guide/kernel-parameters.rst`:12-16 and
+/// `kernel/params.c`:185-186 in v6.6, :14-18 and :182-183 in 7.3-rc6), so a
+/// `threadirqs` token behind the separator never enables the mode.
 fn irqs_forced_threaded(cmdline_path: &str, version_path: &str) -> bool {
     if let Ok(cmdline) = std::fs::read_to_string(cmdline_path) {
         // The early parameter accepts both spellings; `setup_forced_irqthreads`
@@ -2040,8 +2046,12 @@ fn irqs_forced_threaded(cmdline_path: &str, version_path: &str) -> bool {
         // configuration is not readable from userspace portably, so the token
         // is taken at face value and the residual error is a lost
         // recommendation, not an inert one.
+        //
+        // The scan stops at the separator: a token behind it is an init
+        // argument the kernel never reads as a parameter.
         if cmdline
             .split_whitespace()
+            .take_while(|t| *t != "--")
             .any(|t| t == "threadirqs" || t.starts_with("threadirqs="))
         {
             return true;
@@ -9366,6 +9376,63 @@ mod tests {
             assert!(
                 !recs.iter().any(|r| r.param.contains("rq_affinity")),
                 "{label} pins the completion, so rq_affinity changes nothing"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn threadirqs_behind_the_init_separator_is_not_a_kernel_parameter() {
+        // The kernel parses kernel parameters only up to a bare `--` and
+        // passes the rest to init (v6.6 Documentation/admin-guide/
+        // kernel-parameters.rst:12-16 and kernel/params.c:185-186; 7.3-rc6
+        // :14-18 and :182-183), so a `threadirqs` token behind the separator
+        // never reaches setup_forced_irqthreads() (v6.6 kernel/irq/manage.c:
+        // 30-35) and never enables force_irqthreads(). The guard must not
+        // drop the advice for a token the kernel ignores.
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_cmdline_separator_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, content: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        let version = write(
+            "version",
+            "Linux version 6.6.0 (gcc) #1 SMP PREEMPT_DYNAMIC\n",
+        );
+
+        let mut info = make_test_info();
+        info.numa_nodes = 2;
+        info.disks[0].rq_affinity = 0;
+
+        // Behind the separator both spellings are init arguments, so the
+        // migration is still off and the advice stands; before the separator,
+        // and on a command line without one, behaviour is unchanged.
+        let cases = [
+            ("after", "root=/dev/sda1 ro -- threadirqs\n", true),
+            ("after_value", "root=/dev/sda1 ro -- threadirqs=0\n", true),
+            ("before", "root=/dev/sda1 threadirqs\n", false),
+            ("none", "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro\n", true),
+        ];
+        for (name, content, expect_advice) in cases {
+            let cmdline = write(&format!("cmdline_{name}"), content);
+            let mut recs = Vec::new();
+            eval_rq_affinity_at(
+                &info,
+                &mut recs,
+                cmdline.to_str().unwrap(),
+                version.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.iter().any(|r| r.param.contains("rq_affinity")),
+                expect_advice,
+                "{name}: {content:?}"
             );
         }
 

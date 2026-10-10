@@ -34,14 +34,19 @@ enum Commands {
         exclude: Vec<String>,
     },
     /// Fix a single parameter
-    Fix { param: String },
+    Fix {
+        param: String,
+        /// Show what this fix would write, without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Explain why a parameter should be changed
     Why { param: String },
-    /// Roll back all applied changes, or one recorded parameter
+    /// Roll back all applied changes, or one or more recorded parameters
     Rollback {
-        /// Restore only this recorded parameter, leaving the other entries
+        /// Restore only these recorded parameters, leaving the other entries
         /// in the ledger in place
-        param: Option<String>,
+        params: Vec<String>,
         /// Show what a rollback would restore, without changing anything
         #[arg(long)]
         list: bool,
@@ -69,7 +74,7 @@ fn main() {
             // error shape (stderr JSON, exit 2) instead of exiting 0 on text
             // that never reached the consumer.
             if let Err(error) = write_stdout(&e.to_string()) {
-                let out = json!({ "error": format!("{error:#}") });
+                let out = error_body(&error);
                 print_error_json(&out);
                 std::process::exit(2);
             }
@@ -87,18 +92,25 @@ fn main() {
             category: cat,
             exclude,
         } => cmd_tune(dry_run, conservative, cat, exclude),
-        Commands::Fix { param } => cmd_fix(&param),
+        Commands::Fix { param, dry_run } => cmd_fix(&param, dry_run),
         Commands::Why { param } => cmd_why(&param),
-        Commands::Rollback { param, list } => cmd_rollback(param.as_deref(), list),
+        Commands::Rollback { params, list } => cmd_rollback(&params, list),
     };
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            let out = json!({ "error": format!("{e:#}") });
+            let out = error_body(&e);
             print_error_json(&out);
             std::process::exit(2);
         }
     }
+}
+
+/// The stderr body a command error reports: `main` renders every command
+/// failure through here, so a caller — including the tests — can byte-compare
+/// what two failure modes would print.
+fn error_body(error: &anyhow::Error) -> serde_json::Value {
+    json!({ "error": format!("{error:#}") })
 }
 
 /// Print a command's JSON body, treating a closed stdout as a graceful stop
@@ -581,25 +593,62 @@ fn find_recommendation<'a>(
         .find(|r| param_matches(&r.param, param))
 }
 
-fn cmd_fix(param: &str) -> Result<i32> {
+fn cmd_fix(param: &str, dry_run: bool) -> Result<i32> {
     let is_root = unsafe { libc::geteuid() } == 0;
-    if !is_root {
+    // Mirrors cmd_tune: the read-only preview needs no root, while a real run
+    // keeps the gate exactly where it has always been — before any system
+    // read, so a failing diagnosis can never replace the root error.
+    fix_root_gate(param, dry_run, is_root)?;
+    let (_, eval) = gather()?;
+    fix_with(param, dry_run, is_root, &eval)
+}
+
+/// The root gate `fix` has always had: a real run needs root, the read-only
+/// preview does not. One expression, so the mode the gate applies to and its
+/// position (before any system read) cannot drift between the CLI entry point
+/// and the decision function the tests drive.
+fn fix_root_gate(param: &str, dry_run: bool, is_root: bool) -> Result<()> {
+    if !dry_run && !is_root {
         anyhow::bail!("fix requires root (sudo ktuner fix {param})");
     }
-    let (_, eval) = gather()?;
-    // Same alias policy as why_with: sysfs names are filesystem identities,
-    // while sysctl names accept slash/dot and case variants. Without this,
-    // `ktuner why vm/swappiness` succeeds but `ktuner fix vm/swappiness`
-    // reports "parameter not found".
-    let rec = find_recommendation(&eval, param)
+    Ok(())
+}
+
+/// The recommendation `fix` would write, or the refusal the command answers
+/// with. One classification for the real run and its `--dry-run` preview: the
+/// lookup accepts the same spellings both use, and the environment refusals
+/// come from the plan's own `skip_reason`, so the preview cannot disagree
+/// with the command it previews.
+fn fix_target<'a>(eval: &'a rules::EvalResult, param: &str) -> Result<&'a Recommendation> {
+    let rec = find_recommendation(eval, param)
         .ok_or_else(|| anyhow::anyhow!("parameter not found or already optimal: {param}"))?;
-    if !rec.writable {
-        anyhow::bail!("parameter {param} is read-only in this environment");
-    }
-    if category::is_runtime_dangerous(&rec.param) {
-        anyhow::bail!(
+    // The excludes are empty because a single fix has no --exclude, so only
+    // the two environment reasons can come back — unwritable outranks
+    // runtime-dangerous exactly as it does in the plan.
+    match skip_reason(rec, &[]) {
+        Some(UNWRITABLE) => anyhow::bail!("parameter {param} is read-only in this environment"),
+        Some(RUNTIME_DANGEROUS) => anyhow::bail!(
             "parameter {param} is dangerous to write at runtime, persist to /etc/sysctl.d instead"
-        );
+        ),
+        _ => Ok(rec),
+    }
+}
+
+/// `fix` over an already-gathered diagnosis: the shared classification, the
+/// preview rendering and the real write. `cmd_fix` supplies the live root
+/// fact and eval; a unit test drives both modes over one fixture and asserts
+/// they refuse identically.
+fn fix_with(param: &str, dry_run: bool, is_root: bool, eval: &rules::EvalResult) -> Result<i32> {
+    // cmd_fix ran the same gate before gathering (that position is the
+    // contract); stating it here keeps this function's verdict complete for
+    // its callers — the unit tests drive it without an euid of their own.
+    fix_root_gate(param, dry_run, is_root)?;
+    let rec = fix_target(eval, param)?;
+    if dry_run {
+        // Read-only: no write, no ledger lock, no record, no persistence and
+        // no cleanup — only the diagnosis above and the preview body.
+        print_json(&fix_dry_run_output(rec))?;
+        return Ok(0);
     }
     let fix = tuner::apply_one(rec)?;
     let (_, eval_after) = gather()?;
@@ -622,6 +671,31 @@ fn cmd_fix(param: &str) -> Result<i32> {
     }
     print_json(&output)?;
     Ok(0)
+}
+
+/// JSON body of `fix --dry-run` — the `tune --dry-run` shape scoped to one
+/// parameter, so one parser reads both previews. Printed only when the shared
+/// classification found a writable, runtime-safe recommendation: every
+/// refusal answers with the plain command's error instead (same stderr JSON,
+/// same exit code), so `status` is always `"planned"` and `would_skip` is
+/// always empty here. The keys stay because the shape is the contract.
+///
+/// A write that zeroes the kernel's mutually exclusive twin names it in
+/// `would_clear`, from the write path's own twin table ([`tuner::cleared_sibling`]):
+/// the preview must not derive the pair relationship a second time. The key
+/// is absent when the parameter has no twin.
+fn fix_dry_run_output(rec: &Recommendation) -> serde_json::Value {
+    let mut body = json!({
+        "dry_run": true,
+        "status": "planned",
+        "blocked": 0,
+        "would_apply": [rec_json(rec)],
+        "would_skip": [],
+    });
+    if let Some(twin) = tuner::cleared_sibling(&rec.param) {
+        body["would_clear"] = json!([twin]);
+    }
+    body
 }
 
 fn cmd_why(param: &str) -> Result<i32> {
@@ -697,15 +771,22 @@ fn why_with(
 
 /// JSON shape of `ktuner rollback --list`. Pure so the agent-facing contract
 /// (key names, count, entry fields, ordering) is unit-testable without a
-/// ledger on disk. Entries arrive as `rollback_preview` returns them:
-/// (param, applied, previous), sorted by param (BTreeMap order).
-fn rollback_list_output(entries: &[(String, String, String)]) -> serde_json::Value {
+/// ledger on disk. Entries arrive as `rollback_preview` returns them, sorted
+/// by param (BTreeMap order); `live` and `drifted` arrive as `Option`s so an
+/// unreadable path publishes JSON `null` instead of a guessed value.
+fn rollback_list_output(entries: &[tuner::RollbackPreview]) -> serde_json::Value {
     json!({
         "count": entries.len(),
         "pending": entries
             .iter()
-            .map(|(param, applied, previous)| {
-                json!({ "param": param, "applied": applied, "previous": previous })
+            .map(|entry| {
+                json!({
+                    "param": entry.param,
+                    "applied": entry.applied,
+                    "previous": entry.previous,
+                    "live": entry.live,
+                    "drifted": entry.drifted,
+                })
             })
             .collect::<Vec<_>>(),
     })
@@ -731,16 +812,63 @@ fn rollback_output(param: Option<&str>, outcome: &tuner::RollbackOutcome) -> ser
     body
 }
 
-fn cmd_rollback(param: Option<&str>, list: bool) -> Result<i32> {
+/// JSON body for two or more positionals: the same four keys and the same
+/// status vocabulary, with `params` (an array) in place of `param` (a string).
+/// The two never appear together, and nothing here is added to a body of one
+/// or zero positionals.
+///
+/// `params` carries the ledger key each positional resolved to — the spelling
+/// `rollback --list` publishes — in the order given and deduplicated, so a
+/// caller can read back the batch it asked for. A mutually exclusive twin
+/// restored with an entry is counted in `restored` but not named here, exactly
+/// as the single-parameter body does not name it; whether the batch restored
+/// everything is `status`'s answer, not the array's.
+fn rollback_params_output(keys: &[String], outcome: &tuner::RollbackOutcome) -> serde_json::Value {
+    let mut body = rollback_output(None, outcome);
+    body["params"] = json!(keys);
+    body
+}
+
+/// JSON body of `ktuner rollback` for the positionals the caller named.
+///
+/// The shape follows the INVOCATION, not how many ledger keys it resolved to:
+/// exactly one positional keeps the body it has had since the positional was
+/// introduced (byte for byte), while two or more carry `params` even when they
+/// name one entry between them (`rollback vm/swappiness vm.swappiness`) —
+/// a consumer that asked for a batch reads the batch shape, and one rule
+/// covers every arity. No positional keeps the four-key full-rollback body.
+fn rollback_body(
+    positionals: usize,
+    keys: &[String],
+    outcome: &tuner::RollbackOutcome,
+) -> serde_json::Value {
+    match positionals {
+        0 => rollback_output(None, outcome),
+        1 => rollback_output(keys.first().map(String::as_str), outcome),
+        _ => rollback_params_output(keys, outcome),
+    }
+}
+
+/// The positional spellings `rollback` hands to the engine: every name goes
+/// through normalize_param, the policy fix/why share, so the spellings this
+/// command accepts cannot drift from those commands whichever position a name
+/// sits in.
+fn normalize_params(params: &[String]) -> Vec<String> {
+    params.iter().map(|param| normalize_param(param)).collect()
+}
+
+fn cmd_rollback(params: &[String], list: bool) -> Result<i32> {
     // `--list` keeps its read-only preview of the whole pending set, so the
-    // positional cannot be combined with it: refusing is a usage error (the
-    // README's stderr JSON, exit 2), while ignoring the parameter would
-    // silently answer a different question than the one asked. Checked before
-    // the root gate so it fails as an argument error, like the parser's own.
-    if list {
-        if let Some(param) = param {
-            anyhow::bail!("rollback --list takes no parameter (got {param})");
-        }
+    // positionals cannot be combined with it: refusing is a usage error (the
+    // README's stderr JSON, exit 2), while ignoring them would silently answer
+    // a different question than the one asked. Checked before the root gate so
+    // it fails as an argument error, like the parser's own. One positional
+    // keeps the message byte for byte; several name every argument given.
+    if list && !params.is_empty() {
+        anyhow::bail!(
+            "rollback --list takes no parameter (got {})",
+            params.join(" ")
+        );
     }
     let is_root = unsafe { libc::geteuid() } == 0;
     if !is_root {
@@ -756,15 +884,16 @@ fn cmd_rollback(param: Option<&str>, list: bool) -> Result<i32> {
         print_json(&output)?;
         return Ok(0);
     }
-    if let Some(param) = param {
-        // The CLI owns the alias policy (fix/why normalize the same way); the
-        // engine matches the normalized spelling against the ledger.
-        let (resolved, outcome) = tuner::rollback_param(&normalize_param(param))?;
-        print_json(&rollback_output(Some(&resolved), &outcome))?;
+    if params.is_empty() {
+        let outcome = tuner::rollback_quiet()?;
+        print_json(&rollback_body(0, &[], &outcome))?;
         return Ok(rollback_exit_code(&outcome));
     }
-    let outcome = tuner::rollback_quiet()?;
-    print_json(&rollback_output(None, &outcome))?;
+    // The CLI owns the alias policy (fix/why normalize the same way); the
+    // engine matches the normalized spellings against the ledger and answers
+    // with one ledger key per positional, in the order they were given.
+    let (keys, outcome) = tuner::rollback_params(&normalize_params(params))?;
+    print_json(&rollback_body(params.len(), &keys, &outcome))?;
     Ok(rollback_exit_code(&outcome))
 }
 
@@ -946,6 +1075,22 @@ mod tests {
         }
     }
 
+    fn preview_entry(
+        param: &str,
+        applied: &str,
+        previous: &str,
+        live: Option<&str>,
+        drifted: Option<bool>,
+    ) -> tuner::RollbackPreview {
+        tuner::RollbackPreview {
+            param: param.to_string(),
+            applied: applied.to_string(),
+            previous: previous.to_string(),
+            live: live.map(str::to_string),
+            drifted,
+        }
+    }
+
     #[test]
     fn rollback_list_output_empty() {
         // Empty ledger: count 0, empty pending — still a valid listing.
@@ -958,19 +1103,50 @@ mod tests {
     #[test]
     fn rollback_list_output_maps_every_field() {
         let entries = vec![
-            (
-                "vm.swappiness".to_string(),
-                "1".to_string(),
-                "60".to_string(),
-            ),
-            (
-                "block/sda/scheduler".to_string(),
-                "none".to_string(),
-                "mq-deadline".to_string(),
-            ),
+            preview_entry("vm.swappiness", "1", "60", Some("1"), Some(false)),
+            preview_entry("block/sda/scheduler", "none", "mq-deadline", None, None),
         ];
         assert_eq!(
             rollback_list_output(&entries),
+            json!({
+                "count": 2,
+                "pending": [
+                    {
+                        "applied": "1",
+                        "drifted": false,
+                        "live": "1",
+                        "param": "vm.swappiness",
+                        "previous": "60",
+                    },
+                    {
+                        "applied": "none",
+                        "drifted": null,
+                        "live": null,
+                        "param": "block/sda/scheduler",
+                        "previous": "mq-deadline",
+                    },
+                ]
+            })
+        );
+    }
+
+    /// The regression this feature owes: the two new keys are the ONLY change
+    /// to the published shape. Stripping them from the output must reproduce,
+    /// field for field, what `rollback --list` emitted before they existed.
+    #[test]
+    fn rollback_list_output_adds_only_live_and_drifted() {
+        let entries = vec![
+            preview_entry("vm.swappiness", "1", "60", Some("60"), Some(true)),
+            preview_entry("block/sda/scheduler", "none", "mq-deadline", None, None),
+        ];
+        let mut out = rollback_list_output(&entries);
+        for entry in out["pending"].as_array_mut().unwrap() {
+            let object = entry.as_object_mut().unwrap();
+            object.remove("live");
+            object.remove("drifted");
+        }
+        assert_eq!(
+            out,
             json!({
                 "count": 2,
                 "pending": [
@@ -982,12 +1158,43 @@ mod tests {
     }
 
     #[test]
+    fn rollback_list_output_keys_are_alphabetical() {
+        // The README's "Object keys are emitted in alphabetical order" is a
+        // hard contract for consumers: the serialized entry must carry
+        // applied < drifted < live < param < previous.
+        let entries = vec![preview_entry(
+            "vm.swappiness",
+            "1",
+            "60",
+            Some("1"),
+            Some(false),
+        )];
+        assert_eq!(
+            serde_json::to_string(&rollback_list_output(&entries)).unwrap(),
+            r#"{"count":1,"pending":[{"applied":"1","drifted":false,"live":"1","param":"vm.swappiness","previous":"60"}]}"#
+        );
+    }
+
+    #[test]
+    fn rollback_list_output_serializes_unknown_readings_as_null() {
+        // A path that could not be read has no value to publish and no
+        // comparison to report: the keys stay present with null and are never
+        // dropped, so a consumer never branches on key presence.
+        let entries = vec![preview_entry("vm.swappiness", "1", "60", None, None)];
+        let out = rollback_list_output(&entries);
+        let entry = &out["pending"][0];
+        assert!(entry.get("live").is_some_and(serde_json::Value::is_null));
+        assert!(entry.get("drifted").is_some_and(serde_json::Value::is_null));
+        assert_eq!(entry.as_object().unwrap().len(), 5, "entry keys: {entry}");
+    }
+
+    #[test]
     fn rollback_list_output_preserves_entry_order() {
         // The shaper must not re-sort: rollback_preview's BTreeMap order is
         // the contract.
         let entries = vec![
-            ("zzz".to_string(), "1".to_string(), "2".to_string()),
-            ("aaa".to_string(), "3".to_string(), "4".to_string()),
+            preview_entry("zzz", "1", "2", None, None),
+            preview_entry("aaa", "3", "4", None, None),
         ];
         let out = rollback_list_output(&entries);
         assert_eq!(out["pending"][0]["param"], json!("zzz"));
@@ -1773,6 +1980,189 @@ mod tests {
         assert!(find_recommendation(&eval, "no/such/param").is_none());
     }
 
+    /// The stderr document a refusal would print, as the bytes `main` writes:
+    /// the command-error arm is the only path an Err takes, so equal
+    /// documents mean equal exit status (2) and equal stderr.
+    fn refusal_document(error: &anyhow::Error) -> String {
+        serde_json::to_string_pretty(&error_body(error)).unwrap()
+    }
+
+    #[test]
+    fn fix_dry_run_refuses_exactly_what_fix_refuses() {
+        // One classification, two modes: the preview answers every refusal
+        // with the plain command's own error — same text, same exit 2 — so
+        // `ktuner fix X --dry-run && ktuner fix X` cannot be misled by a
+        // preview that disagrees with the command it previews.
+        let eval = evaluation(vec![
+            rec("vm.swappiness", false),  // unwritable here
+            rec("vm.nr_hugepages", true), // writable, runtime-dangerous
+        ]);
+        for (param, expected) in [
+            (
+                "vm.swappiness",
+                "parameter vm.swappiness is read-only in this environment",
+            ),
+            (
+                "vm.nr_hugepages",
+                "parameter vm.nr_hugepages is dangerous to write at runtime, persist to /etc/sysctl.d instead",
+            ),
+            (
+                "no_such_ktuner_parameter",
+                "parameter not found or already optimal: no_such_ktuner_parameter",
+            ),
+            // Deny-listed by the write path and never in the plan (no built-in
+            // rule recommends one), so both modes refuse it the way the plain
+            // command always has: the lookup miss. The unconditional write
+            // choke point is unchanged.
+            (
+                "kernel.core_pattern",
+                "parameter not found or already optimal: kernel.core_pattern",
+            ),
+        ] {
+            // The real mode runs as root here (euid is the caller's fact in
+            // cmd_fix); the preview is not root-gated, so both modes reach the
+            // same classification.
+            let real = fix_with(param, false, true, &eval).expect_err("the real run must refuse");
+            let preview = fix_with(param, true, false, &eval).expect_err("the preview must refuse");
+            assert_eq!(
+                refusal_document(&real),
+                refusal_document(&preview),
+                "{param}: the preview must print the command's own error"
+            );
+            assert_eq!(
+                refusal_document(&preview),
+                format!("{{\n  \"error\": \"{expected}\"\n}}"),
+                "{param}"
+            );
+        }
+    }
+
+    #[test]
+    fn fix_root_gate_applies_to_the_real_run_only() {
+        // The two modes side by side: a non-root real run is stopped by the
+        // gate, while the same non-root preview reaches the parameter's own
+        // verdict — the flag is read-only, like `tune --dry-run`.
+        let eval = evaluation(vec![rec("vm.swappiness", false)]);
+        let root_error = "{\n  \"error\": \"fix requires root (sudo ktuner fix vm.swappiness)\"\n}";
+        let gate = fix_with("vm.swappiness", false, false, &eval)
+            .expect_err("a real fix must refuse without root");
+        assert_eq!(refusal_document(&gate), root_error);
+        let without_root = fix_with("vm.swappiness", true, false, &eval)
+            .expect_err("the preview must still refuse the unwritable parameter");
+        assert_eq!(
+            refusal_document(&without_root),
+            "{\n  \"error\": \"parameter vm.swappiness is read-only in this environment\"\n}",
+            "the preview must not stop at the root gate"
+        );
+        // And with root the same real call proceeds to the classification.
+        assert_eq!(
+            refusal_document(&fix_with("vm.swappiness", false, true, &eval).unwrap_err()),
+            "{\n  \"error\": \"parameter vm.swappiness is read-only in this environment\"\n}"
+        );
+    }
+
+    #[test]
+    fn fix_target_classifies_through_the_plans_skip_reason() {
+        // The plan and the single-parameter command share one classification:
+        // what tune drops with `unwritable` / `runtime_dangerous` is exactly
+        // what fix refuses, with the plan's own reason, so fix can never
+        // write an entry the plan skips.
+        let eval = evaluation(vec![
+            rec("vm.swappiness", false),
+            rec("vm.nr_hugepages", true),
+            rec("fs.file-max", true),
+        ]);
+        for (param, reason) in [
+            ("vm.swappiness", UNWRITABLE),
+            ("vm.nr_hugepages", RUNTIME_DANGEROUS),
+        ] {
+            let recommendation = find_recommendation(&eval, param).unwrap();
+            assert_eq!(skip_reason(recommendation, &[]), Some(reason), "{param}");
+            assert!(fix_target(&eval, param).is_err(), "{param}");
+        }
+        let writable = find_recommendation(&eval, "fs.file-max").unwrap();
+        assert_eq!(skip_reason(writable, &[]), None);
+        assert_eq!(
+            fix_target(&eval, "fs.file-max").unwrap().param,
+            "fs.file-max"
+        );
+    }
+
+    #[test]
+    fn fix_dry_run_accepts_the_same_spellings_as_fix() {
+        // The preview resolves the parameter through the same lookup fix and
+        // why use, so every alias they accept reaches the same recommendation
+        // and the entry names its canonical spelling; sysfs identities are
+        // filesystem names and stay verbatim.
+        let eval = evaluation(vec![rec("vm.swappiness", true)]);
+        for alias in ["vm.swappiness", "vm/swappiness", "VM.SWAPPINESS"] {
+            let target = fix_target(&eval, alias).expect("alias must resolve");
+            assert_eq!(target.param, "vm.swappiness");
+            assert_eq!(
+                fix_dry_run_output(target)["would_apply"][0]["param"],
+                json!("vm.swappiness"),
+                "{alias}"
+            );
+        }
+        let sysfs = evaluation(vec![rec("block/sda/scheduler", true)]);
+        assert!(fix_target(&sysfs, "block/sda/scheduler").is_ok());
+        assert!(
+            fix_target(&sysfs, "block.sda.scheduler").is_err(),
+            "sysfs names must not be dot-folded into a match"
+        );
+    }
+
+    #[test]
+    fn fix_dry_run_output_is_the_tune_preview_shape() {
+        // The body a one-parameter preview prints: the tune --dry-run keys,
+        // status "planned" with nothing blocked, and would_apply carrying the
+        // check entry itself (rec_json), so one parser reconciles the
+        // documents. would_skip stays present and empty — a refusal never
+        // reaches this shape, it answers with the command's error instead.
+        let recommendation = rec("vm.swappiness", true);
+        let body = fix_dry_run_output(&recommendation);
+        let keys: Vec<&str> = body
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["blocked", "dry_run", "status", "would_apply", "would_skip"]
+        );
+        assert_eq!(body["dry_run"], json!(true));
+        assert_eq!(body["status"], json!("planned"));
+        assert_eq!(body["blocked"], json!(0));
+        assert_eq!(body["would_skip"], json!([]));
+        assert_eq!(body["would_apply"], json!([rec_json(&recommendation)]));
+    }
+
+    #[test]
+    fn fix_dry_run_names_the_twin_the_write_clears() {
+        // The mutually exclusive pairs come from the write path's own table
+        // (tuner::cleared_sibling): the preview must name the half a write
+        // would zero — a second copy of the relationship could drift from
+        // what the ledger records — and a parameter without a twin carries
+        // no key at all.
+        for (param, twin) in [
+            ("vm.dirty_bytes", "vm.dirty_ratio"),
+            ("vm.dirty_ratio", "vm.dirty_bytes"),
+            ("vm.dirty_background_bytes", "vm.dirty_background_ratio"),
+            ("vm.dirty_background_ratio", "vm.dirty_background_bytes"),
+            ("vm.overcommit_kbytes", "vm.overcommit_ratio"),
+            ("vm.overcommit_ratio", "vm.overcommit_kbytes"),
+        ] {
+            let body = fix_dry_run_output(&rec(param, true));
+            assert_eq!(body["would_clear"], json!([twin]), "{param}");
+        }
+        let body = fix_dry_run_output(&rec("vm.swappiness", true));
+        assert!(
+            body.get("would_clear").is_none(),
+            "a parameter without a twin must not grow the key: {body}"
+        );
+    }
+
     #[test]
     fn why_reads_sysfs_fallback_without_rewriting_identity() {
         let eval = evaluation(Vec::new());
@@ -2108,5 +2498,184 @@ mod tests {
                 "a ledger key must normalize to itself: {expected}"
             );
         }
+    }
+
+    #[test]
+    fn rollback_body_keeps_the_single_param_bytes() {
+        // One positional keeps the body it has had since the positional was
+        // introduced, byte for byte: the same four keys plus `param` naming
+        // the ledger entry that was addressed.
+        let twins = tuner::RollbackOutcome {
+            restored: 2,
+            failed: 0,
+            skipped: 0,
+        };
+        assert_eq!(
+            serde_json::to_string_pretty(&rollback_body(
+                1,
+                &["vm.dirty_bytes".to_string()],
+                &twins
+            ))
+            .unwrap(),
+            "{\n  \"failed\": 0,\n  \"param\": \"vm.dirty_bytes\",\n  \"restored\": 2,\n  \"skipped\": 0,\n  \"status\": \"Full\"\n}"
+        );
+        let skipped = tuner::RollbackOutcome {
+            restored: 0,
+            failed: 0,
+            skipped: 1,
+        };
+        assert_eq!(
+            serde_json::to_string_pretty(&rollback_body(1, &["vm.swappiness".to_string()], &skipped))
+                .unwrap(),
+            "{\n  \"failed\": 0,\n  \"param\": \"vm.swappiness\",\n  \"restored\": 0,\n  \"skipped\": 1,\n  \"status\": \"Nothing\"\n}"
+        );
+    }
+
+    #[test]
+    fn rollback_body_renders_the_multi_param_shape() {
+        // Two or more positionals replace `param` (string) with `params`
+        // (array) and keep the aggregate counters, so a consumer reads the
+        // same four keys whatever it asked for. The array is the ledger key
+        // of each positional, in the order given.
+        let outcome = tuner::RollbackOutcome {
+            restored: 3,
+            failed: 0,
+            skipped: 0,
+        };
+        let keys = vec![
+            "net.core.somaxconn".to_string(),
+            "vm.swappiness".to_string(),
+            "vm.vfs_cache_pressure".to_string(),
+        ];
+        let body = rollback_body(keys.len(), &keys, &outcome);
+        println!(
+            "multi-parameter rollback body:\n{}",
+            serde_json::to_string_pretty(&body).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string_pretty(&body).unwrap(),
+            "{\n  \"failed\": 0,\n  \"params\": [\n    \"net.core.somaxconn\",\n    \"vm.swappiness\",\n    \"vm.vfs_cache_pressure\"\n  ],\n  \"restored\": 3,\n  \"skipped\": 0,\n  \"status\": \"Full\"\n}"
+        );
+        assert!(
+            body.get("param").is_none(),
+            "`params` replaces `param`, the two never appear together: {body}"
+        );
+        // Only the shape changes: a partial batch reports the same status
+        // vocabulary and counts as the single-parameter form.
+        let partial = tuner::RollbackOutcome {
+            restored: 1,
+            failed: 1,
+            skipped: 1,
+        };
+        let body = rollback_body(
+            2,
+            &[
+                "vm.swappiness".to_string(),
+                "vm.vfs_cache_pressure".to_string(),
+            ],
+            &partial,
+        );
+        assert_eq!(
+            body,
+            json!({
+                "restored": 1,
+                "failed": 1,
+                "skipped": 1,
+                "status": "Partial",
+                "params": ["vm.swappiness", "vm.vfs_cache_pressure"],
+            })
+        );
+        assert!(body.get("param").is_none(), "{body}");
+        // The keys are the resolved ledger keys the engine returns: the shaper
+        // renders what it is given, in the order it is given.
+        assert_eq!(
+            rollback_body(
+                2,
+                &[
+                    "vm/swappiness".to_string(),
+                    "net.core.somaxconn".to_string()
+                ],
+                &outcome
+            )["params"],
+            json!(["vm/swappiness", "net.core.somaxconn"]),
+            "the shaper must not re-sort or re-spell the engine's keys"
+        );
+    }
+
+    #[test]
+    fn rollback_body_keeps_the_params_shape_after_dedup() {
+        // The shape follows the invocation, not how many ledger keys it
+        // resolved to: two positionals that turn out to name one entry still
+        // answer with `params` (one element), because a consumer that asked
+        // for a batch must be able to read the batch shape. `param` stays
+        // reserved for the single-positional body, byte for byte.
+        let outcome = tuner::RollbackOutcome {
+            restored: 1,
+            failed: 0,
+            skipped: 0,
+        };
+        for keys in [
+            vec!["vm.swappiness".to_string()],
+            vec!["vm.swappiness".to_string(), "vm.swappiness".to_string()],
+        ] {
+            let body = rollback_body(2, &keys, &outcome);
+            assert!(
+                body.get("param").is_none(),
+                "a two-positional invocation must not fall back to the single-parameter body: {body}"
+            );
+            assert_eq!(
+                body["params"].as_array().map(Vec::len),
+                Some(keys.len()),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            rollback_body(2, &["vm.swappiness".to_string()], &outcome),
+            json!({
+                "restored": 1,
+                "failed": 0,
+                "skipped": 0,
+                "status": "Full",
+                "params": ["vm.swappiness"],
+            })
+        );
+    }
+
+    #[test]
+    fn rollback_body_keeps_the_full_rollback_bytes() {
+        // No positional keeps the four-key body of a full rollback and gains
+        // no `param`/`params` key: the batch shape must not leak into it.
+        let full = tuner::RollbackOutcome {
+            restored: 5,
+            failed: 0,
+            skipped: 0,
+        };
+        assert_eq!(rollback_body(0, &[], &full), rollback_output(None, &full));
+        assert_eq!(
+            serde_json::to_string_pretty(&rollback_body(0, &[], &full)).unwrap(),
+            "{\n  \"failed\": 0,\n  \"restored\": 5,\n  \"skipped\": 0,\n  \"status\": \"Full\"\n}"
+        );
+    }
+
+    #[test]
+    fn rollback_normalizes_every_positional() {
+        // Every positional goes through normalize_param, the policy fix/why
+        // share, so the spellings this command accepts cannot drift from
+        // those commands whichever position a name sits in.
+        assert_eq!(
+            normalize_params(&[
+                "vm/swappiness".to_string(),
+                "VM.SWAPPINESS".to_string(),
+                "net/ipv4/conf/Br0.100/forwarding".to_string(),
+                "block/sda/scheduler".to_string(),
+            ]),
+            vec![
+                "vm.swappiness".to_string(),
+                "vm.swappiness".to_string(),
+                "net.ipv4.conf.Br0.100.forwarding".to_string(),
+                "block/sda/scheduler".to_string(),
+            ]
+        );
+        assert!(normalize_params(&[]).is_empty());
     }
 }

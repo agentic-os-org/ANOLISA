@@ -20,6 +20,7 @@ sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一�
 
 # 修正单个参数（需要 root 权限）
 sudo ktuner fix <param>        # 例如 sudo ktuner fix vm.swappiness
+sudo ktuner fix <param> --dry-run   # 预览单个参数，不做实际变更
 
 # 解释某个参数为何需要修改
 ktuner why <param>             # 例如 ktuner why net.core.somaxconn
@@ -27,7 +28,7 @@ ktuner why <param>             # 例如 ktuner why net.core.somaxconn
 # 回滚变更（需要 root 权限）
 sudo ktuner rollback          # 破坏性且终结（删除 ledger）
 sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
-sudo ktuner rollback <param>  # 回滚单个已记录参数，例如 vm.dirty_bytes
+sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，例如 vm.dirty_bytes
 ```
 
 ## JSON 输出
@@ -148,13 +149,81 @@ sudo ktuner rollback <param>  # 回滚单个已记录参数，例如 vm.dirty_by
 字段），使解释输出与计划不矛盾。`check` 的推荐项也发布同一分类，
 使诊断输出无需 dry run 就携带该原因。
 
+### fix --dry-run 输出
+
+`ktuner fix <param> --dry-run` 以与 `tune --dry-run` 相同的形态预览这一次
+单参数写入（范围就是该参数）：`dry_run`、`status`（此处为 `"planned"`）、
+`blocked`、`would_apply`（本次写入会落地的那一条建议，与 `check` 的条目同形）
+以及 `would_skip`。它不写任何东西——不写内核、不进回滚账本、不持久化、
+不加账本锁——并以 `0` 退出：
+
+```json
+{
+  "blocked": 0,
+  "dry_run": true,
+  "status": "planned",
+  "would_apply": [
+    {
+      "category": "performance",
+      "confidence": "high",
+      "current": "1000",
+      "param": "net.core.netdev_max_backlog",
+      "reason": "万兆网卡场景下增大网卡收包队列深度，避免高流量时软中断处理不及导致丢包",
+      "recommended": "65536",
+      "subcategory": "network",
+      "writable": true
+    }
+  ],
+  "would_skip": []
+}
+```
+
+`would_skip` 在本命令里恒为空：单参数命令的所有拒绝情形都走命令自身的错误
+通道——参数不在计划里（`parameter not found or already optimal: <param>`）、
+不可写、运行时危险，或非 root 的真实运行——其 stderr JSON 与退出码与
+`ktuner fix <param>` 完全一致，因此
+`ktuner fix <param> --dry-run && ktuner fix <param>` 的预检不会被与被预览
+命令不一致的预览误导。与 `tune --dry-run` 一样，预览不需要 root；真实
+`fix` 仍需要。
+
+写入互斥 sysctl 对的一半时，内核会把另一半清零（`mm/page-writeback.c`、
+`mm/util.c`），预览用 `would_clear` 列出这一孪生，取值来自写入路径记账时
+用的同一张表（参数没有孪生时不出现该键）：
+
+```json
+{
+  "blocked": 0,
+  "dry_run": true,
+  "status": "planned",
+  "would_apply": [
+    {
+      "category": "performance",
+      "confidence": "medium",
+      "current": "0",
+      "param": "vm.dirty_bytes",
+      "reason": "大内存服务器 (125 GB) 使用 dirty_ratio 百分比会导致脏页过多、IO 突刺，改用固定字节限制更平稳",
+      "recommended": "268435456",
+      "subcategory": "memory",
+      "writable": true
+    }
+  ],
+  "would_clear": [
+    "vm.dirty_ratio"
+  ],
+  "would_skip": []
+}
+```
+
+真实 `fix` 运行时，只有孪生持有已配置的（非零）原值，才会把被清零的原值
+记入账本（`rollback` 因此能恢复）；持久化重现清零后的状态。
+
 ### rollback 输出
 
 ```json
 {"failed": 0, "restored": 5, "skipped": 0, "status": "Full"}
 ```
 
-### rollback <param> 输出
+### rollback <param>… 输出
 
 `sudo ktuner rollback <param>` 只恢复该参数命中的账本条目，其余条目保留。参数拼写与
 `fix`、`why` 相同（点/斜杠别名、含字面点的网卡名）：
@@ -172,15 +241,36 @@ sudo ktuner rollback <param>  # 回滚单个已记录参数，例如 vm.dirty_by
 错误（`2`，stderr JSON），绝不静默成功。`status` 描述本次尝试（`Full` / `Partial` /
 `Nothing`），不表示账本已清空。普通 `ktuner rollback` 与 `ktuner rollback --list` 行为不变。
 
-### rollback --list 输出
-
-`sudo ktuner rollback --list` 预览回滚将恢复的内容——只读，不写入不删除（ledger 是 0700 root 目录下的 0600 文件，因此与 rollback 共用 root 门槛；损坏的 ledger 报错而不是当作空列表）：
+两个及以上参数把多参数调优一次撤掉：整批在同一把账本锁内完成，持久化文件按剩余账本只重新
+生成一次，而不是每个参数各生成一次。输出保留聚合计数键，把 `param`（字符串）换成 `params`
+（数组）——每个位置参数解析出的账本 key，按输入顺序去重（`vm/swappiness` 与
+`VM.SWAPPINESS` 都报 `vm.swappiness`）：
 
 ```json
-{"count": 2, "pending": [{"applied": "1", "param": "vm.swappiness", "previous": "60"}]}
+{"failed": 0, "params": ["vm.swappiness", "net.core.somaxconn"], "restored": 2, "skipped": 0, "status": "Full"}
 ```
 
-普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
+连同条目一起恢复的孪生计入 `restored` 但不出现在 `params` 里（与单参数版本不列出孪生一致），
+同时点名一对互斥孪生也只恢复一次。写入失败或路径缺失的参数照样出现在 `params` 里，能不能恢复
+由计数器和 `status` 表达。部分成功的批只退役落地的条目，未落地的连同其孪生保留记录，退出码
+`1`、`status` 为 `Partial`；一条都没落地时账本与持久化文件都不改动。任一名字不在账本里就在
+动任何东西之前拒绝整条命令（`2`，stderr JSON）——与单参数版本同一条命令错误：静默跳过会让拼错
+一个名字丢掉一整批回滚，而命令仍然退出 `0`。无参数的 `rollback`、`rollback --list`，以及
+`--list` 与任意位置参数同时出现（仍是用法错误）都不变。
+
+### rollback --list 输出
+
+`sudo ktuner rollback --list` 预览回滚将恢复的内容——只读，不写入不删除（ledger 是 0700 root 目录下的 0600 文件，因此与 rollback 共用 root 门槛；损坏的 ledger 报错而不是当作空列表）。每个条目保留原有的 `param`/`applied`/`previous`，并新增内核当前的实际状态：`live` 从该条目自己的路径读取，使用与其他所有界面相同的读取器（sysfs 选项列表取方括号中的活动项、多值 sysctl 折叠为单空格）；`drifted` 表示 `live` 是否仍与 `applied` 一致，比较方式与写入校验相同——内核按自身形态呈现的值（方括号选项列表、TAB 分隔的多值、领先 token 回显）不算漂移：
+
+```json
+{"count": 3, "pending": [
+  {"applied": "none", "drifted": null, "live": null, "param": "block/sda/scheduler", "previous": "mq-deadline"},
+  {"applied": "0", "drifted": true, "live": "20", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+]}
+```
+
+被内核作为互斥孪生副作用清零的条目记录 `applied = "0"`（内核实际写入的值），因此当它不再为 0 时即为漂移。路径无法读取（设备已消失、模块未加载、write-only 旋钮）时报 `live: null` 和 `drifted: null`：读不到值不算错误，漂移也不会改变退出码。列表是快照——预览与回滚之间内核可能变化。普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
 
 ### 错误输出（stderr）
 

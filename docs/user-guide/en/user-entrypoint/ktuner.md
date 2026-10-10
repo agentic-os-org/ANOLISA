@@ -65,15 +65,26 @@ sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
 
 # Fix a single parameter
 sudo ktuner fix vm.swappiness
+sudo ktuner fix vm.swappiness --dry-run   # preview one parameter, no changes
 
 # Explain why a parameter should change
 ktuner why net.core.somaxconn
 
-# Undo all changes ktuner made, or one recorded parameter
+# Undo all changes ktuner made, or the recorded parameters named
 sudo ktuner rollback          # destructive + terminal: restores and deletes the ledger
 sudo ktuner rollback --list   # read-only preview of what rollback would restore
-sudo ktuner rollback vm.swappiness   # restore one recorded parameter
+sudo ktuner rollback vm.swappiness net.core.somaxconn   # restore the recorded parameters named
 ```
+
+`sudo ktuner fix <param> --dry-run` previews that one write in the same shape
+as `tune --dry-run` (`dry_run`, `status`, `blocked`, `would_apply`,
+`would_skip`) and exits `0` without writing anything, so a parameter can be
+inspected before it is changed. It needs no root, reports a mutually exclusive
+twin the kernel would zero in `would_clear` when the parameter has one, and
+refuses exactly like `sudo ktuner fix <param>` — same stderr JSON, same exit
+code — when the parameter is outside the plan, unwritable, or
+runtime-dangerous, so the preview cannot disagree with the command it
+previews.
 
 All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success,
 `1` check found recommendations or rollback left values unrestored, `2` command error.
@@ -84,6 +95,16 @@ is a successful no-op (`0`); an unreadable or missing ledger is a command error 
 plus the mutually exclusive twin recorded with it, restored together because writing
 either knob zeroes the other — and reports that entry as `param` in its JSON; a
 parameter the ledger does not record is a command error (`2`).
+
+Several parameters are accepted and undone in one run: the whole batch happens under
+one ledger lock and the persisted file is regenerated once from the entries that
+remain, so two parameters cannot leave a half-written state between them. The body
+keeps the aggregate counters and replaces `param` with `params`, the ledger key each
+parameter resolved to in the order given and deduplicated. Each name is answered by
+the same contract as a single one; a batch that restores only part of what it named
+retires the entries that landed, keeps the rest for a retry and exits `1`, and one
+name the ledger does not record refuses the whole command before anything is written
+(`2`), the same command error a single parameter gets.
 
 `tune --exclude <param>` (repeatable) leaves a named recommendation out of the plan:
 nothing is written for it, nothing is recorded in the rollback ledger, and nothing is
@@ -98,6 +119,8 @@ ktuner records the cleared original so `rollback` can restore it.
 ---
 
 For network conf parameters, interface identity is case-sensitive. Both `net/ipv4/conf/Br0.100/forwarding` and `net.ipv4.conf.Br0.100.forwarding` address the same interface; `br0.100` is a different identity. IPv6 follows the same rule. Persisted records for interfaces with literal dots use slash-first sysctl.d keys so systemd preserves those dots. This supports existing valid records or custom library recommendations; built-in rules do not currently generate per-VLAN recommendations.
+
+`sudo ktuner rollback --list` reports the live state as well: each pending entry adds `live` (the value read from the entry's path right now, or `null` when the path cannot be read — a device that is gone, a module that is not loaded) and `drifted` (whether `live` still matches the recorded `applied`; `null` when there is no live value to compare). Both fields are additions to the existing shape — `count`, `pending` and the recorded `param`/`applied`/`previous` values are unchanged — and an unreadable value is not an error: the command still exits `0`. Values are rendered and compared the same way as everywhere else in ktuner, so a sysfs option list or a multi-value sysctl is not mistaken for drift.
 
 ## Permission Boundary
 

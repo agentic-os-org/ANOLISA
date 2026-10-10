@@ -110,7 +110,7 @@ impl BtrfsBaseBackend {
             BtrfsBaseScenario::CrossDisk => {
                 let src = format!("{}/", backup_path);
                 let status = Command::new("rsync")
-                    .args(["-a", &src, &subvol_path.to_string_lossy()])
+                    .args(["-aHAX", &src, &subvol_path.to_string_lossy()])
                     .status()
                     .await
                     .context("failed to run rsync")?;
@@ -340,7 +340,7 @@ impl StorageBackend for BtrfsBaseBackend {
         let sv_mode = subvol_meta.mode();
 
         let rsync_status = Command::new("rsync")
-            .args(["-a", "--delete", &src, original_path])
+            .args(["-aHAX", "--delete", &src, original_path])
             .status()
             .await
             .context("failed to run rsync")?;
