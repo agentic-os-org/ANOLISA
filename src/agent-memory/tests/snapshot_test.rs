@@ -1,9 +1,14 @@
 //! Phase 6.3: snapshot create / list / restore round-trip.
 
+use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
+
 use tempfile::tempdir;
 
 use agent_memory::config::AppConfig;
 use agent_memory::error::MemoryError;
+use agent_memory::ns::{MountPoint, Namespace};
 use agent_memory::service::MemoryService;
 
 fn setup() -> (tempfile::TempDir, MemoryService) {
@@ -146,4 +151,143 @@ fn snapshot_excludes_meta_directory() {
             "snapshot leaked meta path: {path}"
         );
     }
+}
+
+#[test]
+fn snapshot_gzip_finish_failure_is_not_published() {
+    const CHILD_BASE: &str = "AGENT_MEMORY_SNAPSHOT_LIMIT_TEST_BASE";
+    if let Some(base) = std::env::var_os(CHILD_BASE) {
+        let mount = MountPoint::ensure(
+            Namespace::user("limit-test").unwrap(),
+            std::path::Path::new(&base),
+        )
+        .unwrap();
+
+        let result = agent_memory::snapshot::create(&mount, Some("limited"));
+        assert!(result.is_err(), "incomplete gzip was published: {result:?}");
+        assert!(result.unwrap_err().to_string().contains("gzip finish"));
+        assert!(agent_memory::snapshot::list(&mount).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(mount.meta_dir.join("snapshots"))
+                .unwrap()
+                .count(),
+            0,
+            "failed snapshot must not retain a partial file, archive or sidecar"
+        );
+        println!("snapshot-gzip-child-completed");
+        return;
+    }
+
+    let tmp = tempdir().unwrap();
+    let mount = MountPoint::ensure(Namespace::user("limit-test").unwrap(), tmp.path()).unwrap();
+    let mut state = 0x1234_5678_u32;
+    // Stay below flate2's 32 KiB buffer so the EFBIG fault lands in gzip
+    // finalization, rather than an earlier tar append. The direct snapshot API
+    // also avoids indexing/audit writes under this child's small file limit.
+    let contents: Vec<u8> = (0..8192)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    std::fs::write(mount.root.join("original.bin"), &contents).unwrap();
+
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "snapshot_gzip_finish_failure_is_not_published",
+            "--nocapture",
+        ])
+        .env(CHILD_BASE, tmp.path());
+    // A separate process keeps the file limit and signal disposition away
+    // from concurrently running tests. SIG_IGN turns EFBIG into an IO error.
+    // SAFETY: the pre-exec closure calls only non-allocating libc signal and
+    // resource-limit functions, with stack-owned valid pointers, between fork
+    // and exec. It never calls Rust logging or acquires a user-space lock.
+    unsafe {
+        child.pre_exec(|| {
+            nix::libc::signal(nix::libc::SIGXFSZ, nix::libc::SIG_IGN);
+            let mut previous = nix::libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if nix::libc::getrlimit(nix::libc::RLIMIT_FSIZE, &mut previous) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let limit = nix::libc::rlimit {
+                rlim_cur: 1024.min(previous.rlim_max),
+                rlim_max: previous.rlim_max,
+            };
+            if nix::libc::setrlimit(nix::libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = child.output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("snapshot-gzip-child-completed"),
+        "regression child did not execute: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "snapshot failure regression child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(mount.root.join("original.bin")).unwrap(),
+        contents
+    );
+}
+
+#[test]
+fn snapshot_finishes_gzip_and_restores_binary_contents() {
+    let (_tmp, svc) = setup();
+    let contents: Vec<u8> = (0..8192).map(|i| (i % 256) as u8).collect();
+    let original = svc.mount.root.join("original.bin");
+    std::fs::write(&original, &contents).unwrap();
+    let info = svc.mem_snapshot(Some("complete gzip")).unwrap();
+    let archive = svc
+        .mount
+        .meta_dir
+        .join("snapshots")
+        .join(format!("{}.tar.gz", info.id));
+    let bytes = std::fs::read(archive).unwrap();
+    assert_eq!(info.size, bytes.len() as u64);
+    // Reading to EOF also validates the gzip trailer; iterating tar entries
+    // alone may stop at the tar end marker before consuming the trailer.
+    flate2::read::GzDecoder::new(bytes.as_slice())
+        .read_to_end(&mut Vec::new())
+        .unwrap();
+    std::fs::write(&original, b"changed").unwrap();
+    svc.mem_snapshot_restore(&info.id).unwrap();
+    assert_eq!(std::fs::read(original).unwrap(), contents);
+}
+
+#[test]
+fn snapshot_read_failure_removes_partial_archive() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let (_tmp, svc) = setup();
+    svc.write("unreadable.md", "keep this memory", false)
+        .unwrap();
+    let path = svc.mount.root.join("unreadable.md");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = svc.mem_snapshot(None);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(result.is_err());
+    assert_eq!(svc.read("unreadable.md").unwrap(), "keep this memory");
+    assert_eq!(
+        std::fs::read_dir(svc.mount.meta_dir.join("snapshots"))
+            .unwrap()
+            .count(),
+        0
+    );
 }

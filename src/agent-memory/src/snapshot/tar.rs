@@ -76,6 +76,14 @@ pub(crate) fn validate_snapshot_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Publish a completed tar.gz snapshot followed by its metadata sidecar.
+///
+/// # Errors
+/// Returns errors for invalid ids, traversal, archive/finalization I/O, sync,
+/// publication or sidecar writes. Errors before archive publication remove the
+/// partial file and publish neither archive nor sidecar. A later sync/sidecar
+/// error may leave the completed archive available for recovery. Process crashes
+/// can still leave partial files; this guard is not a crash-time collector.
 pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<SnapshotInfo> {
     validate_snapshot_id(id)?;
     let dir = snapshots_dir(mount);
@@ -84,9 +92,10 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
     let archive_path = dir.join(format!("{id}.tar.gz"));
     let tmp_path = dir.join(format!("{id}.tar.gz.partial"));
 
+    let f = File::create(&tmp_path)?;
+    let _partial_cleanup = PartialArchive(&tmp_path);
     // 1. Stream mount tree → tmp tarball, skipping .anolisa/.
     {
-        let f = File::create(&tmp_path)?;
         let gz = GzEncoder::new(f, Compression::default());
         let mut tar = ::tar::Builder::new(gz);
         // SECURITY: tar::Builder::follow_symlinks defaults to true, which
@@ -120,10 +129,13 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
             tar.append_path_with_name(path, rel)
                 .map_err(|e| MemoryError::Other(format!("tar append {}: {e}", rel.display())))?;
         }
-        tar.finish()
+        let gz = tar
+            .into_inner()
             .map_err(|e| MemoryError::Other(format!("tar finish: {e}")))?;
-        // GzEncoder::finish runs in Drop; explicit shutdown via `into_inner`
-        // not necessary because Builder::finish already flushed payload.
+        // Drop discards gzip finalization errors. Finish explicitly before
+        // publishing an archive that callers may rely on for recovery.
+        gz.finish()
+            .map_err(|e| MemoryError::Other(format!("gzip finish: {e}")))?;
     }
 
     let size = std::fs::metadata(&tmp_path)?.len();
@@ -146,6 +158,19 @@ pub fn create_tarball(mount: &MountPoint, id: &str, name: &str) -> Result<Snapsh
     };
     write_sidecar(&dir.join(format!("{id}.json")), &info)?;
     Ok(info)
+}
+
+/// Owns only the unpublished temporary path; publication moves it away.
+struct PartialArchive<'a>(&'a Path);
+
+impl Drop for PartialArchive<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.0.display(), %error, "failed to remove partial snapshot");
+            }
+        }
+    }
 }
 
 pub fn list_tarballs(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
