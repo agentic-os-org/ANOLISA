@@ -596,8 +596,13 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
             PKG_TIMEOUT,
             "pkg",
         ),
+        // Request the status abbreviation: `dpkg-query -W` without a status
+        // filter enumerates every row in /var/lib/dpkg/status, including
+        // removed-but-not-purged (`rc`) packages, which are NOT installed.
+        // Mirrors the `pkg_list` apt invocation so both consumers of the dpkg
+        // database agree on what "installed" means.
         PkgManager::Apt => run_command(
-            Command::new("dpkg-query").args(["-W", "-f", "${Package}\n"]),
+            Command::new("dpkg-query").args(["-W", "-f", "${db:Status-Abbrev}\t${Package}\n"]),
             PKG_TIMEOUT,
             "pkg",
         ),
@@ -612,7 +617,13 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
     match result {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            parse_installed_names(&stdout)
+            // Apt output carries per-row status and needs the "ii" filter;
+            // rpm -qa and brew list --formula report only installed entries.
+            if mgr == PkgManager::Apt {
+                parse_installed_names_with_status(&stdout)
+            } else {
+                parse_installed_names(&stdout)
+            }
         }
         _ => HashSet::new(),
     }
@@ -625,6 +636,30 @@ fn parse_installed_names(output: &str) -> HashSet<String> {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())
+        .collect()
+}
+
+/// Parse `dpkg-query -W -f '${db:Status-Abbrev}\t${Package}\n'` output.
+///
+/// dpkg-query enumerates every status-database row, including
+/// removed-but-not-purged (`rc`) and never-unpacked (`un`) packages; only rows
+/// whose status abbreviation starts with "ii" are installed — the same rule
+/// [`parse_apt_list_output`] applies for `pkg list --installed`. Package names
+/// cannot contain tabs (dpkg's name charset excludes them), so the first tab
+/// unambiguously separates status from name. Hold-state (`hi`) rows are
+/// deliberately excluded here as well, matching `parse_apt_list_output`;
+/// changing hold handling is out of scope for this fix.
+fn parse_installed_names_with_status(output: &str) -> HashSet<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (status, name) = line.split_once('\t')?;
+            status
+                .trim()
+                .starts_with("ii")
+                .then(|| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty())
         .collect()
 }
 
@@ -1616,6 +1651,100 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains("bash"));
         assert!(names.contains("nginx"));
+    }
+
+    #[test]
+    fn parse_installed_names_with_status_keeps_only_installed_rows() {
+        // Rows as dpkg-query prints them with ${db:Status-Abbrev}: only "ii"
+        // rows are installed; "rc" (removed, config-files-present),
+        // "un" (never unpacked) and "hi" (hold) rows are not.
+        let output = "ii \tnginx\nrc\texim4-config\nun\tghost-pkg\nhi \theld-pkg\n";
+        let names = parse_installed_names_with_status(output);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("nginx"));
+        assert!(!names.contains("exim4-config"));
+        assert!(!names.contains("ghost-pkg"));
+        assert!(!names.contains("held-pkg"));
+    }
+
+    #[test]
+    fn parse_installed_names_with_status_ignores_malformed_lines() {
+        // Blank lines and lines without a tab separator are skipped, not fatal.
+        let output = "\nii\tbash\nno-tab-here\nrc\told-pkg\n";
+        let names = parse_installed_names_with_status(output);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("bash"));
+        assert!(!names.contains("old-pkg"));
+    }
+
+    // Environment marker for the re-exec inner half of
+    // get_installed_names_apt_reports_only_currently_installed_packages.
+    const DPKG_INNER_MARKER: &str = "COSH_PKG_TEST_DPKG_INNER";
+
+    // End-to-end guard over the dpkg-query invocation itself: a stub
+    // dpkg-query stands in for the real one, so the test pins both the
+    // requested -f format and the "ii" filtering without needing root or a
+    // dpkg database. Red on code that queries plain ${Package} output (the
+    // stub then lists rc-state names as installed and the inner assertion
+    // fails); green only when the status abbreviation is requested and
+    // filtered.
+    #[cfg(unix)]
+    #[test]
+    fn get_installed_names_apt_reports_only_currently_installed_packages() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Inner half: re-executed with PATH scoped to the stub dpkg-query.
+        if std::env::var_os(DPKG_INNER_MARKER).is_some() {
+            let installed = get_installed_names(PkgManager::Apt);
+            assert!(
+                installed.contains("nginx"),
+                "installed row must be reported, got {installed:?}"
+            );
+            assert!(
+                !installed.contains("exim4-config"),
+                "rc-state (removed, config-files-present) row must not be \
+                 reported as installed, got {installed:?}"
+            );
+            return;
+        }
+
+        // Outer half: install a stub dpkg-query that answers according to the
+        // requested -f format, then re-run this test with PATH scoped to it.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("dpkg-query");
+        let script = concat!(
+            "#!/bin/sh\n",
+            "# Test stub for dpkg-query -W: status-aware format vs. legacy format.\n",
+            "for arg in \"$@\"; do\n",
+            "  case \"$arg\" in\n",
+            "    *Status-Abbrev*)\n",
+            "      printf 'ii \\tnginx\\nrc\\texim4-config\\n'\n",
+            "      exit 0\n",
+            "      ;;\n",
+            "  esac\n",
+            "done\n",
+            "printf 'nginx\\nexim4-config\\n'\n",
+        );
+        std::fs::write(&stub, script).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pkg::tests::get_installed_names_apt_reports_only_currently_installed_packages",
+            ])
+            .env("PATH", dir.path())
+            .env(DPKG_INNER_MARKER, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Require the inner run to report "1 passed": a stale --exact name
+        // would run zero tests and still exit 0, passing vacuously.
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "inner run must execute exactly this test and pass\nstdout: {stdout}\nstderr: {stderr}"
+        );
     }
 
     #[test]
