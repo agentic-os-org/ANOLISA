@@ -297,6 +297,9 @@ sudo anolisa --install-mode system install agentsight
 AgentSight requires Linux system mode. This installs the AgentSight service and
 the `agentsight-enforcer` service together.
 
+Enforcer file open/write and connect blocking additionally requires an active BPF LSM and matching
+ loaded hooks. Block policies for these operations are rejected when that support is unavailable; see the [integration guide](../../docs/user-guide/en/agent-observability/agentsight/integrations.md#agentsight-enforcer-risk-enforcement).
+
 ### Install via RPM
 
 ```bash

@@ -79,6 +79,12 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 
 ## agentsight-enforcer: risk enforcement
 
+Pre-operation `block` rules for exec without argv conditions, file open/write, and connect require
+an active BPF LSM and the matching loaded hooks. Without that support, initial policies and runtime
+policy updates are rejected with a missing-hook error. A full hook profile alone cannot enable
+blocking on a kernel without BPF LSM; supported `notify` and `kill` rules remain available through
+tracepoints.
+
 `agentsight-enforcer` is the privileged daemon that can block risky Agent actions. It ships with the
 package and is started by `agentsight-enforcer.service`. When its socket
 (`/run/agentsight/enforcer.sock`) is missing, `serve` logs:
