@@ -129,8 +129,10 @@ jobs:
               );
             }
 
+            // All nine GitHub closing keywords, past tense included:
+            // close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
             const closingKeyword =
-              /\b(closes|fixes|resolves|close|fix|resolve)\s+#\d+/i;
+              /\b(closed|closes|close|fixed|fixes|fix|resolved|resolves|resolve)\s+#\d+/i;
             const exemption = body.match(/no-issue\s*:\s*(.+)/i);
             if (!closingKeyword.test(body) && !exemption?.[1]?.trim()) {
               warnings.push(
