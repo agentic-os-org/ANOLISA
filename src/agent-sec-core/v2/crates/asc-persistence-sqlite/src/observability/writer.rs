@@ -112,6 +112,13 @@ impl ObservabilitySqliteWriter {
     pub fn close_at(&self, now: f64) {
         self.sink.close(now);
     }
+
+    /// [`close_at`](ObservabilitySqliteWriter::close_at) with a deadline for
+    /// the gated final maintenance pass; see
+    /// [`SqliteSink::close_with_deadline`].
+    pub fn close_with_deadline(&self, deadline: Option<std::time::Instant>) {
+        self.sink.close_with_deadline(current_epoch(), deadline);
+    }
 }
 
 /// Failure of a default-path constructor.
@@ -208,15 +215,18 @@ mod tests {
         assert!(writer.write_or_raise(&record()).is_err());
     }
 
-    /// A failing retention pass stays silent and still advances the gate.
+    /// A failing retention pass stays silent and leaves the gate unmarked.
     ///
     /// v1's `prune` catches `SQLAlchemyError` and disposes the engine so the
     /// next write reconnects. v2 keeps its cached connection, because a
     /// `rusqlite` connection stays usable after a failed statement (see D-25).
     /// What both versions share, and what this pins, is that the failure never
-    /// reaches the caller and never blocks the rest of the close path.
+    /// reaches the caller and never blocks the rest of the close path. What
+    /// deliberately changed (#6602): the gate no longer records the attempt -
+    /// a marked failure made the next retry wait a full window while the
+    /// expired rows stayed in place.
     #[test]
-    fn a_failing_retention_pass_is_swallowed_and_still_marks_the_gate() {
+    fn a_failing_retention_pass_stays_silent_and_does_not_mark_the_gate() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("observability.db");
         let writer = ObservabilitySqliteWriter::new(&path).expect("writer");
@@ -233,8 +243,8 @@ mod tests {
 
         assert!(!writer.sink().store().is_open());
         assert!(
-            dir.path().join("observability.db.maintenance").exists(),
-            "the gate must record the attempt even when pruning failed"
+            !dir.path().join("observability.db.maintenance").exists(),
+            "the gate must not record a failed pass - the marker belongs to a successful prune"
         );
     }
 }

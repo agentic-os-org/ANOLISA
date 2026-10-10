@@ -23,6 +23,16 @@ impl ShutdownToken {
         *self.sender.borrow()
     }
 
+    /// Resolves once shutdown has been requested.
+    ///
+    /// Completes immediately when shutdown was already requested. Unlike
+    /// [`ShutdownToken::is_requested`], this observes the request the moment
+    /// it happens, which lets startup phases race a stop signal instead of
+    /// polling for it.
+    pub async fn cancelled(&self) {
+        self.wait().await;
+    }
+
     pub(crate) async fn wait(&self) {
         let mut receiver = self.sender.subscribe();
         if *receiver.borrow_and_update() {

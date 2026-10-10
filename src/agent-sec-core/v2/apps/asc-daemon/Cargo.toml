@@ -51,6 +51,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 asc-pap-repository-memory.workspace = true
+rusqlite.workspace = true
 # The dual-UID sec.* acceptance forks per-UID children over the socket.
 libc = "0.2"
 asc-action-runtime = { workspace = true, features = ["testing"] }

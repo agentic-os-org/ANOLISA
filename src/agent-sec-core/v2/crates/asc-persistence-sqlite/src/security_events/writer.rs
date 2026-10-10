@@ -11,7 +11,7 @@ use std::sync::Arc;
 use asc_security_events::{
     ConfigError, SECURITY_EVENTS_SQLITE_SCHEMA_VERSION, SecurityEvent, config::get_db_path,
 };
-use asc_sqlite_kernel::{KernelError, SqliteSink, SqliteStore, current_epoch};
+use asc_sqlite_kernel::{KernelError, MaintenanceOutcome, SqliteSink, SqliteStore, current_epoch};
 
 use crate::security_events::migration::SecurityEventsMigrator;
 use crate::security_events::policy::{DropSink, SecurityEventsFaultPolicy, StderrDropSink};
@@ -132,6 +132,23 @@ impl<S: DropSink> SqliteEventWriter<S> {
     pub fn close_at(&self, now: f64) {
         self.sink.close(now);
     }
+
+    /// [`close_at`](SqliteEventWriter::close_at) with a deadline for the
+    /// gated final maintenance pass; see
+    /// [`SqliteSink::close_with_deadline`].
+    pub fn close_with_deadline(&self, deadline: Option<std::time::Instant>) {
+        self.sink.close_with_deadline(current_epoch(), deadline);
+    }
+
+    /// Runs the gated maintenance pass as of `now` without closing the writer.
+    ///
+    /// The daemon's periodic retention task calls this; [`SqliteEventWriter::close_at`]
+    /// remains the shutdown path. A failed pass does not advance the gate's
+    /// marker, so the next call retries.
+    #[must_use]
+    pub fn run_maintenance_at(&self, now: f64) -> MaintenanceOutcome {
+        self.sink.run_maintenance_detailed(now)
+    }
 }
 
 /// Failure of a default-path constructor.
@@ -172,6 +189,46 @@ mod tests {
         );
         assert_eq!(writer.sink().store().log_prefix(), LOG_PREFIX);
         assert!(!writer.sink().store().read_only());
+    }
+
+    #[test]
+    fn run_maintenance_at_prunes_expired_events_without_closing() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("events.db");
+        let writer = SqliteEventWriter::new(&path).expect("writer");
+        writer.probe().expect("probe");
+
+        let mut expired = event("expired");
+        expired
+            .set_timestamp("2020-01-01T00:00:00Z")
+            .expect("timestamp");
+        writer.write(&expired);
+        writer.write(&event("fresh"));
+
+        // A 2026 "now": only the 2020 event is older than the 30-day window.
+        let now = 1_790_000_000.0;
+        assert_eq!(
+            writer.run_maintenance_at(now),
+            asc_sqlite_kernel::MaintenanceOutcome::Ran
+        );
+        assert!(
+            writer.sink().store().is_open(),
+            "a periodic pass must not close the store"
+        );
+
+        let count = writer
+            .sink()
+            .store()
+            .with_connection(false, |conn| {
+                conn.query_row("SELECT COUNT(*) FROM security_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(KernelError::from)
+            })
+            .expect("connection")
+            .expect("store open");
+        assert_eq!(count, 1, "only the expired event is pruned");
+        writer.close_at(now + 1.0);
     }
 
     #[test]
@@ -248,16 +305,18 @@ mod tests {
         assert_eq!(writer.sink().max_age_days(), None);
     }
 
-    /// A failing retention pass stays silent and still advances the gate.
+    /// A failing retention pass stays silent and leaves the gate unmarked.
     ///
     /// v1's `prune` catches `SQLAlchemyError` and disposes the engine so the
     /// next write reconnects. v2 keeps its cached connection: a `rusqlite`
     /// connection remains usable after a failed statement, so there is nothing
     /// to rebuild (see D-25). What both versions share, and what this pins, is
     /// that the failure never reaches the caller and never blocks the rest of
-    /// the close path.
+    /// the close path. What deliberately changed (#6602): the gate no longer
+    /// records the attempt - a marked failure made the next retry wait a
+    /// full window while the expired rows stayed in place.
     #[test]
-    fn a_failing_retention_pass_is_swallowed_and_still_marks_the_gate() {
+    fn a_failing_retention_pass_stays_silent_and_does_not_mark_the_gate() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("events.db");
         let writer = SqliteEventWriter::new(&path).expect("writer");
@@ -274,8 +333,8 @@ mod tests {
 
         assert!(!writer.sink().store().is_open());
         assert!(
-            dir.path().join("events.db.maintenance").exists(),
-            "the gate must record the attempt even when pruning failed"
+            !dir.path().join("events.db.maintenance").exists(),
+            "the gate must not record a failed pass - the marker belongs to a successful prune"
         );
     }
 }

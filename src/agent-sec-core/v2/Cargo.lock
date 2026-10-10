@@ -273,6 +273,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "ring",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

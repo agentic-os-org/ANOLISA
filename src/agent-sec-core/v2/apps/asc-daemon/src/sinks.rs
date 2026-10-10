@@ -95,9 +95,130 @@ pub(crate) struct DurableSinks {
     pub observability: Arc<asc_event_sink::ConfiguredObservabilitySinks>,
 }
 
-impl DurableSinks {
-    pub fn close(&self) {
-        self.security.close();
-        self.observability.close();
+/// The durable sinks plus the shutdown decisions about the final passes.
+///
+/// The observability lifecycle is independent of the security store, so its
+/// close always runs. The security final pass is skipped only when the
+/// retention task failed to join and an orphaned pass may still hold the
+/// store mutex - skipping it must not take the worker drain or the
+/// observability close down with it. Both gated maintenance passes must
+/// finish by `final_pass_deadline` and are skipped when the remaining stop
+/// budget cannot fit them (`None` runs them without a deadline).
+pub(crate) struct ShutdownPlan {
+    sinks: DurableSinks,
+    security_final_pass: bool,
+    final_pass_deadline: Option<std::time::Instant>,
+}
+
+impl ShutdownPlan {
+    /// Builds a plan from the retention join outcome.
+    ///
+    /// `security_final_pass` is `true` only when the retention task joined
+    /// within the shared stop deadline (or never started). The final passes
+    /// must finish by `final_pass_deadline`.
+    pub(crate) fn new(
+        sinks: DurableSinks,
+        security_final_pass: bool,
+        final_pass_deadline: Option<std::time::Instant>,
+    ) -> Self {
+        Self {
+            sinks,
+            security_final_pass,
+            final_pass_deadline,
+        }
+    }
+
+    /// Both sink lifecycles close (no retention task is outstanding).
+    pub(crate) fn full(sinks: DurableSinks) -> Self {
+        Self::new(sinks, true, None)
+    }
+
+    /// Closes what the shutdown decision still allows.
+    ///
+    /// The observability close is unconditional; the security final pass
+    /// runs only when the retention task joined within the shared stop
+    /// deadline, so it can never contend with an orphaned maintenance pass.
+    /// Both are skipped when the remaining stop budget cannot fit them.
+    pub(crate) fn close(&self) {
+        self.sinks
+            .observability
+            .close_with_deadline(self.final_pass_deadline);
+        if self.security_final_pass {
+            self.sinks
+                .security
+                .close_with_deadline(self.final_pass_deadline);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use asc_event_sink::ConfiguredObservabilitySinks;
+    use asc_observability::ObservabilityRecord;
+    use serde_json::json;
+
+    use super::*;
+
+    /// Warms both sink lifecycles so each close leaves an observable trace
+    /// (the `.maintenance` gate marker next to its database).
+    fn warmed_sinks() -> (tempfile::TempDir, DurableSinks) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let security = Arc::new(asc_event_sink::ConfiguredSecurityEventSinks::new(
+            dir.path().join("security.jsonl"),
+            dir.path().join("security.db"),
+        ));
+        let observability = Arc::new(ConfiguredObservabilitySinks::new(
+            dir.path().join("observability.jsonl"),
+            dir.path().join("observability.db"),
+        ));
+        security.warm_sqlite().expect("warm security sqlite");
+        let record = ObservabilityRecord::from_json_value(&json!({
+            "hook": "before_agent_run",
+            "observedAt": "2026-01-01T00:00:00Z",
+            "metadata": {"sessionId": "s-1", "runId": "r-1"},
+            "metrics": {"prompt": "x"},
+        }))
+        .expect("observability record");
+        observability.record(&record).expect("record one event");
+        (
+            dir,
+            DurableSinks {
+                security,
+                observability,
+            },
+        )
+    }
+
+    // DJOB-RET-013: a retention join timeout skips only the security final
+    // pass - the observability lifecycle is independent of the security
+    // store and still closes.
+    #[test]
+    fn a_retention_join_timeout_skips_only_the_security_final_pass() {
+        let (dir, sinks) = warmed_sinks();
+        let plan = ShutdownPlan::new(sinks, false, None);
+        plan.close();
+        assert!(
+            !dir.path().join("security.db.maintenance").exists(),
+            "the security final pass must be skipped"
+        );
+        assert!(
+            dir.path().join("observability.db.maintenance").exists(),
+            "the observability close must still run"
+        );
+    }
+
+    #[test]
+    fn a_joined_retention_task_closes_both_sink_lifecycles() {
+        let (dir, sinks) = warmed_sinks();
+        let plan = ShutdownPlan::full(sinks);
+        plan.close();
+        assert!(
+            dir.path().join("security.db.maintenance").exists(),
+            "the security final pass must run"
+        );
+        assert!(
+            dir.path().join("observability.db.maintenance").exists(),
+            "the observability close must run"
+        );
     }
 }

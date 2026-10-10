@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use asc_event_log::SecurityEventWriter;
 use asc_persistence_sqlite::security_events::SqliteEventWriter;
 use asc_security_events::SecurityEvent;
+use asc_sqlite_kernel::MaintenanceOutcome;
 
 use crate::SinkError;
 
@@ -112,9 +113,34 @@ impl ConfiguredSecurityEventSinks {
 
     /// Runs maintenance and closes the configured `SQLite` writer if initialized.
     pub fn close(&self) {
+        self.close_with_deadline(None);
+    }
+
+    /// [`close`](ConfiguredSecurityEventSinks::close) with a deadline for
+    /// the gated final maintenance pass; see
+    /// [`SqliteSink::close_with_deadline`].
+    pub fn close_with_deadline(&self, deadline: Option<std::time::Instant>) {
         if let Some(writer) = self.sqlite.peek() {
-            writer.close();
+            writer.close_with_deadline(deadline);
         }
+    }
+
+    /// Runs the gated `SQLite` retention pass without closing the writer.
+    ///
+    /// v1's retention rode on short-lived CLI processes exiting through
+    /// `atexit`; a daemon that keeps running never takes that path, so
+    /// expired events survive until an orderly shutdown. The daemon calls
+    /// this once at startup (the catch-up after a hard kill) and then on a
+    /// fixed cadence; the shared cross-process gate decides whether anything
+    /// actually runs. A failed pass does not advance the gate, so the next
+    /// call retries.
+    #[must_use]
+    pub fn run_sqlite_retention(&self, now: f64) -> MaintenanceOutcome {
+        self.sqlite
+            .peek()
+            .map_or(MaintenanceOutcome::NotDue, |writer| {
+                writer.run_maintenance_at(now)
+            })
     }
 
     fn sqlite_writer(&self) -> Result<Arc<SqliteEventWriter>, SinkError> {
@@ -161,8 +187,15 @@ impl ConfiguredObservabilitySinks {
 
     /// Runs retention maintenance and closes `SQLite` if a record initialized it.
     pub fn close(&self) {
+        self.close_with_deadline(None);
+    }
+
+    /// [`close`](ConfiguredObservabilitySinks::close) with a deadline for
+    /// the gated final maintenance pass; see
+    /// [`SqliteSink::close_with_deadline`].
+    pub fn close_with_deadline(&self, deadline: Option<std::time::Instant>) {
         if let Some(writer) = self.sqlite.peek() {
-            writer.close();
+            writer.close_with_deadline(deadline);
         }
     }
 }
@@ -174,6 +207,30 @@ mod tests {
     use serde_json::Map;
 
     use super::*;
+
+    #[test]
+    fn run_sqlite_retention_runs_once_per_window_without_closing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sqlite = dir.path().join("events.db");
+        let sinks =
+            ConfiguredSecurityEventSinks::new(dir.path().join("events.jsonl"), sqlite.clone());
+
+        // Before the SQLite writer is warmed there is nothing to maintain.
+        assert_eq!(
+            sinks.run_sqlite_retention(1000.0),
+            MaintenanceOutcome::NotDue
+        );
+
+        sinks.warm_sqlite().expect("warm sqlite");
+        assert_eq!(sinks.run_sqlite_retention(1000.0), MaintenanceOutcome::Ran);
+        let marker = sqlite.with_extension(std::ffi::OsString::from("db.maintenance"));
+        let _ = marker;
+        assert_eq!(
+            sinks.run_sqlite_retention(1001.0),
+            MaintenanceOutcome::NotDue
+        );
+        sinks.close();
+    }
 
     #[test]
     fn warm_initializes_both_explicit_destinations_without_events() {
