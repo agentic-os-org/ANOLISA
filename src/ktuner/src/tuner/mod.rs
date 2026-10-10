@@ -1450,6 +1450,7 @@ pub fn rollback_param(param: &str) -> Result<(String, RollbackOutcome)> {
         SYSCTL_PERSIST_PATH,
         NONSYSCTL_SERVICE_PATH,
         NONSYSCTL_SCRIPT_PATH,
+        "systemctl",
     )
 }
 
@@ -1474,6 +1475,7 @@ pub fn rollback_params(params: &[String]) -> Result<(Vec<String>, RollbackOutcom
         SYSCTL_PERSIST_PATH,
         NONSYSCTL_SERVICE_PATH,
         NONSYSCTL_SCRIPT_PATH,
+        "systemctl",
     )
 }
 
@@ -1481,6 +1483,7 @@ pub fn rollback_params(params: &[String]) -> Result<(Vec<String>, RollbackOutcom
 /// [`rollback_preview_at`] / [`finalize_rollback_at`] idiom): a fixture restores
 /// and retires entries in a private directory without touching /var/lib, /etc
 /// or /proc/sys.
+/// stands in its own `systemctl` so the regenerated unit is enabled without
 ///
 /// One parameter is the batch of length one: the same engine answers both, so
 /// the single-parameter contract cannot drift from the batch it is a case of.
@@ -1490,6 +1493,7 @@ fn rollback_param_at(
     sysctl_path: &str,
     service_path: &str,
     script_path: &str,
+    systemctl: &str,
 ) -> Result<(String, RollbackOutcome)> {
     let (keys, outcome) = rollback_params_at(
         &[param.to_string()],
@@ -1497,6 +1501,7 @@ fn rollback_param_at(
         sysctl_path,
         service_path,
         script_path,
+        systemctl,
     )?;
     // One name resolves to exactly one ledger key: the lookup refuses the
     // command when it has no answer, so the fallback is only ever the spelling
@@ -1522,6 +1527,7 @@ fn rollback_params_at(
     sysctl_path: &str,
     service_path: &str,
     script_path: &str,
+    systemctl: &str,
 ) -> Result<(Vec<String>, RollbackOutcome)> {
     let guard = lock_ledger_at(ledger)?;
     if !Path::new(ledger).exists() {
@@ -1622,7 +1628,7 @@ fn rollback_params_at(
     // rolled back. Both happen once, under the guard taken above: the batch is
     // one transaction, not one per parameter.
     save_ledger_at(ledger, &data)?;
-    persist_from_rollback_at(&guard, sysctl_path, script_path, service_path, "systemctl")?;
+    persist_from_rollback_at(&guard, sysctl_path, script_path, service_path, systemctl)?;
     Ok((keys, outcome))
 }
 
@@ -5819,7 +5825,7 @@ mod tests {
         // A slashed alias of the recorded key must reach the same entry, the
         // way fix/why accept it.
         let (key, outcome) =
-            rollback_param_at("vm/swappiness", &ledger, &conf, &service, &script).unwrap();
+            rollback_param_at("vm/swappiness", &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(key, "vm.swappiness");
         assert_eq!(
@@ -5851,6 +5857,70 @@ mod tests {
         );
     }
 
+    /// The unit the regenerate writes is enabled through the program the
+    /// caller stood in, not the host's systemctl: `rollback_param_at` threads
+    /// its final argument into `persist_from_rollback_at`, so a fixture that
+    /// names a marker script observes the hand-off. The call site used to
+    /// pass only four of the five arguments, so the crate never compiled and
+    /// this wiring had never been observed at all.
+    #[test]
+    fn rollback_param_enables_the_unit_through_the_stood_in_program() {
+        let dir = AtomicTestDir::new("rollback-param-systemctl");
+        let (conf, service, script) = fixture_paths(&dir);
+        let swappiness = dir.0.join("swappiness");
+        let readahead = dir.0.join("read_ahead_kb");
+        fs::write(&swappiness, "10").unwrap();
+        fs::write(&readahead, "2048").unwrap();
+        // The surviving entry is the non-sysctl one, so the regenerate writes
+        // the boot script and its unit, and enables them through the program
+        // this test names.
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.swappiness", "60", "10", swappiness.to_str().unwrap()),
+                (
+                    "block/sda/read_ahead_kb",
+                    "128",
+                    "2048",
+                    readahead.to_str().unwrap(),
+                ),
+            ],
+        );
+        fs::write(&conf, "vm.swappiness = 10\n").unwrap();
+        let marker = dir.0.join("systemctl-ran");
+        let stand_in = dir.0.join("systemctl");
+        fs::write(
+            &stand_in,
+            format!("#!/bin/sh\ntouch {}\n", marker.to_str().unwrap()),
+        )
+        .unwrap();
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (key, outcome) = rollback_param_at(
+            "vm.swappiness",
+            &ledger,
+            &conf,
+            &service,
+            &script,
+            stand_in.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(key, "vm.swappiness");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (1, 0, 0)
+        );
+        assert!(
+            marker.exists(),
+            "the unit must be enabled through the stood-in program"
+        );
+        assert!(
+            Path::new(&script).exists() && Path::new(&service).exists(),
+            "the regenerate renders the surviving non-sysctl entry"
+        );
+    }
+
     /// The same operation on the last recorded entry runs the full rollback's
     /// terminal cleanup: the persisted files first, then the ledger.
     #[test]
@@ -5866,7 +5936,7 @@ mod tests {
         fs::write(&conf, "vm.swappiness = 10\n").unwrap();
 
         let (key, outcome) =
-            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).unwrap();
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(key, "vm.swappiness");
         assert_eq!(
@@ -5921,7 +5991,7 @@ mod tests {
             .unwrap();
 
             let (key, outcome) =
-                rollback_param_at(target, &ledger, &conf, &service, &script).unwrap();
+                rollback_param_at(target, &ledger, &conf, &service, &script, "true").unwrap();
 
             assert_eq!(key, target, "the resolved key is the recorded spelling");
             assert_eq!(
@@ -5991,8 +6061,15 @@ mod tests {
         );
         fs::write(&conf, "vm.overcommit_ratio = 100\n").unwrap();
 
-        let (key, outcome) =
-            rollback_param_at("vm.overcommit_ratio", &ledger, &conf, &service, &script).unwrap();
+        let (key, outcome) = rollback_param_at(
+            "vm.overcommit_ratio",
+            &ledger,
+            &conf,
+            &service,
+            &script,
+            "true",
+        )
+        .unwrap();
 
         assert_eq!(key, "vm.overcommit_ratio");
         assert_eq!(
@@ -6026,7 +6103,7 @@ mod tests {
         fs::write(&conf, "vm.swappiness = 10\n").unwrap();
 
         let (key, outcome) =
-            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).unwrap();
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(key, "vm.swappiness");
         assert_eq!(
@@ -6066,7 +6143,7 @@ mod tests {
         fs::write(&conf, conf_before).unwrap();
 
         let (key, outcome) =
-            rollback_param_at("vm.dirty_bytes", &ledger, &conf, &service, &script).unwrap();
+            rollback_param_at("vm.dirty_bytes", &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(key, "vm.dirty_bytes");
         assert_eq!(
@@ -6107,7 +6184,7 @@ mod tests {
         );
         let before = fs::read_to_string(&ledger).unwrap();
 
-        let error = rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script)
+        let error = rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script, "true")
             .err()
             .expect("an unrecorded parameter must not answer with an outcome");
         assert!(error.to_string().contains("not recorded"), "{error:#}");
@@ -6128,7 +6205,8 @@ mod tests {
             empty.to_str().unwrap(),
             &conf,
             &service,
-            &script
+            &script,
+            "true"
         )
         .is_err());
         let missing = dir.0.join("missing.json");
@@ -6138,6 +6216,7 @@ mod tests {
             &conf,
             &service,
             &script,
+            "true",
         )
         .err()
         .expect("a missing ledger is a command error");
@@ -6242,7 +6321,7 @@ mod tests {
         let worker_ready = ready.clone();
         let worker = std::thread::spawn(move || {
             worker_ready.wait();
-            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script)
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script, "true")
         });
         ready.wait();
         // 200 ms is the window transactions.rs uses for the same assertion.
@@ -6342,7 +6421,7 @@ mod tests {
             "vm.vfs_cache_pressure".to_string(),
         ];
         let (keys, outcome) =
-            rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+            rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(
             keys,
@@ -6418,7 +6497,7 @@ mod tests {
 
         let params = ["vm.dirty_bytes".to_string(), "vm.dirty_ratio".to_string()];
         let (keys, outcome) =
-            rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+            rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(keys, params, "each named half reports its ledger key");
         assert_eq!(
@@ -6483,7 +6562,7 @@ mod tests {
             "net.ipv4.conf.Br0.100.forwarding".to_string(),
         ];
         let (keys, outcome) =
-            rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+            rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(
             keys,
@@ -6531,7 +6610,7 @@ mod tests {
         let ledger_before = fs::read_to_string(&ledger).unwrap();
 
         let params = ["vm.swappiness".to_string(), "vm.typo".to_string()];
-        let error = rollback_params_at(&params, &ledger, &conf, &service, &script)
+        let error = rollback_params_at(&params, &ledger, &conf, &service, &script, "true")
             .err()
             .expect("an unrecorded name must refuse the command");
         assert!(error.to_string().contains("not recorded"), "{error:#}");
@@ -6553,12 +6632,13 @@ mod tests {
             empty.to_str().unwrap(),
             &conf,
             &service,
-            &script
+            &script,
+            "true"
         )
         .is_err());
         let missing = dir.0.join("missing.json");
         let error =
-            rollback_params_at(&params, missing.to_str().unwrap(), &conf, &service, &script)
+            rollback_params_at(&params, missing.to_str().unwrap(), &conf, &service, &script, "true")
                 .err()
                 .expect("a missing ledger is a command error");
         assert!(
@@ -6611,7 +6691,7 @@ mod tests {
             "vm.vfs_cache_pressure".to_string(),
         ];
         let (keys, outcome) =
-            rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+            rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(keys, params);
         assert_eq!(
@@ -6676,7 +6756,7 @@ mod tests {
             "vm.vfs_cache_pressure".to_string(),
         ];
         let (keys, outcome) =
-            rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+            rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(keys, params);
         assert_eq!(
@@ -6717,7 +6797,7 @@ mod tests {
             "net.core.somaxconn".to_string(),
         ];
         let (keys, outcome) =
-            rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+            rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(keys, params);
         assert_eq!(
@@ -6800,6 +6880,7 @@ mod tests {
                 &worker_conf,
                 &worker_service,
                 &worker_script,
+                "true",
             )
         });
         ready.wait();
@@ -6876,7 +6957,7 @@ mod tests {
             "net.core.somaxconn".to_string(),
             "vm.vfs_cache_pressure".to_string(),
         ];
-        let (_, outcome) = rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+        let (_, outcome) = rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(
             (outcome.restored, outcome.failed, outcome.skipped),
@@ -6921,7 +7002,7 @@ mod tests {
             "vm.swappiness".to_string(),
             "net.core.somaxconn".to_string(),
         ];
-        let (_, outcome) = rollback_params_at(&params, &ledger, &conf, &service, &script).unwrap();
+        let (_, outcome) = rollback_params_at(&params, &ledger, &conf, &service, &script, "true").unwrap();
 
         assert_eq!(
             (outcome.restored, outcome.failed, outcome.skipped),
@@ -6944,6 +7025,7 @@ mod tests {
             &conf,
             &service,
             &script,
+            "true",
         )
         .unwrap();
         assert_eq!(
