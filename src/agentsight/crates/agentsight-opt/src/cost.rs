@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::atif::{observation_result_is_error, AtifStep, AtifTrajectory};
+use crate::atif::{observation_result_is_error, truncate_chars, AtifStep, AtifTrajectory};
 use crate::types::{
     CostFinding, CostHeadroom, CostRatioMetrics, CostSegment, CostStats, LlmCall,
     RedundantCallGroup, TurnLedgerRow, WasteCandidate, WasteCandidateSet,
@@ -28,7 +28,7 @@ use crate::types::{
 /// Minimum call count to flag a group as redundant.
 const REDUNDANT_MIN_COUNT: usize = 3;
 
-/// Maximum command signature characters for grouping.
+/// Maximum command signature characters displayed in a report.
 const CMD_SIG_CHARS: usize = 80;
 
 /// char→token ratio version tag, for auditability.
@@ -132,7 +132,9 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                     let chars = call.arguments.to_string().chars().count();
                     tool_input_chars += chars;
                     total_chars += chars;
-                    let sig = call.command_summary(CMD_SIG_CHARS);
+                    // Summaries are for display: different long paths or
+                    // arguments can share the same truncated prefix.
+                    let sig = call.command_summary(usize::MAX);
                     *tool_sig_counts
                         .entry((call.function_name.clone(), sig))
                         .or_insert(0) += 1;
@@ -182,7 +184,7 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
         .collect();
 
     // Redundancy detection: find tool signatures called >= REDUNDANT_MIN_COUNT times.
-    let mut redundant_calls: Vec<RedundantCallGroup> = tool_sig_counts
+    let mut redundant_calls: Vec<(String, String, RedundantCallGroup)> = tool_sig_counts
         .iter()
         .filter(|(_, &count)| count >= REDUNDANT_MIN_COUNT)
         .map(|((name, sig), &count)| {
@@ -192,12 +194,16 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                 0
             };
             let wasted = (count - 1) * avg_result_chars;
-            RedundantCallGroup {
-                name: name.clone(),
-                cmd_sig: sig.clone(),
-                count,
-                wasted_chars: wasted,
-            }
+            (
+                name.clone(),
+                sig.clone(),
+                RedundantCallGroup {
+                    name: name.clone(),
+                    cmd_sig: truncate_chars(sig, CMD_SIG_CHARS),
+                    count,
+                    wasted_chars: wasted,
+                },
+            )
         })
         .collect();
     // `tool_sig_counts` is a HashMap, whose iteration order is randomized per
@@ -205,11 +211,16 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
     // the waste table reordered between runs of the same trajectory. Break
     // ties by signature, the way 947a9bde2 broke aggregate ties by name.
     redundant_calls.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.cmd_sig.cmp(&b.cmd_sig))
+        a.2.count
+            .cmp(&b.2.count)
+            .reverse()
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
     });
+    let redundant_calls = redundant_calls
+        .into_iter()
+        .map(|(_, _, group)| group)
+        .collect();
 
     // Generate findings. Reserved for data-quality warnings only (degraded
     // capture, below) — heuristic insights (tool dominance, redundant calls,
@@ -507,7 +518,7 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                         primary_sig = format!(
                             "{}|{}",
                             call.function_name,
-                            call.command_summary(CMD_SIG_CHARS)
+                            call.command_summary(usize::MAX)
                         );
                     }
                 }
