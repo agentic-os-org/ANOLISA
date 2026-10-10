@@ -278,6 +278,30 @@ def test_remote_identity_emails_are_low_confidence(text):
     assert finding["metadata"]["context"] == "remote_identity"
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "ssh://\nalice@company.cn",
+        "rsync://\nbob@securecorp.cn",
+        "sftp://\n\nalice@company.cn",
+        "scp:// alice@company.cn",
+    ),
+)
+def test_uri_prefix_ending_at_a_line_break_is_not_remote_identity(text):
+    # The remote-identity URI prefix must end immediately before the address.
+    # A `$` anchor also matches before one trailing newline, which made the
+    # single-newline case classify as a remote identity while a space or a
+    # blank line in the same position did not.
+    hidden = _scan(text)
+    shown = _scan(text, include_low_confidence=True)
+
+    assert _types(hidden) == {"email"}
+    assert _types(shown) == {"email"}
+    finding = shown["findings"][0]
+    assert finding["confidence"] >= 0.82
+    assert "context" not in finding["metadata"]
+
+
 def test_mailto_and_ambiguous_email_shapes_remain_detected():
     result = _scan(
         "mailto:alice@securecorp.cn, literal git@github.com, and lhs@module.py"

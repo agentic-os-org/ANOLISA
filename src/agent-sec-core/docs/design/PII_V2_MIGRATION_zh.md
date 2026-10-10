@@ -68,6 +68,13 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 `tests/fixtures/credit_cards.json` 由 Python 与 Rust 质量测试共用，包含原始良性 Host 输出；
 历史 V1 oracle 保持不变。
 
+远程身份分类要求 URI 前缀紧邻邮箱结尾。V1 oracle 的 `_REMOTE_EMAIL_URI_RE` 以 `$` 锚定，
+而 Python 的 `$` 还匹配末尾单个换行之前的位置：`scheme://\nuser@host` 因此被归为远程身份，
+同一位置的空格或空行却不会——Rust 移植中的 `$` 是严格的输入结尾锚点，从未复刻该行为，
+两个引擎在此静默分歧。Python 锚点现改为 `\Z`；只要 URI 与邮箱之间存在任何字符（包括单个
+换行），两个引擎都保留常规置信度 finding。冻结的 V1 语料不含换行结尾的 URI 前缀用例，
+oracle 字节不变。
+
 V1 顶层字段仍为 `ok`、`verdict`、`summary`、`findings`、`elapsed_ms` 和可选
 `redacted_text`。`summary` 将执行状态与覆盖状态分开：
 
