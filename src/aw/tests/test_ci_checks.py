@@ -152,6 +152,7 @@ class GateTests(GateFixture):
             "contract-empty-canonical", "contract-empty-schemas",
             "contract-empty-contracts", "contract-empty-orchestration",
             "contract-empty-configuration", "contract-empty-protocol", "contract-empty-admission",
+            "contract-empty-qwenpaw",
         ):
             with self.subTest(mode=mode), patch.dict(
                 os.environ,

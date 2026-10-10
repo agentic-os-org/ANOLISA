@@ -7,7 +7,8 @@ its normal interface. You describe the programs and events in `aw.yaml`; AW
 starts or reuses a local service, connects the supported native Hooks and keeps
 execution records after the Agent session ends.
 
-The current Linux source build supports Qoder CLI 1.1.64 and OpenClaw 2026.9.6.
+The current Linux source build supports Qoder CLI 1.1.64, OpenClaw 2026.9.6
+and QwenPaw 2.2.2b4 / AgentScope 2.0.8.
 Other first-release adapters are delivered separately. AW does not install an
 Agent or configure its model account; retain the framework's native configuration.
 
@@ -23,6 +24,7 @@ Agent or configure its model account; retain the framework's native configuratio
 | Preserve existing Qoder Hooks and their scheduling | ✅ Default settings and an explicit extra settings file |
 | Keep a shared service and persistent execution metadata | ✅ On-demand or externally started service |
 | Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
+| Start QwenPaw through AW | ✅ the official App/API entrypoint |
 | Start the other first-release frameworks | ❌ Separate adapters pending; QwenPaw is distinct from Qwen Code |
 | Use other events, portable `ask`, result replacement or OS enforcement | ❌ Not admitted by the current structured Provider path |
 | Install a Preview package and generate a Qoder/sec-core configuration | ✅ [Preview guide](aw-preview.md); not a stable release |
@@ -75,6 +77,44 @@ shared daemon remains available to later sessions using the same configuration.
 target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
+
+## Start QwenPaw
+
+Install QwenPaw 2.2.2b4 with AgentScope 2.0.8 and initialize its model configuration
+through QwenPaw. The example uses `argv: [qwenpaw, app]`. Set
+`QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
+its owned temporary plugin, preserves existing plugins and native configuration,
+and removes its plugin after the App exits.
+
+Native middleware retains onion ordering: before runs forward, after unwinds in
+reverse, and the host controls concurrent tools. After observes terminal
+`ToolResponse` objects, including AW-denied results, without repeating streaming
+chunks. The point covers tools executed inside the App; external execution tools
+and attempts denied before middleware are outside its coverage. Event budgets
+must be 1..55,000 ms. Native commands use the AW plugin's documented convention:
+before exit 2 denies, exit 0 continues, and explicit ask/approve is unsupported.
+Callback failures are reported and follow the step's `on_error`; `report` preserves
+execution and after results, while before `block` denies. Cancellation still propagates.
+
+The native startup hook confirms plugin registration after loading completes.
+It does not promise enforcement before the App's public endpoint opens. ACP/TUI,
+reload and multi-worker launch remain rejected because this integration does not
+verify their plugin lifecycle. Use the App's normal API or interface after the
+native Hooks ready message.
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
+```
+
+The [neutral QwenPaw example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qwenpaw.yaml)
+runs commands before and after tools; it installs no security policy. Use the
+same `aw-provider/v1alpha1` policy configuration across supported adapters.
+The native Hook output dialect and event coverage remain framework-specific.
+
+A configuration with no Providers or event steps also starts the App; AW verifies
+plugin readiness without registering any tool middleware.
 
 ## Start OpenClaw
 
@@ -293,8 +333,10 @@ The local endpoint is a same-user boundary, not a sandbox.
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | Send one developer operation JSON object from stdin; default 5,000 ms |
 
 `--agent TARGET` selects a named entry in `spec.agents`; its `adapter` selects
-the implementation. This build implements Qoder CLI 1.1.64 and OpenClaw 2026.9.6. `aw install` validates the configuration and dispatches to that adapter;
-Both use temporary launch configuration and reject persistent installation.
+the implementation. This build implements Qoder CLI 1.1.64, OpenClaw 2026.9.6
+and QwenPaw 2.2.2b4 / AgentScope 2.0.8. `aw install` validates the configuration
+and dispatches to that adapter;
+All three use temporary launch configuration and reject persistent installation.
 This command does not install AW packages or Agent software, start an Agent,
 or configure model credentials. `aw run` does not implicitly call `install`.
 
@@ -305,8 +347,8 @@ or configure model credentials. `aw run` does not implicitly call `install`.
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw: required absolute native state directory. Qoder rejects it; this is not the AW service's `--state-dir` |
 
 The shared command parser recognizes these adapter-specific options, but that
-alone does not enable them for a framework. Hermes and QwenPaw remain
-unsupported in this build. Pass supported AW options before `--`; arguments
+alone does not enable them for a framework. QwenPaw rejects all these native
+override options and uses `QWENPAW_WORKING_DIR`. Hermes remains unsupported in this build. Pass supported AW options before `--`; arguments
 after it are forwarded literally to the Agent. `install` accepts no Agent
 arguments. Use `aw --help` to see the command syntax and current support.
 

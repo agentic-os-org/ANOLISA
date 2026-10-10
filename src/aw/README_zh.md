@@ -3,7 +3,7 @@
 [English](README.md)
 
 AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以通过已验证的原生
-入口启动 Qoder CLI 和 OpenClaw，运行外部 Provider，并独立于 Agent 会话保存
+入口启动 Qoder CLI、OpenClaw 和 QwenPaw，运行外部 Provider，并独立于 Agent 会话保存
 执行元数据。原生调度与权限仍由框架负责，当前接口处于实验阶段。
 
 AW Preview提供核心包和Provider包，通过`aw-package`安装。当前包含sec-core Provider，
@@ -25,6 +25,7 @@ AW core 可独立构建与初始化，无需 sec-core。`aw-build` 默认只构�
 | 执行回调输入保持不变的原生 Hook 命令 | ✅ 字节输出和退出状态交回 Qoder；不含重写链与审批流程 |
 | 启动或复用独立服务，查询执行元数据 | ✅ |
 | 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
+| 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动其余首批框架 | ❌ 相应 Adapter 独立交付 |
 | 安装已发布的 AW 包、跨框架请求审批或在原生 Hook 之外强制执行策略 | ❌ |
 
@@ -71,12 +72,24 @@ Linux 二进制 `aw-provider-sec-core` 将配置中选定的工具输入传给�
 ## 启动 OpenClaw
 
 使用 OpenClaw 2026.9.6，保留其原生模型配置。
-[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明必需的 profile 参数和
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明必需的工作目录和
 工具生命周期范围。从 `src/aw` 执行：
 
 ```bash
 target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent openclaw \
   --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
+
+## 启动 QwenPaw
+
+使用 QwenPaw 2.2.2b4 / AgentScope 2.0.8，保留其原生模型配置。
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明必需的工作目录和
+工具生命周期范围。从 `src/aw` 执行：
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
 ```
 
 ## 接入与开发

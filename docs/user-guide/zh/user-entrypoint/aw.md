@@ -6,7 +6,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
 会话结束后继续保存执行记录。
 
-当前 Linux 源码版本支持 Qoder CLI 1.1.64 和 OpenClaw 2026.9.6。
+当前 Linux 源码版本支持 Qoder CLI 1.1.64、OpenClaw 2026.9.6 和 QwenPaw 2.2.2b4 / AgentScope 2.0.8。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
@@ -27,6 +27,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 | 保留 Qoder 已有 Hook 及其调度 | ✅ 默认配置和显式传入的附加配置文件 |
 | 复用共享服务并持久保存执行元数据 | ✅ 按需启动或外部启动服务 |
 | 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
+| 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
 | 其他事件、跨框架 `ask`、结果替换或 OS 执行约束 | ❌ 当前结构化 Provider 路径不予准入 |
 | 安装 Preview 包并生成 Qoder/sec-core 配置 | ✅ [Preview 指南](aw-preview.md)，尚非稳定发行 |
@@ -68,6 +69,36 @@ AW 打开 Qoder 的原生终端界面，Qoder 退出后回到原 shell，并释�
 target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
+
+## 启动 QwenPaw
+
+安装 QwenPaw 2.2.2b4 与 AgentScope 2.0.8，通过 QwenPaw 初始化模型配置。示例
+使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
+AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
+
+原生 middleware 保持嵌套顺序：before 正序、after 逆序展开，工具并发由宿主决定。
+after 观察终结的 `ToolResponse`，包括 AW 拒绝结果，不对流式 chunk 重复调用。
+当前点位覆盖 App 内实际执行的工具；外部执行工具以及进入 middleware 前已被拒绝
+的尝试不在覆盖范围。事件预算为 1..55,000 ms。原生命令使用 AW 插件明确约定：
+before 退出 2 表示拒绝，退出 0 表示继续，显式 ask/approve 尚不支持。
+回调故障记录错误并按步骤的 `on_error` 处理：`report` 保留工具执行和 after 结果，
+工具前的 `block` 返回拒绝；宿主取消继续传播。
+
+原生 startup hook 在插件加载完成后确认注册；它不承诺 App 对外端口开放之前已经
+防护。ACP/TUI、reload 和多 worker 启动仍被拒绝，这些入口的插件生命周期尚未验收。
+看到原生 Hook 就绪提示后，通过 App 原有 API 或界面使用。
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
+```
+
+[QwenPaw 中性示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.qwenpaw.yaml)
+在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
+`aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
+
+零 Provider、零事件步骤的配置也可以启动 App；AW 确认插件就绪，不注册工具 middleware。
 
 ## 启动 OpenClaw
 
@@ -248,15 +279,15 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 分派持久化原生 Hook 安装；当前没有支持它的 Adapter，Qoder 和 OpenClaw 也不支持 |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 分派持久化原生 Hook 安装；当前没有支持它的 Adapter，Qoder、OpenClaw 和 QwenPaw 也不支持 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
-当前版本实现了 Qoder CLI 1.1.64 和 OpenClaw 2026.9.6 Adapter。`aw install` 校验配置后分派到对应
-Adapter；两者都使用临时启动配置，拒绝持久化安装。该命令不安装 AW 包
+当前版本实现了 Qoder CLI 1.1.64、OpenClaw 2026.9.6 和 QwenPaw 2.2.2b4 / AgentScope 2.0.8 Adapter。`aw install` 校验配置后分派到对应
+Adapter；三者都使用临时启动配置，拒绝持久化安装。该命令不安装 AW 包
 或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
 
 | Adapter 专用参数 | 命令 | 当前支持情况 |
@@ -265,8 +296,9 @@ Adapter；两者都使用临时启动配置，拒绝持久化安装。该命令�
 | `--native-profile PROFILE` | `run`、`install` | Adapter 的 profile 选择参数；当前没有 Adapter 接受。Qoder 的 `run` 拒绝此参数，也不支持 `install` |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw：必填的原生状态目录绝对路径。Qoder 拒绝此参数，它不是 AW 服务的 `--state-dir` |
 
-公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。当前版本仍不
-支持 Hermes 和 QwenPaw。受支持的 AW 参数放在 `--` 前，之后的参数
+公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。QwenPaw 拒绝
+这些原生覆盖参数，使用 `QWENPAW_WORKING_DIR`。当前版本仍不
+支持 Hermes。受支持的 AW 参数放在 `--` 前，之后的参数
 按字面量交给 Agent；`install` 不接受 Agent 参数。用 `aw --help` 查看命令格式
 和当前支持范围。
 
