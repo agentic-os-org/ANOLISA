@@ -604,12 +604,27 @@ impl EnforcementBackend for ActPlaneBackend {
         self.state.events.record_required_delivery_loss(count);
     }
 
-    fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
-        self.state.security_events.subscribe()
+    fn subscribe_security_events_tracked(
+        &self,
+    ) -> (crate::SecuritySubscriberId, Receiver<SecurityEvent>) {
+        self.state.security_events.subscribe_tracked()
     }
 
-    fn record_security_delivery_loss(&self, count: u64) {
-        self.state.security_events.record_delivery_loss(count);
+    fn unsubscribe_security_events(&self, subscriber: crate::SecuritySubscriberId) -> u64 {
+        self.state.security_events.unsubscribe(subscriber)
+    }
+
+    fn record_security_delivery_loss(
+        &self,
+        subscriber: crate::SecuritySubscriberId,
+        represented_losses: u64,
+        dropped_frames: u64,
+    ) {
+        self.state.security_events.record_orphaned_delivery_loss(
+            subscriber,
+            represented_losses,
+            dropped_frames,
+        );
     }
 }
 

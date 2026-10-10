@@ -91,6 +91,11 @@ Capture and analysis are unaffected; only the Risk Enforcement page and the
 `/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
 built from source.
 
+Normalized security-event delivery is non-blocking. If a collector disconnects or falls behind,
+health becomes not ready until the gap is queued to the replacement subscription as an
+`evidence_loss` event. Readiness then recovers without restarting the enforcer. Each subscriber gets
+its own loss marker; one still-connected consumer never acknowledges another consumer's gap.
+
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
 

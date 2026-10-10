@@ -9,7 +9,7 @@ use agentsight_enforcement_protocol::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::SubscriberClass;
+use crate::{SecuritySubscriberId, SubscriberClass};
 
 /// Failures produced while managing a policy binding.
 #[derive(Debug, Error)]
@@ -93,10 +93,23 @@ pub trait EnforcementBackend: Send + Sync + 'static {
     fn record_required_delivery_loss(&self, count: u64);
 
     /// Creates an independent bounded normalized security-event subscription.
-    fn subscribe_security_events(&self) -> Receiver<SecurityEvent>;
+    fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
+        self.subscribe_security_events_tracked().1
+    }
 
-    /// Records normalized events accepted locally but lost at the remote peer.
-    fn record_security_delivery_loss(&self, count: u64);
+    /// Creates a subscription whose identity attributes its later remote delivery losses.
+    fn subscribe_security_events_tracked(&self) -> (SecuritySubscriberId, Receiver<SecurityEvent>);
+
+    /// Removes the subscriber before its receiver is drained and returns undisclosed hub losses.
+    fn unsubscribe_security_events(&self, subscriber: SecuritySubscriberId) -> u64;
+
+    /// Records represented losses and the actual remote frames that failed delivery.
+    fn record_security_delivery_loss(
+        &self,
+        subscriber: SecuritySubscriberId,
+        represented_losses: u64,
+        dropped_frames: u64,
+    );
 
     /// Detaches every active binding before the daemon exits.
     ///
