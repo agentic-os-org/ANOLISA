@@ -144,6 +144,8 @@ describe("pii-scan-user-input", () => {
     ["2026.5.12", "before_agent_run"],
     ["2026.9.2", "before_agent_run"],
     ["2026.10.1+build.1", "before_agent_run"],
+    ["2026.5.12-2", "before_agent_run"],
+    ["2026.7.1-2", "before_agent_run"],
     ["2027.1.1", "before_agent_run"],
     ["2026.5.12-beta.1", "before_dispatch"],
     ["2026.9.2-dev", "before_dispatch"],

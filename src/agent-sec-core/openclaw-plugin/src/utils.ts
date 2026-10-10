@@ -44,10 +44,16 @@ export function envHookPolicy(name: string, defaultValue: HookPolicy): HookPolic
  * True when the host runtime exposes the model-entry gate (`before_agent_run`).
  * Stable OpenClaw >=2026.5.12 moved inbound text there; prereleases and
  * unrecognized builds keep the legacy `before_dispatch` inbound event.
+ *
+ * Suffix semantics: `+<...>` is semver build metadata (stable); `-<digits>`
+ * is a package revision of a stable release (e.g. 2026.7.1-2, the deployed
+ * packaging scheme); any other `-` suffix marks a prerelease, which stays on
+ * the legacy path — misclassifying a prerelease as stable would register a
+ * hook the host never fires.
  */
 export function supportsModelInputGate(version: unknown): boolean {
   if (typeof version !== "string") return false;
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+|-\d+)?$/.exec(version);
   if (!match) return false;
   const [year, month, day] = match.slice(1, 4).map(Number);
   return (
