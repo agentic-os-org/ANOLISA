@@ -2,6 +2,8 @@
 
 use aw_package::{Error, Result};
 use std::path::PathBuf;
+#[path = "support/arguments.rs"]
+mod arguments;
 #[path = "support/signals.rs"]
 mod signals;
 
@@ -13,7 +15,8 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut args = std::env::args().skip(1);
+    // std::env::args panics on non-UTF-8 arguments; reject them cleanly first.
+    let mut args = arguments::decode_all(std::env::args_os().skip(1))?.into_iter();
     let mut version = None;
     let mut output = None;
     let mut component = None;

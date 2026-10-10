@@ -3,6 +3,8 @@
 use aw_package::{Error, Policy, Result, Settings};
 use std::{collections::BTreeMap, path::Path};
 
+#[path = "support/arguments.rs"]
+mod arguments;
 #[path = "support/signals.rs"]
 mod signals;
 
@@ -14,7 +16,8 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut arguments = std::env::args().skip(1);
+    // std::env::args panics on non-UTF-8 arguments; reject them cleanly first.
+    let mut arguments = arguments::decode_all(std::env::args_os().skip(1))?.into_iter();
     let command = arguments.next().unwrap_or_else(|| "--help".into());
     if command == "--help" {
         println!("aw-package install --prefix ABS_DIR [--bundle ABS_DIR]\naw-package configure --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core --socket ABS_FILE | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]\naw-package uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");

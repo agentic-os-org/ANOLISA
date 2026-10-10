@@ -37,6 +37,32 @@ fn invalid_commands_and_duplicate_flags_fail_before_touching_disk() {
     }
 }
 
+#[test]
+fn non_utf8_arguments_are_rejected_without_panicking() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let invalid = OsStr::from_bytes(b"/tmp/prefix-\xff");
+    for (program, arguments, prefix) in [
+        (
+            env!("CARGO_BIN_EXE_aw-package"),
+            vec!["install".into(), "--prefix".into(), invalid.to_os_string()],
+            "aw-package:",
+        ),
+        (
+            env!("CARGO_BIN_EXE_aw-build"),
+            vec!["--output".into(), invalid.to_os_string()],
+            "aw-build:",
+        ),
+    ] {
+        let output = Command::new(program).args(arguments).output().unwrap();
+        // Non-UTF-8 argv must fail like any rejected invocation, not panic.
+        assert_eq!(output.status.code(), Some(1), "{program}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(prefix), "{program}: {stderr}");
+        assert!(stderr.contains("UTF-8"), "{program}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{program}: {stderr}");
+    }
+}
+
 struct Installer(std::process::Child);
 impl Drop for Installer {
     fn drop(&mut self) {
