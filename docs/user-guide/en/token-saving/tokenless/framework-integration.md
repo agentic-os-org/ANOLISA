@@ -364,6 +364,10 @@ records the profile names, so disable does not accept another `--profile`.
 
 ### OpenCode
 
+Schema compression uses the host's model-facing JSON Schema while preserving its runtime
+parameter validator. Hosts that expose only a runtime validator skip schema compression;
+response compression and command rewriting remain available.
+
 OpenCode discovers global local plugins at startup. For an ANOLISA-managed installation, use:
 
 ```bash

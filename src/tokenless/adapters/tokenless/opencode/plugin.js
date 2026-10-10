@@ -162,6 +162,14 @@ function prependContext(context, content) {
   return content ? `${context}\n${content}` : context;
 }
 
+// Host codecs carry executable validation; only plain JSON schemas cross the hook boundary.
+function isJsonSchema(value) {
+  if (typeof value === "boolean") return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export const TokenlessPlugin = async () => {
   const runner = findHookRunner();
   const readinessContext = new Map();
@@ -235,10 +243,14 @@ export const TokenlessPlugin = async () => {
     },
 
     "tool.definition": async (input, output) => {
+      const schemaField = output.jsonSchema !== undefined ? "jsonSchema" : "parameters";
+      const parameters = output[schemaField];
+      // Older hosts expose only a runtime codec. Leave it intact until they expose a JSON schema.
+      if (!isJsonSchema(parameters)) return;
       const declaration = {
         name: input.toolID,
         description: output.description,
-        parameters: output.parameters,
+        parameters,
       };
       let cacheKey;
       try {
@@ -259,8 +271,8 @@ export const TokenlessPlugin = async () => {
       }
 
       if (typeof tools[0].description === "string") output.description = tools[0].description;
-      if (tools[0].parameters && typeof tools[0].parameters === "object") {
-        output.parameters = JSON.parse(JSON.stringify(tools[0].parameters));
+      if (isJsonSchema(tools[0].parameters)) {
+        output[schemaField] = JSON.parse(JSON.stringify(tools[0].parameters));
       }
     },
   };

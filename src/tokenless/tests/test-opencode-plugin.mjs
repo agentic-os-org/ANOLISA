@@ -252,6 +252,62 @@ try {
   }
   assert.equal(records.filter((record) => record.hook === "compress_schema_hook.py").length, 1);
 
+  class RuntimeCodec {
+    parse(value) {
+      assert.equal(typeof value.command, "string");
+      return value;
+    }
+    toJSON() {
+      throw new Error("runtime codecs must not be serialized");
+    }
+  }
+  const nativeCodec = new RuntimeCodec();
+  const modelSchema = {
+    type: "object",
+    title: "Native Bash",
+    properties: { command: { type: "string", description: "Run a command" } },
+    required: ["command"],
+  };
+  const nativeDefinition = {
+    description: "A native tool description",
+    parameters: nativeCodec,
+    jsonSchema: modelSchema,
+  };
+  await hooks["tool.definition"]({ toolID: "bash" }, nativeDefinition);
+  assert.equal(nativeDefinition.parameters, nativeCodec);
+  assert.equal(nativeDefinition.description, "compressed description");
+  assert.equal(nativeCodec.parse({ command: "pwd" }).command, "pwd");
+  assert.throws(() => nativeCodec.parse({ command: 42 }));
+  assert.deepEqual(nativeDefinition.jsonSchema, {
+    type: "object",
+    properties: { command: { type: "string" } },
+  });
+  assert.equal(modelSchema.properties.command.description, "Run a command");
+  nativeDefinition.jsonSchema.properties.command.type = "number";
+  const nativeCachedDefinition = {
+    description: "A native tool description",
+    parameters: new RuntimeCodec(),
+    jsonSchema: modelSchema,
+  };
+  const cachedCodec = nativeCachedDefinition.parameters;
+  await hooks["tool.definition"]({ toolID: "bash" }, nativeCachedDefinition);
+  assert.equal(nativeCachedDefinition.parameters, cachedCodec);
+  assert.equal(nativeCachedDefinition.jsonSchema.properties.command.type, "string");
+  const schemaRecords = readFileSync(log, "utf8").trim().split("\n")
+    .filter((line) => line.startsWith("compress_schema_hook.py\t"))
+    .map((line) => JSON.parse(line.slice(line.indexOf("\t") + 1)));
+  const nativeRecords = schemaRecords.filter((payload) =>
+    payload.llm_request.config.tools[0].description === "A native tool description");
+  assert.equal(nativeRecords.length, 1);
+  assert.deepEqual(nativeRecords[0].llm_request.config.tools[0].parameters, modelSchema);
+
+  const callsBeforeLegacy = readFileSync(log, "utf8");
+  const legacyNative = { description: "Legacy runtime tool", parameters: nativeCodec };
+  await hooks["tool.definition"]({ toolID: "bash" }, legacyNative);
+  assert.equal(legacyNative.parameters, nativeCodec);
+  assert.equal(legacyNative.description, "Legacy runtime tool");
+  assert.equal(readFileSync(log, "utf8"), callsBeforeLegacy);
+
   if (process.platform !== "win32") {
     const failures = [];
     for (const mode of ["descendant", "ignore-term"]) {

@@ -313,6 +313,9 @@ Session，再传入启用 Tokenless 的 Session。
 
 ### OpenCode 安装
 
+Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
+仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
+
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
 RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。

@@ -723,6 +723,10 @@ make codex-install
 
 ## OpenCode Plugin
 
+Schema compression uses the host's model-facing JSON Schema while preserving its runtime
+parameter validator. Hosts that expose only a runtime validator skip schema compression;
+response compression and command rewriting remain available.
+
 The local plugin uses OpenCode's mutable tool hooks, so compressed output
 replaces the original model-visible response instead of being appended to it.
 
