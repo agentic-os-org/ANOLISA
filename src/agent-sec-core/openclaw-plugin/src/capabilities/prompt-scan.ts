@@ -1,8 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import {
-  inboundPiiScanText,
-  modelInputPiiScanText,
-} from "../helpers/pii-text.js";
+import { inboundPiiScanText } from "../helpers/pii-text.js";
 import {
   buildTraceContext,
   callAgentSecCli,
@@ -15,10 +12,10 @@ import {
  *
  * ## 当前防线：model-entry gate (priority 190)
  * Stable OpenClaw >=2026.5.12 把入站文本从 before_dispatch 挪到
- * before_agent_run，因此新主机在 before_agent_run 扫描组装后的模型输入
- * （systemPrompt + prompt + 消息文本）；老主机（含 prerelease）仍走
- * before_dispatch legacy 入站事件。两条路径都只覆盖用户侧的直接注入 /
- * 越狱攻击，不包含工具输出或 RAG 内容。
+ * before_agent_run，因此新主机在 before_agent_run 只扫描本次用户 prompt
+ * （历史消息到达时已各自扫描过，无需重扫）；
+ * 老主机（含 prerelease）仍走 before_dispatch legacy 入站事件。
+ * 两条路径都只覆盖用户侧的直接注入 / 越狱攻击，不包含工具输出或 RAG 内容。
  *
  * ## 后续待补：before_prompt_build（第二道防线）
  * prompt 组装完成后（用户输入 + 工具输出 + RAG 上下文全部拼入），
@@ -32,6 +29,11 @@ import {
  * CLI: agent-sec-cli scan-prompt --mode <fast|standard|strict> --format json
  *      (prompt text is piped via stdin to avoid /proc/cmdline leak & ARG_MAX)
  */
+
+function safeString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
 type ScanOutcome = {
   verdict: "deny" | "warn";
   message: string;
@@ -62,7 +64,7 @@ export const promptScan: SecurityCapability = {
     ): Promise<ScanOutcome | undefined> => {
       try {
         const text = modelInput
-          ? modelInputPiiScanText(event)
+          ? safeString(event?.prompt)
           : inboundPiiScanText(event);
         if (!text.trim()) {
           return undefined;
