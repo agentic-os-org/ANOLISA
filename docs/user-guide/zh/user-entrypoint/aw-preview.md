@@ -42,6 +42,95 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 
 只使用 OpenClaw 时，将 `--qoder "$AW_QODER"` 换成 `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`；启动时按第 5 步提供原生配置和状态目录。也可同时提供两个 Agent 入口。不需要 sec-core socket 或 Provider 包。空 `providers` 和 `events` 表示没有 AW 策略检查或每次工具调用的 AW 审计；原生权限和已有 Hook/插件继续生效。AW 仍创建实例并启动或复用共享服务。退出 Agent 后用 `aw stop --config "$AW_DEMO/aw-core.yaml"` 停止该服务。
 
+## 编辑已有 Provider 与 Hook 配置
+
+以配置文件所属用户运行 `aw-package config`，查看、校验和修改已有 YAML 或 JSON
+文件。这些命令离线执行，不运行 Provider 或 Hook、不安装原生回调、不启动 Agent，
+也不重载服务。修改前退出当前 Agent 会话，并使用原配置停止服务；修改后使用新文件
+重新运行 Agent。新配置字节选择新的 revision，已有服务不会自动采用修改。
+
+所有操作均要求 `--config` 指定无符号链接的绝对文件路径。文件须为当前用户拥有的
+普通文件，不能有硬链接、特殊权限位或组/其他用户写权限；父目录也须归当前用户
+所有且不可被组/其他用户写入。未知、重复或不完整选项都会报错。定义文件可用绝对
+路径或相对于当前目录的路径，须为普通文件，只包含一个完整 YAML/JSON 对象，
+不支持标准输入。输入及展开 JSON 上限为 4 MiB，深度上限 32。重复键、非字符串键、
+YAML merge key/自定义 tag、非有限数值和多文档输入都会被拒绝。未知公共字段报错，
+Provider 私有 `config` 中的键保持不透明。
+
+| 命令 | 行为 |
+| --- | --- |
+| `aw-package config show --config ABS_FILE` | 以格式化 JSON 打印完整工作配置 |
+| `aw-package config show --config ABS_FILE --provider NAME` | 打印一个 Provider |
+| `aw-package config show --config ABS_FILE --event EVENT [--id ID]` | 打印一个事件，或其中按事件作用域 ID 选择的步骤 |
+| `aw-package config validate --config ABS_FILE` | 校验完整配置，成功时打印 `Valid configuration` |
+| `aw-package config add-provider --config ABS_FILE --name NAME --definition FILE` | 添加完整 Provider 定义 |
+| `aw-package config remove-provider --config ABS_FILE --name NAME` | 删除没有引用的 Provider |
+| `aw-package config add-event --config ABS_FILE --event EVENT --definition FILE` | 添加显式配置的事件 |
+| `aw-package config add-hook --config ABS_FILE --event EVENT --definition FILE` | 追加完整步骤，定义中包含其 `id` |
+| `aw-package config remove-hook --config ABS_FILE --event EVENT --id ID` | 删除指定事件下的步骤 |
+
+`show` 会有意显示 Provider 私有值，须自行选择输出的展示或保存位置。Provider 和
+事件选择器互斥，`--id` 必须与 `--event` 一起使用；指定的对象不存在时会报错。
+`show` 和 `validate` 不改变原文件。
+
+添加已有的相同定义时保留文件；同名对象或同一事件下同 ID 步骤已有不同定义时报告
+冲突。删除不存在的对象或步骤也保留文件。成功的修改操作打印 `Updated configuration`
+或 `Configuration unchanged`。删除 Provider 前须先删除所有引用步骤，包括禁用的
+步骤。删除事件最后一个步骤后仍保留事件选项及空 `steps` 数组。`add-hook` 要求事件
+已存在；`add-event` 显式指定是否启用事件，不覆盖已有事件的选项。
+
+每条修改命令原子发布一个操作。多条命令分别发布，后续命令失败时，先前已成功的
+命令仍然生效。
+
+例如，在上述空 core 配置中添加原生工具前 Hook。将 `/opt/company/bin/tool-audit`
+替换为自己的 Hook 可执行文件，并遵守所选 Agent 的原生响应合同。
+
+```bash
+cat > "$AW_DEMO/provider.yaml" <<'YAML'
+protocol: native-hook/v1alpha1
+transport:
+  type: stdio
+  location: agent
+  argv: [/opt/company/bin/tool-audit]
+timeout_ms: 1000
+max_output_bytes: 4096
+config: {}
+YAML
+cat > "$AW_DEMO/event.yaml" <<'YAML'
+enabled: true
+required: false
+steps: []
+YAML
+cat > "$AW_DEMO/hook.yaml" <<'YAML'
+id: company-before
+provider: company
+native: {}
+on_error: report
+YAML
+chmod 600 "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config add-provider --config "$AW_DEMO/aw-core.yaml" \
+  --name company --definition "$AW_DEMO/provider.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config add-event --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --definition "$AW_DEMO/event.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config add-hook --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --definition "$AW_DEMO/hook.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config show --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --id company-before
+"$AW_PREVIEW_PREFIX/bin/aw-package" config validate --config "$AW_DEMO/aw-core.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --id company-before
+"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
+  --name company
+rm "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
+```
+
+实际修改会将文件原子替换为序列化后的 YAML，保留权限位及无关值，但重写注释、
+格式和键顺序，不保留扩展属性及 ACL。无变化操作保留完整原字节及 inode。校验
+错误、冲突、仍有引用、锁竞争和暂存失败都保留原文件。并发修改会报告快照过期，
+不自动合并或重试。其他写入方须遵守同一文件锁，才能避免发布时的竞争。需要保留
+原文本用于回滚时，应先备份；这是原子发布，不是断电持久性保证。通过校验仅证明
+字段形态及静态引用正确，不代表 Provider 准入或原生效果已被采用。
+
 ## 2. 按需安装并启动 sec-core
 
 纯 core 使用可跳过第 2–5 步。安全演示先将匹配版本的扩展安装到 core 前缀：

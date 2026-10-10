@@ -94,6 +94,24 @@ fn core_configuration_defaults_to_no_policy_and_refuses_overwrite() {
     let original = fs::read(f.config()).unwrap();
     assert!(!f.command().output().unwrap().status.success());
     assert_eq!(fs::read(f.config()).unwrap(), original);
+    for arguments in [
+        vec!["validate"],
+        vec!["remove-provider", "--name", "absent"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
+            .arg("config")
+            .args(arguments)
+            .arg("--config")
+            .arg(f.config().canonicalize().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(f.config()).unwrap(), original);
+    }
     assert!(!f.prefix.join("libexec").exists());
 }
 

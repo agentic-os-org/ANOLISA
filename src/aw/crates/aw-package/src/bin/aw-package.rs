@@ -6,6 +6,9 @@ use std::{collections::BTreeMap, path::Path};
 #[path = "support/signals.rs"]
 mod signals;
 
+#[path = "support/config.rs"]
+mod config;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("aw-package: {error}");
@@ -18,7 +21,11 @@ fn run() -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".into());
     if command == "--help" {
         println!("aw-package install --prefix ABS_DIR [--bundle ABS_DIR]\naw-package configure --prefix ABS_DIR --config ABS_FILE --state-dir ABS_DIR [--qoder ABS_FILE] [--node ABS_FILE --openclaw ABS_FILE] [--provider sec-core --socket ABS_FILE | --provider command --check ABS_PROGRAM --effect block|observe --reason-code CODE -- [CHECK_ARGS]]\naw-package uninstall --prefix ABS_DIR\nSelect at least one Agent. No Provider is enabled by default.\nInstall immutable Preview packages; configuration and Agent state remain external.");
+        println!("{}", config::HELP);
         return Ok(());
+    }
+    if command == "config" {
+        return config::run(arguments);
     }
     let allowed: &[&str] = match command.as_str() {
         "install" => &["--prefix", "--bundle"],

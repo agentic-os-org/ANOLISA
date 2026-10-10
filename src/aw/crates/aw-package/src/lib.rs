@@ -1,6 +1,7 @@
 //! Native Preview package contracts, installation and selected-Agent configuration.
 //! Configuration and mutable runtime state remain outside immutable prefixes.
 
+pub mod config_edit;
 mod configuration;
 mod filesystem;
 mod install;
