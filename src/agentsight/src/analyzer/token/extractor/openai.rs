@@ -439,6 +439,129 @@ fn accumulate_text(buf: &mut String, next: &str) {
     }
 }
 
+/// Reconstruct complete tool calls before discarding their protocol identity.
+pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
+    use crate::analyzer::message::ResponsesToolCalls;
+    use std::collections::BTreeMap;
+
+    // Maps bound the number of calls, without allocating slots up to a wire
+    // index. Choice identity matters too: each choice starts its indices at 0.
+    let mut chat: BTreeMap<(u64, u64), (String, String)> = BTreeMap::new();
+    let mut current: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut responses = ResponsesToolCalls::default();
+    let mut compatible: Vec<String> = Vec::new();
+    for chunk in chunks {
+        responses.observe(chunk);
+        if let Some(choices) = chunk.get("choices").and_then(Value::as_array) {
+            for (choice_pos, choice) in choices.iter().enumerate() {
+                if choice.get("index").is_some_and(|v| v.as_u64().is_none()) {
+                    continue;
+                }
+                let choice_index = choice
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(choice_pos as u64);
+                let snapshot = choice.get("message");
+                let message = snapshot.or_else(|| choice.get("delta"));
+                let Some(message) = message else {
+                    continue;
+                };
+                // SysOM uses tool_use for the same Chat call shape.
+                let calls = ["tool_calls", "tool_use"]
+                    .into_iter()
+                    .filter_map(|field| message.get(field).and_then(Value::as_array))
+                    .flatten();
+                for (call_pos, call) in calls.enumerate() {
+                    if call.get("index").is_some_and(|v| v.as_u64().is_none()) {
+                        continue;
+                    }
+                    let Some(function) = call.get("function") else {
+                        continue;
+                    };
+                    let index = call
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_else(|| {
+                            if snapshot.is_some() {
+                                call_pos as u64
+                            } else if function
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty())
+                            {
+                                // Unindexed compatible streams retain the sequential
+                                // fallback: a name starts a call, continuations use it.
+                                chat.keys()
+                                    .filter(|(choice, _)| *choice == choice_index)
+                                    .map(|(_, index)| *index)
+                                    .max()
+                                    .map_or(0, |index| index.saturating_add(1))
+                            } else {
+                                current.get(&choice_index).copied().unwrap_or(0)
+                            }
+                        });
+                    let key = (choice_index, index);
+                    if !chat.contains_key(&key) && chat.len() >= 256 {
+                        continue;
+                    }
+                    current.insert(choice_index, index);
+                    let (name, arguments) = chat.entry(key).or_default();
+                    if snapshot.is_some() {
+                        // A message carries the whole call, not another delta.
+                        *name = function
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        *arguments = function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                    } else {
+                        if let Some(fragment) = function.get("name").and_then(Value::as_str) {
+                            name.push_str(fragment);
+                        }
+                        if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
+                            arguments.push_str(fragment);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if chunk
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.starts_with("response."))
+        {
+            continue;
+        }
+        // Retain the legacy fragment contract for other compatible providers;
+        // Responses and Chat calls never pass through this unnamed stream.
+        if let Some((_, _, fragments)) = extract_response_content(Some(chunk)) {
+            for fragment in fragments {
+                let starts_call = matches!(fragment.split_once(": "), Some((name, _)) if !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.'));
+                if starts_call || compatible.is_empty() {
+                    compatible.push(fragment);
+                } else if let Some(last) = compatible.last_mut() {
+                    last.push_str(fragment.strip_prefix(": ").unwrap_or(&fragment));
+                }
+            }
+        }
+    }
+    chat.into_values()
+        .filter(|(name, arguments)| !name.is_empty() || !arguments.is_empty())
+        .map(|(name, arguments)| format!("{name}: {arguments}"))
+        .chain(
+            responses
+                .into_calls()
+                .map(|(_, name, arguments)| format!("{name}: {arguments}")),
+        )
+        .chain(compatible)
+        .collect()
+}
+
 /// Extract role and content from OpenAI message JSON
 fn extract_message(msg: &Value) -> Option<(String, String)> {
     let role = msg.get("role").and_then(|r| r.as_str())?;
@@ -483,6 +606,70 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_tools_replace_cumulative_chat_snapshots() {
+        let chunks = [
+            serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"x\":"}}]}}]}),
+            serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"x\":1}"}}]}}]}),
+        ];
+        assert_eq!(merge_response_tool_calls(&chunks), ["lookup: {\"x\":1}"]);
+        assert_eq!(
+            merge_response_tool_calls(&[
+                serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{}}]}}]})
+            ]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn manual_tools_ignore_invalid_identities_and_keep_sparse_calls() {
+        let chunks = [
+            serde_json::json!({"choices":[{"index":-1,"delta":{"tool_calls":[{"function":{"name":"invalid"}}]}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":-1,"function":{"name":"invalid"}},{"index":0}]}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":u64::MAX,"function":{"name":"lookup","arguments":"{}"}}]}},{"index":1,"delta":{"content":"hello"}}]}),
+        ];
+        assert_eq!(merge_response_tool_calls(&chunks), ["lookup: {}"]);
+        let mut chunks = Vec::new();
+        for index in 0..257 {
+            chunks.push(serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":index,"function":{"name":"lookup","arguments":"a"}}]}}]}));
+        }
+        chunks.push(serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"b"}}]}}]}));
+        let calls = merge_response_tool_calls(&chunks);
+        assert_eq!(calls.len(), 256);
+        assert_eq!(calls[0], "lookup: ab");
+        assert!(calls[1..].iter().all(|call| call == "lookup: a"));
+    }
+
+    #[test]
+    fn manual_tools_keep_unindexed_sequential_continuations() {
+        let chunks = [
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"orphan"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"first","arguments":"a"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"b"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"second","arguments":"c"}}]}}]}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            [": orphan", "first: ab", "second: c"]
+        );
+    }
+
+    #[test]
+    fn manual_tools_keep_compatible_provider_fragments() {
+        let chunks = [
+            serde_json::json!({"content":[{"type":"tool_use","name":"lookup","input":{}}]}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"1}"}}),
+            serde_json::json!({"content":[{"type":"tool_use","name":"other","input":{"y":2}}]}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            ["lookup: {}{\"x\":1}", "other: {\"y\":2}"]
+        );
+        assert_eq!(merge_response_tool_calls(&chunks[1..3]), ["{\"x\":1}"]);
+    }
 
     #[test]
     fn test_extract_openai_request() {
