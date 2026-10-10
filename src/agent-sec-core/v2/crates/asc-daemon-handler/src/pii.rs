@@ -121,7 +121,7 @@ mod tests {
         let handler = PiiScanHandler::new(Arc::new(ActionService::new(
             ActionRuntime::new(
                 ActionId::CodeScan,
-                CodeScanExecutor,
+                CodeScanExecutor::default(),
                 CodeScanAuditProjector,
                 discarding_finalizer(),
             ),

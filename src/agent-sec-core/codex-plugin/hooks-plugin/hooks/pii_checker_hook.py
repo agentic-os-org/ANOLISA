@@ -272,6 +272,12 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         return
 
+    # Valid JSON that is not an object (array/scalar/null) has no hook fields
+    # to read: exit silently so Codex treats it as allow, same as undecodable
+    # input above - mirroring the observability hook's payload guard.
+    if not isinstance(input_data, dict):
+        return
+
     # 2. Determine which hook event we're handling
     hook_event = input_data.get("hook_event_name", "")
     if hook_event not in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):

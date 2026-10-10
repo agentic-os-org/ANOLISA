@@ -40,6 +40,7 @@ const KNOWN_SERVICES: &[(&str, &str)] = &[
     ("tikv-server", "TiKV"),
     ("minio", "MinIO"),
     ("pulsar", "Pulsar"),
+    ("bookkeeper", "BookKeeper"),
 ];
 
 pub fn detect_services(info: &SystemInfo) -> Vec<&'static str> {
@@ -150,6 +151,14 @@ mod tests {
         // The client tool is not the server.
         let info = info_with(&["mariadb-dump"]);
         assert!(!detect_services(&info).contains(&"MariaDB"));
+    }
+
+    #[test]
+    fn test_detect_services_bookkeeper_bookie() {
+        // The detector names a bookie JVM `bookkeeper`; a Pulsar storage node
+        // must report the service it runs.
+        let info = info_with(&["bookkeeper"]);
+        assert!(detect_services(&info).contains(&"BookKeeper"));
     }
 
     #[test]

@@ -950,3 +950,12 @@ server frame proof。普通 V2 请求仍由原 closed envelope 解析，不接�
 实时 pending 上限为 256 个不同 canonical Skill，满队列返回签名业务拒绝；已确认接受不表示
 持久化或已完成激活。完整配置、权限和恢复语义见
 [SkillSec 第一阶段迁移](SKILL_SEC_PHASE_ONE_zh.md#第六批-skillfs-边界)。
+
+## 15. [TARGET V2] 可观测单条采集
+
+新增显式 allowlist 方法 `obs.record`，按 `LocalUser` 授权。业务参数仅含
+`hook / observedAt / metrics`，关联 metadata 通过第 13 节 OTel carrier 的 Baggage 传递。
+成功响应为 `{requestId,result:{}}`，且发生在 JSONL、SQLite 两次写入成功之后。
+完整输入、错误、部分成功语义、V1 CLI 兼容边界与 OBS-001..006 executable fixtures 见
+[V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md)。这不是 V1 新增 RPC，
+不改变本文 CURRENT V1 方法清单；本批没有新增查询接口。

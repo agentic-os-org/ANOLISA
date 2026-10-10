@@ -81,7 +81,10 @@ function fixtureSteps() {
     }),
     step(2, 'agent', {
       timestamp: '2026-10-05T01:02:00Z',
-      tool_calls: [{ tool_call_id: 'tc-1' }, { tool_call_id: 'tc-2' }],
+      tool_calls: [
+        { tool_call_id: 'tc-1', function_name: 'read_file' },
+        { tool_call_id: 'tc-2', function_name: 'edit_file' },
+      ],
     }),
     step(3, 'user', {
       message: 'also add tests',
@@ -89,7 +92,7 @@ function fixtureSteps() {
     }),
     step(4, 'agent', {
       timestamp: '2026-10-05T01:05:00Z',
-      tool_calls: [{ tool_call_id: 'tc-9' }],
+      tool_calls: [{ tool_call_id: 'tc-9', function_name: 'run_tests' }],
       observation: { results: [{ source_call_id: 'tc-9' }] },
       metrics: { prompt_tokens: 40, completion_tokens: 9 },
     }),

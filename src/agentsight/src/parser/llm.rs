@@ -101,6 +101,25 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
         let system_text = body.get("system").and_then(extract_system_text);
         return Some((arr.clone(), system_text));
     }
+    // Gemini v1beta requests carry their messages under `contents` (each with
+    // a `role` and a `parts` array) and their system prompt as
+    // `systemInstruction.parts[].text`. Without this arm a drained Gemini
+    // call's `input_tokens` stays NULL because no other shape matches.
+    if let Some(arr) = body.get("contents").and_then(|c| c.as_array()) {
+        let system_text = body
+            .get("systemInstruction")
+            .and_then(|si| si.get("parts"))
+            .and_then(|p| p.as_array())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|s| !s.is_empty());
+        return Some((arr.clone(), system_text));
+    }
     if let Some(input) = body.get("input") {
         if let Some(arr) = input.as_array() {
             let instructions = body
@@ -516,5 +535,29 @@ mod tests {
         let (msgs, instructions) = extract_messages_view(&body).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(instructions.as_deref(), Some("sys prompt"));
+    }
+
+    #[test]
+    fn test_extract_messages_view_gemini_contents() {
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "Hello"}]},
+                {"role": "model", "parts": [{"text": "Hi there"}]}
+            ],
+            "systemInstruction": {"parts": [{"text": "Be concise"}]}
+        });
+        let (msgs, instructions) = extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(instructions.as_deref(), Some("Be concise"));
+    }
+
+    #[test]
+    fn test_extract_messages_view_gemini_no_system() {
+        let body = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}]
+        });
+        let (msgs, instructions) = extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(instructions, None);
     }
 }

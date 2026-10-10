@@ -17,6 +17,36 @@ import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
 
+type ReconcileMessage = { role: string; content: string };
+
+function messagesMatch(left: ReconcileMessage, right: ReconcileMessage): boolean {
+  return left.role === right.role && left.content === right.content;
+}
+
+function suffixOverlap(stored: ReconcileMessage[], incoming: ReconcileMessage[]): number {
+  if (stored.length === 0 || incoming.length === 0) return 0;
+
+  // Prefix fallback keeps matching linear even for repeated message patterns.
+  const fallback = new Array<number>(incoming.length).fill(0);
+  let matched = 0;
+  for (let i = 1; i < incoming.length; i++) {
+    while (matched > 0 && !messagesMatch(incoming[i], incoming[matched])) {
+      matched = fallback[matched - 1];
+    }
+    if (messagesMatch(incoming[i], incoming[matched])) matched++;
+    fallback[i] = matched;
+  }
+
+  matched = 0;
+  for (const message of stored) {
+    while (matched > 0 && (matched === incoming.length || !messagesMatch(message, incoming[matched]))) {
+      matched = fallback[matched - 1];
+    }
+    if (messagesMatch(message, incoming[matched])) matched++;
+  }
+  return matched;
+}
+
 export class SelectiveContextEngine implements ContextEngine {
   readonly info: ContextEngineInfo = {
     id: "selective-claw",
@@ -221,25 +251,19 @@ export class SelectiveContextEngine implements ContextEngine {
     turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
   } {
     const cache = this.turnMessagesCache.get(sessionId);
-    if (cache) {
-      const result: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }> = [];
-      for (const seq of turnSeqs) {
-        const msgs = cache.get(seq);
-        if (msgs) {
-          result.push({
-            turnSeq: seq,
-            messages: msgs.map((m) => ({
-              role: m.role,
-              content: this.extractContent(m),
-            })),
-          });
-        }
+    const turnMap = new Map<number, Array<{ role: string; content: string }>>();
+    for (const seq of turnSeqs) {
+      const messages = cache?.get(seq);
+      if (messages) {
+        turnMap.set(seq, messages.map((message) => ({
+          role: message.role,
+          content: this.extractContent(message),
+        })));
       }
-      if (result.length > 0) return { found: result.length, turns: result };
     }
 
-    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, turnSeqs);
-    const turnMap = new Map<number, Array<{ role: string; content: string }>>();
+    const missingTurns = turnSeqs.filter((seq) => !turnMap.has(seq));
+    const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
     for (const m of storeMessages) {
       const arr = turnMap.get(m.turnSeq) ?? [];
       arr.push({ role: m.role, content: m.content });
@@ -255,14 +279,15 @@ export class SelectiveContextEngine implements ContextEngine {
 
   private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
     const stored = this.store.getMessages(sessionId);
+    const incoming = messages.map((message) => ({
+      role: this.normalizeRole(message.role),
+      content: this.extractContent(message),
+    }));
 
     let matchLen = 0;
     const minLen = Math.min(stored.length, messages.length);
     for (let i = 0; i < minLen; i++) {
-      const storedRole = stored[i].role;
-      const incomingRole = this.normalizeRole(messages[i].role);
-      const incomingContent = this.extractContent(messages[i]);
-      if (storedRole === incomingRole && stored[i].content === incomingContent) {
+      if (messagesMatch(stored[i], incoming[i])) {
         matchLen++;
       } else {
         break;
@@ -270,7 +295,8 @@ export class SelectiveContextEngine implements ContextEngine {
     }
 
     if (matchLen < messages.length) {
-      const toImport = messages.slice(matchLen);
+      const overlap = suffixOverlap(stored.slice(matchLen), incoming.slice(matchLen));
+      const toImport = messages.slice(matchLen + overlap);
       this.importMessages(sessionId, toImport);
     }
   }
@@ -378,7 +404,8 @@ export class SelectiveContextEngine implements ContextEngine {
         turns.push(current);
       }
       if (!current) {
-        current = { turnSeq: 1, messages: [] };
+        turnSeq = 1;
+        current = { turnSeq, messages: [] };
         turns.push(current);
       }
       current.messages.push(msg);

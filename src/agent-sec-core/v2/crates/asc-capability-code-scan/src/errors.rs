@@ -42,14 +42,12 @@ pub enum CodeScanError {
     /// V1 `ErrEngineResource`: the engine ran out of a bounded resource.
     #[error("engine resource exhausted")]
     EngineResource,
-    /// V1 `ErrLlmUnavailable`: the LLM engine was requested but is not present.
-    ///
-    /// V1 reaches this when a model service is unreachable; this crate reaches
-    /// it for every `llm` request, because the daemon build ships only the
-    /// regex engine. The message is V1's, so a caller sees the same summary
-    /// either way.
-    #[error("LLM model not available")]
-    LlmUnavailable,
+    /// V1 `ErrLlmUnavailable`: the local model cannot serve this scan.
+    #[error("{0}")]
+    LlmUnavailable(String),
+    /// V1 `ErrLlmUnparsable`: the model did not produce an unambiguous verdict.
+    #[error("LLM response unparsable: {0}")]
+    LlmUnparsable(String),
 }
 
 impl CodeScanError {
@@ -64,7 +62,8 @@ impl CodeScanError {
             Self::RuleRefResolve(_) => 123,
             Self::RegexCompile(_) => 124,
             Self::EngineResource => 131,
-            Self::LlmUnavailable => 140,
+            Self::LlmUnavailable(_) => 140,
+            Self::LlmUnparsable(_) => 141,
         }
     }
 }

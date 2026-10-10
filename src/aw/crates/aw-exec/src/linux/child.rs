@@ -21,6 +21,21 @@ pub(super) struct OwnedChild {
 
 impl OwnedChild {
     pub(super) fn spawn(spec: &CommandSpec) -> Result<Self, Error> {
+        Self::spawn_with_streams(spec, true)
+    }
+
+    pub(super) fn spawn_foreground(spec: &CommandSpec) -> Result<Self, Error> {
+        Self::spawn_with_streams(spec, false)
+    }
+
+    fn spawn_with_streams(spec: &CommandSpec, piped: bool) -> Result<Self, Error> {
+        let stream = || {
+            if piped {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            }
+        };
         let parent = std::process::id();
         let mut command = Command::new(&spec.program);
         // Nested Provider transports have separate process groups. Kill their
@@ -44,9 +59,9 @@ impl OwnedChild {
             .current_dir(&spec.cwd)
             .env_clear()
             .envs(&spec.environment)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(stream())
+            .stdout(stream())
+            .stderr(stream())
             .process_group(0)
             .spawn()
             .map_err(|e| io_error("spawn", e))?;
@@ -70,9 +85,13 @@ impl OwnedChild {
     }
 
     fn signal_group(&self) -> io::Result<()> {
+        self.signal(libc::SIGKILL)
+    }
+
+    pub(super) fn signal(&self, signal: i32) -> io::Result<()> {
         // SAFETY: the unreaped group leader reserves the PGID until the final
         // group signal. Exclusive child reaping is required by the public API.
-        if unsafe { libc::kill(-(self.id() as i32), libc::SIGKILL) } < 0 {
+        if unsafe { libc::kill(-(self.id() as i32), signal) } < 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);

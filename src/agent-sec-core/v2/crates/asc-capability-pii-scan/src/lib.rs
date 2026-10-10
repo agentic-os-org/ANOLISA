@@ -28,4 +28,4 @@ pub use rules::{DEFAULT_CUSTOM_RULES_PATH, PiiRuleSet};
 pub use scanner::PiiScanner;
 
 /// Detection semantics version, independent of the `AgentSecCore` package version.
-pub const SCANNER_VERSION: &str = "2.0.0";
+pub const SCANNER_VERSION: &str = "2.0.1";

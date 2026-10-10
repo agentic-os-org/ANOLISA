@@ -824,16 +824,20 @@ pub struct StatsSummary {
 }
 
 impl StatsSummary {
+    /// UTF-8 bytes removed across all recorded operations (before minus after;
+    /// the production recording paths pass `str::len()` byte lengths).
     pub fn chars_saved(&self) -> usize {
         self.total_before_chars
             .saturating_sub(self.total_after_chars)
     }
 
+    /// Tokens saved across all recorded operations (before minus after).
     pub fn tokens_saved(&self) -> usize {
         self.total_before_tokens
             .saturating_sub(self.total_after_tokens)
     }
 
+    /// Byte savings as a percentage of total before-chars (UTF-8 bytes); 0.0 when no data.
     pub fn chars_percent(&self) -> f64 {
         if self.total_before_chars > 0 {
             (self.chars_saved() as f64 / self.total_before_chars as f64) * 100.0
@@ -842,6 +846,7 @@ impl StatsSummary {
         }
     }
 
+    /// Token savings as a percentage of total before-tokens; 0.0 when no data.
     pub fn tokens_percent(&self) -> f64 {
         if self.total_before_tokens > 0 {
             (self.tokens_saved() as f64 / self.total_before_tokens as f64) * 100.0

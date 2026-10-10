@@ -19,6 +19,43 @@ _V2 = os.environ.get("PII_E2E_RUNTIME") == "v2"
 _MODES = ("binary",) if _V2 else ("binary", "module")
 
 
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("sentence", [False, True])
+def test_scan_pii_email_sentence_boundaries(
+    mode: str, sentence: bool, tmp_path: Path
+) -> None:
+    email = "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+    text = email + "."
+    if sentence:
+        text = (
+            "Reply with exactly this synthetic test email address and nothing else: "
+            + text
+            + " Do not call any tools. The address is invented test data."
+        )
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--text",
+        text,
+        "--source",
+        "user_input",
+        "--raw-evidence",
+        "--redact-output",
+        data_dir=tmp_path / "data",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["verdict"] == "warn"
+    assert report["summary"]["by_type"] == {"email": 1}
+    finding = report["findings"][0]
+    start = text.index(email)
+    assert finding["span"] == {"start": start, "end": start + len(email)}
+    assert finding["raw_evidence"] == email
+    assert report["redacted_text"] == text.replace(
+        email, "a***@pii-fixture-20261008.net"
+    )
+
+
 def _module_mode_available() -> bool:
     result = subprocess.run(
         [sys.executable, "-c", "import agent_sec_cli.cli"],

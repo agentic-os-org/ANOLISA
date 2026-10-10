@@ -268,9 +268,14 @@ async fn forward_events(
     use std::collections::HashMap;
     use tokio::time::{Instant, MissedTickBehavior};
 
-    // Debounce state: path -> (last_mutation_time, last_mutation_kind)
+    // Debounce state: path -> (last_mutation_time, last_mutation_kind,
+    // paired-rename destination). The destination is `Some` only on the
+    // From side of a paired rename (`RenameMode::Both`), naming where the
+    // object went; the flush uses it to tell a re-scope inside the source
+    // (flat → categorized move) from a genuine move-out.
     let debounce = std::time::Duration::from_millis(debounce_ms);
-    let mut pending: HashMap<PathBuf, (Instant, notify::EventKind)> = HashMap::new();
+    let mut pending: HashMap<PathBuf, (Instant, notify::EventKind, Option<PathBuf>)> =
+        HashMap::new();
 
     // Type memory for the move-out arm: immediate children of the source
     // that we know to be directories. Seeded once from the source root so a
@@ -322,13 +327,15 @@ async fn forward_events(
             }
             _ = tick.tick() => {
                 let now = Instant::now();
-                let ready: Vec<(PathBuf, notify::EventKind)> = pending
+                let ready: Vec<(PathBuf, notify::EventKind, Option<PathBuf>)> = pending
                     .iter()
-                    .filter(|(_, (time, _))| now.duration_since(*time) >= debounce)
-                    .map(|(path, (_, kind))| (path.clone(), *kind))
+                    .filter(|(_, (time, _, _))| now.duration_since(*time) >= debounce)
+                    .map(|(path, (_, kind, paired_to))| {
+                        (path.clone(), *kind, paired_to.clone())
+                    })
                     .collect();
 
-                for (path, kind) in ready {
+                for (path, kind, paired_to) in ready {
                     pending.remove(&path);
                     // Retain the observed type while the path still exists,
                     // and invalidate the memory when the path has been
@@ -339,6 +346,16 @@ async fn forward_events(
                             // The entry no longer names a directory; stop
                             // treating a future same-named path as one.
                             known_dirs.remove(gone);
+                            if rename_rescopes_within_source(source, gone, paired_to.as_deref()) {
+                                // A paired rename whose destination is a
+                                // loadable `<category>/<skill>` under the
+                                // SAME leaf name is a re-scope (flat →
+                                // categorized move), not a deletion: the
+                                // skill remains loadable under the same
+                                // identity, so the drift pipeline must not
+                                // be told it vanished.
+                                continue;
+                            }
                         }
                         if tx.send(event).is_err() {
                             return; // receiver dropped
@@ -431,6 +448,38 @@ fn refresh_known_dir(known_dirs: &mut HashSet<PathBuf>, source: &Path, path: &Pa
     }
 }
 
+/// Whether a paired rename's destination re-scoped the object into the
+/// store's categorized layout — a loadable `<source>/<category>/<skill>`
+/// — making the old path's `DirDeleted` a false deletion signal.
+///
+/// The immediate children of the source root are the unit of skill-directory
+/// tracking. A rename landing at another immediate child (same-scope rename)
+/// stays inside that scope and keeps its balanced `DirDeleted` + `DirCreated`
+/// pair. A destination outside the source, and an unpaired departure
+/// (genuine move-out), keep reporting. Every other nested destination is
+/// judged by the store's own layout determination
+/// (`store::is_loadable_categorized_skill`): ONLY a destination the loader
+/// would actually load suppresses the deletion. A destination the store
+/// skips — a hidden category (`<source>/.archive/my-skill`), a destination
+/// deeper than `<category>/<skill>` (`<source>/a/b/my-skill`), or a parent
+/// that is itself a flat skill directory — leaves the loadable set, and the
+/// drift pipeline must still hear the deletion.
+///
+/// The suppression additionally requires the same leaf name on both sides.
+/// The store adopts the directory leaf name as the authoritative skill
+/// name, so the re-scope case is exactly `alpha` → `<category>/alpha`. A
+/// rename that also changes the leaf (`alpha` → `<category>/beta`) deletes
+/// the `alpha` identity and creates nothing the watcher can report (the
+/// nested To side is not an immediate child and classifies to `None`), so
+/// its `DirDeleted` must still be heard — otherwise the audit misses the
+/// identity change entirely.
+fn rename_rescopes_within_source(source: &Path, gone: &Path, paired_to: Option<&Path>) -> bool {
+    paired_to.is_some_and(|dest| {
+        gone.file_name() == dest.file_name()
+            && crate::store::is_loadable_categorized_skill(source, dest)
+    })
+}
+
 /// Record one notify event into the debounce map.
 ///
 /// `Modify(Name(RenameMode::Both))` carries both sides of a rename (old
@@ -467,7 +516,10 @@ fn refresh_known_dir(known_dirs: &mut HashSet<PathBuf>, source: &Path, path: &Pa
 /// keeps only the last kind, so the flush alone cannot see the
 /// replacement).
 fn debounce_insert(
-    pending: &mut std::collections::HashMap<PathBuf, (tokio::time::Instant, notify::EventKind)>,
+    pending: &mut std::collections::HashMap<
+        PathBuf,
+        (tokio::time::Instant, notify::EventKind, Option<PathBuf>),
+    >,
     event: &notify::Event,
     known_dirs: &mut HashSet<PathBuf>,
     source: &Path,
@@ -510,12 +562,20 @@ fn debounce_insert(
         // drains — a restat would see NotFound and keep a stale directory
         // memory); untagged kinds restat the live path. A paired rename's
         // split kinds (From/To) carry no tag, so its sides fall back to
-        // the correlation above plus the restat.
+        // the correlation above plus the restat. The From side also
+        // remembers its destination: at flush time a DirDeleted whose
+        // destination re-scoped the object inside the source (flat →
+        // categorized move) must be withheld — the skill never left.
+        let paired_to = if both && index == 0 {
+            Some(event.paths[1].clone())
+        } else {
+            None
+        };
         match event_declares_directory(&event.kind) {
             Some(is_dir) => record_known_dir_type(known_dirs, source, path, is_dir),
             None => refresh_known_dir(known_dirs, source, path),
         }
-        pending.insert(path.clone(), (tokio::time::Instant::now(), kind));
+        pending.insert(path.clone(), (tokio::time::Instant::now(), kind, paired_to));
     }
 }
 
@@ -1063,20 +1123,27 @@ mod tests {
                 _,
                 notify::EventKind::Modify(notify::event::ModifyKind::Name(
                     notify::event::RenameMode::From
-                ))
+                )),
+                Some(_)
             )
         ));
+        assert_eq!(
+            pending[&old].2.as_deref(),
+            Some(new.as_path()),
+            "the From side remembers the paired destination"
+        );
         assert!(matches!(
             pending[&new],
             (
                 _,
                 notify::EventKind::Modify(notify::event::ModifyKind::Name(
                     notify::event::RenameMode::To
-                ))
+                )),
+                None
             )
         ));
 
-        // Single-path events keep their kind verbatim.
+        // Single-path events keep their kind verbatim and carry no pairing.
         pending.clear();
         let file = PathBuf::from("/source/alpha/SKILL.md");
         let event = notify::Event {
@@ -1092,7 +1159,11 @@ mod tests {
         );
         assert!(matches!(
             pending[&file],
-            (_, notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            (
+                _,
+                notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                None
+            )
         ));
     }
 
@@ -1502,6 +1573,289 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn flat_to_categorized_move_does_not_report_the_skill_deleted() {
+        // Delta-audit round 9: `mv <source>/my-skill <source>/category/
+        // my-skill` is a paired rename whose old side is a seeded known
+        // directory, so the From side classified as DirDeleted while the
+        // new (nested) side classifies to None — a false deletion signal
+        // for a skill that remains loadable in the categorized layout.
+        let source = tempfile::tempdir().expect("source directory");
+        let category = source.path().join("category");
+        std::fs::create_dir(&category).expect("category directory");
+        let old = source.path().join("my-skill");
+        std::fs::create_dir(&old).expect("flat skill directory");
+        std::fs::write(old.join("SKILL.md"), "---\nname: my-skill\n---\n").expect("manifest");
+
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let src = source.path().to_path_buf();
+        let join = tokio::spawn(async move {
+            forward_events(&src, 50, notify_rx, tx, Some(shutdown_rx)).await;
+        });
+        // Let the task start so the startup seed records the flat skill.
+        tokio::task::yield_now().await;
+
+        let new = category.join("my-skill");
+        std::fs::rename(&old, &new).expect("categorize the skill");
+        assert!(new.join("SKILL.md").is_file(), "the skill remains loadable");
+
+        notify_tx
+            .send(notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both,
+                )),
+                paths: vec![old.clone(), new],
+                attrs: Default::default(),
+            })
+            .expect("queue the paired rename");
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+
+        let mut saw_dir_deleted = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SkillEvent::DirDeleted(path) = event {
+                saw_dir_deleted = true;
+                eprintln!("unexpected DirDeleted: {}", path.display());
+            }
+        }
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(
+            !saw_dir_deleted,
+            "a flat-to-categorized move must not report the live skill deleted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_scope_rename_still_reports_both_dir_sides() {
+        // Control for the re-scope suppression: when the paired
+        // destination is another immediate child of the source, the
+        // rename stays inside the tracked scope and keeps emitting the
+        // balanced DirDeleted(old) + DirCreated(new) pair.
+        let source = tempfile::tempdir().expect("source directory");
+        let old = source.path().join("alpha");
+        std::fs::create_dir(&old).expect("skill directory");
+
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let src = source.path().to_path_buf();
+        let join = tokio::spawn(async move {
+            forward_events(&src, 50, notify_rx, tx, Some(shutdown_rx)).await;
+        });
+        tokio::task::yield_now().await;
+
+        let new = source.path().join("beta");
+        std::fs::rename(&old, &new).expect("rename the skill");
+        notify_tx
+            .send(notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both,
+                )),
+                paths: vec![old.clone(), new.clone()],
+                attrs: Default::default(),
+            })
+            .expect("queue the paired rename");
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+
+        let mut saw_deleted = false;
+        let mut saw_created = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                SkillEvent::DirDeleted(path) => saw_deleted |= path == old,
+                SkillEvent::DirCreated(path) => saw_created |= path == new,
+                _ => {}
+            }
+        }
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(
+            saw_deleted,
+            "a same-scope rename keeps emitting DirDeleted for the old name"
+        );
+        assert!(
+            saw_created,
+            "a same-scope rename keeps emitting DirCreated for the new name"
+        );
+    }
+
+    // Review fix: the re-scope suppression must only fire for a
+    // destination the store's layout determination would actually load.
+    // The three shapes below nest inside the source but are never
+    // loaded, so the old path's DirDeleted is a REAL deletion and must
+    // keep flowing to the drift pipeline.
+
+    #[tokio::test(start_paused = true)]
+    async fn hidden_category_move_still_reports_the_skill_deleted() {
+        // `mv <source>/my-skill <source>/.archive/my-skill`: the store
+        // skips hidden directories, so the skill left the loadable set.
+        // The any-nested-destination-inside-the-source rule swallowed
+        // the deletion and the audit under-reported a real removal.
+        let source = tempfile::tempdir().expect("source directory");
+        let archive = source.path().join(".archive");
+        std::fs::create_dir(&archive).expect("hidden directory");
+        let old = source.path().join("my-skill");
+        std::fs::create_dir(&old).expect("flat skill directory");
+        std::fs::write(old.join("SKILL.md"), "---\nname: my-skill\n---\n").expect("manifest");
+
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let src = source.path().to_path_buf();
+        let join = tokio::spawn(async move {
+            forward_events(&src, 50, notify_rx, tx, Some(shutdown_rx)).await;
+        });
+        // Let the task start so the startup seed records the flat skill.
+        tokio::task::yield_now().await;
+
+        let new = archive.join("my-skill");
+        std::fs::rename(&old, &new).expect("archive the skill");
+
+        notify_tx
+            .send(notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both,
+                )),
+                paths: vec![old.clone(), new],
+                attrs: Default::default(),
+            })
+            .expect("queue the paired rename");
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+
+        let mut saw_dir_deleted = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SkillEvent::DirDeleted(path) = event {
+                saw_dir_deleted |= path == old;
+            }
+        }
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(
+            saw_dir_deleted,
+            "a move into a hidden directory leaves the loadable set and must report DirDeleted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn too_deep_move_still_reports_the_skill_deleted() {
+        // `mv <source>/my-skill <source>/a/b/my-skill`: the categorized
+        // loader only reads `<source>/<category>/<skill>` — two levels.
+        // A destination nested deeper is never loaded, so the deletion
+        // is real.
+        let source = tempfile::tempdir().expect("source directory");
+        let deep = source.path().join("a/b");
+        std::fs::create_dir_all(&deep).expect("nested directory");
+        let old = source.path().join("my-skill");
+        std::fs::create_dir(&old).expect("flat skill directory");
+        std::fs::write(old.join("SKILL.md"), "---\nname: my-skill\n---\n").expect("manifest");
+
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let src = source.path().to_path_buf();
+        let join = tokio::spawn(async move {
+            forward_events(&src, 50, notify_rx, tx, Some(shutdown_rx)).await;
+        });
+        // Let the task start so the startup seed records the flat skill.
+        tokio::task::yield_now().await;
+
+        let new = deep.join("my-skill");
+        std::fs::rename(&old, &new).expect("bury the skill");
+
+        notify_tx
+            .send(notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both,
+                )),
+                paths: vec![old.clone(), new],
+                attrs: Default::default(),
+            })
+            .expect("queue the paired rename");
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+
+        let mut saw_dir_deleted = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SkillEvent::DirDeleted(path) = event {
+                saw_dir_deleted |= path == old;
+            }
+        }
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(
+            saw_dir_deleted,
+            "a move deeper than <category>/<skill> is never loaded and must report DirDeleted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn move_under_flat_skill_directory_still_reports_the_skill_deleted() {
+        // `mv <source>/my-skill <source>/flat-skill/my-skill` where
+        // `flat-skill` is itself a flat skill (it has its own SKILL.md):
+        // the loader treats it as a skill, never as a category, so it
+        // never descends into it — the destination is not loadable.
+        let source = tempfile::tempdir().expect("source directory");
+        let flat = source.path().join("flat-skill");
+        std::fs::create_dir(&flat).expect("flat skill directory");
+        std::fs::write(flat.join("SKILL.md"), "---\nname: flat-skill\n---\n")
+            .expect("flat manifest");
+        let old = source.path().join("my-skill");
+        std::fs::create_dir(&old).expect("flat skill directory");
+        std::fs::write(old.join("SKILL.md"), "---\nname: my-skill\n---\n").expect("manifest");
+
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let src = source.path().to_path_buf();
+        let join = tokio::spawn(async move {
+            forward_events(&src, 50, notify_rx, tx, Some(shutdown_rx)).await;
+        });
+        // Let the task start so the startup seed records the flat skill.
+        tokio::task::yield_now().await;
+
+        let new = flat.join("my-skill");
+        std::fs::rename(&old, &new).expect("tuck the skill under a flat skill");
+
+        notify_tx
+            .send(notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both,
+                )),
+                paths: vec![old.clone(), new],
+                attrs: Default::default(),
+            })
+            .expect("queue the paired rename");
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+
+        let mut saw_dir_deleted = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SkillEvent::DirDeleted(path) = event {
+                saw_dir_deleted |= path == old;
+            }
+        }
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert!(
+            saw_dir_deleted,
+            "a move under a flat skill directory is never loaded and must report DirDeleted"
+        );
+    }
+
     #[test]
     fn skill_md_move_from_side_still_reports_modified() {
         let source = tempfile::tempdir().expect("source directory");
@@ -1861,5 +2215,187 @@ mod tests {
                 assert!(completed.unwrap().is_ok(), "watcher task must exit cleanly");
             }
         }
+    }
+
+    /// Synthetic-event variant of [`event_loop`] rooted at a real temporary
+    /// source, so the flush-time layout judgment observes the on-disk
+    /// post-move state exactly as inotify would have delivered it.
+    fn event_loop_at(
+        source: &Path,
+        debounce_ms: u64,
+    ) -> (
+        mpsc::UnboundedSender<notify::Event>,
+        mpsc::UnboundedReceiver<SkillEvent>,
+        oneshot::Sender<()>,
+        JoinHandle<()>,
+    ) {
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let root = source.to_path_buf();
+        let join = tokio::spawn(async move {
+            forward_events(&root, debounce_ms, notify_rx, tx, Some(shutdown_rx)).await;
+        });
+        (notify_tx, rx, shutdown_tx, join)
+    }
+
+    /// An inotify paired rename (`Modify(Name(RenameMode::Both))`): old side
+    /// first, new side second.
+    fn paired_rename(from: &Path, to: &Path) -> notify::Event {
+        use notify::event::{ModifyKind, RenameMode};
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(from.to_path_buf())
+        .add_path(to.to_path_buf())
+    }
+
+    /// The first `DirDeleted` within a bounded window, skipping the manifest
+    /// events a move also produces.
+    async fn next_dir_deleted(rx: &mut mpsc::UnboundedReceiver<SkillEvent>) -> Option<PathBuf> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(SkillEvent::DirDeleted(path))) => return Some(path),
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rename_into_a_category_with_a_new_leaf_reports_the_old_skill_deleted() {
+        let dir = tempfile::tempdir().expect("temp source");
+        let source = dir.path().to_path_buf();
+        let category = source.join("category");
+        std::fs::create_dir(&category).expect("category directory");
+        let flat = source.join("alpha");
+        std::fs::create_dir(&flat).expect("flat skill directory");
+        std::fs::write(flat.join("SKILL.md"), "---\nname: alpha\n---\n").expect("manifest");
+        let renamed = category.join("beta");
+        std::fs::rename(&flat, &renamed).expect("categorize with a new leaf");
+
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop_at(&source, 50);
+        notify_tx
+            .send(paired_rename(&flat, &renamed))
+            .expect("paired rename event");
+        let deleted = next_dir_deleted(&mut rx).await;
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert_eq!(
+            deleted.as_deref(),
+            Some(flat.as_path()),
+            "the store adopts the leaf name as the skill name, so a rename that changes the leaf deletes the old identity; the nested To side creates nothing the watcher reports, and the audit must still hear the deletion"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn rename_into_a_non_utf8_category_reports_the_old_skill_deleted() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().expect("temp source");
+        let source = dir.path().to_path_buf();
+        let category = source.join(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
+        std::fs::create_dir(&category).expect("non-UTF-8 category directory");
+        let flat = source.join("alpha");
+        std::fs::create_dir(&flat).expect("flat skill directory");
+        std::fs::write(flat.join("SKILL.md"), "---\nname: alpha\n---\n").expect("manifest");
+        let renamed = category.join("alpha");
+        std::fs::rename(&flat, &renamed).expect("move under the non-UTF-8 category");
+
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop_at(&source, 50);
+        notify_tx
+            .send(paired_rename(&flat, &renamed))
+            .expect("paired rename event");
+        let deleted = next_dir_deleted(&mut rx).await;
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert_eq!(
+            deleted.as_deref(),
+            Some(flat.as_path()),
+            "the loader rejects a non-UTF-8 category name, so the move removed the skill from the loadable set and the deletion must be reported"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn rename_to_a_non_utf8_skill_leaf_reports_the_old_skill_deleted() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().expect("temp source");
+        let source = dir.path().to_path_buf();
+        let category = source.join("category");
+        std::fs::create_dir(&category).expect("category directory");
+        let flat = source.join("alpha");
+        std::fs::create_dir(&flat).expect("flat skill directory");
+        std::fs::write(flat.join("SKILL.md"), "---\nname: alpha\n---\n").expect("manifest");
+        let renamed = category.join(std::ffi::OsString::from_vec(vec![0xff]));
+        std::fs::rename(&flat, &renamed).expect("rename to a non-UTF-8 leaf");
+
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop_at(&source, 50);
+        notify_tx
+            .send(paired_rename(&flat, &renamed))
+            .expect("paired rename event");
+        let deleted = next_dir_deleted(&mut rx).await;
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert_eq!(
+            deleted.as_deref(),
+            Some(flat.as_path()),
+            "the loader rejects a non-UTF-8 skill leaf name, so the rename removed the old identity from the loadable set and the deletion must be reported"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_leaf_rename_into_a_category_stays_silent() {
+        let dir = tempfile::tempdir().expect("temp source");
+        let source = dir.path().to_path_buf();
+        let category = source.join("category");
+        std::fs::create_dir(&category).expect("category directory");
+        let flat = source.join("alpha");
+        std::fs::create_dir(&flat).expect("flat skill directory");
+        std::fs::write(flat.join("SKILL.md"), "---\nname: alpha\n---\n").expect("manifest");
+        let renamed = category.join("alpha");
+        std::fs::rename(&flat, &renamed).expect("categorize keeping the leaf");
+
+        let (notify_tx, mut rx, shutdown_tx, join) = event_loop_at(&source, 50);
+        notify_tx
+            .send(paired_rename(&flat, &renamed))
+            .expect("paired rename event");
+        let deleted = next_dir_deleted(&mut rx).await;
+        shutdown_tx.send(()).expect("shutdown");
+        join.await.expect("event loop");
+        assert_eq!(
+            deleted, None,
+            "a same-leaf flat-to-categorized move re-scopes the live skill and must stay silent"
+        );
+    }
+
+    #[test]
+    fn rename_rescope_judgment_requires_the_same_leaf_name() {
+        let dir = tempfile::tempdir().expect("temp source");
+        let source = dir.path().to_path_buf();
+        let category = source.join("category");
+        std::fs::create_dir(&category).expect("category directory");
+        for leaf in ["alpha", "beta"] {
+            let skill = category.join(leaf);
+            std::fs::create_dir(&skill).expect("categorized skill directory");
+            std::fs::write(skill.join("SKILL.md"), format!("---\nname: {leaf}\n---\n"))
+                .expect("manifest");
+        }
+        let gone = source.join("alpha");
+        let re_scoped = category.join("alpha");
+        let renamed = category.join("beta");
+        assert!(
+            rename_rescopes_within_source(&source, &gone, Some(&re_scoped)),
+            "a same-leaf move into a loadable category is a re-scope"
+        );
+        assert!(
+            !rename_rescopes_within_source(&source, &gone, Some(&renamed)),
+            "a loadable destination under a different leaf name is an identity change, not a re-scope"
+        );
+        assert!(
+            !rename_rescopes_within_source(&source, &gone, None),
+            "an unpaired departure keeps reporting"
+        );
     }
 }

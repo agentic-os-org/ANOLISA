@@ -177,10 +177,15 @@ test('empty trajectories keep the existing no-step state', () => {
 
 const { roundMatchesText } = require(process.env.AGENTSIGHT_TRAJECTORY_FILTER_BUILD);
 for (const field of ['tool_calls', 'observation']) {
-  test(`search preserves the viewer's safe handling of malformed ${field} collections`, () => {
+  test(`search keeps working after a malformed ${field} import is rejected`, () => {
     const doc = trajectory();
     doc.steps[2][field] = field === 'tool_calls' ? { bad: true } : { results: { bad: true } };
-    const page = loaded(doc);
+    const page = loaded();
+    page.complete(page.import(), doc);
+    assert.equal(page.error(), 'atif.malformedDocument');
+    assert.equal(page.session(), 'root');
+    assert.equal(roundMatchesText(doc.steps, 'alpha'), true);
+    assert.equal(roundMatchesText(doc.steps, 'never matches'), false);
     page.filter('alpha');
     assert.deepEqual(keys(page), [1]);
     page.filter('never matches');

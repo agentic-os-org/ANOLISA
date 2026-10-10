@@ -49,17 +49,27 @@ fi
 # manifest inside SHARE_DIR, so this branch is a no-op in those flows.
 EXTENSION_MANIFEST="$PLUGIN_SRC/qwen-extension.json"
 EXTENSION_TEMPLATE="$PLUGIN_SRC/qwen-extension.json.in"
-if [ ! -f "$EXTENSION_MANIFEST" ] && [ -f "$EXTENSION_TEMPLATE" ]; then
-    VERSION="${TOKENLESS_VERSION:-${ANOLISA_VERSION:-0.0.0-dev}}"
-    sed "s/@VERSION@/${VERSION}/g" "$EXTENSION_TEMPLATE" > "$EXTENSION_MANIFEST"
-    echo "[${COMPONENT}] dev-fallback: stamped qwen-extension.json (version=${VERSION}) — production builds should stamp via Makefile"
-fi
-
-if [ ! -f "$EXTENSION_MANIFEST" ]; then
+if [ ! -f "$EXTENSION_MANIFEST" ] && [ ! -f "$EXTENSION_TEMPLATE" ]; then
     echo "[${COMPONENT}] ERROR: $EXTENSION_MANIFEST missing." >&2
     echo "[${COMPONENT}]        Stamp the manifest first:" >&2
     echo "[${COMPONENT}]            make -C src/tokenless stamp-adapter-templates" >&2
     exit 1
+fi
+
+# Preview before any write or CLI invocation: re-linking first uninstalls
+# the active extension, which a dry-run must leave in place.
+if [ "$DRY_RUN" = "1" ]; then
+    if [ ! -f "$EXTENSION_MANIFEST" ]; then
+        echo "DRY-RUN: stamp $EXTENSION_MANIFEST from $EXTENSION_TEMPLATE"
+    fi
+    echo "DRY-RUN: $QWEN_BIN extensions link $PLUGIN_SRC"
+    exit 0
+fi
+
+if [ ! -f "$EXTENSION_MANIFEST" ]; then
+    VERSION="${TOKENLESS_VERSION:-${ANOLISA_VERSION:-0.0.0-dev}}"
+    sed "s/@VERSION@/${VERSION}/g" "$EXTENSION_TEMPLATE" > "$EXTENSION_MANIFEST"
+    echo "[${COMPONENT}] dev-fallback: stamped qwen-extension.json (version=${VERSION}) — production builds should stamp via Makefile"
 fi
 
 # Idempotent: unlink first if already linked, then link again.
@@ -70,11 +80,6 @@ if "$QWEN_BIN" extensions list 2>/dev/null | grep -qE "(^|[[:space:]])${EXTENSIO
     if ! "$QWEN_BIN" extensions uninstall "$EXTENSION_NAME" 2>/dev/null; then
         echo "[${COMPONENT}] WARNING: qwen extensions uninstall failed (non-fatal, will re-link)"
     fi
-fi
-
-if [ "$DRY_RUN" = "1" ]; then
-    echo "DRY-RUN: $QWEN_BIN extensions link $PLUGIN_SRC"
-    exit 0
 fi
 
 echo "[${COMPONENT}] linking extension from ${PLUGIN_SRC}..."

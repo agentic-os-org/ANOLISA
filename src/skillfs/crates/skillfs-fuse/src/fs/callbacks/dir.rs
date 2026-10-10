@@ -216,9 +216,14 @@ impl SkillFs {
                         (parent_ino, FileType::Directory, "..".to_string()),
                     ];
 
-                    let md_path = format!("{}/SKILL.md", path);
-                    let md_ino = self.inodes.readdir_ino(&md_path);
-                    entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                    // Same gate as the opendir snapshot: list the virtual
+                    // SKILL.md only when lookup/getattr/open can serve it
+                    // (present, and within the mount's size ceiling).
+                    if self.skill_md_listable(&skill_name) {
+                        let md_path = format!("{}/SKILL.md", path);
+                        let md_ino = self.inodes.readdir_ino(&md_path);
+                        entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                    }
 
                     if skill_name != "skill-discover" {
                         let show_meta = self.should_show_skill_meta_in_listing(&skill_name, req);
@@ -535,10 +540,12 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                // H3: staging and pending install bypass for nested skills.
+                // H3: staging and pending install bypass for nested skills
+                // (activation and the SKILL.md size gate alike).
                 let nested_id = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nested_id)
-                    && !self.is_pending_install(&nested_id)
+                let gated =
+                    !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id);
+                if gated
                     && matches!(
                         self.resolve_hermes_nested_read(category, skill_name),
                         ReadResolution::Hidden
@@ -567,6 +574,9 @@ impl SkillFs {
                     for entry in dir_iter.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if name == SKILL_META_DIR && !show_meta {
+                            continue;
+                        }
+                        if !self.nested_entry_listable(&entry, gated) {
                             continue;
                         }
                         let kind = dir_entry_file_type(&entry);
@@ -1233,8 +1243,11 @@ impl SkillFs {
                 ref skill_name,
             } => {
                 let nested_id = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nested_id)
-                    && !self.is_pending_install(&nested_id)
+                // Staging and pending installs bypass activation and the
+                // SKILL.md size gate alike.
+                let gated =
+                    !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id);
+                if gated
                     && matches!(
                         self.resolve_hermes_nested_read(category, skill_name),
                         ReadResolution::Hidden
@@ -1265,6 +1278,9 @@ impl SkillFs {
                         for entry in phys_entries {
                             let name = entry.file_name().to_string_lossy().to_string();
                             if name == SKILL_META_DIR && !show_meta {
+                                continue;
+                            }
+                            if !self.nested_entry_listable(&entry, gated) {
                                 continue;
                             }
                             let kind = dir_entry_file_type(&entry);

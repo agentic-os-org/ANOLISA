@@ -480,3 +480,100 @@ def test_worker_stop_escalates_to_kill(monkeypatch, tmp_path: Path):
 
     assert process.stdin.closed is True
     assert process.signals == ["terminate", "kill"]
+
+
+def test_oversize_request_never_spawns_worker(monkeypatch, tmp_path: Path):
+    """An oversized request frame is a permanent payload error.
+
+    Serializing used to happen AFTER _ensure_worker() and WorkerProtocolError
+    (a ValueError) was caught by the transport except-clause: the client
+    classified a never-attempted communication as a transport failure,
+    killed the freshly spawned worker, spawned a second one, and failed
+    identically. Serialize-before-spawn classifies it as a protocol error
+    with zero spawns and zero retries.
+    """
+    process = FakeProcess(201, "success")
+    calls = install_process_factory(monkeypatch, [process])
+
+    # A change whose serialized frame exceeds MAX_WORKER_FRAME_BYTES
+    # (4 MiB): many distinct accumulated paths.
+    big_paths = {
+        f"skills/pack{i:07d}/file{j}.md" for i in range(150000) for j in range(1)
+    }
+    change = SkillFsChange(
+        canonical_skill_dir=tmp_path / "weather",
+        event_kinds={"write"},
+        paths=big_paths,
+    )
+
+    async def scenario():
+        client = SkillLedgerWorkerClient()
+        try:
+            await client.process_change(change)
+            return None
+        except Exception as exc:  # noqa: BLE001 - return for assertion
+            return exc
+        finally:
+            await client.stop()
+
+    exc = asyncio.run(scenario())
+
+    assert exc is not None, "oversized request must fail"
+    assert "exceeds" in str(exc), f"expected frame-size error, got: {exc}"
+    assert not isinstance(
+        exc, SkillLedgerWorkerTransportError
+    ), f"payload error misclassified as transport failure: {exc!r}"
+    assert (
+        len(calls) == 0
+    ), f"worker spawned {len(calls)} time(s) for an unsendable frame"
+
+
+def test_read_side_value_error_still_recovers_through_transport(
+    monkeypatch, tmp_path: Path
+):
+    """A read-side ValueError keeps its transport classification.
+
+    Request serialization now happens before the spawn, so nothing on the
+    write path can raise ValueError any more - but readline() still can (a
+    decoding error, interpreter shutdown). That is a faulty-worker
+    condition: it must surface as SkillLedgerWorkerTransportError so the
+    existing kill-and-restart recovery handles it, not escape the client
+    as a raw ValueError. (Independent review of this PR reproduced the
+    recovery regression when the ValueError arm was removed.)
+    """
+
+    class ValueErrorReader(FakeReader):
+        async def readline(self) -> bytes:
+            raise ValueError("read failed while decoding")
+
+    class ReadErrorProcess(FakeProcess):
+        def __init__(self) -> None:
+            # exit_on_close=False: the faulty worker must be TERMINATED by the
+            # recovery, not merely closed via stdin (same shape as the other
+            # transport-recovery tests).
+            super().__init__(202, "success", exit_on_close=False)
+            self.stdout = ValueErrorReader()
+
+    broken = ReadErrorProcess()
+    healthy = FakeProcess(203, "success")
+    calls = install_process_factory(monkeypatch, [broken, healthy])
+
+    async def scenario():
+        client = SkillLedgerWorkerClient()
+        try:
+            result = await client.process_change(make_change(tmp_path))
+            return ("ok", result)
+        except Exception as exc:  # noqa: BLE001 - return for assertion
+            return ("error", exc)
+        finally:
+            await client.stop()
+
+    outcome, payload = asyncio.run(scenario())
+
+    assert outcome == "ok", f"recovery must complete on the second worker: {payload!r}"
+    assert payload["status"] == "processed"
+    assert payload["workerPid"] == 203
+    assert (
+        len(calls) == 2
+    ), f"expected kill-and-restart recovery to respawn once, got {len(calls)} spawns"
+    assert broken.signals == ["terminate"], "the faulty worker must be terminated"

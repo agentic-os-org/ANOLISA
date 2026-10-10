@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+asc-observability.workspace = true
 asc-action-runtime.workspace = true
 asc-action-types.workspace = true
 asc-foundation-types = { workspace = true }

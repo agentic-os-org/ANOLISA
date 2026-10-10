@@ -1376,6 +1376,11 @@ mod tests {
             std::env::temp_dir().join(format!("agentsight-preview-auth-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&auth_dir).expect("auth dir should exist");
         let state = web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,

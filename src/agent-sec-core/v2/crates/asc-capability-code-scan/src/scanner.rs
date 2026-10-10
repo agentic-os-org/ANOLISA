@@ -21,7 +21,7 @@ use crate::run_regex_rules;
 /// the daemon, so it reports the daemon workspace version instead. The value
 /// legitimately differs from V1 — the goldens only require it to be present and
 /// not the literal `"unknown"`.
-const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The mode literal that selects the LLM engine.
 ///
@@ -62,7 +62,7 @@ impl ScanResult {
     /// [`Verdict::Error`], the summary is `scan error: {message}`, and no
     /// findings are carried. `language` is whatever the caller was scanning as
     /// when the failure occurred.
-    fn error(language: Language, elapsed_ms: u64, error: &CodeScanError) -> Self {
+    pub(crate) fn error(language: Language, elapsed_ms: u64, error: &CodeScanError) -> Self {
         Self {
             ok: false,
             verdict: Verdict::Error,
@@ -79,9 +79,10 @@ impl ScanResult {
 ///
 /// This is the sole public entry point of the capability. When `rules` is
 /// `Some`, only rules whose id appears in it are run; `None` runs the whole set
-/// for the language. `mode` selects the engine: only the literal `"llm"` asks
-/// for the LLM engine, which this crate does not ship, so that request returns
-/// an error result; any other value runs the regex engine.
+/// for the language. The action executor routes the literal `"llm"` to the
+/// injected local-model client; this direct regex entry point returns its
+/// V1-compatible unavailable result for that mode. Any other value runs the
+/// regex engine.
 ///
 /// Never returns `Err`: every failure is folded into an error [`ScanResult`],
 /// because the caller must always be able to act on a verdict.
@@ -94,7 +95,11 @@ pub fn scan(code: &str, language: Language, rules: Option<&[String]>, mode: &str
     }
 
     if mode == LLM_MODE {
-        return ScanResult::error(language, elapsed_ms(start), &CodeScanError::LlmUnavailable);
+        return ScanResult::error(
+            language,
+            elapsed_ms(start),
+            &CodeScanError::LlmUnavailable("LLM model not available".to_owned()),
+        );
     }
 
     // Resolved before the pipeline runs so that a failure reports the language
@@ -155,7 +160,7 @@ fn scan_with_regex(
 }
 
 /// Whole milliseconds elapsed since `start`, saturating rather than wrapping.
-fn elapsed_ms(start: Instant) -> u64 {
+pub(crate) fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 

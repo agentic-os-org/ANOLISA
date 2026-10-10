@@ -15,6 +15,9 @@ pub(crate) enum SyncEvent {
     Reparse {
         skill_name: String,
         source_path: PathBuf,
+        /// The mount's `max_skill_size`, so a reparse refuses exactly what
+        /// the initial load and the read paths refuse.
+        max_skill_size: u64,
     },
 }
 
@@ -50,8 +53,10 @@ pub(crate) fn spawn_sync_worker(
                     SyncEvent::Reparse {
                         ref skill_name,
                         ref source_path,
+                        max_skill_size,
                     } => {
-                        match parser::parse_skill_file(source_path) {
+                        let limit = usize::try_from(max_skill_size).unwrap_or(usize::MAX);
+                        match parser::parse_skill_file_with_limit(source_path, limit) {
                             Ok(mut entry) => {
                                 // The directory name is the authoritative store
                                 // key, and adopting it goes through the same
@@ -111,6 +116,7 @@ mod tests {
         tx.send(SyncEvent::Reparse {
             skill_name: "demo".to_string(),
             source_path: md_path.clone(),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
         })
         .expect("send reparse");
         drop(tx);
@@ -152,11 +158,13 @@ mod tests {
         tx.send(SyncEvent::Reparse {
             skill_name: "foo_bar".to_string(),
             source_path: md_path,
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
         })
         .expect("send reparse");
         tx.send(SyncEvent::Reparse {
             skill_name: "good-skill".to_string(),
             source_path: ok_path,
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
         })
         .expect("send reparse");
         drop(tx);
@@ -177,5 +185,36 @@ mod tests {
             "conforming directory must re-parse clean, got {:?}",
             clean.parse_status
         );
+    }
+
+    /// The reparse applies the mount's limit carried by the event, not the
+    /// parser default: a 2 KiB SKILL.md under a 1 KiB mount limit is refused
+    /// (the store keeps nothing), the same file under the default is loaded.
+    #[test]
+    fn reparse_applies_the_event_size_limit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let md_path = tmp.path().join("big").join("SKILL.md");
+        std::fs::create_dir_all(md_path.parent().expect("skill parent")).expect("skill dir");
+        let mut content = String::from("---\nname: big\ndescription: sized\n---\n");
+        content.push_str(&"a".repeat(2048));
+        std::fs::write(&md_path, &content).expect("SKILL.md");
+
+        for (limit, loaded) in [
+            (1024, false),
+            (skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64, true),
+        ] {
+            let store = Arc::new(RwLock::new(SkillStore::new()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = spawn_sync_worker(rx, store.clone());
+            tx.send(SyncEvent::Reparse {
+                skill_name: "big".to_string(),
+                source_path: md_path.clone(),
+                max_skill_size: limit,
+            })
+            .expect("send reparse");
+            drop(tx);
+            worker.join().expect("sync worker");
+            assert_eq!(store.read().get("big").is_some(), loaded, "limit {limit}");
+        }
     }
 }

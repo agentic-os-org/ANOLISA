@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 asc-action-types = { workspace = true }
 asc-capability-prompt-scan = { workspace = true }
+asc-model-client = { workspace = true }
 dirs = { workspace = true }
 rustix = { workspace = true }
 asc-observability = { workspace = true, features = ["runtime"] }

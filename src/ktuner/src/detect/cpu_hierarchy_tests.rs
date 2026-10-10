@@ -96,3 +96,64 @@ fn cpu_missing_or_malformed_inputs_keep_fallback_contract() {
     t.v1("cpu", "200000", "100000");
     assert_eq!(t.read("0::/missing"), 2);
 }
+
+/// The cpuset controller bounds the same number the bandwidth quota does:
+/// how many CPUs this process may actually run on. A Kubernetes pod with the
+/// static CPU-manager policy, a `docker --cpuset-cpus=4-5` container, and a
+/// systemd unit with `AllowedCPUs=` all cap the process while leaving the
+/// quota unlimited, and /proc/cpuinfo still reports every host processor.
+#[test]
+fn cpuset_mask_bounds_the_effective_cpu_count() {
+    let t = Tree::new();
+    t.write("cpuset.cpus.effective", "0-63");
+    t.write("kubepods/pod123/cpuset.cpus.effective", "4-5");
+    t.write("kubepods/pod123/cpu.max", "max 100000");
+    assert_eq!(t.read("0::/kubepods/pod123"), 2);
+
+    // The mask is inherited: a cgroup that enables the controller without
+    // narrowing it carries an equal or wider mask, so the smallest count on
+    // the chain (here the pod's) is the one that binds.
+    let t = Tree::new();
+    t.write("system.slice/cpuset.cpus.effective", "4-7");
+    t.write("system.slice/app.service/cpu.max", "max 100000");
+    assert_eq!(t.read("0::/system.slice/app.service"), 4);
+
+    // Whichever of the two limits is smaller binds.
+    t.write("system.slice/app.service/cpu.max", "200000 100000");
+    assert_eq!(t.read("0::/system.slice/app.service"), 2);
+    let t = Tree::new();
+    t.write("app/cpuset.cpus.effective", "0-3");
+    t.write("app/cpu.max", "800000 100000");
+    assert_eq!(t.read("0::/app"), 4);
+}
+
+#[test]
+fn cpuset_mask_counts_ranges_and_singles() {
+    let t = Tree::new();
+    t.write("app/cpuset.cpus.effective", "0-3,8,10-11");
+    assert_eq!(t.read("0::/app"), 7);
+
+    // An empty or unparsable mask is not a CPU count, so it clamps nothing.
+    for mask in ["", "\n", "garbage", "3-1", "0-"] {
+        t.write("app/cpuset.cpus.effective", mask);
+        assert_eq!(t.read("0::/app"), 0, "{mask:?}");
+    }
+}
+
+#[test]
+fn v1_cpuset_effective_mask_is_read_from_its_own_mount() {
+    let t = Tree::new();
+    t.write("cpuset/cpuset.effective_cpus", "0-3");
+    t.write("cpuset/app.service/cpuset.effective_cpus", "0-1");
+    assert_eq!(t.read("11:cpuset:/app.service"), 2);
+
+    // Only the cpuset line's own mount carries the mask.
+    let t = Tree::new();
+    t.write("cpuset/cpuset.effective_cpus", "0-3");
+    t.write("cpuset/app.service/cpuset.effective_cpus", "0-1");
+    t.write("cpu/cpuset.effective_cpus", "0-63");
+    assert_eq!(
+        t.read("11:cpuset:/app.service\n3:cpu,cpuacct:/app.service"),
+        2
+    );
+}

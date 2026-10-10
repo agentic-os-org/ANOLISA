@@ -122,6 +122,8 @@ def _daemon_settings(socket_path: Path) -> tuple[Path, dict[str, str]]:
     environment = os.environ.copy()
     environment.setdefault("AGENT_SEC_DATA_DIR", str(socket_path.with_suffix(".audit")))
     environment["AGENT_SEC_DAEMON_SOCKET"] = str(socket_path)
+    environment["AGENT_SEC_OLLAMA_MODEL"] = "agent-sec-core-e2e-unavailable"
+    environment["AGENT_SEC_MODEL_SERVICE_BASE_URL"] = "http://127.0.0.1:0"
     return config, environment
 
 

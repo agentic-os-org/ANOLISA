@@ -138,7 +138,10 @@ mod tests {
     }
 
     fn with_sink(sink: Arc<dyn SecurityEventSink>) -> CodeScanHandler {
-        CodeScanHandler::new(action_service_with_code_executor(sink, CodeScanExecutor))
+        CodeScanHandler::new(action_service_with_code_executor(
+            sink,
+            CodeScanExecutor::default(),
+        ))
     }
 
     /// Builds an `ActionService` with a custom code-scan executor; the prompt
@@ -314,7 +317,7 @@ mod tests {
         ));
         assert_eq!(
             value["summary"],
-            serde_json::json!("scan error: LLM model not available")
+            serde_json::json!("scan error: model 'warden' not available")
         );
     }
 }

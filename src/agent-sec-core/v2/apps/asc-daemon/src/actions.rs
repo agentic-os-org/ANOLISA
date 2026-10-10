@@ -29,7 +29,7 @@ fn scan_service(finalizer: Finalizer, pii_rules: Arc<PiiRuleSet>) -> ActionServi
     ActionService::new(
         ActionRuntime::new(
             ActionId::CodeScan,
-            CodeScanExecutor,
+            CodeScanExecutor::from_env(),
             CodeScanAuditProjector,
             finalizer.clone(),
         ),

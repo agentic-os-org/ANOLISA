@@ -37,6 +37,27 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 /// single scan hang far longer than any caller expects.
 const MAX_TIMEOUT_SECS: u64 = 300;
 
+/// Maximum transport budget for Code Scanner LLM mode.
+///
+/// The largest permitted model-service timeout is three hundred seconds. One
+/// availability check, one chat request, a retry, and a one-second margin need
+/// at most this duration.
+pub const MAX_CODE_SCAN_BUDGET: Duration = Duration::from_secs(MAX_TIMEOUT_SECS * 3 + 1);
+
+/// Upper bound for a Code Scanner LLM mode invocation.
+///
+/// The V1 flow first checks model availability, then sends one chat request.
+/// A transient chat failure is retried once by this client, so the caller must
+/// reserve three request windows plus a small dispatch margin.
+#[must_use]
+pub fn code_scan_budget() -> Duration {
+    Duration::from_secs(
+        timeout_secs_or_default(std::env::var(ENV_TIMEOUT).ok())
+            .saturating_mul(3)
+            .saturating_add(1),
+    )
+}
+
 /// Errors raised by the model service client.
 #[derive(Debug, Error)]
 pub enum ModelServiceError {
@@ -106,6 +127,21 @@ pub trait ModelClient: Send + Sync {
         logprobs: bool,
         top_logprobs: u32,
     ) -> Result<Value, ModelServiceError>;
+
+    /// Chat completion constrained to a JSON response when the backend supports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelServiceError::Inference`] when the service is unreachable
+    /// or the response body is not valid JSON.
+    fn chat_json(
+        &self,
+        model: &str,
+        messages: &[(&str, &str)],
+        options: &ModelOptions,
+    ) -> Result<Value, ModelServiceError> {
+        self.chat(model, messages, options, false, 0)
+    }
 }
 
 /// Ollama REST backend.
@@ -215,6 +251,27 @@ impl ModelClient for OllamaClient {
             payload.insert("logprobs".into(), json!(true));
             payload.insert("top_logprobs".into(), json!(top_logprobs));
         }
+        if !options.is_empty() {
+            payload.insert("options".into(), Value::Object(options.clone()));
+        }
+        self.post("/api/chat", &Value::Object(payload))
+    }
+
+    fn chat_json(
+        &self,
+        model: &str,
+        messages: &[(&str, &str)],
+        options: &ModelOptions,
+    ) -> Result<Value, ModelServiceError> {
+        let messages: Vec<Value> = messages
+            .iter()
+            .map(|(role, content)| json!({"role": role, "content": content}))
+            .collect();
+        let mut payload = Map::new();
+        payload.insert("model".into(), json!(model));
+        payload.insert("messages".into(), Value::Array(messages));
+        payload.insert("stream".into(), json!(false));
+        payload.insert("format".into(), json!("json"));
         if !options.is_empty() {
             payload.insert("options".into(), Value::Object(options.clone()));
         }

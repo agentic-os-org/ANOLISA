@@ -46,7 +46,7 @@ V2 keeps the existing top-level result fields and adds evidence metadata under `
 | `coverage.reasons` | Safe codes for truncation, invalid rules, matching limits, or scan failure |
 | `input_sha256` | SHA-256 of text received by the detector; never a claim about omitted input |
 | `scanned_input_sha256`, `scanned_bytes` | Digest and byte length of the prefix actually scanned |
-| `scanner_version` | Detection semantics version; V2 currently reports `2.0.0` |
+| `scanner_version` | Detection semantics version; V2 currently reports `2.0.1` |
 | `ruleset_id` | Identity of the scanner version and immutable built-in/custom rule configuration |
 
 `bytes_scanned` retains the V1 prefix counter and can include an incomplete UTF-8 tail excluded
@@ -84,7 +84,7 @@ transport failure while the worker still finalizes its safe scan error and relea
 ## Detection semantics version
 
 `summary.scanner_version` identifies detection behavior independently of the AgentSecCore package
-version and RPC schema. V2 reports `2.0.0` in successful and failed scan reports and audit results;
+version and RPC schema. V2 reports `2.0.1` in successful and failed scan reports and audit results;
 built-in findings use engine `regex_v2`, custom findings use `fancy_regex`. `ruleset_id` includes
 this version plus the built-in patterns and custom configuration, so rule-engine changes remain
 traceable even when the YAML bytes are unchanged. A CI commit SHA identifies the tested build;
@@ -99,8 +99,8 @@ with these intentional changes from V1:
   not authenticate the signature or authorize use of the token.
 - Chinese ID date and checksum validation normalize decimal digits consistently, including fullwidth
   dates/check digits and `Ｘ`/`ｘ`, while retaining the original text and character spans.
-- All-zero card placeholders are rejected even though they satisfy Luhn. Other length/checksum
-  checks remain; a finding does not confirm that a card number has been issued.
+- All-zero card placeholders are rejected even though they satisfy Luhn. A finding does not
+  confirm that a card number has been issued; version 2.0.1 adds the structural checks below.
 - Custom patterns use the native dialect described below. A behavior difference from Python alone
   does not make a valid V2 rule invalid or its coverage partial.
 
@@ -108,6 +108,40 @@ The retained V1 corpus checks unchanged behavior; separate positive, negative an
 cases define V2 changes. These checks cover the supported formats, not a guarantee of zero errors
 on arbitrary data. Short/unlabeled secrets, formats outside the 11 types, and contextual ambiguity
 still need application-specific rules and representative examples.
+
+### Supported card-number formats
+
+Version 2.0.1 and the retained Python detector require a complete numeric format,
+a supported network prefix paired with its allowed length, then Luhn. Prefixes and
+lengths follow [these pinned card-type definitions](https://github.com/braintree/credit-card-type/blob/c50db7708ce3945a1cf00aca4220ee2356d2a580/src/lib/card-types.ts):
+
+| Network | Supported digit counts |
+|---|---|
+| Visa | 16, 18, 19 |
+| Mastercard | 16 |
+| American Express | 15 |
+| Diners Club | 14, 16, 19 |
+| Discover | 16, 19 |
+| JCB | 16, 17, 18, 19 |
+| UnionPay | 14, 15, 16, 17, 18, 19 |
+
+Continuous digits are supported. Grouped values use one consistent ASCII space or
+hyphen: Amex uses `4-6-5`, 14-digit Diners uses `4-6-4`, and other supported combinations
+use four-digit groups from the left with a final remainder (for example `4-4-4-4-3`).
+Repeated/mixed separators and unconventional splitting are rejected. Existing Unicode
+decimal normalization and character spans are retained. Every network requires Luhn;
+all-zero values fail the network-prefix check.
+
+The detector validates the entire run of digits, spaces and hyphens. It never retries
+inside an invalid run: `1-4111111111111111` is rejected, while
+`card-4111111111111111` and `/cards/4111111111111111/` remain detectable. Trailing
+spaces/hyphens without a following digit stay outside the finding. Commas and newlines
+separate expressions; two card numbers joined only by spaces form one rejected run.
+The same rule removes version/timestamp path false positives without exempting paths.
+
+This is a deliberately bounded format/network set, not an issued-card lookup. Formats
+outside it can be missed, and unrelated numeric identifiers can still satisfy every
+check. Severity, confidence scoring and host policy behavior are unchanged.
 
 ## Use the bundled Skill
 
@@ -168,6 +202,13 @@ Credit card, Chinese ID, and JWT candidates are validated before becoming findin
 security keywords can increase confidence, while fixture markers such as `example`, `dummy`,
 `test`, and `sample` can lower it. Findings below the default `0.5` threshold are omitted unless
 `--include-low-confidence` is set.
+
+Email detection accepts sentence-ending ASCII periods, including an ellipsis, when the period run
+is followed by end of input, whitespace, or a supported sentence/closing delimiter. For example,
+`alice@company.co.uk.` produces a finding for `alice@company.co.uk`; the period remains outside
+both the finding span and the redaction replacement. Invalid domain suffixes such as `.123`, `.c`,
+`.-bad`, `._bad`, and `..evil` are rejected without reporting a shorter address. Reserved domains
+and remote identities retain their existing low-confidence handling.
 
 ## Verdicts and redaction
 

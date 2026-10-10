@@ -477,7 +477,13 @@ impl TrajectoryStore {
             args.push(Box::new(s.to_string()));
         }
         if let Some(a) = agent_name {
-            clauses.push("agent_name = ?".to_string());
+            // Every other agent-scoped query in the tree matches
+            // case-insensitively (genai latency/activity/timeseries, token
+            // summary, interruptions, skill metrics — see the genai store's
+            // `COLLATE NOCASE` filters), and the dashboard's agent filter is
+            // built from those merged case variants. An exact match here made
+            // a `Qoder` row invisible to a `qoder` filter and vice versa.
+            clauses.push("agent_name COLLATE NOCASE = ? COLLATE NOCASE".to_string());
             args.push(Box::new(a.to_string()));
         }
         if !clauses.is_empty() {
@@ -866,7 +872,9 @@ impl TrajectoryStore {
             args.push(Box::new(s.clone()));
         }
         if let Some(a) = &filter.agent_name {
-            clauses.push("agent_name = ?".to_string());
+            // Same convention as `list_summaries` above and the genai store:
+            // the agent filter matches case-insensitively.
+            clauses.push("agent_name COLLATE NOCASE = ? COLLATE NOCASE".to_string());
             args.push(Box::new(a.clone()));
         }
         if let Some(sid) = &filter.session_id {
@@ -1379,6 +1387,85 @@ mod tests {
         );
         // limit caps the result
         assert_eq!(store.list_summaries(None, None, None, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_list_summaries_matches_agent_case_insensitively() {
+        // Every other agent-scoped view merges case variants of one agent
+        // (genai stores filter with COLLATE NOCASE; /api/agent-names reports
+        // one merged entry), so the trajectory list must not split them.
+        let store = TrajectoryStore::new_with_path(&tmp_db("list-case")).unwrap();
+        for (id, agent) in [
+            ("case-1", "Qoder"),
+            ("case-2", "qoder"),
+            ("case-3", "codex"),
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id.into();
+            rec.agent_name = agent.into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        for probe in ["qoder", "Qoder", "QODER"] {
+            let rows = store.list_summaries(None, None, Some(probe), 100).unwrap();
+            assert_eq!(
+                rows.len(),
+                2,
+                "agent filter {probe:?} must match both case variants: {rows:?}"
+            );
+        }
+        // A different agent still selects nothing.
+        assert!(store
+            .list_summaries(None, None, Some("other"), 100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_scan_steps_matches_agent_case_insensitively() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("scan-case")).unwrap();
+        for (id, agent) in [
+            ("scan-1", "Qoder"),
+            ("scan-2", "qoder"),
+            ("scan-3", "codex"),
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id.into();
+            rec.agent_name = agent.into();
+            rec.atif_json = r#"{"schema_version":"ATIF-v1.7","agent":{"name":"test"},"steps":[
+                {"step_id":1,"source":"user","message":"fix the login bug"},
+                {"step_id":2,"source":"agent","message":"done"}
+            ]}"#
+            .into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let filter = StepScanFilter {
+            agent_name: Some("qoder".into()),
+            categories: vec![StepCategory::UserInput],
+            limit: 10,
+            context_radius: 0,
+            max_scan: 100,
+            ..StepScanFilter::default()
+        };
+        let outcome = store.scan_steps(&filter).unwrap();
+        assert_eq!(outcome.hits.len(), 2, "both case variants must match");
+        assert_eq!(
+            outcome.scanned_trajectories, 2,
+            "the codex row is excluded before any JSON is parsed"
+        );
+        let mut hit_ids: Vec<&str> = outcome.hits.iter().map(|h| h.session_id.as_str()).collect();
+        hit_ids.sort();
+        assert_eq!(hit_ids, vec!["scan-1", "scan-2"]);
+
+        // The uppercase probe matches the same rows.
+        let upper = store
+            .scan_steps(&StepScanFilter {
+                agent_name: Some("QODER".into()),
+                ..filter
+            })
+            .unwrap();
+        assert_eq!(upper.hits.len(), 2);
     }
 
     #[test]

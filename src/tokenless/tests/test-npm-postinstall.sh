@@ -389,4 +389,21 @@ assert_file "the unrelated leftover is not touched" "$LEFT.tokenless-new-12345/m
 assert_eq "the leftover is still exactly what it was" \
   "$(cat "$LEFT.tokenless-new-12345/manifest.json")" '{"stale":true}'
 
+# =============================================================================
+# 9. Rebuild repairs dangling native launcher symlinks
+# =============================================================================
+for b in tokenless rtk; do
+  rm -f "$PKG/bin/$b"
+  ln -s "$TEST_DIR/removed-platform/bin/$b" "$PKG/bin/$b"
+done
+run_postinstall dangling-launchers
+assert_eq "postinstall repairs dangling launchers" "$STATUS" "0"
+for b in tokenless rtk; do
+  assert_eq "the $b launcher targets the installed platform package" \
+    "$(readlink "$PKG/bin/$b")" "$PKG/node_modules/$PLATFORM_PKG/bin/$b"
+  assert_eq "the repaired $b launcher executes" "$("$PKG/bin/$b")" "$b"
+done
+run_postinstall dangling-launchers
+assert_eq "rebuilding repaired launchers is idempotent" "$STATUS" "0"
+
 echo "npm-postinstall test passed"

@@ -223,9 +223,11 @@ function main() {
 
     const linkPath = join(binDir, binary);
 
-    // Remove existing symlink or file
-    if (existsSync(linkPath)) {
+    // Unlink the entry itself: existsSync follows dangling symlinks.
+    try {
       unlinkSync(linkPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
     }
 
     symlinkSync(nativeBinary, linkPath);

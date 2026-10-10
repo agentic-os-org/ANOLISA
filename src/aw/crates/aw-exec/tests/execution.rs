@@ -112,6 +112,26 @@ fn duplex_payloads_larger_than_pipe_buffers_do_not_deadlock() {
 }
 
 #[test]
+fn bulk_streams_are_not_throttled_by_the_poll_interval() {
+    // Pacing every 8 KiB chunk by the 2 ms poll interval needs over 12 s for
+    // these 72 MiB of pipe traffic, far beyond the 5 s fixture deadline.
+    let directory = Directory::new();
+    let input: Vec<_> = (0..24 << 20).map(|index| (index % 251) as u8).collect();
+    let output = execute(
+        &directory.command("binary"),
+        &input,
+        limits(input.len(), input.len() + 6, input.len() + 1),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.input_bytes_written, input.len());
+    assert_eq!(output.stdout.len(), input.len() + 6);
+    assert!(output.stdout.starts_with(&input));
+    assert_eq!(output.stderr.len(), input.len() + 1);
+    directory.assert_reaped();
+}
+
+#[test]
 fn exact_stream_limits_including_zero_are_allowed() {
     for length in [0, 1, 65536] {
         let directory = Directory::new();

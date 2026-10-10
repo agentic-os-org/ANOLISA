@@ -21,6 +21,7 @@ pub struct DaemonDispatcher {
     skill_sec: crate::skill_sec::SkillSecHandler,
     prompt_scan: PromptScanHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
+    observability: Option<asc_daemon_core::ObservabilityService>,
 }
 
 impl DaemonDispatcher {
@@ -40,7 +41,15 @@ impl DaemonDispatcher {
             skill_sec: crate::skill_sec::SkillSecHandler::new(Arc::clone(&actions)),
             prompt_scan: PromptScanHandler::new(actions),
             principal_policy,
+            observability: None,
         }
+    }
+
+    /// Installs the explicitly configured observability ingestion application.
+    #[must_use]
+    pub fn with_observability(mut self, service: asc_daemon_core::ObservabilityService) -> Self {
+        self.observability = Some(service);
+        self
     }
 
     /// Handles one decoded request using transport-authenticated peer identity.
@@ -100,6 +109,12 @@ impl DaemonDispatcher {
             );
         }
         match method_id {
+            MethodId::ObservabilityRecord => crate::observability::handle(
+                request_id,
+                control,
+                self.observability.as_ref(),
+                request.params,
+            ),
             MethodId::Pap(method) => {
                 self.pap
                     .handle(request_id, &principal, method, request.params)
@@ -142,13 +157,20 @@ fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
 impl RequestDispatcher for DaemonDispatcher {
     fn dispatch_timeout(&self, payload: &[u8]) -> Option<std::time::Duration> {
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
-        // Prompt scanning waits on a local L2 model call whose own budget
-        // defaults to 30s (`AGENT_SEC_MODEL_SERVICE_TIMEOUT`), so the family
-        // needs a dispatch budget that outlives the slowest configured scan.
+        // Prompt Scanner retains its existing fixed local-model budget.
         if request.method == method::ACTION_PROMPT_SCAN
             || request.method == method::ACTION_PROMPT_SCAN_WARMUP
         {
             return Some(std::time::Duration::from_secs(35));
+        }
+        if request.method == method::ACTION_CODE_SCAN
+            && request
+                .params
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                == Some("llm")
+        {
+            return Some(asc_model_client::code_scan_budget());
         }
         if request.method != method::ACTION_SKILL_SEC {
             return None;

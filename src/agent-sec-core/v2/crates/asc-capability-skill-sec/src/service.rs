@@ -145,7 +145,12 @@ impl SkillSecService {
     /// Rejects unsafe state paths, permissions and malformed persisted registration.
     pub fn new(config: SkillSecConfig, registry: ScannerRegistry) -> Result<Self, SkillSecError> {
         config.validate()?;
-        KeyStore::open(&config.state_dir)?;
+        let key_store = KeyStore::open(&config.state_dir)?;
+        // Crash recovery, once per process: an interrupted initialize or
+        // replace can strand a full private key in a `.key-` temporary that
+        // nothing else reclaims. The sweep is age-guarded, so it never races
+        // a concurrent initializer's in-flight temporary.
+        key_store.reclaim_temporaries(Instant::now() + Duration::from_secs(5))?;
         let directory = Directory::open(&config.state_dir)?;
         let managed: BTreeSet<SkillIdentity> = match directory.read(
             "managed-skills.json",

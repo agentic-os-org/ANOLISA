@@ -58,6 +58,10 @@ Schema v4 gives every AgentSight-owned database a `retention_days`, `max_db_size
 Tokenless's `stats.db` is listed by the status API as external. AgentSight opens it read-only and
 never applies its lifecycle policy; Tokenless remains responsible for that file.
 
+`storage.max_total_size_mb` adds a combined physical-allocation limit across the nine managed
+AgentSight databases. It defaults to `2200` MiB, accepts `0` to disable the combined limit, and
+otherwise must be at least `9` MiB so every database can retain the minimum enforceable allocation.
+
 A zero value disables its corresponding rule: age cleanup, size cleanup, or scheduled checks. An
 interval of zero therefore disables automatic governance for that store even if its age and size
 values are non-zero. The old `check_interval_inserts` key is unsupported; pre-v4 configuration is
@@ -76,6 +80,10 @@ Every pass follows the same lifecycle:
 3. Trigger capacity pruning only when physical allocation (database, WAL, and SHM) exceeds the limit.
 4. Delete the oldest eligible records and checkpoint between rounds until logical usage reaches 90% of the limit.
 
+The combined-budget ranking also includes WAL and SHM. A WAL-heavy database can therefore rank first
+for one pass; its maintenance checkpoints before pruning, and subsequent passes rebalance using the
+new physical allocation.
+
 Automatic maintenance never runs `VACUUM`. Freed pages remain on the freelist and are reused by
 future writes, so a large physical file can be healthy when its logical usage is within target. To
 return disk space to the filesystem, stop the service and run
@@ -90,9 +98,12 @@ are caches, so eviction can cause a later request to repeat a billed attribution
 > persistent. Without a volume mount, every container restart wipes all data —
 > see [Containers and sidecars](deployment.md#containers-and-sidecars).
 
-To change the limits, edit the `storage` section in `/etc/agentsight/config.json` and reload the
-service. The Settings page shows the effective policy, physical and logical usage, cleanup coverage,
-and maintenance-worker state for every store.
+The Settings page changes the combined limit through `POST /api/storage/config`. Long-running
+`trace`, `serve`, local trace, and local serve processes started with a configuration file re-read
+valid edits before maintenance, so no restart is required. Local processes started without
+`--config` cannot persist edits. A missing, incomplete, or invalid file leaves the last valid limit
+active. The page also shows physical and logical usage, cleanup coverage, and maintenance-worker
+state.
 
 Check current usage from the API:
 
@@ -102,7 +113,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7396/api/storage/stat
   | python3 -m json.tool
 ```
 
-The response uses schema version `2`. Each store reports availability, size, policy, coverage, and
+The response uses schema version `3`. Each store reports availability, size, policy, coverage, and
 `size_state`, plus a `maintenance` object with `scheduled`, `worker_running`,
 `worker_heartbeat_unix_ms`, `last_attempt_unix_ms`, `last_success_unix_ms`, `last_result`,
 `consecutive_failures`, and `next_run_unix_ms`. Trajectories, security audit, reuse, causal, and
@@ -160,7 +171,7 @@ Endpoint groups in 0.11:
 | Trajectories | `GET /api/trajectories`, `/filters`, `/steps`, `/{session_id}` | Collected trajectories. The list accepts optional `label`, `exclude_label`, and `human_backed` filters; `label` is comma-separated effective labels such as `good,bad` |
 | Reuse labels | `POST /api/reuse/triage`, `GET /api/reuse/sessions`, `POST /api/reuse/sessions/{session_id}/label`, `POST /api/reuse/sessions/labels:batch-confirm`, `GET /api/reuse/label-stats`, `POST /api/reuse/judge` | Rule triage and human label decisions. The judge requires `features.reuse_llm_judge=true` and configured LLM credentials; it makes billed model calls |
 | Preferences | `GET /api/preferences`, `/export`, `/turns` | User preference analysis, Markdown export, and source user turns for agent-side reasoning |
-| Storage | `GET /api/storage/status` | Schema-v2 policy, capacity, coverage, and maintenance-worker status for every SQLite target; paths are not returned |
+| Storage | `GET /api/storage/status`, `POST /api/storage/config` | Schema-v3 combined limit, capacity, coverage, and maintenance-worker status; POST persists the combined limit when a config file is available |
 | Skill metrics | `GET /api/skill-metrics`, `/downloads`, `/loads`, `/usage-ratio`, `/distribution`, `/hotness` | Skill adoption |
 | Optimization | `POST /api/optimize/sessions/{id}/{dimension}`, `GET /api/optimize/results`, `GET` and `POST /api/optimize/config` | LLM-assisted analysis |
 | Quality and attribution | `POST /api/grader/evaluate`, `GET /api/grader/latest`, `POST /api/causal-attribution` | Session quality scoring, root-cause attribution |

@@ -276,7 +276,7 @@ async fn standard_mode_discloses_l2_degradation_when_the_model_service_is_down()
     let actions = Arc::new(ActionService::new(
         ActionRuntime::new(
             ActionId::CodeScan,
-            CodeScanExecutor,
+            CodeScanExecutor::default(),
             CodeScanAuditProjector,
             finalizer.clone(),
         ),
@@ -352,7 +352,7 @@ async fn a_warmup_reports_the_model_service_outage_as_ready_false() {
     let actions = Arc::new(ActionService::new(
         ActionRuntime::new(
             ActionId::CodeScan,
-            CodeScanExecutor,
+            CodeScanExecutor::default(),
             CodeScanAuditProjector,
             finalizer.clone(),
         ),

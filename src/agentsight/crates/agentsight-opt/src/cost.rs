@@ -774,7 +774,11 @@ fn compute_headroom(calls: &[LlmCall]) -> CostHeadroom {
 
     let total_save_tok = payload_deletable_tok + effective_cacheable_save + orch_savable_tok;
     let pct = if total_input_tok + total_output_tok > 0 {
-        (total_save_tok as f64 / (total_input_tok + total_output_tok) as f64) * 100.0
+        // The layers overlap — a removable turn's whole context is counted by
+        // the orchestration layer while its assistant/tool bytes are also part
+        // of the payload layers — so the sum can exceed the total it is divided
+        // by. Saturate at 100: the field reports a share of the total cost.
+        ((total_save_tok as f64 / (total_input_tok + total_output_tok) as f64) * 100.0).min(100.0)
     } else {
         0.0
     };
@@ -1514,6 +1518,32 @@ mod tests {
                 "agent":{{"name":"a","version":"1","model_name":"claude-x"}},"steps":{steps_json}}}"#
         ))
         .unwrap()
+    }
+
+    /// The field documents itself as "percentage of total cost (0..100)". The
+    /// orchestration layer counts a removable turn's whole context (input +
+    /// output) while the payload layers count parts of that same context, so
+    /// the sum can pass the total it is divided by.
+    #[test]
+    fn headroom_percentage_stays_within_its_documented_range() {
+        let mut steps = String::from(r#"{"step_id":1,"source":"user","message":"go"}"#);
+        for i in 2..=11u32 {
+            steps.push_str(&format!(
+                r#",{{"step_id":{i},"source":"agent",
+                    "metrics":{{"prompt_tokens":6000,"completion_tokens":500}},
+                    "tool_calls":[{{"tool_call_id":"c{i}","function_name":"Bash","arguments":{{"command":"ls -la"}}}}],
+                    "observation":{{"results":[{{"source_call_id":"c{i}","extra":{{"is_error":true}},"content":"{}"}}]}}}}"#,
+                "a".repeat(400)
+            ));
+        }
+        steps.push_str(r#",{"step_id":12,"source":"agent","message":"done"}"#);
+
+        let cost = compute_cost(&traj(&format!("[{steps}]"))).unwrap();
+        assert!(
+            cost.headroom.pct > 0.0 && cost.headroom.pct <= 100.0,
+            "pct {} is outside the documented 0..100 range",
+            cost.headroom.pct
+        );
     }
 
     /// Replay model: per-step categories must accumulate monotonically.

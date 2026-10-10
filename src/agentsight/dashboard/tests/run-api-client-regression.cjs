@@ -37,6 +37,7 @@ try {
       'src/utils/savingsCsv.ts',
       'src/utils/sessionModel.ts',
       'src/pages/AgentSessionsPage.tsx',
+      'src/utils/setSelection.ts',
       'src/pages/security/utils.ts',
       'src/pages/LoginPage.tsx',
       'src/components/OptimizationSettings.tsx',
@@ -48,7 +49,7 @@ try {
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -62,6 +63,7 @@ try {
       AGENTSIGHT_SESSION_PAGE_BUILD: join(outputDir, 'pages', 'AgentSessionsPage.js'),
       AGENTSIGHT_RICH_TEXT_BUILD: join(outputDir, 'utils', 'richText.js'),
       AGENTSIGHT_SAVINGS_CSV_BUILD: join(outputDir, 'utils', 'savingsCsv.js'),
+      AGENTSIGHT_SET_SELECTION_BUILD: join(outputDir, 'utils', 'setSelection.js'),
       AGENTSIGHT_SECURITY_UTILS_BUILD: join(outputDir, 'pages', 'security', 'utils.js'),
       AGENTSIGHT_LOGIN_PAGE_BUILD: join(outputDir, 'pages', 'LoginPage.js'),
       AGENTSIGHT_LLM_CONFIG_BUILD: join(outputDir, 'components', 'OptimizationSettings.js'),

@@ -742,3 +742,16 @@ test('optimization findings render through the sanitizer, not raw strings', () =
   assert.doesNotMatch(source, /dangerouslySetInnerHTML=\{\{ __html: s \}\}/,
     'the page must not inject the raw finding string into the DOM');
 });
+
+const { sameMembers } = require(process.env.AGENTSIGHT_SET_SELECTION_BUILD);
+
+test('selection shortcuts compare members, not sizes', () => {
+  // Picking "select unknown" with three hand-ticked rows of other sessions
+  // used to clear the selection: the sizes matched, the members did not.
+  const ticked = new Set(['a', 'b', 'c']);
+  assert.equal(sameMembers(ticked, new Set(['a', 'b', 'c'])), true);
+  assert.equal(sameMembers(ticked, new Set(['a', 'b', 'd'])), false);
+  assert.equal(sameMembers(ticked, new Set(['a', 'b'])), false);
+  assert.equal(sameMembers(new Set(), new Set()), true);
+  assert.equal(sameMembers(ticked, new Set()), false);
+});

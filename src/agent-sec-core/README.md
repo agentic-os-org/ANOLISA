@@ -346,18 +346,27 @@ Scans bash and python source for dangerous operations. In the V2 RPM,
 # The deployment supplies the daemon endpoint.
 export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# Regex engine (the only V2 scanning engine currently available)
+# Embedded regex engine
 agent-sec-cli scan-code --code 'rm -rf /'
 agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
   scan-code --code 'import os; os.system("rm -rf /")' --language python
+
+# Local-model engine: set AGENT_SEC_OLLAMA_MODEL in the daemon service
+# environment and restart agent-sec-daemon before invoking the CLI.
+agent-sec-cli scan-code --mode llm --code 'rm -rf /'
 ```
 
 The verdict enum is `pass` / `warn` / `deny` / `error`; built-in rules currently
 produce `warn` or `pass`. Rules are embedded in the V2 binary rather than read
-from a Python source-tree directory. `--mode llm` remains accepted for CLI
-compatibility but returns `LLM model not available`; `--trace-context` and
-code-scan telemetry are not yet available in V2, so hooks requiring them remain
-deferred.
+from a Python source-tree directory. In `llm` mode, the daemon calls the local
+Ollama-compatible model service. `AGENT_SEC_OLLAMA_MODEL` defaults to `warden`;
+backend, loopback base URL, and per-request timeout use the shared
+`AGENT_SEC_MODEL_SERVICE_*` settings. A valid model-service timeout is 1–300
+seconds, and the daemon budgets `3 * timeout + 1` seconds for availability,
+chat, and one retry. Missing models, inference failures, and unparsable verdicts
+return a parseable `error` result; `DENY` returns a successful `warn` result.
+`--trace-context` and code-scan telemetry are not yet available in V2, so hooks
+requiring them remain deferred.
 
 Full daemon endpoint, CLI, and host-hook status:
 [Code Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).

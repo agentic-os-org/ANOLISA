@@ -56,12 +56,17 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 内置 word 和 decimal 字符表固定为 Python 3.11 / Unicode 14；全量 Unicode scalar
 分类检查和大小写匹配用例保护 V1 的字符边界语义。
 
-检测语义版本为 `summary.scanner_version=2.0.0`，纳入 `ruleset_id`，并在成功/失败扫描及
+检测语义版本为 `summary.scanner_version=2.0.1`，纳入 `ruleset_id`，并在成功/失败扫描及
 审计结果中记录。内置 engine 为 `regex_v2`，自定义 engine 为 `fancy_regex`。该版本独立于包版本。
 2.0.0 修复空 claims JWT 漏报，保留大整数/深层 JSON 的非递归结构检查；身份证日期和校验位
 统一转换数字并支持全角 X；银行卡排除全零占位符。142 个 V1 用例继续验证不变行为，
 `tests/detection_quality.rs` 的 11 类正反例及新增边界定义这些变化，不重生成 V1 预期。
 既有大输入、Unicode、重叠脱敏、回溯及发现数量限制测试继续约束效果和执行成本。
+
+2.0.1 及保留的 Python 检测器先校验完整卡号表达式的分组、网络前缀/长度组合，再执行 Luhn。
+七个支持网络与表达式边界见[用户指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md#支持的银行卡格式)。
+`tests/fixtures/credit_cards.json` 由 Python 与 Rust 质量测试共用，包含原始良性 Host 输出；
+历史 V1 oracle 保持不变。
 
 V1 顶层字段仍为 `ok`、`verdict`、`summary`、`findings`、`elapsed_ms` 和可选
 `redacted_text`。`summary` 将执行状态与覆盖状态分开：
@@ -157,7 +162,7 @@ opaque 兼容 trace 标签，并为遥测提供白名单 Agent product。PII Han
 | 身份 | UID/GID/PID 来自 UDS peer；trace 和 `agent_name` 不授予权限 |
 | Trace | CLI 顶层 `--trace-context`；V1 别名、去空白和 256 字符限制；复用公共 Context/顶层 carrier，opaque 标签不是 OTel ID |
 | 规则 | 从 V1 用户级、下次扫描加载，显式迁移为中央配置、启动加载 |
-| 检测版本 | `scanner_version=2.0.0`；内置质量改进与原生自定义方言有独立用例 |
+| 检测版本 | `scanner_version=2.0.1`；内置质量改进与原生自定义方言有独立用例 |
 | 正则 | 原生 fancy-regex；实际无效语法、YAML 别名/多文档拒绝，以及执行预算/引擎限制 |
 | Runtime | 检测器、client、daemon 均为 Rust；保留 V1 作为独立回滚及 oracle |
 

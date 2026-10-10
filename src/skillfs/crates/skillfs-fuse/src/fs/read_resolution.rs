@@ -16,6 +16,56 @@ use std::sync::Arc;
 use super::SkillFs;
 use crate::security::ActiveTarget;
 
+/// Whether a physical `SKILL.md` of `len` bytes may be served under `limit`.
+///
+/// The parser refuses to load a `SKILL.md` larger than the mount's
+/// `max_skill_size`, but a file that grows past that cap after its skill was
+/// loaded keeps the last good store entry (the sync worker only warns on a
+/// failed reparse), so the skill stays addressable. Every path that serves or
+/// lists the file applies the same ceiling (`size > max` is the parser's rule).
+pub(super) fn skill_md_within_size_limit(len: u64, limit: u64) -> bool {
+    len <= limit
+}
+
+/// Read an opened `SKILL.md`, buffering at most `limit + 1` bytes.
+///
+/// The `metadata` length check skips an obviously oversize file without
+/// reading it, but it is only a snapshot: the inode can grow between the stat
+/// and the read, and a FIFO or special file reports no length at all. The read
+/// itself is therefore capped too, and a file that yields more than `limit`
+/// bytes is refused with `ENOENT` — the errno the skill's absence would have
+/// produced.
+pub(super) fn read_skill_md_limited(
+    file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+    limit: u64,
+) -> std::io::Result<String> {
+    let enoent = || std::io::Error::from_raw_os_error(libc::ENOENT);
+    if !skill_md_within_size_limit(metadata.len(), limit) {
+        return Err(enoent());
+    }
+    use std::io::Read;
+    // Bytes first: the `limit + 1` cut can split a UTF-8 sequence, and an
+    // oversize file must answer ENOENT rather than an encoding error.
+    let mut raw = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut raw)?;
+    if !skill_md_within_size_limit(raw.len() as u64, limit) {
+        return Err(enoent());
+    }
+    String::from_utf8(raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Open and read a `SKILL.md` under `limit` (see [`read_skill_md_limited`]).
+pub(super) fn read_skill_md_bounded(
+    physical: &Path,
+    limit: u64,
+) -> std::io::Result<(String, std::fs::Metadata)> {
+    let file = std::fs::File::open(physical)?;
+    let metadata = file.metadata()?;
+    let raw = read_skill_md_limited(&file, &metadata, limit)?;
+    Ok((raw, metadata))
+}
+
 /// Outcome of [`SkillFs::resolve_skill_read`].
 #[derive(Debug, Clone)]
 pub(super) enum ReadResolution {
@@ -56,11 +106,7 @@ impl SkillFs {
         target: Option<&ActiveTarget>,
     ) -> std::io::Result<(Arc<str>, std::fs::Metadata)> {
         if self.transform_pipeline.is_empty() {
-            use std::io::Read;
-            let mut file = std::fs::File::open(physical)?;
-            let metadata = file.metadata()?;
-            let mut raw = String::new();
-            file.read_to_string(&mut raw)?;
+            let (raw, metadata) = read_skill_md_bounded(physical, self.max_skill_size)?;
             return Ok((raw.into(), metadata));
         }
         self.transform_cache.load(
@@ -68,6 +114,7 @@ impl SkillFs {
             physical,
             target,
             self.transform_pipeline.identity(),
+            self.max_skill_size,
             |raw| self.transform_pipeline.run(raw),
         )
     }
@@ -136,7 +183,9 @@ impl SkillFs {
             }
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
-        let raw = std::fs::read_to_string(&physical_path).ok()?;
+        let raw = read_skill_md_bounded(&physical_path, self.max_skill_size)
+            .ok()?
+            .0;
         Some(self.transform_pipeline.run(&raw))
     }
 
@@ -150,15 +199,40 @@ impl SkillFs {
     /// virtual entry on the manifest actually being readable through the
     /// current read semantics: `skill-discover` is always virtual, and any
     /// other skill lists `SKILL.md` only when the resolved read directory
-    /// (live source or snapshot) physically contains it.
+    /// (live source or snapshot) physically contains it, within the
+    /// mount's `max_skill_size` — an oversize file is refused by every read
+    /// path, so listing it would be the same phantom entry.
     pub(super) fn skill_md_listable(&self, skill_name: &str) -> bool {
         if skill_name == "skill-discover" {
             return true;
         }
         match self.skill_read_dir(skill_name) {
-            Some(dir) => skillfs_core::store::has_regular_skill_md(&dir),
+            Some(dir) => {
+                skillfs_core::store::has_regular_skill_md(&dir)
+                    && std::fs::symlink_metadata(dir.join("SKILL.md")).is_ok_and(|meta| {
+                        skill_md_within_size_limit(meta.len(), self.max_skill_size)
+                    })
+            }
             None => false,
         }
+    }
+
+    /// Whether a Hermes nested skill listing may show the physical entry
+    /// `entry` from its read directory.
+    ///
+    /// Nested listings enumerate the read directory as-is, so the gate only
+    /// concerns `SKILL.md`: a regular file over the mount's size ceiling is
+    /// dropped, matching the `ENOENT` its lookup answers. Lookup and read
+    /// follow a symlinked `SKILL.md`, so the size is the link target's.
+    /// Staging and pending installs serve their `SKILL.md` raw, unbounded,
+    /// so `gated` is false there and the entry stays.
+    pub(super) fn nested_entry_listable(&self, entry: &std::fs::DirEntry, gated: bool) -> bool {
+        if !gated || entry.file_name() != "SKILL.md" {
+            return true;
+        }
+        std::fs::metadata(entry.path()).map_or(true, |meta| {
+            !meta.is_file() || skill_md_within_size_limit(meta.len(), self.max_skill_size)
+        })
     }
 
     /// Physical directory to read **content from** for `skill_name`.
@@ -209,7 +283,9 @@ impl SkillFs {
             }
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
-        let raw = std::fs::read_to_string(&physical_path).ok()?;
+        let raw = read_skill_md_bounded(&physical_path, self.max_skill_size)
+            .ok()?
+            .0;
         Some(self.transform_pipeline.run(&raw))
     }
 
@@ -380,7 +456,9 @@ impl SkillFs {
                 .join("SKILL.md"),
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
-        let raw = std::fs::read_to_string(&physical_path).ok()?;
+        let raw = read_skill_md_bounded(&physical_path, self.max_skill_size)
+            .ok()?
+            .0;
         Some(self.transform_pipeline.run(&raw))
     }
 
@@ -737,5 +815,393 @@ mod tests {
             open_reads, 1,
             "open must read the activation target exactly once (2 = pre-fix TOCTOU double read); got {open_reads}"
         );
+    }
+
+    /// A SKILL.md larger than the parser's `max_skill_size` must not be served
+    /// through the virtual read path.
+    ///
+    /// The parser refuses to load such a file, but a SKILL.md that grows past
+    /// the cap after its skill was loaded keeps the last good store entry (the
+    /// sync worker only warns on a failed reparse), so the skill stays
+    /// addressable. The read path used to read the whole file into memory on
+    /// every lookup/getattr/open regardless of size — a sparse truncate to a
+    /// huge size is enough to make that unbounded.
+    #[test]
+    fn oversize_skill_md_is_refused_by_the_read_path() {
+        let max = ParseConfig::default().max_skill_size;
+        let tmp = tempfile::tempdir().unwrap();
+        let physical = tmp.path().join("big").join("SKILL.md");
+        std::fs::create_dir_all(physical.parent().unwrap()).unwrap();
+        std::fs::write(
+            &physical,
+            "---\nname: big\ndescription: small\n---\nsmall\n",
+        )
+        .unwrap();
+        // Both stores snapshot the skill while the file is still loadable; a
+        // runtime write then pushes it past the cap without a reparse.
+        let mut store = SkillStore::new();
+        store.load_from_directory(tmp.path(), &ParseConfig::default());
+        assert!(store.get("big").is_some(), "baseline skill must load");
+        let mut cached_store = SkillStore::new();
+        cached_store.load_from_directory(tmp.path(), &ParseConfig::default());
+        std::fs::write(&physical, vec![b'a'; max + 1]).unwrap();
+
+        let fs = SkillFs::new_with_pipeline(
+            tmp.path().into(),
+            tmp.path().into(),
+            Arc::new(RwLock::new(store)),
+            false,
+            TransformPipeline::empty(),
+        );
+        assert!(
+            fs.transformed_skill_attr("big", None).is_none(),
+            "an oversize SKILL.md must not be read for attrs"
+        );
+        assert!(
+            fs.capture_transformed("big", &physical, None).is_err(),
+            "an oversize SKILL.md must not be captured"
+        );
+        assert!(
+            fs.compiled_skill_md_pinned("big", None).is_none(),
+            "an oversize SKILL.md must not be compiled"
+        );
+
+        // The transform-pipeline variant goes through the cache's own read.
+        let cached = SkillFs::new(
+            tmp.path().into(),
+            tmp.path().into(),
+            Arc::new(RwLock::new(cached_store)),
+            false,
+        );
+        assert!(
+            cached.transformed_skill_attr("big", None).is_none(),
+            "an oversize SKILL.md must not be read through the transform cache"
+        );
+    }
+
+    /// Control: a SKILL.md exactly at the cap still parses (`size > max` is
+    /// the parser's rule), so the read path must keep serving it.
+    #[test]
+    fn at_cap_skill_md_is_still_served() {
+        let max = ParseConfig::default().max_skill_size;
+        let tmp = tempfile::tempdir().unwrap();
+        let physical = tmp.path().join("big").join("SKILL.md");
+        std::fs::create_dir_all(physical.parent().unwrap()).unwrap();
+        std::fs::write(
+            &physical,
+            "---\nname: big\ndescription: small\n---\nsmall\n",
+        )
+        .unwrap();
+        let mut store = SkillStore::new();
+        store.load_from_directory(tmp.path(), &ParseConfig::default());
+
+        let mut content = String::from("---\nname: big\ndescription: at cap\n---\n");
+        content.push_str(&"a".repeat(max - content.len()));
+        std::fs::write(&physical, &content).unwrap();
+
+        let fs = SkillFs::new_with_pipeline(
+            tmp.path().into(),
+            tmp.path().into(),
+            Arc::new(RwLock::new(store)),
+            false,
+            TransformPipeline::empty(),
+        );
+        let attr = fs
+            .transformed_skill_attr("big", None)
+            .expect("an at-cap SKILL.md stays readable");
+        assert_eq!(attr.size, max as u64);
+        assert!(fs.capture_transformed("big", &physical, None).is_ok());
+        assert!(fs.compiled_skill_md_pinned("big", None).is_some());
+    }
+
+    /// Make a FIFO: it reports a zero length to the pre-read size check and
+    /// then yields however many bytes its writer sends, which is exactly the
+    /// "file grew after the check" window, deterministically.
+    fn fifo_with_writer(path: &std::path::Path, len: usize) -> std::thread::JoinHandle<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path for the call's duration.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut writer = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            // The reader stops after `limit + 1` bytes and closes its end; the
+            // resulting EPIPE is expected.
+            let _ = writer.write_all(&vec![b'a'; len]);
+        })
+    }
+
+    /// The pre-read length is only a snapshot: content produced after it must
+    /// still be capped at `limit + 1` bytes and refused with ENOENT, not
+    /// buffered whole.
+    #[test]
+    fn bounded_read_caps_bytes_produced_after_the_size_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("SKILL.md");
+        let writer = fifo_with_writer(&fifo, 4096);
+        let err = read_skill_md_bounded(&fifo, 64).expect_err("an over-limit read must fail");
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT), "got {err:?}");
+        writer.join().unwrap();
+    }
+
+    /// Same window through the transform cache's own open/read.
+    #[test]
+    fn cached_read_caps_bytes_produced_after_the_size_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("SKILL.md");
+        let writer = fifo_with_writer(&fifo, 4096);
+        let cache = super::super::transform_cache::TransformCache::default();
+        let err = cache
+            .load("big", &fifo, None, [0; 32], 64, str::to_owned)
+            .expect_err("an over-limit cached read must fail");
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT), "got {err:?}");
+        writer.join().unwrap();
+    }
+
+    /// A store loaded with `max_skill_size` (via `ParseConfig`) and a mount
+    /// told the same limit.
+    fn fs_with_limit(src: &std::path::Path, limit: usize, cached: bool) -> SkillFs {
+        let config = ParseConfig {
+            max_skill_size: limit,
+            ..ParseConfig::default()
+        };
+        let mut store = SkillStore::new();
+        store.load_from_directory(src, &config);
+        let store = Arc::new(RwLock::new(store));
+        let fs = if cached {
+            SkillFs::new(src.into(), src.into(), store, false)
+        } else {
+            SkillFs::new_with_pipeline(
+                src.into(),
+                src.into(),
+                store,
+                false,
+                TransformPipeline::empty(),
+            )
+        };
+        fs.with_max_skill_size(limit)
+    }
+
+    fn write_skill_of_size(src: &std::path::Path, len: usize) -> std::path::PathBuf {
+        let physical = src.join("big").join("SKILL.md");
+        std::fs::create_dir_all(physical.parent().unwrap()).unwrap();
+        let mut content = String::from("---\nname: big\ndescription: sized\n---\n");
+        content.push_str(&"a".repeat(len - content.len()));
+        std::fs::write(&physical, &content).unwrap();
+        physical
+    }
+
+    /// A configured limit above the default serves what the store accepted:
+    /// a 1.5 MiB SKILL.md loads under a 2 MiB `ParseConfig`, so every read
+    /// path and the listing must serve it too (it used to answer ENOENT).
+    #[test]
+    fn configured_limit_above_default_serves_what_the_store_loaded() {
+        let default = skillfs_core::DEFAULT_MAX_SKILL_SIZE;
+        let tmp = tempfile::tempdir().unwrap();
+        let physical = write_skill_of_size(tmp.path(), default + default / 2);
+        for cached in [false, true] {
+            let fs = fs_with_limit(tmp.path(), 2 * default, cached);
+            assert!(fs.store.read().get("big").is_some(), "store must accept it");
+            let attr = fs
+                .transformed_skill_attr("big", None)
+                .unwrap_or_else(|| panic!("served under the configured limit (cached={cached})"));
+            assert!(attr.size > default as u64);
+            assert!(fs.capture_transformed("big", &physical, None).is_ok());
+            assert!(fs.compiled_skill_md_pinned("big", None).is_some());
+            assert!(fs.skill_md_listable("big"), "listed (cached={cached})");
+        }
+    }
+
+    /// A configured limit below the default refuses a file that later grows
+    /// past it, even though it is still under the default.
+    #[test]
+    fn configured_limit_below_default_refuses_a_grown_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let physical = write_skill_of_size(tmp.path(), 512);
+        for cached in [false, true] {
+            let fs = fs_with_limit(tmp.path(), 1024, cached);
+            assert!(fs.store.read().get("big").is_some(), "baseline loads");
+            write_skill_of_size(tmp.path(), 2048);
+            assert!(
+                fs.transformed_skill_attr("big", None).is_none(),
+                "refused for attrs (cached={cached})"
+            );
+            assert!(fs.capture_transformed("big", &physical, None).is_err());
+            assert!(fs.compiled_skill_md_pinned("big", None).is_none());
+            assert!(!fs.skill_md_listable("big"), "not listed (cached={cached})");
+            write_skill_of_size(tmp.path(), 512);
+        }
+    }
+
+    /// End to end: once SKILL.md grows past the mount's limit, the skill
+    /// directory listing drops it instead of showing an entry whose lookup
+    /// answers ENOENT.
+    #[test]
+    fn oversize_skill_md_is_not_listed_end_to_end() {
+        if !fuse_available() {
+            eprintln!("SKIP oversize_skill_md_is_not_listed_end_to_end: FUSE unavailable");
+            return;
+        }
+        let src_dir = tempfile::tempdir().unwrap();
+        let mnt_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path();
+        write_skill_of_size(src, 512);
+        let mut store = SkillStore::new();
+        store.load_from_directory(
+            src,
+            &ParseConfig {
+                max_skill_size: 1024,
+                ..ParseConfig::default()
+            },
+        );
+        let store: SharedSkillStore = Arc::new(RwLock::new(store));
+        let _handle = mount_background_configured(
+            mnt_dir.path(),
+            src,
+            store,
+            MountOptions::default(),
+            false,
+            MountConfig {
+                max_skill_size: Some(1024),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount");
+        let dir = mnt_dir.path().join("skills/big");
+        // The session starts asynchronously; a fixed sleep races it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&dir).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mount did not come up"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let names = |dir: &std::path::Path| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&dir), ["SKILL.md"], "baseline lists SKILL.md");
+        write_skill_of_size(src, 2048);
+        assert!(
+            !names(&dir).contains(&"SKILL.md".to_string()),
+            "an oversize SKILL.md must not be listed"
+        );
+        let err = std::fs::metadata(dir.join("SKILL.md")).expect_err("lookup refuses it");
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    }
+
+    /// Hermes counterpart: a nested skill's listing drops a SKILL.md that grew
+    /// past the limit, matching the ENOENT its lookup answers, and keeps the
+    /// other entries.
+    #[test]
+    fn oversize_nested_skill_md_is_not_listed_end_to_end() {
+        if !fuse_available() {
+            eprintln!("SKIP oversize_nested_skill_md_is_not_listed_end_to_end: FUSE unavailable");
+            return;
+        }
+        assert_oversize_nested_skill_md_unlisted(|skill_md, oversize| {
+            std::fs::write(skill_md, oversize).unwrap();
+        });
+    }
+
+    /// The same holds when `SKILL.md` becomes a symlink to an oversize file:
+    /// lookup and read follow the link, so the listing must judge the target.
+    #[test]
+    fn nested_skill_md_linking_to_an_oversize_file_is_not_listed_end_to_end() {
+        if !fuse_available() {
+            eprintln!(
+                "SKIP nested_skill_md_linking_to_an_oversize_file_is_not_listed_end_to_end: \
+                 FUSE unavailable"
+            );
+            return;
+        }
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path().join("big.md");
+        assert_oversize_nested_skill_md_unlisted(|skill_md, oversize| {
+            std::fs::write(&target, oversize).unwrap();
+            std::fs::remove_file(skill_md).unwrap();
+            std::os::unix::fs::symlink(&target, skill_md).unwrap();
+        });
+    }
+
+    /// Mount a Hermes `cat/alpha` skill under a 1024-byte limit, let `grow`
+    /// replace its SKILL.md with 2048 bytes of content, and require the listing
+    /// to drop the entry its lookup refuses while keeping `notes.txt`.
+    fn assert_oversize_nested_skill_md_unlisted(grow: impl FnOnce(&std::path::Path, &str)) {
+        let src_dir = tempfile::tempdir().unwrap();
+        let mnt_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path();
+        let skill_dir = src.join("cat").join("alpha");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("notes.txt"), "kept").unwrap();
+        let write_skill_md = |len: usize| {
+            let mut content = String::from("---\nname: alpha\ndescription: sized\n---\n");
+            content.push_str(&"a".repeat(len - content.len()));
+            std::fs::write(skill_dir.join("SKILL.md"), &content).unwrap();
+        };
+        write_skill_md(512);
+        let mut store = SkillStore::new();
+        store.load_from_directory(
+            src,
+            &ParseConfig {
+                max_skill_size: 1024,
+                ..ParseConfig::default()
+            },
+        );
+        let store: SharedSkillStore = Arc::new(RwLock::new(store));
+        let _handle = mount_background_configured(
+            mnt_dir.path(),
+            src,
+            store,
+            MountOptions::default(),
+            false,
+            MountConfig {
+                skill_layout: Some(crate::SkillLayout::Hermes),
+                max_skill_size: Some(1024),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount");
+        let dir = mnt_dir.path().join("skills/cat/alpha");
+        // The session starts asynchronously; a fixed sleep races it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&dir).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mount did not come up"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Each read_dir opens a fresh handle, so the listing is the opendir
+        // snapshot taken after the change.
+        let names = |dir: &std::path::Path| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names(&dir),
+            ["SKILL.md", "notes.txt"],
+            "baseline lists SKILL.md"
+        );
+        let mut oversize = String::from("---\nname: alpha\ndescription: sized\n---\n");
+        oversize.push_str(&"a".repeat(2048 - oversize.len()));
+        grow(&skill_dir.join("SKILL.md"), &oversize);
+        assert_eq!(
+            names(&dir),
+            ["notes.txt"],
+            "an oversize nested SKILL.md must not be listed"
+        );
+        let err = std::fs::metadata(dir.join("SKILL.md")).expect_err("lookup refuses it");
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
     }
 }

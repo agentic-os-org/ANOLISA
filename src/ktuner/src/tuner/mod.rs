@@ -165,13 +165,20 @@ fn apply_locked(
 
     if !applied_recs.is_empty() {
         save_rollback(guard, &applied_recs)?;
-        persist_from_rollback(guard)?;
+        let boot_unit_enabled = persist_from_rollback(guard)?;
         if !quiet {
             println!();
             // Count writes, not ledger records: a *_bytes knob also records
             // the ratio sibling the kernel clears for it, and the batch's
             // progress and exit-code semantics stay per-write.
-            println!("  {} 项配置已应用并持久化（重启后自动生效）", applied);
+            if boot_unit_enabled {
+                println!("  {} 项配置已应用并持久化（重启后自动生效）", applied);
+            } else {
+                println!(
+                    "  {} 项配置已应用，但 ktuner-nonsysctl.service 未能启用（systemctl enable 失败），块设备与 THP 等非 sysctl 配置重启后不会自动生效",
+                    applied
+                );
+            }
         }
     } else if applied == 0 && !quiet {
         println!();
@@ -307,8 +314,16 @@ fn apply_recordable(rec: &Recommendation) -> Result<(Option<String>, WriteOutcom
 /// `vm.overcommit_kbytes` limit reads the ratio as 0, the ratio rule then
 /// treats that 0 as "too low" and the write silently disables the fixed
 /// limit, whose original only the ledger can bring back.
+///
+/// The table is keyed on the dotted spelling, but the caller's spelling is not
+/// fixed: `apply_import` resolves both spellings to one file
+/// ([`param_to_path`]), which is the separator handling `validate_import_value`
+/// documents ("other separator spellings that map to the same file cannot slip
+/// past") and the reason 33c0d669a dotted-normalized the runtime-dangerous
+/// guard. A slashed spelling that missed the table would clear the twin with
+/// no record of its original — the loss the table exists to prevent.
 fn cleared_sibling(param: &str) -> Option<&'static str> {
-    match param {
+    match param.replace('/', ".").as_str() {
         "vm.dirty_bytes" => Some("vm.dirty_ratio"),
         "vm.dirty_ratio" => Some("vm.dirty_bytes"),
         "vm.dirty_background_bytes" => Some("vm.dirty_background_ratio"),
@@ -360,12 +375,25 @@ fn sibling_rec(entry: (String, String, String)) -> Recommendation {
 /// this predicate — persistence never re-applies such a line after its
 /// clearer's (the clearer reproduces the zeroed twin at boot), and the
 /// restore writes it AFTER its clearer (whose write would zero it again).
+///
+/// Both sides of the comparison are canonical. `cleared_sibling` answers in
+/// the dotted spelling, but a KEY is the raw spelling the caller used:
+/// `merge_entries` matches an existing record by the path the parameter
+/// resolves to and keeps the FIRST key, so a twin disabled by a later run
+/// stays under the slashed key an earlier import wrote. Comparing that raw key
+/// against the canonical answer would miss the pair, persist its zero line and
+/// restore it before its clearer — whose own restore then zeroes it again,
+/// losing the pristine value the record exists to bring back.
 fn is_cleared_twin(
     entries: &BTreeMap<String, RollbackEntry>,
     param: &str,
     entry: &RollbackEntry,
 ) -> bool {
-    entry.applied == "0" && entries.keys().any(|k| cleared_sibling(k) == Some(param))
+    let canonical = param.replace('/', ".");
+    entry.applied == "0"
+        && entries
+            .keys()
+            .any(|k| cleared_sibling(k).is_some_and(|twin| twin == canonical))
 }
 
 /// The result of a verified write: the value now live in the kernel.
@@ -1084,8 +1112,16 @@ fn render_persistence(
 
     for (param, entry) in entries {
         if param.starts_with("block/") || param.starts_with("transparent_hugepage/") {
+            // The guard is a deliberate skip, not a failure: a device renamed
+            // between the apply and the boot (sda -> sdb), a disk that is gone,
+            // or a node that only shows up later leaves the path absent. With
+            // no `set -e`, the status systemd reads as the unit's verdict is
+            // the exit code of the last rendered line, and `&&` makes a failed
+            // guard there that status - a degraded boot for a skip this
+            // renderer chose. An if-statement carries no status for the skip
+            // while a write that does fail still fails the unit.
             nonsysctl_script.push_str(&format!(
-                "[ -f '{}' ] && echo '{}' > '{}'\n",
+                "if [ -f '{}' ]; then echo '{}' > '{}'; fi\n",
                 entry.path, entry.applied, entry.path
             ));
             has_nonsysctl = true;
@@ -1145,7 +1181,32 @@ fn persistable_entries(
 /// persists a param that failed to apply (those are not in the record). The
 /// record is read from the ledger the transaction's lock guards, so a fixture
 /// lock renders its own ledger and never the production one.
-fn persist_from_rollback(guard: &LedgerLock) -> Result<()> {
+///
+/// Returns whether the boot replay is armed: false when the non-sysctl unit
+/// was written but `systemctl enable` did not succeed (no systemd, or a
+/// refused enable), so the script will not run at the next boot.
+fn persist_from_rollback(guard: &LedgerLock) -> Result<bool> {
+    persist_from_rollback_at(
+        guard,
+        SYSCTL_PERSIST_PATH,
+        NONSYSCTL_SCRIPT_PATH,
+        NONSYSCTL_SERVICE_PATH,
+        "systemctl",
+    )
+}
+
+/// [`persist_from_rollback`] with the generated-file paths injectable (the
+/// [`rollback_preview_at`] / [`finalize_rollback_at`] idiom): a fixture test
+/// can land a file the ledger can no longer render, or a fixture guard whose
+/// ledger renders one, without touching /etc. `systemctl` names the program
+/// the unit is enabled with, so a test can stand in one that refuses.
+fn persist_from_rollback_at(
+    guard: &LedgerLock,
+    sysctl_path: &str,
+    script_path: &str,
+    service_path: &str,
+    systemctl: &str,
+) -> Result<bool> {
     let data = load_rollback_from(&guard.path)?;
     let entries = persistable_entries(&data.entries);
     let (sysctl_content, nonsysctl_script) = render_persistence(&entries);
@@ -1154,16 +1215,39 @@ fn persist_from_rollback(guard: &LedgerLock) -> Result<()> {
         // sysctl.d convention: world-readable, same as the systemd service
         // file below; write_atomic lands the mode before the rename so no
         // 0600 intermediate is ever visible at the final path.
-        write_atomic(SYSCTL_PERSIST_PATH, sysctl_content.as_bytes(), 0o644)
+        // /etc/sysctl.d belongs to the package that replays it at boot
+        // (systemd-sysctl), so a missing directory means nothing would read
+        // the file: say so instead of guessing at permissions.
+        let sysctl_dir = Path::new(sysctl_path).parent().unwrap_or(Path::new("/"));
+        if !sysctl_dir.is_dir() {
+            anyhow::bail!(
+                "未持久化：{} 不存在（本机没有 systemd-sysctl？），已应用的 sysctl 值重启后不会保留",
+                sysctl_dir.display()
+            );
+        }
+        write_atomic(sysctl_path, sysctl_content.as_bytes(), 0o644)
             .context("持久化 sysctl 配置失败（需要 root 权限？）")?;
+    } else if !remove_persisted(sysctl_path, true) {
+        // A file this regenerate cannot render must not survive it. The
+        // render comes back empty when every sysctl-class entry the ledger
+        // holds is one the deny-list refuses; the file on disk, though, may
+        // be the one an earlier generation wrote from those very entries —
+        // and systemd-sysctl applies it as root at the next boot, which is
+        // the write the deny-list exists to keep off the boot path.
+        // `rollback` cannot clean it up either: the deny-listed entry counts
+        // as a failed restore, and an incomplete restore keeps the cleanup
+        // (files included) back for a retry, so no other command ever
+        // removes it. Leaving the failure silent would do the same, hence
+        // the error.
+        anyhow::bail!("清理 {sysctl_path} 失败（未能删除的配置会在下次启动时重新生效）");
     }
 
     if let Some(nonsysctl_script) = nonsysctl_script {
-        let dir = Path::new(NONSYSCTL_SCRIPT_PATH).parent().unwrap();
+        let dir = Path::new(script_path).parent().unwrap();
         fs::create_dir_all(dir).ok();
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("设置 {} 权限 0755 失败", dir.display()))?;
-        write_atomic(NONSYSCTL_SCRIPT_PATH, nonsysctl_script.as_bytes(), 0o755)
+        write_atomic(script_path, nonsysctl_script.as_bytes(), 0o755)
             .context("写入非 sysctl 持久化脚本失败")?;
 
         let service = format!(
@@ -1172,30 +1256,57 @@ fn persist_from_rollback(guard: &LedgerLock) -> Result<()> {
              After=local-fs.target\n\n\
              [Service]\n\
              Type=oneshot\n\
-             ExecStart={NONSYSCTL_SCRIPT_PATH}\n\
+             ExecStart={script_path}\n\
              RemainAfterExit=yes\n\n\
              [Install]\n\
              WantedBy=multi-user.target\n"
         );
 
-        write_atomic(NONSYSCTL_SERVICE_PATH, service.as_bytes(), 0o644)
+        write_atomic(service_path, service.as_bytes(), 0o644)
             .context("写入 systemd service 失败")?;
 
-        systemctl_quiet(&["daemon-reload"]);
-        systemctl_quiet(&["enable", "ktuner-nonsysctl.service"]);
+        systemctl_quiet(systemctl, &["daemon-reload"]);
+        if !systemctl_quiet(systemctl, &["enable", "ktuner-nonsysctl.service"]) {
+            return Ok(false);
+        }
+    } else {
+        // The same invariant one artifact further: the script and its unit
+        // render only while the ledger keeps a non-sysctl entry the deny-list
+        // accepts, and an edited or pre-filter ledger can hold one whose
+        // *path* the filter refuses — `persistable_entries` drops an entry
+        // whose recorded path is deny-listed however the parameter is named.
+        // The pair an earlier generation wrote from it would still replay that
+        // write as root at the next boot, and nothing else removes it, so a
+        // failed retire is an error here too.
+        //
+        // Both removals are attempted before the error is raised. `||` would
+        // short-circuit, so a script that refuses to go (an immutable file, a
+        // read-only /etc, a directory in its place) would stop the unit from
+        // being retired with it — and the unit is what runs the script at the
+        // next boot, on a path that may by then hold something systemd fails
+        // to execute, which leaves the unit failed and the boot degraded.
+        let script_removed = remove_persisted(script_path, true);
+        let service_removed = remove_persisted(service_path, true);
+        if !script_removed || !service_removed {
+            anyhow::bail!(
+                "清理 {script_path} 或 {service_path} 失败（未能删除的持久化会在下次启动时重新生效）"
+            );
+        }
     }
 
-    Ok(())
+    Ok(true)
 }
 
-fn systemctl_quiet(args: &[&str]) {
+/// Run `program` (systemctl) with its output discarded. Returns whether it
+/// ran and exited 0; a host without systemd fails to spawn it.
+fn systemctl_quiet(program: &str, args: &[&str]) -> bool {
     use std::process::Stdio;
-    std::process::Command::new("systemctl")
+    std::process::Command::new(program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .ok();
+        .is_ok_and(|status| status.success())
 }
 
 pub fn rollback_preview() -> Result<Vec<(String, String, String)>> {
@@ -1254,6 +1365,146 @@ fn parse_rollback_entries(json: &str) -> Result<Vec<(String, String, String)>> {
         .iter()
         .map(|(param, entry)| (param.clone(), entry.applied.clone(), entry.previous.clone()))
         .collect())
+}
+
+/// Restore just the ledger entry a parameter names, leaving every other entry
+/// in place: the batch rollback's only escape used to be restoring everything,
+/// so one tuning that turned out to have a side effect forced the caller to
+/// drop all of it.
+///
+/// Returns the resolved ledger key (the spelling `rollback --list` publishes)
+/// and the same counters a full rollback reports. A parameter the ledger does
+/// not record is a command error, not an incomplete restore: there is no
+/// original to write back and nothing a retry could do.
+pub fn rollback_param(param: &str) -> Result<(String, RollbackOutcome)> {
+    rollback_param_at(
+        param,
+        ROLLBACK_PATH,
+        SYSCTL_PERSIST_PATH,
+        NONSYSCTL_SERVICE_PATH,
+        NONSYSCTL_SCRIPT_PATH,
+    )
+}
+
+/// [`rollback_param`] with the ledger and generated-file paths injectable (the
+/// [`rollback_preview_at`] / [`finalize_rollback_at`] idiom): a fixture restores
+/// and retires entries in a private directory without touching /var/lib, /etc
+/// or /proc/sys.
+///
+/// The existence check, restore, ledger rewrite (or final cleanup) and
+/// persistence all share the apply transaction lock, so a concurrent tune/fix
+/// can neither merge into the ledger this run replaces nor read a half-written
+/// one.
+fn rollback_param_at(
+    param: &str,
+    ledger: &str,
+    sysctl_path: &str,
+    service_path: &str,
+    script_path: &str,
+) -> Result<(String, RollbackOutcome)> {
+    let guard = lock_ledger_at(ledger)?;
+    if !Path::new(ledger).exists() {
+        anyhow::bail!("没有找到 rollback 文件 ({ledger})，可能尚未执行过 tune");
+    }
+    let json = fs::read_to_string(ledger).context("读取 rollback 文件失败")?;
+    let mut data: RollbackData = serde_json::from_str(&json).context("解析 rollback 文件失败")?;
+    // Heal first for the same reason restore_entries does: a legacy ledger can
+    // hold two spellings of one kernel path, and the lookup should see the
+    // single record the restore will act on.
+    heal_alias_duplicates(&mut data);
+    let key = ledger_key_for(&data.entries, param)
+        .ok_or_else(|| anyhow::anyhow!("parameter not recorded in the rollback ledger: {param}"))?;
+    // The unit is the named entry plus the mutually exclusive twin the ledger
+    // records for it: the kernel zeroes either knob when the other is written,
+    // so restoring or retiring half the pair would leave this run's own side
+    // effect outside the ledger.
+    let mut unit = BTreeMap::new();
+    unit.insert(key.clone(), data.entries[&key].clone());
+    if let Some(twin) = paired_ledger_key(&data.entries, &key) {
+        unit.insert(twin.clone(), data.entries[&twin].clone());
+    }
+    let subset = RollbackData {
+        version: data.version,
+        entries: unit,
+    };
+    let outcome = restore_entries(&subset, true);
+
+    // A unit that did not fully restore keeps its whole record: a retry
+    // restores the values that did not land, and until then the persisted file
+    // still replays the ledger wholesale — the same contract a partial full
+    // rollback has. Retiring the landed half would let the next tune/fix
+    // regenerate persistence from the ledger and return the rolled-back value
+    // to the boot path.
+    if !rollback_should_finalize(outcome.failed, outcome.skipped) {
+        return Ok((key, outcome));
+    }
+
+    for retired in subset.entries.keys() {
+        data.entries.remove(retired);
+    }
+    if data.entries.is_empty() {
+        // Nothing left to restore: the same terminal cleanup a full rollback
+        // runs. A file or ledger that survives it counts as a failure, so the
+        // caller exits 1 — the surviving file would re-apply the tuned values
+        // at the next boot, and the kept ledger preserves the originals for a
+        // retry.
+        let cleanup_failed =
+            finalize_rollback_at(ledger, sysctl_path, service_path, script_path, true);
+        return Ok((
+            key,
+            RollbackOutcome {
+                restored: outcome.restored,
+                failed: outcome.failed + cleanup_failed,
+                skipped: outcome.skipped,
+            },
+        ));
+    }
+    // Rewrite the ledger with the surviving entries and regenerate the
+    // persisted files from it, so the file no longer replays what this run
+    // rolled back.
+    save_ledger_at(ledger, &data)?;
+    persist_from_rollback_at(&guard, sysctl_path, script_path, service_path)?;
+    Ok((key, outcome))
+}
+
+/// Replace the ledger with `data`, keeping the merge writer's contract: a
+/// private 0600 file published atomically, so no reader can observe a
+/// half-written ledger.
+fn save_ledger_at(path: &str, data: &RollbackData) -> Result<()> {
+    let json = serde_json::to_string_pretty(data)?;
+    write_atomic(path, json.as_bytes(), 0o600).context("保存 rollback 文件失败")
+}
+
+/// The ledger key a user-supplied parameter addresses.
+///
+/// Ledger keys are parameter spellings, so each side resolves through
+/// [`param_to_path`] and the results are canonicalized — the same "one kernel
+/// file" test [`merge_entries`] applies before it treats two spellings as one
+/// record. Dotted and slashed sysctl aliases therefore reach one entry, while
+/// the per-interface families keep their literal dots and case (`Br0.100`
+/// stays a different identity from `br0.100`). Pure so the lookup contract is
+/// unit-testable.
+fn ledger_key_for(entries: &BTreeMap<String, RollbackEntry>, param: &str) -> Option<String> {
+    let wanted = canonicalize_path(&param_to_path(param));
+    entries
+        .iter()
+        .find(|(recorded, _)| canonicalize_path(&param_to_path(recorded)) == wanted)
+        .map(|(recorded, _)| recorded.clone())
+}
+
+/// The ledger key recording the mutually exclusive twin of `param`, when the
+/// ledger holds it.
+///
+/// [`cleared_sibling`] answers in the dotted spelling, but a key is the raw
+/// spelling a caller used — [`merge_entries`] keeps the first one it saw — so a
+/// twin disabled by a later import can sit under a slashed key. The comparison
+/// normalizes the separator for the same reason `is_cleared_twin` does.
+fn paired_ledger_key(entries: &BTreeMap<String, RollbackEntry>, param: &str) -> Option<String> {
+    let twin = cleared_sibling(param)?;
+    entries
+        .keys()
+        .find(|recorded| recorded.replace('/', ".") == twin)
+        .cloned()
 }
 
 /// Outcome of a rollback attempt: how many params were restored vs. failed to
@@ -1461,9 +1712,6 @@ fn restore_entries_with(
 /// the file is gone: one that survived still re-applies the tuned values on the
 /// next boot, so the caller must not report a finished rollback.
 fn remove_persisted(path: &str, quiet: bool) -> bool {
-    if !Path::new(path).exists() {
-        return true;
-    }
     match fs::remove_file(path) {
         Ok(()) => {
             if !quiet {
@@ -1471,6 +1719,12 @@ fn remove_persisted(path: &str, quiet: bool) -> bool {
             }
             true
         }
+        // Only a path that is genuinely absent is already clean. A metadata
+        // check first would also call a dangling symlink absent — the lookup
+        // follows the link — while its directory entry stays behind and
+        // systemd-sysctl re-applies the file the moment the target appears.
+        // Unlinking does not follow the link, so the entry always goes.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
         Err(err) => {
             if !quiet {
                 println!("  {} {path} : {err}（未清理）", "✗".red());
@@ -1481,8 +1735,9 @@ fn remove_persisted(path: &str, quiet: bool) -> bool {
 }
 
 /// Delete the persisted config `tune` wrote and, only when every file is gone,
-/// the rollback ledger at `ledger`. Returns how many persisted files could not
-/// be removed.
+/// the rollback ledger at `ledger`. Returns how many removals failed — the
+/// persisted files plus the ledger itself, because a rollback that leaves any
+/// of them behind is not finished.
 ///
 /// The removal result used to be discarded while the 已清理 line printed
 /// unconditionally and the ledger was deleted anyway: on an `/etc` that refuses
@@ -1490,6 +1745,12 @@ fn remove_persisted(path: &str, quiet: bool) -> bool {
 /// place) `rollback` reported success, exited 0, and dropped the only record of
 /// the originals — the next boot then re-applied every tuned value from the
 /// surviving file with nothing left to roll it back with.
+///
+/// The ledger's own removal counts the same way, and it is the `ledger` file
+/// this function removes last: it is the record a retry restores from and the
+/// set `rollback --list` publishes, so a run that could not drop it and still
+/// returned 0 would keep reporting a pending rollback of values that are
+/// already restored. A ledger that is already gone is not a failure.
 fn finalize_rollback_at(
     ledger: &str,
     sysctl_path: &str,
@@ -1502,17 +1763,28 @@ fn finalize_rollback_at(
         failed += 1;
     }
     if Path::new(service_path).exists() {
-        systemctl_quiet(&["disable", "ktuner-nonsysctl.service"]);
+        systemctl_quiet("systemctl", &["disable", "ktuner-nonsysctl.service"]);
         if !remove_persisted(service_path, quiet) {
             failed += 1;
         }
-        systemctl_quiet(&["daemon-reload"]);
+        systemctl_quiet("systemctl", &["daemon-reload"]);
     }
     if !remove_persisted(script_path, quiet) {
         failed += 1;
     }
     if failed == 0 {
-        fs::remove_file(ledger).ok();
+        match fs::remove_file(ledger) {
+            Ok(()) => {}
+            // Only a delete that left the ledger behind counts: ENOENT — the
+            // ledger already gone — is the state this call exists to reach.
+            Err(error) if Path::new(ledger).exists() => {
+                if !quiet {
+                    println!("  {} {ledger} : {error}（未清理）", "✗".red());
+                }
+                failed += 1;
+            }
+            Err(_) => {}
+        }
     }
     failed
 }
@@ -1533,10 +1805,11 @@ fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
     } = restore_entries(&data, quiet);
 
     // A persisted file that survived cleanup re-applies the tuned values on the
-    // next boot, so the restoration is not complete. Counting it like a failed
-    // or skipped restore is what keeps the ledger for a retry and turns the exit
-    // code into 1 (#4535), instead of a silent success that deletes the
-    // originals.
+    // next boot, and a ledger that survived it keeps the record a retry
+    // restores from, so the restoration is not complete either way. Counting
+    // both like a failed or skipped restore is what keeps the ledger for a
+    // retry and turns the exit code into 1 (#4535), instead of a silent success
+    // that deletes the originals.
     let mut cleanup_failed = 0;
     if rollback_should_finalize(failed, skipped) {
         cleanup_failed = finalize_rollback_at(
@@ -1552,7 +1825,7 @@ fn rollback_inner(quiet: bool) -> Result<RollbackOutcome> {
     if !quiet {
         if cleanup_failed > 0 {
             println!(
-                "  {} {} 项持久化配置未能删除，已保留 {} 以便重试（其中的调优值仍会在下次启动时生效）",
+                "  {} {} 项清理未能完成，已保留 {} 以便重试（未能删除的持久化配置会在下次启动时重新生效）",
                 "⚠".yellow(),
                 cleanup_failed,
                 ROLLBACK_PATH
@@ -1939,6 +2212,94 @@ mod tests {
         );
     }
 
+    /// The twin lookup must answer for the separator spellings every other
+    /// write path resolves to the same file: `apply_import` takes the slash
+    /// spelling of a sysctl — `validate_import_value` resolves the parameter
+    /// "the same way the write path does, so `kernel/sysrq` and other separator
+    /// spellings that map to the same file cannot slip past", and 33c0d669a
+    /// dotted-normalized the runtime-dangerous guard for exactly this reason.
+    /// `cleared_sibling` matched the dotted spelling only, so a slashed
+    /// clearer wrote the knob, the kernel zeroed its twin, and the ledger kept
+    /// no entry for the twin's original — the loss
+    /// [`mutually_exclusive_writes_record_the_twin_they_disable`] pins for the
+    /// dotted spelling, with the same consequence: a rollback restores what the
+    /// ledger holds, reports a full restore, and leaves the twin zeroed.
+    #[test]
+    fn cleared_sibling_accepts_the_separator_spellings_import_resolves() {
+        for (param, twin) in [
+            ("vm/dirty_bytes", "vm.dirty_ratio"),
+            ("vm/dirty_ratio", "vm.dirty_bytes"),
+            ("vm/dirty_background_bytes", "vm.dirty_background_ratio"),
+            ("vm/dirty_background_ratio", "vm.dirty_background_bytes"),
+            ("vm/overcommit_kbytes", "vm.overcommit_ratio"),
+            ("vm/overcommit_ratio", "vm.overcommit_kbytes"),
+        ] {
+            assert_eq!(
+                cleared_sibling(param),
+                Some(twin),
+                "the slash spelling {param} resolves to the same file as its dotted form"
+            );
+        }
+        // A knob outside the pairs disables nothing, whichever separator the
+        // caller used.
+        for param in ["vm.swappiness", "vm/swappiness", "net/ipv4/tcp_syncookies"] {
+            assert_eq!(cleared_sibling(param), None, "{param} disables no twin");
+        }
+    }
+
+    /// The pair can be recorded under the spelling the caller imported the
+    /// CLEARER with: a first run writes the slashed `vm/overcommit_kbytes`, a
+    /// later one applies the dotted ratio, and `merge_entries` matches the twin
+    /// record to the existing entry by resolved path while keeping the first
+    /// key — so the zeroed twin sits under the slashed spelling. The predicate
+    /// both consumers share must still recognize it: otherwise persistence
+    /// writes the `= 0` line and the restore writes the twin BEFORE its
+    /// clearer, whose own write zeroes the just-restored value again.
+    #[test]
+    fn cleared_twin_is_recognized_under_the_importers_spelling() {
+        let entries = BTreeMap::from([
+            (
+                "vm/overcommit_kbytes".to_string(),
+                RollbackEntry {
+                    previous: "4194304".to_string(),
+                    applied: "0".to_string(),
+                    path: "/proc/sys/vm/overcommit_kbytes".to_string(),
+                },
+            ),
+            (
+                "vm.overcommit_ratio".to_string(),
+                RollbackEntry {
+                    previous: "50".to_string(),
+                    applied: "100".to_string(),
+                    path: "/proc/sys/vm/overcommit_ratio".to_string(),
+                },
+            ),
+        ]);
+        assert!(
+            is_cleared_twin(
+                &entries,
+                "vm/overcommit_kbytes",
+                &entries["vm/overcommit_kbytes"]
+            ),
+            "the zeroed twin recorded under the imported slash key must count"
+        );
+        assert!(
+            !is_cleared_twin(
+                &entries,
+                "vm.overcommit_ratio",
+                &entries["vm.overcommit_ratio"]
+            ),
+            "the clearer is not a side-effect record"
+        );
+        let (config, _) = render_persistence(&entries);
+        let config = config.unwrap();
+        assert!(
+            !config.contains("vm/overcommit_kbytes"),
+            "the zero line of a cleared twin must not be persisted:\n{config}"
+        );
+        assert!(config.contains("vm.overcommit_ratio = 100"), "{config}");
+    }
+
     #[test]
     fn restore_entries_restores_the_ratio_after_the_bytes() {
         // The dirty pair is mutually exclusive: writing either knob clears
@@ -2024,6 +2385,80 @@ mod tests {
         assert!(nonsysctl.is_none());
     }
 
+    /// The generated script is the ExecStart of `ktuner-nonsysctl.service`, a
+    /// `Type=oneshot` unit: a command that exits non-zero is the unit's own
+    /// failure, which is exactly what puts a host into the `degraded` state
+    /// systemctl reports. The `[ -f ]` guard is what makes "the node is not
+    /// there" a deliberate skip — a device renamed between the apply and the
+    /// boot (sda -> sdb), a disk that is gone, or a node that appears only
+    /// later all leave `/sys/block/<dev>/…` absent — so a skip must not end up
+    /// as the script's exit status: `&&` carries the failed test into it, and
+    /// the unit then fails on every boot for a node the renderer chose to skip.
+    #[test]
+    fn nonsysctl_script_skips_an_absent_node_without_failing() {
+        let dir = AtomicTestDir::new("nonsysctl-absent");
+        let node = dir.0.join("queue").join("read_ahead_kb");
+        let entries = BTreeMap::from([(
+            "block/sda/read_ahead_kb".to_string(),
+            RollbackEntry {
+                previous: "128".to_string(),
+                applied: "2048".to_string(),
+                path: node.to_str().unwrap().to_string(),
+            },
+        )]);
+        let script = render_persistence(&entries)
+            .1
+            .expect("a block entry renders the boot script");
+        let path = dir.0.join("apply-nonsysctl.sh");
+        fs::write(&path, &script).unwrap();
+
+        // Run it the way the unit does; `sh` is enough for a POSIX test and
+        // echo, and the node stays absent for the whole run.
+        let status = std::process::Command::new("sh")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "an absent node is the skip the guard exists for, not a boot failure: {script}"
+        );
+    }
+
+    /// Control for the test above: a node that IS there still receives the
+    /// recorded value, so the skip cannot degenerate into "never write".
+    #[test]
+    fn nonsysctl_script_applies_a_present_node() {
+        let dir = AtomicTestDir::new("nonsysctl-present");
+        let queue = dir.0.join("queue");
+        fs::create_dir(&queue).unwrap();
+        let node = queue.join("read_ahead_kb");
+        fs::write(&node, "128\n").unwrap();
+        let entries = BTreeMap::from([(
+            "block/sda/read_ahead_kb".to_string(),
+            RollbackEntry {
+                previous: "128".to_string(),
+                applied: "2048".to_string(),
+                path: node.to_str().unwrap().to_string(),
+            },
+        )]);
+        let script = render_persistence(&entries)
+            .1
+            .expect("a block entry renders the boot script");
+        let path = dir.0.join("apply-nonsysctl.sh");
+        fs::write(&path, &script).unwrap();
+
+        let status = std::process::Command::new("sh")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "a present node must apply: {script}");
+        assert_eq!(
+            fs::read_to_string(&node).unwrap().trim(),
+            "2048",
+            "the recorded value must reach the node"
+        );
+    }
+
     #[test]
     fn persistence_drops_entries_the_deny_list_refuses() {
         // The rendered sysctl.d file is applied by systemd-sysctl at boot with
@@ -2073,6 +2508,302 @@ mod tests {
             "nothing deny-listed may reach the rendered file: {config}"
         );
         assert!(script.is_none());
+    }
+
+    /// Dropping a deny-listed entry from the *render* is not enough: the file
+    /// the previous generation wrote is still on disk, and systemd-sysctl
+    /// applies it as root at the next boot — the exact write the deny-list
+    /// exists to keep off the boot path. The regenerate reads the whole ledger
+    /// every time, so a file it can no longer render must be retired, or a
+    /// denied line survives every later run that has something else to persist.
+    #[test]
+    fn persist_retires_a_file_the_ledger_can_no_longer_render() {
+        let dir = AtomicTestDir::new("persist-retire");
+        let ledger = dir.0.join("rollback.json");
+        let sysctl = dir.0.join("99-ktuner.conf");
+        let script = dir.0.join("apply-nonsysctl.sh");
+        let service = dir.0.join("ktuner-nonsysctl.service");
+        let path = ledger.to_str().unwrap();
+
+        // A file an earlier generation left for a ledger whose only
+        // sysctl-class entry is a deny-listed one (the ledger an edited file
+        // or one from before the persist-side filter can hold).
+        fs::write(
+            &sysctl,
+            "# Generated by ktuner - do not edit manually\nkernel.core_pattern = |/tmp/evil\n",
+        )
+        .unwrap();
+        merge_rollback_at(
+            path,
+            [(
+                "kernel.core_pattern".to_string(),
+                "core".to_string(),
+                "|/tmp/evil".to_string(),
+            )],
+        )
+        .unwrap();
+        let guard = lock_ledger_at(path).unwrap();
+        persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            script.to_str().unwrap(),
+            service.to_str().unwrap(),
+            "true",
+        )
+        .unwrap();
+        assert!(
+            !sysctl.exists(),
+            "a file with nothing left to render must be retired, not left for the next boot"
+        );
+
+        // Control: with a persistable entry in the ledger the file is
+        // regenerated (without the denied line) — the retire arm must not
+        // fire while there is still something to persist. The merge takes
+        // the same exclusive lock, so the transaction guard goes first.
+        drop(guard);
+        merge_rollback_at(
+            path,
+            [(
+                "vm.swappiness".to_string(),
+                "60".to_string(),
+                "10".to_string(),
+            )],
+        )
+        .unwrap();
+        let guard = lock_ledger_at(path).unwrap();
+        persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            script.to_str().unwrap(),
+            service.to_str().unwrap(),
+            "true",
+        )
+        .unwrap();
+        let rendered = fs::read_to_string(&sysctl).unwrap();
+        assert!(rendered.contains("vm.swappiness = 10"), "{rendered}");
+        assert!(!rendered.contains("core_pattern"), "{rendered}");
+    }
+
+    /// The boot script and its unit are rendered from the same filtered
+    /// entries as the sysctl file, and an entry whose recorded *path* the
+    /// deny-list refuses is dropped however the parameter is named. The pair
+    /// an earlier generation wrote from such an entry must be retired with it,
+    /// or the denied write still runs as root at the next boot.
+    #[test]
+    fn persist_retires_the_script_and_unit_of_an_unrenderable_ledger() {
+        let dir = AtomicTestDir::new("persist-retire-script");
+        let ledger = dir.0.join("rollback.json");
+        let sysctl = dir.0.join("99-ktuner.conf");
+        let script = dir.0.join("apply-nonsysctl.sh");
+        let service = dir.0.join("ktuner-nonsysctl.service");
+        let path = ledger.to_str().unwrap();
+
+        // A non-sysctl parameter whose recorded path is deny-listed — the
+        // shape an edited or pre-filter ledger has. The filter drops the entry
+        // by path, so neither the sysctl file nor the script renders.
+        let ledger_json = serde_json::json!({
+            "version": 1,
+            "entries": {
+                "block/sda/read_ahead_kb": {
+                    "previous": "128",
+                    "applied": "2048",
+                    "path": "/proc/sys/kernel/core_pattern",
+                }
+            }
+        });
+        fs::write(&ledger, serde_json::to_string(&ledger_json).unwrap()).unwrap();
+        fs::write(
+            &script,
+            "#!/bin/bash\necho '|/tmp/evil' > /proc/sys/kernel/core_pattern\n",
+        )
+        .unwrap();
+        fs::write(
+            &service,
+            "[Unit]\nDescription=Apply ktuner non-sysctl kernel parameters\n",
+        )
+        .unwrap();
+
+        let guard = lock_ledger_at(path).unwrap();
+        persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            script.to_str().unwrap(),
+            service.to_str().unwrap(),
+            "true",
+        )
+        .unwrap();
+
+        assert!(
+            !script.exists() && !service.exists(),
+            "the script and its unit must be retired with the render that owns them"
+        );
+    }
+
+    /// The pair is retired best-effort across BOTH files: the unit is the boot
+    /// path that runs the script, and systemd fails a unit whose ExecStart
+    /// cannot be executed, so a script that refuses to go must not stop the
+    /// unit from being retired with it. `||` short-circuits, so the second
+    /// removal only ran while the first succeeded, and the unit was left for
+    /// the next boot — a failed oneshot that no later command clears, because
+    /// an incomplete rollback never reaches `finalize_rollback_at`.
+    #[test]
+    fn persist_retires_the_unit_even_when_the_script_survives() {
+        let dir = AtomicTestDir::new("persist-retire-both");
+        let ledger = dir.0.join("rollback.json");
+        let sysctl = dir.0.join("99-ktuner.conf");
+        let script = dir.0.join("apply-nonsysctl.sh");
+        let service = dir.0.join("ktuner-nonsysctl.service");
+        let path = ledger.to_str().unwrap();
+
+        // The same unrenderable ledger as above, so the pair is retired...
+        let ledger_json = serde_json::json!({
+            "version": 1,
+            "entries": {
+                "block/sda/read_ahead_kb": {
+                    "previous": "128",
+                    "applied": "2048",
+                    "path": "/proc/sys/kernel/core_pattern",
+                }
+            }
+        });
+        fs::write(&ledger, serde_json::to_string(&ledger_json).unwrap()).unwrap();
+        // ...with the script path occupied by something `remove_file` refuses.
+        // A directory is the portable shape: no permission bits are involved,
+        // so the refusal is the same for root and for an unprivileged runner.
+        fs::create_dir(&script).unwrap();
+        fs::write(
+            &service,
+            "[Unit]\nDescription=Apply ktuner non-sysctl kernel parameters\n",
+        )
+        .unwrap();
+
+        let guard = lock_ledger_at(path).unwrap();
+        let result = persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            script.to_str().unwrap(),
+            service.to_str().unwrap(),
+            "true",
+        );
+
+        assert!(
+            result.is_err(),
+            "a file that could not be removed is reported"
+        );
+        assert!(
+            !service.exists(),
+            "the unit must still be retired, not left to fail the next boot"
+        );
+    }
+
+    /// Retirement is an unlink, not a metadata lookup: a dangling symlink at
+    /// the generated path also fails a lookup, and leaving its directory entry
+    /// behind means systemd-sysctl applies the file once the target appears.
+    #[test]
+    fn persist_retires_a_dangling_link_at_the_generated_path() {
+        let dir = AtomicTestDir::new("persist-retire-link");
+        let ledger = dir.0.join("rollback.json");
+        let sysctl = dir.0.join("99-ktuner.conf");
+        let path = ledger.to_str().unwrap();
+
+        fs::write(&sysctl, "# leftovers from a previous generation\n").unwrap();
+        let target = dir.0.join("missing-target.conf");
+        fs::remove_file(&sysctl).unwrap();
+        std::os::unix::fs::symlink(&target, &sysctl).unwrap();
+
+        // Nothing to render, so the generated path is retired.
+        let guard = lock_ledger_at(path).unwrap();
+        persist_from_rollback_at(
+            &guard,
+            sysctl.to_str().unwrap(),
+            dir.0.join("script.sh").to_str().unwrap(),
+            dir.0.join("unit.service").to_str().unwrap(),
+            "true",
+        )
+        .unwrap();
+
+        assert!(
+            fs::symlink_metadata(&sysctl).is_err(),
+            "the directory entry must be gone, not just resolved away"
+        );
+    }
+
+    /// The boot script only runs if its unit is enabled, so a refused or
+    /// impossible `systemctl enable` (no systemd on the host) must not be
+    /// reported as a persisted change.
+    #[test]
+    fn persist_reports_a_boot_unit_that_was_not_enabled() {
+        let dir = AtomicTestDir::new("persist-enable");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        let ledger_json = serde_json::json!({
+            "version": 1,
+            "entries": {
+                "block/sda/read_ahead_kb": {
+                    "previous": "128",
+                    "applied": "2048",
+                    "path": "/sys/block/sda/queue/read_ahead_kb",
+                }
+            }
+        });
+        fs::write(&ledger, serde_json::to_string(&ledger_json).unwrap()).unwrap();
+        let script = dir.0.join("apply-nonsysctl.sh");
+        let service = dir.0.join("ktuner-nonsysctl.service");
+        let guard = lock_ledger_at(path).unwrap();
+        let persist = |systemctl: &str| {
+            persist_from_rollback_at(
+                &guard,
+                dir.0.join("99-ktuner.conf").to_str().unwrap(),
+                script.to_str().unwrap(),
+                service.to_str().unwrap(),
+                systemctl,
+            )
+            .unwrap()
+        };
+
+        assert!(persist("true"), "an enabled unit replays at boot");
+        assert!(
+            !persist("false"),
+            "a refused enable leaves nothing to replay"
+        );
+        assert!(
+            !persist(dir.0.join("no-systemctl").to_str().unwrap()),
+            "a host without systemctl has no unit to run"
+        );
+        assert!(service.exists(), "the unit itself is still written");
+    }
+
+    /// /etc/sysctl.d is owned by the package that replays it at boot, so its
+    /// absence is the host telling us nothing would read the file.
+    #[test]
+    fn persist_names_a_missing_sysctl_directory() {
+        let dir = AtomicTestDir::new("persist-no-sysctl-d");
+        let ledger = dir.0.join("rollback.json");
+        let path = ledger.to_str().unwrap();
+        merge_rollback_at(
+            path,
+            [(
+                "vm.swappiness".to_string(),
+                "60".to_string(),
+                "10".to_string(),
+            )],
+        )
+        .unwrap();
+        let guard = lock_ledger_at(path).unwrap();
+        let missing = dir.0.join("sysctl.d");
+        let error = persist_from_rollback_at(
+            &guard,
+            missing.join("99-ktuner.conf").to_str().unwrap(),
+            dir.0.join("apply-nonsysctl.sh").to_str().unwrap(),
+            dir.0.join("ktuner-nonsysctl.service").to_str().unwrap(),
+            "true",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("未持久化") && error.contains(missing.to_str().unwrap()),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2748,6 +3479,65 @@ mod tests {
             !ledger.exists(),
             "a complete cleanup drops the ledger with the persisted config"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The ledger is the third thing a cleanup deletes, and its removal used to
+    /// be the one result thrown away: a ledger that survived the delete left
+    /// `rollback --list` reporting a pending rollback of values the run had
+    /// already restored, while `rollback` reported a finished cleanup and exited
+    /// 0. It is the record a retry restores from, so a delete that fails leaves
+    /// the cleanup incomplete the same way a surviving persisted file does.
+    ///
+    /// A directory standing in for the ledger makes `remove_file` fail with
+    /// `EISDIR` on every filesystem, so this needs neither root nor a
+    /// read-only `/var/lib`.
+    #[test]
+    fn test_cleanup_counts_a_ledger_that_could_not_be_removed() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_cleanup_ledger_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let ledger = dir.join("rollback.json");
+        fs::create_dir_all(&ledger).expect("create a directory where the ledger belongs");
+        let sysctl = dir.join("99-ktuner.conf");
+        fs::write(&sysctl, b"vm.swappiness = 10\n").expect("write sysctl file");
+        let service = dir.join("ktuner-nonsysctl.service");
+        let script = dir.join("apply-nonsysctl.sh");
+        fs::write(&script, b"#!/bin/sh\n").expect("write script");
+
+        let cleanup_failed = finalize_rollback_at(
+            ledger.to_str().unwrap(),
+            sysctl.to_str().unwrap(),
+            service.to_str().unwrap(),
+            script.to_str().unwrap(),
+            true,
+        );
+
+        assert_eq!(
+            cleanup_failed, 1,
+            "the persisted files went, so the ledger is the removal that failed"
+        );
+        assert!(
+            ledger.exists(),
+            "the record a retry restores from is still there, so the cleanup is \
+             not finished"
+        );
+        assert!(!sysctl.exists() && !script.exists());
+
+        // What the count means for the caller: the rollback is incomplete, so
+        // `rollback` exits 1 instead of reporting a finished cleanup.
+        let outcome = RollbackOutcome {
+            restored: 3,
+            failed: cleanup_failed,
+            skipped: 0,
+        };
+        assert!(!outcome.is_complete());
+        assert_eq!(classify_rollback(&outcome), RollbackStatus::Partial);
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -4519,6 +5309,516 @@ mod tests {
             assert!(message.contains("inspect and repair"), "{message}");
             assert!(message.contains("rerun the command"), "{message}");
         }
+    }
+
+    /// Write a rollback ledger whose recorded paths point into `dir`, for the
+    /// single-parameter tests: the restores they drive must land on plain files
+    /// instead of /proc/sys and /sys.
+    fn fixture_ledger(dir: &AtomicTestDir, entries: &[(&str, &str, &str, &str)]) -> String {
+        let mut map = serde_json::Map::new();
+        for (param, previous, applied, path) in entries {
+            map.insert(
+                (*param).to_string(),
+                serde_json::json!({ "previous": previous, "applied": applied, "path": path }),
+            );
+        }
+        let ledger = dir.0.join("rollback.json");
+        fs::write(
+            &ledger,
+            serde_json::json!({ "version": 1, "entries": map }).to_string(),
+        )
+        .unwrap();
+        ledger.to_str().unwrap().to_string()
+    }
+
+    /// The generated-file paths `rollback_param_at` must be told, in the same
+    /// order as `finalize_rollback_at`: (sysctl.d, unit, script).
+    fn fixture_paths(dir: &AtomicTestDir) -> (String, String, String) {
+        (
+            dir.0.join("99-ktuner.conf").to_str().unwrap().to_string(),
+            dir.0
+                .join("ktuner-nonsysctl.service")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            dir.0
+                .join("apply-nonsysctl.sh")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        )
+    }
+
+    /// `rollback <param>` restores only the named ledger entry: the rest stay
+    /// live and recorded, and the persisted file is regenerated from what
+    /// remains instead of re-applying the rolled-back value at the next boot.
+    #[test]
+    fn rollback_param_retires_one_entry_and_keeps_the_rest() {
+        let dir = AtomicTestDir::new("rollback-param-one");
+        let (conf, service, script) = fixture_paths(&dir);
+        let swappiness = dir.0.join("swappiness");
+        let somaxconn = dir.0.join("somaxconn");
+        fs::write(&swappiness, "10").unwrap();
+        fs::write(&somaxconn, "4096").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.swappiness", "60", "10", swappiness.to_str().unwrap()),
+                (
+                    "net.core.somaxconn",
+                    "128",
+                    "4096",
+                    somaxconn.to_str().unwrap(),
+                ),
+            ],
+        );
+        fs::write(&conf, "vm.swappiness = 10\nnet.core.somaxconn = 4096\n").unwrap();
+
+        // A slashed alias of the recorded key must reach the same entry, the
+        // way fix/why accept it.
+        let (key, outcome) =
+            rollback_param_at("vm/swappiness", &ledger, &conf, &service, &script).unwrap();
+
+        assert_eq!(key, "vm.swappiness");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (1, 0, 0)
+        );
+        assert!(outcome.is_complete());
+        assert_eq!(fs::read_to_string(&swappiness).unwrap(), "60");
+        assert_eq!(
+            fs::read_to_string(&somaxconn).unwrap(),
+            "4096",
+            "the untouched entry must stay live"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ledger).unwrap()).unwrap();
+        assert!(
+            data["entries"].get("vm.swappiness").is_none(),
+            "the restored entry must leave the ledger: {data}"
+        );
+        assert_eq!(data["entries"]["net.core.somaxconn"]["previous"], "128");
+        let persisted = fs::read_to_string(&conf).unwrap();
+        assert!(
+            !persisted.contains("vm.swappiness"),
+            "the rolled-back value must leave the persisted file: {persisted}"
+        );
+        assert!(
+            persisted.contains("net.core.somaxconn = 4096"),
+            "{persisted}"
+        );
+    }
+
+    /// The same operation on the last recorded entry runs the full rollback's
+    /// terminal cleanup: the persisted files first, then the ledger.
+    #[test]
+    fn rollback_param_empties_the_ledger_and_finalizes() {
+        let dir = AtomicTestDir::new("rollback-param-empty");
+        let (conf, service, script) = fixture_paths(&dir);
+        let swappiness = dir.0.join("swappiness");
+        fs::write(&swappiness, "10").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[("vm.swappiness", "60", "10", swappiness.to_str().unwrap())],
+        );
+        fs::write(&conf, "vm.swappiness = 10\n").unwrap();
+
+        let (key, outcome) =
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).unwrap();
+
+        assert_eq!(key, "vm.swappiness");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (1, 0, 0)
+        );
+        assert_eq!(fs::read_to_string(&swappiness).unwrap(), "60");
+        assert!(
+            !Path::new(&ledger).exists(),
+            "an emptied ledger is deleted like a full rollback"
+        );
+        assert!(
+            !Path::new(&conf).exists(),
+            "the persisted file goes with it"
+        );
+    }
+
+    /// A mutually exclusive pair is restored and retired as one unit whichever
+    /// half is named: the kernel's write to either knob zeroes the other, so a
+    /// half restore could not leave the ledger describing the live kernel.
+    #[test]
+    fn rollback_param_restores_the_recorded_twin() {
+        for (target, label) in [
+            ("vm.dirty_bytes", "rollback-param-twin-clearer"),
+            ("vm.dirty_ratio", "rollback-param-twin-cleared"),
+        ] {
+            let dir = AtomicTestDir::new(label);
+            let (conf, service, script) = fixture_paths(&dir);
+            let bytes = dir.0.join("dirty_bytes");
+            let ratio = dir.0.join("dirty_ratio");
+            let somaxconn = dir.0.join("somaxconn");
+            fs::write(&bytes, "1073741824").unwrap();
+            fs::write(&ratio, "0").unwrap();
+            fs::write(&somaxconn, "4096").unwrap();
+            let ledger = fixture_ledger(
+                &dir,
+                &[
+                    ("vm.dirty_bytes", "0", "1073741824", bytes.to_str().unwrap()),
+                    ("vm.dirty_ratio", "20", "0", ratio.to_str().unwrap()),
+                    (
+                        "net.core.somaxconn",
+                        "128",
+                        "4096",
+                        somaxconn.to_str().unwrap(),
+                    ),
+                ],
+            );
+            fs::write(
+                &conf,
+                "vm.dirty_bytes = 1073741824\nnet.core.somaxconn = 4096\n",
+            )
+            .unwrap();
+
+            let (key, outcome) =
+                rollback_param_at(target, &ledger, &conf, &service, &script).unwrap();
+
+            assert_eq!(key, target, "the resolved key is the recorded spelling");
+            assert_eq!(
+                (outcome.restored, outcome.failed, outcome.skipped),
+                (2, 0, 0),
+                "{target}: the recorded twin is restored and counted"
+            );
+            assert_eq!(fs::read_to_string(&bytes).unwrap(), "0", "{target}");
+            assert_eq!(
+                fs::read_to_string(&ratio).unwrap(),
+                "20",
+                "{target}: the kernel-cleared twin comes back"
+            );
+            assert_eq!(fs::read_to_string(&somaxconn).unwrap(), "4096", "{target}");
+            let data: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&ledger).unwrap()).unwrap();
+            assert!(
+                data["entries"].get("vm.dirty_bytes").is_none(),
+                "{target}: {data}"
+            );
+            assert!(
+                data["entries"].get("vm.dirty_ratio").is_none(),
+                "{target}: both halves are retired together: {data}"
+            );
+            assert_eq!(
+                data["entries"]["net.core.somaxconn"]["applied"], "4096",
+                "{target}"
+            );
+            let persisted = fs::read_to_string(&conf).unwrap();
+            assert!(
+                !persisted.contains("vm.dirty_bytes"),
+                "{target}: {persisted}"
+            );
+            assert!(
+                !persisted.contains("vm.dirty_ratio"),
+                "{target}: {persisted}"
+            );
+            assert!(
+                persisted.contains("net.core.somaxconn = 4096"),
+                "{target}: {persisted}"
+            );
+        }
+    }
+
+    /// The twin can be recorded under the spelling an import used: merge keeps
+    /// the first key it saw, so the cleared twin may sit under a slashed key
+    /// while its clearer is dotted. The pair lookup must still find it.
+    #[test]
+    fn rollback_param_retires_a_cleared_twin_under_the_importers_spelling() {
+        let dir = AtomicTestDir::new("rollback-param-twin-slash");
+        let (conf, service, script) = fixture_paths(&dir);
+        let kbytes = dir.0.join("overcommit_kbytes");
+        let ratio = dir.0.join("overcommit_ratio");
+        fs::write(&kbytes, "0").unwrap();
+        fs::write(&ratio, "100").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                (
+                    "vm/overcommit_kbytes",
+                    "4194304",
+                    "0",
+                    kbytes.to_str().unwrap(),
+                ),
+                ("vm.overcommit_ratio", "50", "100", ratio.to_str().unwrap()),
+            ],
+        );
+        fs::write(&conf, "vm.overcommit_ratio = 100\n").unwrap();
+
+        let (key, outcome) =
+            rollback_param_at("vm.overcommit_ratio", &ledger, &conf, &service, &script).unwrap();
+
+        assert_eq!(key, "vm.overcommit_ratio");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (2, 0, 0)
+        );
+        assert_eq!(fs::read_to_string(&ratio).unwrap(), "50");
+        assert_eq!(
+            fs::read_to_string(&kbytes).unwrap(),
+            "4194304",
+            "the twin under the imported slash key must be restored too"
+        );
+        assert!(
+            !Path::new(&ledger).exists(),
+            "both halves retired, so the emptied ledger finalizes"
+        );
+    }
+
+    /// A target whose path is gone is a skipped restore: the record survives,
+    /// the persisted file is untouched, and the caller sees an incomplete
+    /// outcome (exit 1 in the CLI).
+    #[test]
+    fn rollback_param_keeps_the_record_when_the_target_path_is_gone() {
+        let dir = AtomicTestDir::new("rollback-param-missing");
+        let (conf, service, script) = fixture_paths(&dir);
+        let absent = dir.0.join("absent");
+        let ledger = fixture_ledger(
+            &dir,
+            &[("vm.swappiness", "60", "10", absent.to_str().unwrap())],
+        );
+        fs::write(&conf, "vm.swappiness = 10\n").unwrap();
+
+        let (key, outcome) =
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).unwrap();
+
+        assert_eq!(key, "vm.swappiness");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (0, 0, 1)
+        );
+        assert!(
+            !outcome.is_complete(),
+            "a skipped path is not a completed rollback"
+        );
+        assert!(Path::new(&ledger).exists(), "the record must survive");
+        let data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ledger).unwrap()).unwrap();
+        assert_eq!(data["entries"]["vm.swappiness"]["previous"], "60");
+        assert_eq!(fs::read_to_string(&conf).unwrap(), "vm.swappiness = 10\n");
+    }
+
+    /// A pair restores as one unit: one half landing while the other is skipped
+    /// keeps BOTH records so a retry can finish the pair. Retiring the landed
+    /// half would let the next tune/fix regenerate persistence from the ledger
+    /// and put the rolled-back value back on the boot path.
+    #[test]
+    fn rollback_param_keeps_the_whole_pair_when_one_half_fails() {
+        let dir = AtomicTestDir::new("rollback-param-pair-half");
+        let (conf, service, script) = fixture_paths(&dir);
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio = dir.0.join("absent_ratio");
+        fs::write(&bytes, "1073741824").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.dirty_bytes", "0", "1073741824", bytes.to_str().unwrap()),
+                ("vm.dirty_ratio", "20", "0", ratio.to_str().unwrap()),
+            ],
+        );
+        let conf_before = "vm.dirty_bytes = 1073741824\n";
+        fs::write(&conf, conf_before).unwrap();
+
+        let (key, outcome) =
+            rollback_param_at("vm.dirty_bytes", &ledger, &conf, &service, &script).unwrap();
+
+        assert_eq!(key, "vm.dirty_bytes");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            fs::read_to_string(&bytes).unwrap(),
+            "0",
+            "the half that could land did"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ledger).unwrap()).unwrap();
+        assert_eq!(data["entries"]["vm.dirty_bytes"]["previous"], "0", "{data}");
+        assert_eq!(
+            data["entries"]["vm.dirty_ratio"]["previous"], "20",
+            "the half that did not land keeps its record for a retry: {data}"
+        );
+        assert_eq!(
+            fs::read_to_string(&conf).unwrap(),
+            conf_before,
+            "an incomplete unit must leave persistence untouched"
+        );
+    }
+
+    /// A parameter the ledger does not record is a command error: nothing to
+    /// restore, nothing to retry, and never a success. The ledger and the
+    /// persisted file stay untouched — no empty ledger is invented.
+    #[test]
+    fn rollback_param_errors_when_not_recorded() {
+        let dir = AtomicTestDir::new("rollback-param-not-recorded");
+        let (conf, service, script) = fixture_paths(&dir);
+        let other = dir.0.join("somaxconn");
+        fs::write(&other, "4096").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[("net.core.somaxconn", "128", "4096", other.to_str().unwrap())],
+        );
+        let before = fs::read_to_string(&ledger).unwrap();
+
+        let error = rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script)
+            .err()
+            .expect("an unrecorded parameter must not answer with an outcome");
+        assert!(error.to_string().contains("not recorded"), "{error:#}");
+        assert!(error.to_string().contains("vm.swappiness"), "{error:#}");
+        assert_eq!(
+            fs::read_to_string(&ledger).unwrap(),
+            before,
+            "a lookup miss must not rewrite the ledger"
+        );
+        assert!(!Path::new(&conf).exists());
+
+        // An empty ledger is the same miss; a missing ledger keeps the full
+        // rollback's command error.
+        let empty = dir.0.join("empty.json");
+        fs::write(&empty, r#"{"version":1,"entries":{}}"#).unwrap();
+        assert!(rollback_param_at(
+            "vm.swappiness",
+            empty.to_str().unwrap(),
+            &conf,
+            &service,
+            &script
+        )
+        .is_err());
+        let missing = dir.0.join("missing.json");
+        let error = rollback_param_at(
+            "vm.swappiness",
+            missing.to_str().unwrap(),
+            &conf,
+            &service,
+            &script,
+        )
+        .err()
+        .expect("a missing ledger is a command error");
+        assert!(
+            error.to_string().contains("没有找到 rollback 文件"),
+            "{error:#}"
+        );
+        assert!(!missing.exists(), "the miss must not create a ledger");
+    }
+
+    /// The ledger lookup accepts the same spellings fix/why accept, and keeps
+    /// per-interface identity case-sensitive with its literal dots.
+    #[test]
+    fn rollback_param_lookup_accepts_the_fix_and_why_aliases() {
+        let entries = BTreeMap::from([
+            (
+                "vm.swappiness".to_string(),
+                RollbackEntry {
+                    previous: "60".into(),
+                    applied: "10".into(),
+                    path: "/proc/sys/vm/swappiness".into(),
+                },
+            ),
+            (
+                "vm/overcommit_ratio".to_string(),
+                RollbackEntry {
+                    previous: "50".into(),
+                    applied: "100".into(),
+                    path: "/proc/sys/vm/overcommit_ratio".into(),
+                },
+            ),
+            (
+                "net.ipv4.conf.Br0.100.forwarding".to_string(),
+                RollbackEntry {
+                    previous: "0".into(),
+                    applied: "1".into(),
+                    path: "/proc/sys/net/ipv4/conf/Br0.100/forwarding".into(),
+                },
+            ),
+            (
+                "block/sda/scheduler".to_string(),
+                RollbackEntry {
+                    previous: "mq-deadline".into(),
+                    applied: "none".into(),
+                    path: "/sys/block/sda/queue/scheduler".into(),
+                },
+            ),
+        ]);
+        assert_eq!(
+            ledger_key_for(&entries, "vm.swappiness").as_deref(),
+            Some("vm.swappiness")
+        );
+        assert_eq!(
+            ledger_key_for(&entries, "vm/swappiness").as_deref(),
+            Some("vm.swappiness"),
+            "the slashed alias reaches the dotted key"
+        );
+        assert_eq!(
+            ledger_key_for(&entries, "vm.overcommit_ratio").as_deref(),
+            Some("vm/overcommit_ratio"),
+            "the dotted alias reaches the slashed key"
+        );
+        assert_eq!(
+            ledger_key_for(&entries, "net/ipv4/conf/Br0.100/forwarding").as_deref(),
+            Some("net.ipv4.conf.Br0.100.forwarding")
+        );
+        assert_eq!(
+            ledger_key_for(&entries, "net.ipv4.conf.br0.100.forwarding"),
+            None,
+            "interface identity stays case-sensitive"
+        );
+        assert_eq!(
+            ledger_key_for(&entries, "block/sda/scheduler").as_deref(),
+            Some("block/sda/scheduler")
+        );
+        assert_eq!(ledger_key_for(&entries, "vm.nothing_here"), None);
+        assert_eq!(
+            paired_ledger_key(&entries, "vm.overcommit_ratio"),
+            None,
+            "no twin is recorded for the pair"
+        );
+    }
+
+    /// The whole operation runs under the ledger's exclusive lock: while
+    /// another holder keeps it, the parameter write must not happen, and the
+    /// restore completes once the lock is released.
+    #[test]
+    fn rollback_param_waits_for_the_ledger_lock() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = AtomicTestDir::new("rollback-param-lock");
+        let (conf, service, script) = fixture_paths(&dir);
+        let swappiness = dir.0.join("swappiness");
+        fs::write(&swappiness, "10").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[("vm.swappiness", "60", "10", swappiness.to_str().unwrap())],
+        );
+        let guard = lock_ledger_at(&ledger).unwrap();
+
+        let ready = Arc::new(Barrier::new(2));
+        let worker_ready = ready.clone();
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script)
+        });
+        ready.wait();
+        // 200 ms is the window transactions.rs uses for the same assertion.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            fs::read_to_string(&swappiness).unwrap(),
+            "10",
+            "the write escaped the ledger lock"
+        );
+
+        drop(guard);
+        let (key, outcome) = worker.join().unwrap().unwrap();
+        assert_eq!(key, "vm.swappiness");
+        assert_eq!(
+            (outcome.restored, outcome.failed, outcome.skipped),
+            (1, 0, 0)
+        );
+        assert_eq!(fs::read_to_string(&swappiness).unwrap(), "60");
     }
 
     fn bench(name: &str, value: f64, unit: &str) -> BenchResult {

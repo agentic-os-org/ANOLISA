@@ -214,10 +214,14 @@ impl GenAIBuilder {
                         Some(idx) => idx,
                         None => return body,
                     };
-                    // Find the last '}' — everything after it is chunked trailer
+                    // Find the last '}' — everything after it is chunked trailer.
+                    // A body can also contain a '}' before the first '{' (proxy
+                    // noise, a truncated or binary error page); slicing with an
+                    // end before the start panicked, so that shape keeps the
+                    // remainder and lets the JSON parse fail on its own.
                     let end = match body.rfind('}') {
-                        Some(idx) => idx + 1,
-                        None => return &body[start..],
+                        Some(idx) if idx >= start => idx + 1,
+                        _ => return &body[start..],
                     };
                     &body[start..end]
                 }
@@ -1386,6 +1390,23 @@ mod tests {
         http.status_code = 500;
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert_eq!(call.error.as_deref(), Some("oops"));
+    }
+
+    /// A status-4xx/5xx body is remote input: a stray `}` before the first `{`
+    /// (proxy noise, a truncated or binary error page) used to panic the slice.
+    #[test]
+    fn test_build_llm_call_error_body_with_reversed_braces_does_not_panic() {
+        let builder = GenAIBuilder::new();
+        let mut http = make_http(
+            "/v1/chat/completions",
+            None,
+            Some("} trailing {".to_string()),
+        );
+        http.status_code = 500;
+
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).expect("call is built");
+        // Nothing parses, so the raw body is reported as the error.
+        assert_eq!(call.error.as_deref(), Some("} trailing {"));
     }
 
     #[test]

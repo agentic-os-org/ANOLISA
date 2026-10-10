@@ -333,3 +333,60 @@ fn document_depth_size_and_alias_expansion_are_bounded() {
         Err(Error::Document { .. })
     ));
 }
+
+#[test]
+fn native_hook_steps_are_explicit_and_cannot_claim_provider_effects() {
+    let mut value = example();
+    value["spec"]["providers"]["raw"] = json!({
+        "protocol": "native-hook/v1alpha1", "config": {}, "timeout_ms": 1000,
+        "max_output_bytes": 4096,
+        "transport": {"type": "stdio", "location": "agent", "argv": ["/bin/cat"]}
+    });
+    value["spec"]["events"]["tool.before"]["steps"] = json!([
+        {"id": "raw", "provider": "raw", "native": {}, "on_error": "block"}
+    ]);
+    parse(&value).unwrap();
+    for (pointer, replacement) in [
+        ("/spec/providers/raw/config", json!({"ignored": true})),
+        (
+            "/spec/providers/raw/protocol",
+            json!("aw-provider/v1alpha1"),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/native",
+            json!({"ignored": true}),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/on_error",
+            json!("withhold_result"),
+        ),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(parse(&invalid).is_err(), "{pointer}");
+    }
+    for (field, replacement) in [("operation", json!("fake")), ("effects", json!(["block"]))] {
+        let mut invalid = value.clone();
+        invalid["spec"]["events"]["tool.before"]["steps"][0][field] = replacement;
+        assert!(parse(&invalid).is_err(), "{field}");
+    }
+    value["spec"]["events"]["tool.after"]["steps"] =
+        value["spec"]["events"]["tool.before"]["steps"].clone();
+    assert!(parse(&value).is_err());
+    value["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("report");
+    parse(&value).unwrap();
+}
+
+#[test]
+fn native_qoder_scheduling_is_an_explicit_adapter_setting() {
+    let mut value = example();
+    value["spec"]["agents"]["qoder"]["qoder"] = json!({"sequential": true});
+    parse(&value).unwrap();
+    value["spec"]["agents"]["qoder"]["qoder"]["sequential"] = json!(false);
+    parse(&value).unwrap();
+    value["spec"]["agents"]["qoder"]["adapter"] = json!("openclaw");
+    assert!(parse(&value).is_err());
+    value["spec"]["agents"]["qoder"]["adapter"] = json!("qoder");
+    value["spec"]["agents"]["qoder"]["qoder"]["unknown"] = json!(true);
+    assert!(parse(&value).is_err());
+}

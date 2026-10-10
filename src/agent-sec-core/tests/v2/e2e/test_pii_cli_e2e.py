@@ -6,8 +6,54 @@ import os
 import shutil
 import socket
 import subprocess
+from pathlib import Path
 
 import pytest
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        case
+        for case in json.loads(
+            (
+                Path(__file__).resolve().parents[3]
+                / "v2/crates/asc-capability-pii-scan/tests/fixtures/credit_cards.json"
+            ).read_text()
+        )["cases"]
+        if case["id"]
+        in {
+            "openclaw-B-tool-output",
+            "cosh-B2-tool-output",
+            "run-directory",
+            "clean-text",
+            "synthetic-card",
+        }
+    ],
+    ids=lambda case: case["id"],
+)
+def test_credit_card_tool_outputs_and_audit(case, pii_daemon, pii_environment):
+    report = _scan(
+        pii_daemon,
+        "--stdin",
+        "--source",
+        "tool_output",
+        "--raw-evidence",
+        "--redact-output",
+        input_text=case["text"],
+    )
+    cards = [f for f in report["findings"] if f["type"] == "credit_card"]
+    assert [f["raw_evidence"] for f in cards] == case["cards"]
+    assert report["redacted_text"] == case["redacted_text"]
+    assert report["verdict"] == ("warn" if case["cards"] else "pass")
+    [event] = _events(pii_environment)
+    assert event["details"]["result"]["verdict"] == report["verdict"]
+    assert event["details"]["result"]["summary"] == report["summary"]
+    assert event["details"]["request"]["source"] == "tool_output"
+    audit = json.dumps(event)
+    assert "raw_evidence" not in audit and "redacted_text" not in audit
+    for card in case["cards"]:
+        assert card not in audit
 
 
 def _events(environment):
@@ -75,7 +121,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
         }
         assert report["ok"] and report["verdict"] == "deny"
         assert report["summary"]["source"] == source
-        assert report["summary"]["scanner_version"] == "2.0.0"
+        assert report["summary"]["scanner_version"] == "2.0.1"
         assert report["summary"]["coverage"] == {"status": "complete", "reasons": []}
         assert not report["summary"].get("findings_truncated", False)
         assert not report["summary"].get("redacted_text_omitted", False)
@@ -95,7 +141,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
     for event in events:
         assert event["result"] == "succeeded"
         assert event["details"]["request"]["text_length"] == len(text)
-        assert event["details"]["result"]["summary"]["scanner_version"] == "2.0.0"
+        assert event["details"]["result"]["summary"]["scanner_version"] == "2.0.1"
         assert event["details"]["result"]["summary"]["source"] == source
     audit = json.dumps(events)
     for forbidden in [

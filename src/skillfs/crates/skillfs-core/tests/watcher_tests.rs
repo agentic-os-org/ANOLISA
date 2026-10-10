@@ -419,6 +419,47 @@ async fn test_watcher_symlink_moved_in_is_not_a_dir_created() {
 
 #[tokio::test]
 #[ignore = "flaky in CI - filesystem events may not fire reliably"]
+async fn delta9_flat_to_categorized_move_does_not_delete_a_live_skill() {
+    // Delta-audit round 9, real inotify: moving a flat skill into a
+    // category directory inside the same source (`mv source/my-skill
+    // source/category/my-skill`) must not emit DirDeleted for the skill —
+    // the manifest stays loadable at category/my-skill/SKILL.md.
+    let source_dir = tempdir().expect("source directory");
+    let source = source_dir.path().to_path_buf();
+    let category = source.join("category");
+    std::fs::create_dir(&category).expect("category directory");
+    let skill = source.join("my-skill");
+    std::fs::create_dir(&skill).expect("flat skill directory");
+    std::fs::write(skill.join("SKILL.md"), "---\nname: my-skill\n---\n").expect("manifest");
+
+    let (mut rx, handle) = watch_source_with_handle(source, 50)
+        .await
+        .expect("watcher must be attached before categorizing the skill");
+    let categorized = category.join("my-skill");
+    std::fs::rename(&skill, &categorized).expect("categorize the skill");
+    assert!(categorized.join("SKILL.md").is_file());
+
+    let mut saw_dir_deleted = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(SkillEvent::DirDeleted(path))) => {
+                saw_dir_deleted = true;
+                eprintln!("unexpected DirDeleted: {}", path.display());
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    handle.shutdown().await;
+    assert!(
+        !saw_dir_deleted,
+        "a flat-to-categorized move must not report the live skill deleted"
+    );
+}
+
+#[tokio::test]
+#[ignore = "flaky in CI - filesystem events may not fire reliably"]
 async fn test_watcher_debouncing() {
     let source_dir = tempdir().unwrap();
     let source = source_dir.path().to_path_buf();

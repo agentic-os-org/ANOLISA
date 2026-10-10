@@ -96,12 +96,18 @@ pub(crate) fn decide_sls_config_change(
             }
         }
         Some(Some(new_path)) => {
-            if uid.is_empty() {
-                return SlsConfigAction::UidUnavailable;
-            }
             if !sls_activated.swap(true, Ordering::SeqCst) {
+                if uid.is_empty() {
+                    // Nothing was built, so the flag must not claim activation.
+                    sls_activated.store(false, Ordering::SeqCst);
+                    return SlsConfigAction::UidUnavailable;
+                }
                 SlsConfigAction::Activate { path: new_path }
             } else {
+                // Already active: the exporter exists and reads the global
+                // dynamic path, so the account id is not needed here. Checking
+                // it first dropped every path change whenever ECS metadata was
+                // temporarily unreachable, leaving the old path in effect.
                 SlsConfigAction::Reactivated { path: new_path }
             }
         }
@@ -463,6 +469,35 @@ mod tests {
             }
         );
         assert!(flag.load(Ordering::SeqCst), "flag set on activation");
+    }
+
+    /// A path change on an already-active exporter needs no account id: the
+    /// exporter exists and reads the process-global dynamic path.
+    #[test]
+    fn test_decide_sls_reactivation_without_uid_still_reactivates() {
+        let flag = AtomicBool::new(true);
+        assert_eq!(
+            decide_sls_config_change(Some(Some("/new.log".to_string())), &flag, ""),
+            SlsConfigAction::Reactivated {
+                path: "/new.log".to_string()
+            }
+        );
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "an active exporter stays active"
+        );
+
+        // First activation still needs the uid, and a deferred activation must
+        // not leave the flag set.
+        let flag = AtomicBool::new(false);
+        assert_eq!(
+            decide_sls_config_change(Some(Some("/new.log".to_string())), &flag, ""),
+            SlsConfigAction::UidUnavailable
+        );
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "a deferred activation must not look active"
+        );
     }
 
     #[test]

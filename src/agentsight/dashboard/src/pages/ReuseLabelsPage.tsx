@@ -12,6 +12,7 @@
  * rule gets noticed.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { sameMembers } from '../utils/setSelection';
 
 import { useI18n } from '../i18n';
 import {
@@ -103,6 +104,15 @@ export const ReuseLabelsPage: React.FC = () => {
   // violate the active label/confirm-state filter — and its selection reset
   // discards rows the user already ticked under the new filter.
   const loadRequestIdRef = useRef(0);
+  // The filters as of the newest render. Judging and triage run for minutes
+  // and refetch when they finish; that refetch must honour whatever filter the
+  // reader picked in the meantime, not the one captured when the action
+  // started — otherwise it becomes the newest request and repopulates the
+  // table with rows that violate the active filter.
+  const labelFilterRef = useRef(labelFilter);
+  labelFilterRef.current = labelFilter;
+  const stateFilterRef = useRef(stateFilter);
+  stateFilterRef.current = stateFilter;
 
   const load = useCallback(async () => {
     const requestId = ++loadRequestIdRef.current;
@@ -110,8 +120,8 @@ export const ReuseLabelsPage: React.FC = () => {
     setError(null);
     try {
       const response = await fetchReuseSessions({
-        label: labelFilter || undefined,
-        confirmState: stateFilter || undefined,
+        label: labelFilterRef.current || undefined,
+        confirmState: stateFilterRef.current || undefined,
         limit: PAGE_LIMIT,
       });
       if (requestId !== loadRequestIdRef.current) return;
@@ -128,11 +138,11 @@ export const ReuseLabelsPage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [labelFilter, stateFilter]);
+  }, []);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, labelFilter, stateFilter]);
 
   const counts = useMemo(() => {
     const tally: Record<string, number> = {};
@@ -290,8 +300,8 @@ export const ReuseLabelsPage: React.FC = () => {
   };
 
   const toggleAllPending = () => {
-    const pending = rows.filter((row) => !row.human_backed).map((row) => row.session_id);
-    setSelected((current) => (current.size === pending.length ? new Set() : new Set(pending)));
+    const pending = new Set(rows.filter((row) => !row.human_backed).map((row) => row.session_id));
+    setSelected((current) => (sameMembers(current, pending) ? new Set() : pending));
   };
 
   /**
@@ -316,7 +326,9 @@ export const ReuseLabelsPage: React.FC = () => {
         })
         .map((row) => row.session_id),
     );
-    setSelected((current) => (ids.size === current.size ? new Set() : ids));
+    // Toggle off only when this criterion's rows are the current selection:
+    // a hand-picked selection of the same size is a different selection.
+    setSelected((current) => (sameMembers(current, ids) ? new Set() : ids));
   };
 
   return (

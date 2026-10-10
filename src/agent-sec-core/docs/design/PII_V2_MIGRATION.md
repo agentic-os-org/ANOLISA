@@ -62,7 +62,7 @@ Builtin word and decimal classes are frozen to Python 3.11 / Unicode 14; exhaust
 scalar classification and case-folding fixtures protect the V1 boundary semantics.
 Elapsed time, additive V2 metadata and the explicitly upgraded engine identity are excluded from comparisons.
 
-Detection semantics are versioned as `summary.scanner_version=2.0.0`, included in `ruleset_id`
+Detection semantics are versioned as `summary.scanner_version=2.0.1`, included in `ruleset_id`
 and successful/failed reports and audit results. Built-in engine identity is `regex_v2`; custom
 identity is `fancy_regex`. This version is independent of the package version. Version 2.0.0 fixes
 empty-claims JWT detection, retains nonrecursive structural checks for large integers/deep JSON,
@@ -70,6 +70,12 @@ normalizes Chinese ID decimal dates/check digits and fullwidth X, and rejects al
 placeholders. The 142 V1 cases continue to check retained behavior; `tests/detection_quality.rs`
 adds positives/negatives for all 11 types and the new boundaries without regenerating V1 outputs.
 Existing large-input, Unicode, overlapping-redaction, backtracking and finding-limit tests remain.
+
+Version 2.0.1 and the retained Python detector validate complete card expressions against
+supported grouping and network prefix/length pairs before Luhn. The supported seven-network
+matrix and expression boundaries are documented in the [user guide](../../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md#supported-card-number-formats).
+`tests/fixtures/credit_cards.json` is shared by Python and Rust quality tests, including
+the original benign Host outputs; the historical V1 oracle is unchanged.
 
 The top-level V1 fields remain `ok`, `verdict`, `summary`, `findings`, `elapsed_ms`,
 and optional `redacted_text`. `summary` separates execution status from coverage:
@@ -189,7 +195,7 @@ and bounded shutdown; PII adds no second propagation or output pipeline.
 | Identity | UID/GID/PID from UDS peer; trace and `agent_name` never confer authority |
 | Trace | Top-level CLI `--trace-context`, V1 aliases/trim/256-character limits; shared Context/top-level carrier; opaque labels are not OTel IDs |
 | Rules | Versioned change from V1 per-user/next-scan reload to central/startup load |
-| Detection version | `scanner_version=2.0.0`; builtin quality changes and native custom syntax have separate cases |
+| Detection version | `scanner_version=2.0.1`; builtin quality changes and native custom syntax have separate cases |
 | Regex | Native fancy-regex; actual invalid syntax, YAML alias/multiple-document rejection, execution budgets/engine limits |
 | Runtime | Rust detector/client/daemon; retained V1 is an independent rollback oracle |
 

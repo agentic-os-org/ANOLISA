@@ -2,7 +2,7 @@
 
 `v1.json` contains synthetic inputs and expected responses recorded while the
 existing Python scanner regression suite passes, plus explicit token and email
-boundary probes and JWT JSON/base64 compatibility cases (142 synthetic cases). It records the source commit,
+boundary probes and JWT JSON/base64 compatibility cases (234 synthetic cases). It records the source commit,
 SHA-256 of each Python PII source file, and Python version. Regeneration is an
 explicit review operation; Rust tests never regenerate their expected values.
 
@@ -24,5 +24,16 @@ versioned engine name (`regex_v1` to `regex_v2`). Version 2.0.0 detection improv
 have separate positive/negative cases in `../detection_quality.rs`; this V1 oracle
 is not regenerated to hide intentional differences. Custom rule behavior is validated separately using isolated rule sets.
 
+The email sentence-boundary repair adds 92 cases from the maintained V1 scanner;
+all 142 previously frozen cases retain their expected responses. These additions
+cover punctuation, invalid suffixes, Unicode spans, redaction, and confidence.
+Rust also checks these boundaries independently in `../detection_quality.rs`.
+
 The source hashes remain the reproducible oracle identity after implementation-branch
 rebases; `source_commit` records the original capture checkout, not the final PR tip.
+
+`credit_cards.json` is a separate, explicit card-structure corpus shared by the retained
+Python detector and Rust 2.0.1. It includes synthetic network/format boundaries and
+the original 214-byte OpenClaw and 840-byte Cosh-NG benign tool outputs, with input
+SHA-256 identities. Its expected findings and redactions describe the new contract;
+adding or changing these cases does not regenerate the historical `v1.json` oracle.

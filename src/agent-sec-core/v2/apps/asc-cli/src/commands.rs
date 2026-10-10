@@ -3,6 +3,7 @@
 mod binding;
 mod capabilities;
 mod common;
+mod observability;
 mod policy;
 mod scan_code;
 mod scan_pii;
@@ -26,6 +27,9 @@ use crate::InputError;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Collect observability records through the daemon.
+    #[command(subcommand)]
+    Observability(observability::ObservabilityCommand),
     /// Manage authored Policy templates.
     #[command(subcommand)]
     Policy(PolicyCommand),
@@ -51,6 +55,7 @@ pub(crate) enum Command {
 impl Command {
     pub(crate) fn request(&self) -> Result<DaemonRequest, InputError> {
         match self {
+            Self::Observability(command) => command.request(),
             Self::Policy(command) => command.request(),
             Self::Scope(command) => command.request(),
             Self::Binding(command) => command.request(),
@@ -83,8 +88,19 @@ impl Command {
         }
     }
 
+    pub(crate) const fn is_observability_record(&self) -> bool {
+        matches!(
+            self,
+            Self::Observability(observability::ObservabilityCommand::Record(_))
+        )
+    }
+
     pub(crate) const fn is_scan_code(&self) -> bool {
         matches!(self, Self::ScanCode(_))
+    }
+
+    pub(crate) fn is_llm_code_scan(&self) -> bool {
+        matches!(self, Self::ScanCode(command) if command.is_llm_mode())
     }
 
     pub(crate) const fn pii_format(&self) -> Option<PiiOutputFormat> {

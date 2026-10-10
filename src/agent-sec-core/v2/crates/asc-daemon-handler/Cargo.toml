@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 asc-action-runtime = { workspace = true }
 asc-action-types = { workspace = true }
+asc-model-client = { workspace = true }
 
 asc-observability.workspace = true
 tracing.workspace = true

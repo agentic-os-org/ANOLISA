@@ -120,6 +120,9 @@ impl Cli {
                 .timeout_ms
                 .unwrap_or(if arguments.command.is_scan_prompt() {
                     120_000
+                } else if arguments.command.is_llm_code_scan() {
+                    u32::try_from(asc_model_client::MAX_CODE_SCAN_BUDGET.as_millis())
+                        .unwrap_or(u32::MAX)
                 } else if arguments.command.is_skill_sec() {
                     60_000
                 } else {
@@ -204,6 +207,11 @@ impl Cli {
         self.command.prompt_scan_run()
     }
 
+    /// Whether this invocation uses the V1-compatible observability-record projection.
+    pub const fn is_observability_record(&self) -> bool {
+        self.command.is_observability_record()
+    }
+
     /// Whether this invocation uses the V1-compatible scan-code projection.
     pub const fn is_scan_code(&self) -> bool {
         self.command.is_scan_code()
@@ -273,6 +281,9 @@ pub enum InputError {
         /// Bounded public explanation.
         message: &'static str,
     },
+    /// V1-compatible observability input validation failure.
+    #[error("Error: {0}")]
+    Observability(String),
     /// The V1-compatible scan-code command received no non-whitespace source.
     #[error("Error: --code is required (use --code '<source>')")]
     EmptyCode,
@@ -308,6 +319,7 @@ impl InputError {
             Self::EmptyCode => true,
             Self::ScanPrompt(error) => error.is_usage_hint(),
             Self::PiiRead(_)
+            | Self::Observability(_)
             | Self::PiiUtf8
             | Self::PiiTooLarge
             | Self::SkillSec(_)
@@ -364,6 +376,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn llm_code_scan_uses_the_model_compatible_default_deadline() {
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/run/asc.sock",
+                "scan-code",
+                "--code",
+                "echo hello",
+                "--mode",
+                "llm",
+            ],
+            None,
+        )
+        .expect("LLM scan parses");
+        assert_eq!(cli.timeout(), asc_model_client::MAX_CODE_SCAN_BUDGET);
     }
 
     #[test]

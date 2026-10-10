@@ -2692,6 +2692,7 @@ async fn cmd_mount(
                 os_adapter: os_adapter_stage,
                 directive_enabled,
                 skill_discover_root,
+                max_skill_size: Some(config.max_skill_size),
             },
         )
     });

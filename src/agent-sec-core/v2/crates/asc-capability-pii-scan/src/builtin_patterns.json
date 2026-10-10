@@ -1,9 +1,9 @@
 {
   "_REMOTE_EMAIL_URI_RE": "(?i)(?<![\\w+.-])(?:git\\+ssh|ssh|sftp|scp|rsync)://$",
   "_SHELL_COMMAND_SEPARATOR_RE": "[\\n;|&]",
-  "_EMAIL_RE": "(?<![\\w.+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\\.[A-Za-z]{2,63}(?![\\w.-])",
+  "_EMAIL_RE": "(?<![\\w.+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\\.[A-Za-z]{2,63}(?![\\w-])",
   "_PHONE_CN_RE": "(?<!\\d)(?:\\+?86[-\\s]?)?1[3-9]\\d[-\\s]?\\d{4}[-\\s]?\\d{4}(?!\\d)",
-  "_CREDIT_CARD_RE": "(?<!\\d)(?:\\d[ -]?){13,19}(?!\\d)",
+  "_CREDIT_CARD_RE": "\\d[\\d -]*",
   "_CN_ID_RE": "(?<!\\d)\\d{17}[\\dXxＸｘ](?!\\w)",
   "_JWT_RE": "(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{3,}\\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])",
   "_API_KEY_RE": "\\b(?:sk|pk|rk|gh[pousr]|xox[baprs])[-_][A-Za-z0-9_=-]{16,}\\b",

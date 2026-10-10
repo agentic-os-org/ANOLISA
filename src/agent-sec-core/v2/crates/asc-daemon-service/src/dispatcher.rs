@@ -171,7 +171,7 @@ pub trait RequestDispatcher: Send + Sync + 'static {
     }
 
     /// Selects a method-specific execution budget after a complete bounded frame arrives.
-    /// The transport caps overrides at 120 seconds. Default adapters keep configured limits.
+    /// The transport caps overrides at the composition-root configured maximum.
     /// Implementations must perform bounded parsing only, never I/O or capability work.
     fn dispatch_timeout(&self, _payload: &[u8]) -> Option<std::time::Duration> {
         None

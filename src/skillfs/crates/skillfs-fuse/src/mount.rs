@@ -54,6 +54,11 @@ pub struct MountConfig {
     /// reader runs in a different mount namespace and can only access the
     /// SkillFS view, for example `<mountpoint>/skills` in a sidecar workload.
     pub skill_discover_root: Option<PathBuf>,
+    /// The `max_skill_size` the store was loaded with. `None` keeps
+    /// [`skillfs_core::DEFAULT_MAX_SKILL_SIZE`]; set it whenever the store was
+    /// loaded with a non-default [`skillfs_core::ParseConfig`] so reads,
+    /// listings and reparses apply the same per-file ceiling.
+    pub max_skill_size: Option<usize>,
 }
 
 /// Mount the SkillFS FUSE filesystem (blocking) with a unified
@@ -88,6 +93,7 @@ pub fn mount_configured(
         config.os_adapter,
         config.directive_enabled,
         config.skill_discover_root,
+        config.max_skill_size,
     )
 }
 
@@ -129,6 +135,7 @@ pub fn mount_background_configured(
             config.os_adapter,
             config.directive_enabled,
             config.skill_discover_root,
+            config.max_skill_size,
         ) {
             error!(error = %e, "background mount failed");
         }
@@ -169,6 +176,7 @@ fn mount_inner(
     os_adapter: Option<OsAdapterStage>,
     directive_enabled: Option<bool>,
     skill_discover_root: Option<PathBuf>,
+    max_skill_size: Option<usize>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -235,6 +243,9 @@ fn mount_inner(
     );
     if let Some(root) = skill_discover_root {
         fs = fs.with_skill_discover_root(root);
+    }
+    if let Some(limit) = max_skill_size {
+        fs = fs.with_max_skill_size(limit);
     }
     if let Some(sink) = event_sink {
         fs = fs.with_event_sink(sink);
@@ -352,7 +363,7 @@ pub fn mount(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, None, None,
     )
 }
 
@@ -382,7 +393,7 @@ pub fn mount_with_security(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, event_sink, policy, None, None, None, None,
-        None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, None, None, None,
     )
 }
 
@@ -417,6 +428,7 @@ pub fn mount_with_security_and_active_resolver(
         event_sink,
         policy,
         active_resolver,
+        None,
         None,
         None,
         None,
@@ -477,6 +489,7 @@ pub fn mount_with_security_active_resolver_and_demo_refresh(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -519,6 +532,7 @@ pub fn mount_with_security_active_resolver_demo_refresh_and_trusted_writer(
         refresh_controller,
         None,
         trusted_writer,
+        None,
         None,
         None,
         None,
@@ -688,6 +702,7 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             refresh_controller,
             None,
             trusted_writer,
+            None,
             None,
             None,
             None,

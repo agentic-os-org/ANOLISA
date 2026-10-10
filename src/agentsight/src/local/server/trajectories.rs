@@ -361,11 +361,17 @@ mod tests {
 
     fn make_state(store: Option<Arc<TrajectoryStore>>) -> web::Data<LocalState> {
         let db_path = PathBuf::from("/nonexistent/trajectories.db");
+        let storage_config = StorageConfig::default();
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(store)),
             database_manager: manager(&db_path),
             db_path,
-            storage_config: StorageConfig::default(),
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &storage_config,
+            )),
+            storage_config,
+            config_path: None,
             reuse_store: None,
             reuse_llm_judge_enabled: false,
         })
@@ -375,11 +381,17 @@ mod tests {
         store: Arc<TrajectoryStore>,
         db_path: PathBuf,
     ) -> web::Data<LocalState> {
+        let storage_config = StorageConfig::default();
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(Some(store))),
             database_manager: manager(&db_path),
             db_path,
-            storage_config: StorageConfig::default(),
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &storage_config,
+            )),
+            storage_config,
+            config_path: None,
             reuse_store: None,
             reuse_llm_judge_enabled: false,
         })
@@ -390,11 +402,17 @@ mod tests {
         reuse: Arc<crate::reuse::ReuseStore>,
         db_path: PathBuf,
     ) -> web::Data<LocalState> {
+        let storage_config = StorageConfig::default();
         web::Data::new(LocalState {
             trajectory_store: Arc::new(RwLock::new(Some(store))),
             database_manager: manager(&db_path),
             db_path,
-            storage_config: StorageConfig::default(),
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &storage_config,
+            )),
+            storage_config,
+            config_path: None,
             reuse_store: Some(reuse),
             reuse_llm_judge_enabled: false,
         })

@@ -61,6 +61,7 @@ sudo ktuner tune --dry-run
 # Apply recommendations (requires root)
 sudo ktuner tune               # apply all
 sudo ktuner tune --conservative
+sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
 
 # Fix a single parameter
 sudo ktuner fix vm.swappiness
@@ -68,9 +69,10 @@ sudo ktuner fix vm.swappiness
 # Explain why a parameter should change
 ktuner why net.core.somaxconn
 
-# Undo all changes ktuner made
+# Undo all changes ktuner made, or one recorded parameter
 sudo ktuner rollback          # destructive + terminal: restores and deletes the ledger
 sudo ktuner rollback --list   # read-only preview of what rollback would restore
+sudo ktuner rollback vm.swappiness   # restore one recorded parameter
 ```
 
 All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success,
@@ -78,6 +80,20 @@ All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success
 Rollback returns `1` for failed writes or missing paths, including partial restoration;
 its JSON counts remain on stdout and the ledger is kept for retry. An empty ledger
 is a successful no-op (`0`); an unreadable or missing ledger is a command error (`2`).
+`sudo ktuner rollback <param>` follows the same contract for the entry it names —
+plus the mutually exclusive twin recorded with it, restored together because writing
+either knob zeroes the other — and reports that entry as `param` in its JSON; a
+parameter the ledger does not record is a command error (`2`).
+
+`tune --exclude <param>` (repeatable) leaves a named recommendation out of the plan:
+nothing is written for it, nothing is recorded in the rollback ledger, and nothing is
+persisted. It applies after the `--category` and `--conservative` filters, and the
+excluded entry is listed in the output (`would_skip`, reason `excluded`); a name that
+matches no recommendation in scope is reported in `unmatched_exclude` instead of
+failing the run (on an empty plan, every given name). Excluding every recommendation
+is a `blocked` run with exit code `1`, like any other plan with nothing applicable. Excluding one half of a mutually exclusive
+sysctl pair does not stop the kernel from zeroing it when the other half is written;
+ktuner records the cleared original so `rollback` can restore it.
 
 ---
 

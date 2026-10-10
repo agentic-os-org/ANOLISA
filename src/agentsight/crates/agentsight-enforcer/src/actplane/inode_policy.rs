@@ -387,6 +387,41 @@ mod tests {
     }
 
     #[test]
+    fn guarded_paths_reject_wrapped_non_agent_labels() {
+        let fixture = Fixture::new();
+        let source = fixture.file("secret");
+        let first = fixture.file("a");
+        let second = fixture.file("b");
+        let sources = format!("source AGENT = exec \"**\"\nsource SECRET = file \"{source}\"\n");
+        for clauses in [
+            format!("block unlink file \"{first}\"\n if SECRET"),
+            format!("block unlink file \"{first}\"\n if\n SECRET"),
+            format!("block unlink file \"{first}\" unless target \"/safe\""),
+            format!(
+                "block unlink file \"{first}\" if AGENT\n block write file \"{second}\" if SECRET"
+            ),
+        ] {
+            let dsl = format!("{sources}rule r:\n {clauses}\n because \"x\"\n");
+            let error = prepare(&dsl).unwrap_err();
+            assert!(
+                error.to_string().contains("inode-only delete protection"),
+                "{error}"
+            );
+        }
+        let malformed = guard_dsl(&first, "unless AGENT");
+        assert!(
+            prepare(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown unless cond 'AGENT'")
+        );
+        let prepared = prepare(&guard_dsl(&first, "if AGENT")).unwrap();
+        assert_eq!(prepared.files.len(), 1);
+        assert_eq!(prepared.files[0].path, first);
+        assert_eq!(prepared.files[0].rule_id, Some(0));
+    }
+
+    #[test]
     fn credential_source_registers_only_a_path_and_keeps_inode_alive() {
         let fixture = Fixture::new();
         let path = fixture.file("cred");

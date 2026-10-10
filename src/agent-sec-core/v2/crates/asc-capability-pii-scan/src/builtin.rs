@@ -50,6 +50,7 @@ const RESERVED: &[&str] = &[
     "localhost",
     "test",
 ];
+const EMAIL_SENTENCE_DELIMITERS: &str = "\"')]}>,;:!?，。；：！？、）］｝】〕》〉」』”’";
 
 pub(crate) struct BuiltinDetector {
     patterns: BTreeMap<String, Regex>,
@@ -324,6 +325,15 @@ mod resource_tests {
         ));
         assert!(matches.next().is_none());
     }
+
+    #[test]
+    fn email_sentence_period_scan_checks_deadline() {
+        let input = format!("alice@company.cn{} ", ".".repeat(8193));
+        assert!(matches!(
+            email_right_boundary(&input, "alice@company.cn".len(), Some(Instant::now())),
+            Err(ScanError::DeadlineExceeded)
+        ));
+    }
 }
 
 fn candidate<'a>(
@@ -375,7 +385,13 @@ fn basic<'a>(
     let matched = captures
         .get(usize::from(id == "_BEARER_RE"))
         .ok_or(ScanError::Matching)?;
-    let value = matched.as_str();
+    // The cursor consumes the whole numeric expression; only trailing punctuation
+    // lies outside the card's evidence and redaction span.
+    let value = if id == "_CREDIT_CARD_RE" {
+        matched.as_str().trim_end_matches([' ', '-'])
+    } else {
+        matched.as_str()
+    };
     let mut metadata = BTreeMap::new();
     let (kind, base, validator) = match id {
         "_PRIVATE_KEY_RE" => ("private_key", 1.0, Some("pem_private_key")),
@@ -387,7 +403,7 @@ fn basic<'a>(
         "_JWT_RE" if jwt_boundaries(text.input, matched) && validators::jwt(value) => {
             ("jwt", 0.94, Some("jwt_structure"))
         }
-        "_CREDIT_CARD_RE" if validators::luhn(value) => ("credit_card", 0.92, Some("luhn")),
+        "_CREDIT_CARD_RE" if validators::credit_card(value) => ("credit_card", 0.92, Some("luhn")),
         "_CN_ID_RE" if validators::cn_id(value) => ("cn_id", 0.93, Some("cn_id_checksum")),
         "_PHONE_CN_RE" => ("phone_cn", 0.78, None),
         _ => return Ok(None),
@@ -395,7 +411,13 @@ fn basic<'a>(
     if let Some(validator) = validator {
         metadata.insert("validator".into(), json!(validator));
     }
-    Ok(Some(candidate(text, matched.range(), kind, base, metadata)))
+    Ok(Some(candidate(
+        text,
+        matched.start()..matched.start() + value.len(),
+        kind,
+        base,
+        metadata,
+    )))
 }
 
 fn word(c: char) -> bool {
@@ -551,9 +573,8 @@ fn next_email<'a>(
         check_deadline(deadline)?;
         cursor.position = whole.start() + 1;
         let before = text.input[..whole.start()].chars().next_back();
-        let after = text.input[whole.end()..].chars().next();
         if before.is_some_and(|c| word(c) || matches!(c, '.' | '+' | '-'))
-            || after.is_some_and(|c| word(c) || matches!(c, '.' | '-'))
+            || !email_right_boundary(text.input, whole.end(), deadline)?
         {
             continue;
         }
@@ -573,6 +594,31 @@ fn next_email<'a>(
         }
     }
     Ok(None)
+}
+
+fn email_right_boundary(
+    input: &str,
+    mut end: usize,
+    deadline: Option<Instant>,
+) -> Result<bool, ScanError> {
+    let Some(after) = input[end..].chars().next() else {
+        return Ok(true);
+    };
+    if after != '.' {
+        return Ok(!word(after) && after != '-');
+    }
+    // A period run is punctuation only when it cannot continue the domain.
+    let start = end;
+    while input.as_bytes().get(end) == Some(&b'.') {
+        if (end - start).is_multiple_of(4096) {
+            check_deadline(deadline)?;
+        }
+        end += 1;
+    }
+    Ok(input[end..]
+        .chars()
+        .next()
+        .is_none_or(|c| space(c) || EMAIL_SENTENCE_DELIMITERS.contains(c)))
 }
 
 fn space(c: char) -> bool {

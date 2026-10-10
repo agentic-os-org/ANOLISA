@@ -16,6 +16,7 @@ ktuner check --conservative    # 仅高置信度
 sudo ktuner tune --dry-run     # 预览，不做实际变更
 sudo ktuner tune               # 全部应用
 sudo ktuner tune --conservative
+sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一项
 
 # 修正单个参数（需要 root 权限）
 sudo ktuner fix <param>        # 例如 sudo ktuner fix vm.swappiness
@@ -23,9 +24,10 @@ sudo ktuner fix <param>        # 例如 sudo ktuner fix vm.swappiness
 # 解释某个参数为何需要修改
 ktuner why <param>             # 例如 ktuner why net.core.somaxconn
 
-# 回滚所有变更（需要 root 权限）
+# 回滚变更（需要 root 权限）
 sudo ktuner rollback          # 破坏性且终结（删除 ledger）
 sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
+sudo ktuner rollback <param>  # 回滚单个已记录参数，例如 vm.dirty_bytes
 ```
 
 ## JSON 输出
@@ -43,9 +45,10 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 | 2      | 错误（详情见 stderr JSON） |
 
 `rollback` 在所有记录值恢复完成时返回 `0`（空记录为成功的无操作），
-任一值恢复失败、路径缺失或持久化配置文件未能删除时返回 `1`，记录读取失败等命令错误返回 `2`。
+任一值恢复失败、路径缺失或清理未能完成（持久化配置文件或回滚记录本身未能删除）时返回 `1`，
+记录读取失败等命令错误返回 `2`。
 未完成的恢复仍在 stdout 输出 JSON 计数，并保留回滚记录以便重试；未能删除的持久化文件同样计入失败，
-因为它会在下次启动时重新写入调优值。
+因为它会在下次启动时重新写入调优值；回滚记录本身未能删除时，`rollback --list` 会继续列出这些已恢复的条目。
 
 ### check 输出
 
@@ -103,10 +106,38 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 
 全部被过滤时的短路输出同样携带 `would_skip` 列表（与计数并存）。
 
+`tune --exclude <param>`（可重复）把点名的建议移出计划：不写入、不进回滚
+账本、不持久化。排除在 `--category`/`--conservative` 过滤之后生效；被排除
+项在 `would_skip` 中以原因 `excluded` 列出（操作者本人的指示优先于
+`unwritable` 和 `runtime_dangerous`）；某个名字没有命中范围内的任何建议
+时不算错误——它按给定拼写回显在 `unmatched_exclude` 中，让没起作用的排除
+可见而不是静默（计划为空时所有给出的名字都会出现在其中）：
+
+```json
+{"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "kernel.dmesg_restrict", "reason": "excluded"}]}
+```
+
+全部被排除时与任何无可应用项的计划一样，输出 `status: "blocked"`、退出码
+1（`check` 仍会报告这些参数）；`blocked_excluded` 与其余短路计数并列，三者
+加总等于 `recommendations`：
+
+```json
+{"applied": 0, "blocked": 55, "blocked_excluded": 55, "blocked_runtime_dangerous": 0, "blocked_unwritable": 0, "dry_run": true, "recommendations": 55, "status": "blocked", "would_apply": [], "would_skip": [ ... ]}
+```
+
+`--exclude` 管不到内核自身的副作用：互斥 sysctl 对（`vm.dirty_bytes`/
+`vm.dirty_ratio`、`vm.dirty_background_bytes`/`vm.dirty_background_ratio`、
+`vm.overcommit_kbytes`/`vm.overcommit_ratio`）中写入一半会把另一半清零
+（`mm/page-writeback.c`、`mm/util.c`），因此被排除的参数在其对应项被写入时
+仍会被内核清零。ktuner 照旧把被清零的原值记入账本（`rollback` 因此能恢复，
+不丢原值）、只持久化真正写入的那一半，重启时由内核重现同样的清零状态；
+内置规则从不同时把一对孪生的两半放进计划。
+
 `tune --dry-run` 输出的是预览；`status` 与短路路径使用同一套取值
 （此处为 `planned`；无可应用项时为 `optimal`/`blocked`）。`would_apply`
-列出真实运行会写入的项，`would_skip` 列出本环境过滤掉的项及原因
-（`unwritable` 或 `runtime_dangerous`），`blocked` 为这些项的数量：
+列出真实运行会写入的项，`would_skip` 列出本次运行不写入的项及原因
+（`unwritable`、`runtime_dangerous`，或 `--exclude` 点名时的 `excluded`），
+`blocked` 为这些项的数量：
 
 ```json
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
@@ -122,6 +153,24 @@ sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
 ```json
 {"failed": 0, "restored": 5, "skipped": 0, "status": "Full"}
 ```
+
+### rollback <param> 输出
+
+`sudo ktuner rollback <param>` 只恢复该参数命中的账本条目，其余条目保留。参数拼写与
+`fix`、`why` 相同（点/斜杠别名、含字面点的网卡名）：
+
+```json
+{"failed": 0, "param": "vm.dirty_bytes", "restored": 2, "skipped": 0, "status": "Full"}
+```
+
+`param` 是被恢复的账本条目，拼写与 `rollback --list` 一致。持久化文件按剩余账本重新
+生成；账本清空时走与全量 rollback 相同的收尾（先删持久化文件，再删账本）。内核互斥的
+参数对（`vm.dirty_bytes` / `vm.dirty_ratio`、`vm.overcommit_kbytes` /
+`vm.overcommit_ratio`、`dirty_background_` 对）连同账本记录的孪生一起恢复：写任一半都会
+把另一半清零，只恢复一半无法让账本描述内核的真实状态，因此 `restored` 把两条都计入。
+写入失败或路径缺失的条目连同其孪生一起保留，退出码 `1`，可重试；账本里没有的参数是命令
+错误（`2`，stderr JSON），绝不静默成功。`status` 描述本次尝试（`Full` / `Partial` /
+`Nothing`），不表示账本已清空。普通 `ktuner rollback` 与 `ktuner rollback --list` 行为不变。
 
 ### rollback --list 输出
 

@@ -126,6 +126,65 @@ pub fn extract_response_content(
         return Some((content, reasoning, tool_calls));
     }
 
+    // Anthropic streams carry the assistant output in `delta` events and in
+    // `content[]` blocks. Without these arms the manual counters recorded a
+    // real answer as zero output tokens (and the drain estimate as empty),
+    // because nothing here recognised the protocol.
+    if let Some(delta) = resp.get("delta") {
+        match delta.get("type").and_then(|t| t.as_str()) {
+            Some("text_delta") => {
+                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        content.push_str(text);
+                        has_data = true;
+                    }
+                }
+            }
+            Some("thinking_delta") => {
+                if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                    if !thinking.is_empty() {
+                        reasoning = match reasoning {
+                            Some(existing) => Some(existing + thinking),
+                            None => Some(thinking.to_string()),
+                        };
+                        has_data = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(blocks) = resp.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        if !text.is_empty() {
+                            content.push_str(text);
+                            has_data = true;
+                        }
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let arguments = block
+                        .get("input")
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        tool_calls.push(format!("{name}: {arguments}"));
+                        has_data = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if has_data {
+        return Some((content, reasoning, tool_calls));
+    }
+
     // OpenAI Responses API SSE chunks have a different shape — top-level
     // "type" tags such as `response.output_text.delta` carry text in
     // `delta` / `text`, while `response.output_item.done` embeds the
@@ -831,5 +890,45 @@ mod tests {
             tool_calls.is_empty(),
             "tool_call without function should be skipped"
         );
+    }
+
+    /// Anthropic streams deliver the answer as `content_block_delta` events and
+    /// complete bodies as `content[]` blocks; neither shape was recognised, so
+    /// the manual counters recorded a real answer as zero output tokens.
+    #[test]
+    fn anthropic_shapes_yield_content_reasoning_and_tool_calls() {
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello there"}
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&delta)).expect("text delta extracts");
+        assert_eq!(content, "hello there");
+        assert!(reasoning.is_none());
+        assert!(tool_calls.is_empty());
+
+        let thinking = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "let me think"}
+        });
+        let (_, reasoning, _) =
+            extract_response_content(Some(&thinking)).expect("thinking extracts");
+        assert_eq!(reasoning.as_deref(), Some("let me think"));
+
+        let body = serde_json::json!({
+            "id": "msg_1",
+            "content": [
+                {"type": "text", "text": "the answer"},
+                {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                 "input": {"city": "Paris"}}
+            ]
+        });
+        let (content, _, tool_calls) =
+            extract_response_content(Some(&body)).expect("complete body extracts");
+        assert_eq!(content, "the answer");
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].starts_with("get_weather: "));
     }
 }

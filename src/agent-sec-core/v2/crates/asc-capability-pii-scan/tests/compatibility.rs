@@ -17,7 +17,7 @@ fn frozen_v1_builtin_responses_match() {
         let result = scanner
             .scan(case["text"].as_str().unwrap(), &options)
             .unwrap();
-        assert_eq!(result.summary.scanner_version, "2.0.0");
+        assert_eq!(result.summary.scanner_version, "2.0.1");
         assert!(
             result
                 .findings

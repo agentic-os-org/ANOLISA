@@ -629,11 +629,16 @@ mod tests {
         inner: InMemoryStore,
         stash_calls: AtomicUsize,
         delete_calls: AtomicUsize,
+        /// When nonzero, `stash` starts failing after that many calls.
+        fail_stashes_after: usize,
     }
 
     impl StashStore for CountingStore {
         fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
-            self.stash_calls.fetch_add(1, Ordering::Relaxed);
+            let calls = self.stash_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_stashes_after != 0 && calls >= self.fail_stashes_after {
+                return Err(StashError::Backend("simulated mid-run failure".to_owned()));
+            }
             self.inner.stash(payload)
         }
 
@@ -885,6 +890,36 @@ mod tests {
             .collect()
     }
 
+    fn build_log_with_midway_diagnostic() -> String {
+        // One cargo run split by a diagnostic into two reducible blocks, so
+        // the compressor performs two stash writes.
+        let mut output = "$ cargo build\n".to_owned();
+        for index in 0..30 {
+            if index == 15 {
+                output.push_str("error[E0308]: mismatched types\n  --> src/main.rs:3:4\n");
+            }
+            output.push_str(&format!(
+                "Compiling package-{index:03} v0.1.{index} with extended progress output\n"
+            ));
+        }
+        output.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+        output
+    }
+
+    fn build_log_with_duplicate_blocks() -> String {
+        // Two routine blocks whose omitted payloads are identical, so the
+        // compressor creates then refreshes a single stash row.
+        let mut output = "$ cargo build\n".to_owned();
+        for group in 0..2 {
+            for _ in 0..12 {
+                output.push_str("Compiling package v0.1.0 with extended progress output\n");
+            }
+            output.push_str(&format!("phase boundary {group}\n"));
+        }
+        output.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+        output
+    }
+
     fn build_log_config() -> PostToolPipelineConfig {
         let mut config = config(Duration::from_secs(1), 32);
         config.force_json = false;
@@ -1025,6 +1060,58 @@ mod tests {
             assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
             assert_eq!(concrete.len(), 1);
         }
+    }
+
+    #[test]
+    fn partial_build_log_stash_failure_deletes_orphaned_tentative_writes() {
+        // The compressor's second stash write fails mid-run: it returns the
+        // lossless original plus one tentative write, and the pipeline must
+        // delete that orphaned row instead of leaving an unreachable entry.
+        let concrete = Arc::new(CountingStore {
+            fail_stashes_after: 1,
+            ..CountingStore::default()
+        });
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let input = build_log_with_midway_diagnostic();
+
+        let run =
+            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store)).unwrap();
+
+        assert_eq!(run.response.disposition, Disposition::NoSavings);
+        assert_eq!(run.response.output, input);
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(run.stash_errors, Some(1));
+        assert_eq!(run.stash_writes, Some(0));
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(concrete.len(), 0);
+    }
+
+    #[test]
+    fn applied_build_log_with_duplicate_payloads_commits_one_row() {
+        // Two omission blocks share one payload: the compressor creates then
+        // refreshes one row, both markers carry its key, and commit reports
+        // the key exactly once with a single surviving row.
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let input = build_log_with_duplicate_blocks();
+
+        let run =
+            PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store)).unwrap();
+
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+        assert_eq!(
+            run.response.applied_operations,
+            [AppliedOperation::BuildLogReduction]
+        );
+        assert_eq!(run.response.stash_keys.len(), 1);
+        assert_eq!(run.stash_writes, Some(1));
+        assert_eq!(run.stash_errors, Some(0));
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(concrete.len(), 1);
     }
 
     #[test]

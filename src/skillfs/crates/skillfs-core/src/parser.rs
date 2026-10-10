@@ -84,7 +84,7 @@ pub fn parse_skill_md(content: &str, dir_name: &str) -> SkillEntry {
 
 /// Parse a SKILL.md file from a filesystem path.
 pub fn parse_skill_file(path: &Path) -> Result<SkillEntry, ParseError> {
-    parse_skill_file_with_limit(path, 1_048_576)
+    parse_skill_file_with_limit(path, crate::DEFAULT_MAX_SKILL_SIZE)
 }
 
 /// Parse from file with explicit size limit.

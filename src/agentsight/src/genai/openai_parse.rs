@@ -195,6 +195,14 @@ impl GenAIBuilder {
                 }
             }
 
+            // Legacy function_call (pre-tool_calls spelling of a tool request).
+            if let Some(part) = msg
+                .get("function_call")
+                .and_then(Self::parse_legacy_function_call)
+            {
+                parts.push(part);
+            }
+
             // tool_calls (role=assistant 发起的 tool calls)
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
@@ -282,22 +290,13 @@ impl GenAIBuilder {
         parsed_message: &Option<ParsedApiMessage>,
         http: &HttpRecord,
     ) -> Option<String> {
-        // 1. Try parsed message response.id
+        // 1. Try parsed message response.id. `ParsedApiMessage::response_id`
+        // covers every protocol the parser knows; matching the variants by hand
+        // missed SysOM, whose call then carried the generated call id instead of
+        // the provider's response id.
         if let Some(msg) = parsed_message {
-            match msg {
-                ParsedApiMessage::OpenAICompletion {
-                    response: Some(resp),
-                    ..
-                } if !resp.id.is_empty() => {
-                    return Some(resp.id.clone());
-                }
-                ParsedApiMessage::AnthropicMessage {
-                    response: Some(resp),
-                    ..
-                } if !resp.id.is_empty() => {
-                    return Some(resp.id.clone());
-                }
-                _ => {}
+            if let Some(id) = msg.response_id().filter(|id| !id.is_empty()) {
+                return Some(id.to_string());
             }
         }
 
@@ -385,6 +384,15 @@ impl GenAIBuilder {
             }
         }
 
+        // Legacy function_call: the same tool request in the older spelling.
+        if let Some(part) = m
+            .function_call
+            .as_ref()
+            .and_then(Self::parse_legacy_function_call)
+        {
+            parts.push(part);
+        }
+
         InputMessage {
             role,
             parts,
@@ -433,6 +441,15 @@ impl GenAIBuilder {
             }
         }
 
+        // Legacy function_call: the same tool request in the older spelling.
+        if let Some(part) = m
+            .function_call
+            .as_ref()
+            .and_then(Self::parse_legacy_function_call)
+        {
+            parts.push(part);
+        }
+
         OutputMessage {
             role,
             parts,
@@ -453,6 +470,31 @@ impl GenAIBuilder {
         });
         Some(MessagePart::ToolCall {
             id,
+            name,
+            arguments,
+        })
+    }
+
+    /// Legacy `function_call` payload, the pre-`tool_calls` spelling that
+    /// older models (and clients replaying their history) still use:
+    /// `{"name": "…", "arguments": "{…}"}`. Without this the tool request was
+    /// dropped from the semantic model, so tool-use metrics saw a plain text
+    /// turn where the model had actually asked to run a tool.
+    pub(super) fn parse_legacy_function_call(value: &serde_json::Value) -> Option<MessagePart> {
+        if value.get("function").is_some() {
+            // Already in the modern nesting.
+            return Self::parse_openai_tool_call_value(value);
+        }
+        let name = value.get("name")?.as_str()?.to_string();
+        if name.is_empty() {
+            return None;
+        }
+        let arguments = value.get("arguments").and_then(|v| match v {
+            serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+            other => Some(other.clone()),
+        });
+        Some(MessagePart::ToolCall {
+            id: None,
             name,
             arguments,
         })
@@ -912,7 +954,9 @@ impl GenAIBuilder {
         let mut added_indexes: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut orphan_done: Vec<(String, String, String)> = Vec::new();
         // Set by the terminal `response.incomplete` event when the stream was
-        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`.
+        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`;
+        // `response.completed` sets `completed` for the finish fallback below.
+        let mut completed = false;
         let mut output_capped = false;
 
         for chunk in chunks {
@@ -934,6 +978,13 @@ impl GenAIBuilder {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         reasoning_buf.push_str(delta);
                     }
+                }
+                "response.created" => {
+                    saw_responses_event = true;
+                }
+                "response.completed" => {
+                    saw_responses_event = true;
+                    completed = true;
                 }
                 "response.output_item.added" => {
                     saw_responses_event = true;
@@ -1012,6 +1063,7 @@ impl GenAIBuilder {
                 // of response.completed; the cap reason must surface as the
                 // chat-completions "length" finish rather than a clean "stop".
                 "response.incomplete" => {
+                    saw_responses_event = true;
                     if let Some(resp) = chunk.get("response") {
                         if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
                             && resp
@@ -1076,11 +1128,17 @@ impl GenAIBuilder {
         }
         parts.extend(tool_parts);
 
-        // Same finish-reason convention as the analyzer's aggregator: the cap
-        // wins even when a tool call was in flight, because its arguments may
-        // be cut mid-JSON.
+        // Same finish-reason convention as the analyzer's aggregator: the
+        // terminal event decides. A capped stream is the chat "length"
+        // finish — the cap wins even when a tool call was in flight, because
+        // its arguments may be cut mid-JSON — and a stream whose capture
+        // never saw a terminal event at all keeps an unknown finish instead
+        // of a fabricated clean stop, the same None the Anthropic merger
+        // leaves on a missing message_delta.
         let finish_reason = if output_capped {
             Some("length".to_string())
+        } else if !completed {
+            None
         } else if parts
             .iter()
             .any(|p| matches!(p, MessagePart::ToolCall { .. }))
@@ -1288,6 +1346,57 @@ mod tests {
         assert!(req.stream);
     }
 
+    /// Legacy `function_call` payloads (finish_reason `function_call`) carry the
+    /// tool request in the pre-`tool_calls` spelling; dropping them made the
+    /// turn look like plain text.
+    #[test]
+    fn legacy_function_call_becomes_a_tool_call_part() {
+        let body = r#"{
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "user", "content": "weather in Beijing?"},
+                {"role": "assistant", "content": null,
+                 "function_call": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+        match &req.messages[1].parts[0] {
+            MessagePart::ToolCall {
+                name, arguments, ..
+            } => {
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments
+                        .as_ref()
+                        .and_then(|a| a.get("city"))
+                        .and_then(|c| c.as_str()),
+                    Some("Beijing")
+                );
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+
+        // The typed response converter does the same.
+        let output =
+            serde_json::from_value::<crate::analyzer::message::OpenAIResponse>(serde_json::json!({
+                "id": "chatcmpl-legacy",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-3.5-turbo",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": null,
+                                "function_call": {"name": "get_weather", "arguments": "{}"}},
+                    "finish_reason": "function_call"
+                }]
+            }))
+            .expect("response parses");
+        let msg = &output.choices[0].message;
+        let parts =
+            GenAIBuilder::openai_msg_to_output(msg, output.choices[0].finish_reason.as_deref());
+        assert!(matches!(parts.parts[0], MessagePart::ToolCall { .. }));
+    }
+
     #[test]
     fn test_parse_request_body_with_tool_calls() {
         let body = r#"{
@@ -1328,6 +1437,41 @@ mod tests {
         assert_eq!(req.messages[0].role, "system");
         assert_eq!(req.messages[1].role, "user");
         assert!(req.stream);
+    }
+
+    /// The SysOM (Aliyun Copilot) response carries its id inside `response.id`;
+    /// ignoring it made the row fall back to the generated call id, breaking
+    /// correlation with the provider's identifier.
+    #[test]
+    fn sysom_responses_keep_their_id() {
+        let parsed = Some(ParsedApiMessage::SysomMessage {
+            request: None,
+            response: Some(crate::analyzer::message::sysom::SysomResponse {
+                id: Some("chatcmpl-sysom-1".to_string()),
+                choices: Vec::new(),
+            }),
+        });
+        let http = HttpRecord {
+            timestamp_ns: 0,
+            pid: 1,
+            comm: "t".to_string(),
+            method: "POST".to_string(),
+            path: "/api/v1/copilot/generate_copilot".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: None,
+            response_headers: "{}".to_string(),
+            response_body: None,
+            duration_ns: 0,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        };
+
+        assert_eq!(
+            GenAIBuilder::extract_response_id(&parsed, &http).as_deref(),
+            Some("chatcmpl-sysom-1")
+        );
     }
 
     #[test]
@@ -1826,6 +1970,36 @@ mod tests {
             MessagePart::Text { content } if content == "partial"
         ));
         assert_eq!(finish.as_deref(), Some("length"));
+    }
+
+    /// A stream whose capture never saw a terminal event (dead-pid drain of
+    /// an interrupted call) keeps an unknown finish instead of a fabricated
+    /// clean stop, and an in-flight tool call still flushes with its partial
+    /// arguments.
+    #[test]
+    fn test_extract_parts_from_sse_body_responses_truncated_flushes_call() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_3"}},
+            {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_t","name":"read_file"}},
+            {"type":"response.function_call_arguments.delta","delta":"{\"path\":"}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_t"));
+                assert_eq!(name, "read_file");
+                // Arguments cut mid-JSON stay a None payload, not a lossy
+                // partial parse.
+                assert!(arguments.is_none());
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+        assert!(finish.is_none(), "no terminal event means no finish reason");
     }
 
     #[test]

@@ -1,6 +1,8 @@
 """Unit tests for the PII scanner."""
 
+import json
 import time
+from pathlib import Path
 
 import pytest
 from agent_sec_cli.pii_checker.detectors.base import PiiCandidate
@@ -8,6 +10,37 @@ from agent_sec_cli.pii_checker.detectors.regex import RegexPiiDetector
 from agent_sec_cli.pii_checker.models import PiiFinding
 from agent_sec_cli.pii_checker.redactor import redact_text
 from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES, PiiScanner
+
+CARD_CASES = json.loads(
+    (
+        Path(__file__).resolve().parents[3]
+        / "v2/crates/asc-capability-pii-scan/tests/fixtures/credit_cards.json"
+    ).read_text()
+)["cases"]
+
+
+@pytest.mark.parametrize("case", CARD_CASES, ids=lambda case: case["id"])
+def test_credit_card_structure_and_complete_spans(case):
+    text = case["text"]
+    result = _scan(
+        text, raw_evidence=True, redact_output=True, include_low_confidence=True
+    )
+    cards = [f for f in result["findings"] if f["type"] == "credit_card"]
+    assert [f["raw_evidence"] for f in cards] == case["cards"]
+    for finding in cards:
+        span = finding["span"]
+        assert text[span["start"] : span["end"]] == finding["raw_evidence"]
+        assert finding["severity"] == "warn"
+    assert result["redacted_text"] == case["redacted_text"]
+
+
+def test_long_invalid_card_expression_preserves_later_card():
+    text = "1-" * 50_000 + "4111111111111111; card-4111111111111111"
+    result = _scan(text, raw_evidence=True, redact_output=True)
+    cards = [f for f in result["findings"] if f["type"] == "credit_card"]
+    assert len(cards) == 1
+    assert cards[0]["span"] == {"start": len(text) - 16, "end": len(text)}
+    assert result["redacted_text"] == text[:-16] + "[REDACTED_CARD:1111]"
 
 
 @pytest.fixture(autouse=True)
@@ -351,6 +384,130 @@ def test_fixture_words_do_not_lower_real_email_confidence():
 )
 def test_invalid_email_syntax_is_not_detected(email):
     assert "email" not in _types(_scan(f"Contact {email}"))
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["", ".", "...", ". Next sentence", ".\n", ".\t", ".\u00a0", ".\x1c", ",", "。"]
+    + [
+        "." + delimiter
+        for delimiter in "\"')]}>,;:!?，。；：！？、）］｝】〕》〉」』”’"
+    ],
+)
+def test_email_sentence_boundaries_preserve_spans_and_punctuation(suffix: str) -> None:
+    email = "alice@company.co.uk"
+    prefix = "备注🙂e\u0301 "
+    text = prefix + email + suffix
+    result = _scan(text, raw_evidence=True, redact_output=True)
+
+    assert result["verdict"] == "warn"
+    assert len(result["findings"]) == 1
+    finding = result["findings"][0]
+    assert finding["type"] == "email"
+    assert finding["raw_evidence"] == email
+    assert finding["span"] == {"start": len(prefix), "end": len(prefix + email)}
+    assert finding["confidence"] == 0.82
+    assert finding["metadata"]["validator"] == "email_syntax"
+    assert result["redacted_text"] == prefix + "a***@company.co.uk" + suffix
+
+
+@pytest.mark.parametrize(
+    "suffix", ["", ".", ". Do not call any tools.", " Do not call any tools."]
+)
+def test_email_sentence_original_cosh_prompt(suffix: str) -> None:
+    email = "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+    text = email + suffix
+    if "tools" in suffix:
+        text = (
+            "Reply with exactly this synthetic test email address and nothing else: "
+            + text
+            + " The address is invented test data."
+        )
+    result = _scan(text, raw_evidence=True)
+
+    assert result["verdict"] == "warn"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["raw_evidence"] == email
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".123", ".c", ".-bad", "._bad", "..evil", ".cn-", "中", "_", "-", ".中", ".🙂"]
+    + ["." + delimiter for delimiter in "/@+%`([{<\\"]
+    + ["...123", ".../", "." + "a" * 64],
+)
+def test_email_sentence_rejects_domain_continuations_without_hiding_later_email(
+    suffix: str,
+) -> None:
+    text = "alice@company.cn" + suffix + " bob@securecorp.cn."
+    result = _scan(text, raw_evidence=True, redact_output=True)
+
+    assert result["verdict"] == "warn"
+    assert [finding["raw_evidence"] for finding in result["findings"]] == [
+        "bob@securecorp.cn"
+    ]
+    assert (
+        result["redacted_text"] == "alice@company.cn" + suffix + " b***@securecorp.cn."
+    )
+
+
+@pytest.mark.parametrize("email", ["alice@example.com", "alice@sub.example.net"])
+def test_email_sentence_reserved_domains_keep_low_confidence(email: str) -> None:
+    hidden = _scan(email + ".")
+    shown = _scan(email + ".", include_low_confidence=True, raw_evidence=True)
+
+    assert hidden["verdict"] == "pass"
+    assert shown["verdict"] == "warn"
+    finding = shown["findings"][0]
+    assert finding["raw_evidence"] == email
+    assert finding["confidence"] == 0.35
+    assert finding["metadata"]["context"] == "reserved_domain"
+
+
+def test_email_sentence_remote_identity_keeps_low_confidence() -> None:
+    text = "ssh://alice@company.cn."
+    assert _scan(text)["verdict"] == "pass"
+    result = _scan(text, include_low_confidence=True, raw_evidence=True)
+    finding = result["findings"][0]
+    assert finding["raw_evidence"] == "alice@company.cn"
+    assert finding["confidence"] == 0.35
+    assert finding["metadata"]["context"] == "remote_identity"
+
+
+@pytest.mark.parametrize("suffix", ["/", "@", "+", "%", "`", "(", "🙂", "\u0301"])
+def test_email_sentence_nonperiod_boundaries_remain_accepted(suffix: str) -> None:
+    result = _scan("alice@company.cn" + suffix, raw_evidence=True)
+    assert result["findings"][0]["raw_evidence"] == "alice@company.cn"
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        ".alice@company.cn",
+        "alice.@company.cn",
+        "alice..bob@company.cn",
+        "alice@-company.cn",
+        "alice@company-.cn",
+        "alice@company..cn",
+        "alice@bad_domain.cn",
+        "a" * 65 + "@company.cn",
+        "alice@" + "a" * 64 + ".cn",
+        "a" * 64 + "@" + ".".join(["b" * 63, "c" * 63, "d" * 63, "cn"]),
+    ],
+)
+def test_email_sentence_periods_preserve_existing_validation(email: str) -> None:
+    assert _types(_scan(email + ".")) == set()
+
+
+def test_email_sentence_long_period_run_keeps_later_findings() -> None:
+    text = "alice@company.cn" + "." * 100_000 + " bob@securecorp.cn."
+    result = _scan(text, raw_evidence=True)
+
+    assert result["verdict"] == "warn"
+    assert [finding["raw_evidence"] for finding in result["findings"]] == [
+        "alice@company.cn",
+        "bob@securecorp.cn",
+    ]
 
 
 def test_raw_evidence_default_off_and_opt_in():

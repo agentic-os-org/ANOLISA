@@ -584,3 +584,14 @@ RPM 安装套件通过 914 项，并单独通过修正后的 systemd 生命周�
 | DPROC-SG-004 | 真实二进制 staging、配置权限/保留、V1/V2 unit 分离 | `tests/packaging/test-skillsec-install.sh` |
 | DPROC-SG-005 | 安装后 CLI 核心流程、公共审计及进程退出 | `tests/v2/e2e/test_skillsec_cli_e2e.py`、`test_daemon_process_e2e.py` |
 | DPROC-SG-006 | 实际 RPM 安装、system unit 启停/重启、普通 UID 与用户/系统 Skill 操作 | 第七批独立 Linux 安装环境执行；staging 和进程 fixture 不替代此证据 |
+
+## [TARGET V2] 可观测采集存储接线（DPROC-022）
+
+`obs.record` 的 JSONL/SQLite writers 使用与安全事件相同的已解析 daemon 系统数据目录，
+显式装配、惰性初始化，无 HOME fallback。可观测双写仅通过 daemon 持有的
+`ConfiguredObservabilitySinks` 实例，不提供进程全局可观测写入口。关闭时保留 sinks 到 transport/blocking drain
+之后再执行 close/保留期维护。具体路径、失败及有界关闭语义见
+[V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md#3-数据路径与生命周期)。
+DPROC-022 的 executable fixture 为
+`tests/v2/e2e/test_observability_record_e2e.py::test_v1_cli_records_persist_and_survive_restart`；
+验证源码二进制的目录权限、双落盘与进程重启，不替代 RPM/systemd 或跨 UID 验收。

@@ -256,6 +256,12 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                     || part
                         .get("functionCall")
                         .is_some_and(|call| non_empty_string(call.get("name")))
+                    // Gemini image generation streams the answer as inline
+                    // image parts (`inlineData.data`) and code execution
+                    // streams the model-authored code as `executableCode.code`
+                    // — both are the first content-bearing output of the
+                    // answer. `codeExecutionResult` is sandbox tool output,
+                    // not model output, and stays non-dating.
                     || part
                         .get("inlineData")
                         .is_some_and(|data| non_empty_string(data.get("data")))
@@ -645,10 +651,43 @@ mod latency_tests {
                             "finishReason": "STOP", "index": 0}],
             "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
         });
+        let image_part = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                "role": "model"}, "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let code_part = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_inline_data = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": ""}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_executable_code = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": ""}}],
+                "role": "model"}, "index": 0}]
+        });
+        let code_execution_result = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                "role": "model"}, "index": 0}]
+        });
 
         assert!(event_has_meaningful_output(Some(&text)));
         assert!(event_has_meaningful_output(Some(&tool_call)));
         assert!(!event_has_meaningful_output(Some(&usage_only)));
+        // Image and model-authored code parts are incremental answer output.
+        assert!(event_has_meaningful_output(Some(&image_part)));
+        assert!(event_has_meaningful_output(Some(&code_part)));
+        // Empty payloads and sandbox tool results stay non-meaningful.
+        assert!(!event_has_meaningful_output(Some(&empty_inline_data)));
+        assert!(!event_has_meaningful_output(Some(&empty_executable_code)));
+        assert!(!event_has_meaningful_output(Some(&code_execution_result)));
     }
 
     #[test]

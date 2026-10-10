@@ -2,11 +2,16 @@
 
 use crate::{
     check, identifier, positive, Error, Exchange, Failure, FailureAction, Host, Invocation, Method,
+    StepOutput,
 };
-use aw_provider::{admission::AdmittedStep, Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION};
+use aw_provider::{
+    admission::{AdmittedStep, StepExecution},
+    Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION,
+};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     sync::{atomic::AtomicBool, Mutex},
     time::{Duration, Instant},
 };
@@ -19,6 +24,7 @@ use std::{
 pub struct Event<'a> {
     host: &'a Host,
     value: Value,
+    native_input: Option<Vec<u8>>,
     name: String,
     id: String,
     deadline: Instant,
@@ -38,9 +44,40 @@ impl Host {
     /// # Errors
     /// Rejects expired/cancelled events, excessive input, mismatched Agent binding,
     /// disabled or unsupported events and invalid local budget/context data.
+    /// Native steps require [`Self::hook_event`] with original callback input.
     pub fn event<'a>(
         &'a self,
         value: Value,
+        deadline: Instant,
+        cancelled: &'a AtomicBool,
+    ) -> Result<Event<'a>, Error> {
+        self.open(value, None, deadline, cancelled)
+    }
+
+    /// Bind the exact native callback bytes and normalized event to one shared budget.
+    ///
+    /// Native steps receive these bytes unchanged. Structured steps receive the
+    /// normalized event and retain their regular protocol validation.
+    ///
+    /// # Errors
+    /// Returns the same context/deadline errors as [`Self::event`], or an input limit.
+    pub fn hook_event<'a>(
+        &'a self,
+        value: Value,
+        native_input: Vec<u8>,
+        deadline: Instant,
+        cancelled: &'a AtomicBool,
+    ) -> Result<Event<'a>, Error> {
+        if native_input.len() > MAX_MESSAGE_BYTES {
+            return Err(Error::Invalid("native input size limit"));
+        }
+        self.open(value, Some(native_input), deadline, cancelled)
+    }
+
+    fn open<'a>(
+        &'a self,
+        value: Value,
+        native_input: Option<Vec<u8>>,
         deadline: Instant,
         cancelled: &'a AtomicBool,
     ) -> Result<Event<'a>, Error> {
@@ -61,6 +98,16 @@ impl Host {
         let configured = &spec["events"][&name];
         if configured["enabled"] != true || !matches!(name.as_str(), "tool.before" | "tool.after") {
             return Err(Error::Invalid("event was not enabled and admitted"));
+        }
+        if native_input.is_none()
+            && self
+                .steps
+                .iter()
+                .any(|step| step.event == name && matches!(step.execution, StepExecution::Native))
+        {
+            return Err(Error::Invalid(
+                "native steps require original callback input",
+            ));
         }
         let budget = configured
             .get("budget_ms")
@@ -85,6 +132,7 @@ impl Host {
         Ok(Event {
             host: self,
             value,
+            native_input,
             name,
             id: identifier()?,
             deadline,
@@ -123,6 +171,33 @@ impl Event<'_> {
     /// Returns a selection error for unknown/already claimed steps. All call failures,
     /// including pre-spawn cancellation/deadline, are recorded inside the invocation.
     pub fn invoke(&self, step_id: &str) -> Result<Invocation, Error> {
+        self.invoke_with_environment(step_id, None)
+    }
+
+    /// Execute a step with the complete environment observed by its native callback.
+    ///
+    /// Only native-hook steps use this snapshot, replacing their bound environment
+    /// without restoring variables removed by the Agent. Structured Providers keep
+    /// their prepared context. Environment bytes are not event data or call metadata.
+    /// This method shares the original event deadline and once-only step claims.
+    ///
+    /// # Errors
+    /// Returns the same selection errors as [`Self::invoke`]. Invalid native
+    /// environments produce a recorded [`Failure::NativeEnvironment`] and consume
+    /// the step claim, preserving its configured failure action.
+    pub fn invoke_with_native_environment(
+        &self,
+        step_id: &str,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> Result<Invocation, Error> {
+        self.invoke_with_environment(step_id, Some(environment))
+    }
+
+    fn invoke_with_environment(
+        &self,
+        step_id: &str,
+        environment: Option<&BTreeMap<OsString, OsString>>,
+    ) -> Result<Invocation, Error> {
         let step = self
             .steps()
             .find(|step| step.step_id == step_id)
@@ -134,7 +209,11 @@ impl Event<'_> {
             .ok_or(Error::Invalid("prepared Provider is missing"))?;
         let record = self.host.record(
             &step.provider,
-            Method::Invoke,
+            if matches!(step.execution, StepExecution::Native) {
+                Method::NativeHook
+            } else {
+                Method::Invoke
+            },
             Some(&self.id),
             Some(&step.step_id),
         )?;
@@ -146,24 +225,34 @@ impl Event<'_> {
         {
             return Err(Error::Invalid("step was already claimed for this event"));
         }
-        let request_id = record.request_id.clone();
-        let Exchange { record, result } = self
-            .host
-            .transport(provider, self.deadline, self.cancelled)
-            .exchange(record, |budget_ms| {
-                self.host.protocol.bind_invocation(json!({
-                    "api_version": VERSION, "method": "invoke", "request_id": request_id,
-                    "operation": step.operation, "config_revision": self.host.revision,
-                    "budget_ms": budget_ms, "allowed_effects": step.effects,
-                    "config": provider.config, "event": self.value,
-                }))
-            });
-        let result = result.and_then(|reply| match reply {
-            Reply::Invocation(outcome) => Ok(outcome),
-            _ => Err(Failure::Protocol(aw_provider::Error::Invalid(
-                "unexpected invocation reply type",
-            ))),
-        });
+        let transport = self.host.transport(provider, self.deadline, self.cancelled);
+        let (record, result) = match &step.execution {
+            StepExecution::Native => {
+                let input = self
+                    .native_input
+                    .as_ref()
+                    .ok_or(Error::Invalid("native callback input is missing"))?;
+                transport.native(record, input, environment)
+            }
+            StepExecution::Provider { operation, effects } => {
+                let request_id = record.request_id.clone();
+                let Exchange { record, result } = transport.exchange(record, |budget_ms| {
+                    self.host.protocol.bind_invocation(json!({
+                        "api_version": VERSION, "method": "invoke", "request_id": request_id,
+                        "operation": operation, "config_revision": self.host.revision,
+                        "budget_ms": budget_ms, "allowed_effects": effects,
+                        "config": provider.config, "event": self.value,
+                    }))
+                });
+                let result = result.and_then(|reply| match reply {
+                    Reply::Invocation(outcome) => Ok(StepOutput::Provider(outcome)),
+                    _ => Err(Failure::Protocol(aw_provider::Error::Invalid(
+                        "unexpected invocation reply type",
+                    ))),
+                });
+                (record, result)
+            }
+        };
         let failure_action = result.is_err().then_some(if step.on_error == "block" {
             FailureAction::Block
         } else {

@@ -451,6 +451,20 @@ fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (St
     StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {e}"), 1))
 }
 
+/// Best-effort stderr warning whose own write failure cannot fail the
+/// command. `eprintln!` panics when writing to stderr fails (a full
+/// filesystem behind redirected logs), which turned the fail-soft stats
+/// warning into exit 101 while the compression output itself was fine.
+/// Write errors are discarded: there is no fallback channel, and
+/// failing the command here is the regression to avoid.
+fn warn_stats(message: &str) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(message.as_bytes());
+    let _ = stderr.write_all(b"\n");
+    let _ = stderr.flush();
+}
+
 /// Resolve the stash database path under a trusted state root.
 ///
 /// File-level overrides may reside beneath the passwd-backed home or the
@@ -1277,11 +1291,17 @@ fn record_compression_stats(
         .with_mode(mode)
         .with_stash(stash_writes, stash_errors, stash_size);
 
-    // SQLite stats recording — gated by stats_enabled
+    // SQLite stats recording — gated by stats_enabled. The warning is
+    // best-effort: a failed stderr write (full filesystem behind
+    // redirected logs) must not turn a fail-soft stats miss into a
+    // failed compression command.
     if config.is_stats_enabled()
         && let Ok(recorder) = open_recorder_with(database_paths)
+        && let Err(e) = recorder.record(&record)
     {
-        let _ = recorder.record(&record);
+        warn_stats(&format!(
+            "[tokenless-stats] WARNING: failed to record stats entry: {e}"
+        ));
     }
 
     // SLS recording — fail-silent, independent of SQLite

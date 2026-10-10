@@ -148,3 +148,47 @@ pub fn run(
         Err(Error::UnsupportedPlatform)
     }
 }
+
+/// Run an Agent with inherited terminal streams and exclusive process-group ownership.
+///
+/// The session lasts until the child exits or the caller supplies a termination
+/// signal. Pending signals are forwarded to the owned group; termination then
+/// has a two-second grace period. The foreground terminal is restored and owned
+/// descendants are stopped before returning the original child exit status.
+/// The caller must serialize foreground sessions and own signal-handler setup.
+/// This is foreground execution, not a shell job-control implementation.
+///
+/// # Errors
+/// Rejects spawn, terminal-transfer, child-wait and bounded cleanup failures.
+pub fn run_foreground(
+    command: &CommandSpec,
+    signal: &std::sync::atomic::AtomicI32,
+) -> Result<ExitStatus, Error> {
+    run_foreground_observed(command, signal, |_| {})
+}
+
+/// Run a foreground Agent and report its owned leader PID after terminal handoff.
+///
+/// `started` runs once on the caller's thread after successful spawn and terminal
+/// transfer, before waiting for exit. The PID is also the owned process-group ID.
+/// The callback must return promptly and must not reap the child; the executor
+/// retains exclusive cleanup ownership. Spawn/transfer failure does not call it.
+/// See [`run_foreground`] for signal, terminal and lifetime guarantees.
+///
+/// # Errors
+/// Returns the same execution and cleanup errors as [`run_foreground`].
+pub fn run_foreground_observed(
+    command: &CommandSpec,
+    signal: &std::sync::atomic::AtomicI32,
+    started: impl FnOnce(u32),
+) -> Result<ExitStatus, Error> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::foreground::run(command, signal, started)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, signal, started);
+        Err(Error::UnsupportedPlatform)
+    }
+}

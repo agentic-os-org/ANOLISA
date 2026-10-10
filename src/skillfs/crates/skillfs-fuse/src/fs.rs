@@ -62,6 +62,10 @@ pub struct SkillFs {
     /// directive stage is enabled.
     transform_pipeline: TransformPipeline,
     transform_cache: transform_cache::TransformCache,
+    /// Ceiling for a single `SKILL.md` in bytes: the `max_skill_size` the
+    /// store was loaded with. Reads, listings and sync reparses all apply it,
+    /// so the mount never serves a file its parser would refuse.
+    max_skill_size: u64,
     /// View configuration loaded from skillfs-views.toml (if present).
     views_config: Option<ViewsConfig>,
     /// Optional reader-visible root for paths emitted by `skill-discover`.
@@ -217,6 +221,7 @@ impl SkillFs {
             inodes: InodeManager::new(),
             transform_pipeline,
             transform_cache: transform_cache::TransformCache::default(),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
             views_config,
             skill_discover_root: None,
             source_dirfd,
@@ -253,6 +258,14 @@ impl SkillFs {
             .allocate("/.skillfs-inbox", FileType::Directory, FUSE_ROOT_ID);
 
         fs
+    }
+
+    /// Set the per-file `SKILL.md` ceiling to the `max_skill_size` of the
+    /// [`skillfs_core::ParseConfig`] the store was loaded with. The default is
+    /// [`skillfs_core::DEFAULT_MAX_SKILL_SIZE`].
+    pub fn with_max_skill_size(mut self, max_skill_size: usize) -> Self {
+        self.max_skill_size = max_skill_size as u64;
+        self
     }
 
     /// Override the Skill Security policy. The S1 default is

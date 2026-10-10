@@ -441,6 +441,55 @@ fn non_utf8_name_error(path: &Path) -> LoadError {
     }
 }
 
+/// Whether `dest` names a skill directory the categorized loader would
+/// actually load: a real, non-hidden directory exactly one level below a
+/// real, non-hidden category container under `source` — a loadable
+/// `<source>/<category>/<skill>`.
+///
+/// This is the store's own layout determination (`is_category_dir` +
+/// `has_regular_skill_md` + the hidden-name and non-UTF-8 skips), factored
+/// out so other layers can apply the same judgment the loader does.
+/// Destinations the loader would never touch — a hidden category
+/// (`<source>/.archive/<skill>`), a hidden skill leaf, a non-UTF-8
+/// category or leaf name, a destination nested deeper than
+/// `<category>/<skill>`, or a parent that is itself a flat skill
+/// directory — are not loadable, and a rename landing there has removed
+/// the skill from the loadable set.
+pub fn is_loadable_categorized_skill(source: &Path, dest: &Path) -> bool {
+    let Some(category) = dest.parent() else {
+        return false;
+    };
+    // Exactly `<source>/<category>/<skill>`: a same-scope rename (the
+    // destination is another immediate child) is not a category move,
+    // and anything deeper than `<category>/<skill>` is never loaded.
+    if category.parent() != Some(source) {
+        return false;
+    }
+    // The same skip rules the loader applies before reading any layout:
+    // hidden names are never a category or a skill.
+    if is_hidden(category) || is_hidden(dest) {
+        return false;
+    }
+    // The loader only ever loads UTF-8 names: both the category scan and
+    // the nested-leaf scan reject a non-UTF-8 component before any layout
+    // is read (`non_utf8_name_error`). A destination under a non-UTF-8
+    // category — or with a non-UTF-8 leaf of its own — never enters the
+    // loadable set, so a rename landing there has removed the skill.
+    if category.file_name().and_then(|n| n.to_str()).is_none()
+        || dest.file_name().and_then(|n| n.to_str()).is_none()
+    {
+        return false;
+    }
+    // A symlinked category is never descended into by the loader
+    // (no-follow entry type), so it cannot make the destination loadable.
+    if !std::fs::symlink_metadata(category).is_ok_and(|meta| meta.file_type().is_dir()) {
+        return false;
+    }
+    // The parent must be a genuine category container and the
+    // destination a skill directory with a regular-file `SKILL.md`.
+    is_category_dir(category) && has_regular_skill_md(dest)
+}
+
 /// Returns `true` when `dir` looks like a category container:
 /// it has no `SKILL.md` of its own but contains at least one **real
 /// sub-directory** (not a symlink) that does have a `SKILL.md`.
@@ -1399,5 +1448,39 @@ mod tests {
         assert_eq!(store.len(), 1, "the first skill still loads");
         assert_eq!(errors.len(), 1, "the second skill still errors");
         assert!(errors[0].error.contains("max skills"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loadable_categorized_skill_rejects_a_non_utf8_category() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let source = temp_dir.path();
+        let category = source.join(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
+        let dest = category.join("alpha");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: alpha\n---\n").unwrap();
+
+        assert!(
+            !is_loadable_categorized_skill(source, &dest),
+            "the loader rejects a non-UTF-8 category name before any layout is read, so the destination is not loadable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loadable_categorized_skill_rejects_a_non_utf8_skill_leaf() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let source = temp_dir.path();
+        let category = source.join("category");
+        let dest = category.join(std::ffi::OsString::from_vec(vec![0xff]));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: alpha\n---\n").unwrap();
+
+        assert!(
+            !is_loadable_categorized_skill(source, &dest),
+            "the loader rejects a non-UTF-8 nested skill leaf name, so the destination is not loadable"
+        );
     }
 }

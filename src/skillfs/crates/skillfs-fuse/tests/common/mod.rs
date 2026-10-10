@@ -148,6 +148,14 @@ impl MountFixture {
         Self::mount_now(MountMode::Normal, source, Some(mountpoint))
     }
 
+    /// Like [`MountFixture::normal`] with a caller-supplied [`MountConfig`].
+    pub fn normal_with_config<F: FnOnce(&Path)>(seed: F, config: MountConfig) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_config(MountMode::Normal, source, Some(mountpoint), config)
+    }
+
     /// Like [`MountFixture::normal`] but builds the source tempdir under the
     /// caller-supplied `parent` directory instead of `$TMPDIR`. Tests that
     /// need a specific substrate capability (T3 `user.*` xattr passthrough
@@ -318,6 +326,22 @@ impl MountFixture {
         directive_enabled: Option<bool>,
         event_sink: Option<Arc<dyn SkillEventSink>>,
     ) -> Self {
+        let config = MountConfig {
+            event_sink,
+            skill_layout,
+            os_adapter,
+            directive_enabled,
+            ..MountConfig::default()
+        };
+        Self::mount_now_with_config(mode, source, mountpoint, config)
+    }
+
+    fn mount_now_with_config(
+        mode: MountMode,
+        source: tempfile::TempDir,
+        mountpoint: Option<tempfile::TempDir>,
+        config: MountConfig,
+    ) -> Self {
         let mut store = SkillStore::new();
         store.load_from_directory(source.path(), &ParseConfig::default());
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
@@ -328,14 +352,6 @@ impl MountFixture {
             _ => unreachable!("mountpoint/mode mismatch"),
         };
         let in_place = matches!(mode, MountMode::InPlace);
-
-        let config = MountConfig {
-            event_sink,
-            skill_layout,
-            os_adapter,
-            directive_enabled,
-            ..MountConfig::default()
-        };
 
         let handle = mount_background_configured(
             &mp_path,

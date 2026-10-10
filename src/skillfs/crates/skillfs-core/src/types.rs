@@ -221,11 +221,19 @@ pub struct ParseConfig {
     pub max_skills: usize,
 }
 
+/// Default ceiling for a single `SKILL.md` file in bytes (1 MiB).
+///
+/// Shared by [`ParseConfig::default`] and [`crate::parser::parse_skill_file`].
+/// Consumers outside the parser that must decide whether a `SKILL.md` can be
+/// served at all use the same ceiling, so a file the parser would refuse is
+/// never read whole by another path.
+pub const DEFAULT_MAX_SKILL_SIZE: usize = 1_048_576;
+
 impl Default for ParseConfig {
     fn default() -> Self {
         Self {
             strict: false,
-            max_skill_size: 1_048_576, // 1MB
+            max_skill_size: DEFAULT_MAX_SKILL_SIZE,
             max_skills: 1000,
         }
     }

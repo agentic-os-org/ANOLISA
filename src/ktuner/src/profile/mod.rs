@@ -71,7 +71,10 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         // Pulsar is the same event-streaming class as Kafka; the runtime
         // detector already resolves org.apache.pulsar broker cmdlines to
         // the "pulsar" service.
-        || info.has_process("pulsar");
+        || info.has_process("pulsar")
+        // Pulsar keeps its ledgers on BookKeeper bookies, which append and
+        // replay them sequentially.
+        || info.has_process("bookkeeper");
 
     if has_db {
         return WorkloadType::IoLatency;
@@ -312,6 +315,22 @@ mod tests {
         // A database on the same host still outranks the streaming tier.
         assert_eq!(
             classify(&make_info(vec!["pulsar", "postgres"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
+    fn test_classify_bookkeeper() {
+        // A BookKeeper bookie is the storage tier of a Pulsar cluster: it
+        // appends and replays ledger entries sequentially, so a bookie-only
+        // host is an io-throughput workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["bookkeeper"])),
+            WorkloadType::IoThroughput
+        );
+        // A database on the same host still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["bookkeeper", "postgres"])),
             WorkloadType::IoLatency
         );
     }

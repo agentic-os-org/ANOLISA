@@ -37,6 +37,7 @@ asc-daemon-core.workspace = true
 asc-daemon-handler.workspace = true
 asc-daemon-service.workspace = true
 asc-event-sink.workspace = true
+asc-model-client.workspace = true
 asc-foundation-types.workspace = true
 asc-pap.workspace = true
 asc-pap-repository-memory.workspace = true

@@ -379,7 +379,7 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, Optimi
   const [showArgs, setShowArgs] = useState(false);
   const argsStr = typeof tc.arguments === 'string'
     ? tc.arguments
-    : JSON.stringify(tc.arguments, null, 2);
+    : JSON.stringify(tc.arguments, null, 2) ?? '';
   const isLongArgs = argsStr.length > 200;
   const savings = savingsMap?.get(tc.tool_call_id);
   const stratStyle = savings ? (STRATEGY_STYLES[savings.strategy] ?? { color: 'text-gray-700', bg: 'bg-gray-100' }) : null;
@@ -561,12 +561,59 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
 // same ATIF schema, so only the lookup differs — try the export first, since it
 // carries token metrics, then fall back for sessions never seen on the wire.
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalStrings(record: Record<string, unknown>, keys: string[]): boolean {
+  return keys.every(key => record[key] == null || typeof record[key] === 'string');
+}
+
+function optionalNumbers(record: Record<string, unknown>, keys: string[]): boolean {
+  return keys.every(key => record[key] == null || (
+    typeof record[key] === 'number' && Number.isFinite(record[key]) && record[key] >= 0
+  ));
+}
+
+function optionalArray(value: unknown, accepts: (item: unknown) => boolean): boolean {
+  return value == null || (Array.isArray(value) && value.every(accepts));
+}
+
+function isAtifStep(value: unknown): boolean {
+  if (!isRecord(value) || !Number.isSafeInteger(value.step_id) || (value.step_id as number) < 0
+    || typeof value.source !== 'string'
+    || !optionalStrings(value, ['message', 'timestamp', 'model_name', 'reasoning_content'])) return false;
+  if (!optionalArray(value.tool_calls, call => isRecord(call)
+    && typeof call.tool_call_id === 'string' && typeof call.function_name === 'string')) return false;
+  if (value.metrics != null && (!isRecord(value.metrics)
+    || !optionalNumbers(value.metrics, ['prompt_tokens', 'completion_tokens', 'cached_tokens']))) return false;
+  if (value.observation != null && (!isRecord(value.observation)
+    || !optionalArray(value.observation.results, result => isRecord(result)
+      && optionalStrings(result, ['source_call_id'])
+      && optionalArray(result.subagent_trajectory_ref, ref => isRecord(ref)
+        && optionalStrings(ref, ['trajectory_id', 'trajectory_path', 'session_id']))))) return false;
+  return true;
+}
+
+/** Check viewer-consumed fields without rewriting IDs or arbitrary JSON payloads. */
 function isAtifDocument(value: unknown): value is AtifDocument {
-  return !!value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && typeof (value as { schema_version?: unknown }).schema_version === 'string'
-    && String((value as { schema_version: string }).schema_version).startsWith('ATIF');
+  const pending = [value];
+  while (pending.length > 0) {
+    const doc = pending.pop();
+    if (!isRecord(doc) || typeof doc.schema_version !== 'string' || !doc.schema_version.startsWith('ATIF')
+      || !optionalStrings(doc, ['session_id', 'trajectory_id', 'notes'])
+      || !optionalArray(doc.steps, isAtifStep)) return false;
+    if (doc.agent != null && (!isRecord(doc.agent) || typeof doc.agent.name !== 'string'
+      || !optionalStrings(doc.agent, ['version', 'model_name'])
+      || !optionalArray(doc.agent.tool_definitions, () => true))) return false;
+    if (doc.final_metrics != null && (!isRecord(doc.final_metrics)
+      || !optionalNumbers(doc.final_metrics, ['total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens', 'total_steps']))) return false;
+    if (doc.subagent_trajectories != null) {
+      if (!Array.isArray(doc.subagent_trajectories)) return false;
+      pending.push(...doc.subagent_trajectories);
+    }
+  }
+  return true;
 }
 
 async function loadSessionDoc(
@@ -726,6 +773,7 @@ export const AtifViewerPage: React.FC = () => {
       let data: AtifDocument;
       if (qt === 'conversation') {
         data = await fetchAtifByConversation(i.trim());
+        if (!isAtifDocument(data)) throw new Error(t('atif.malformedDocument'));
       } else {
         data = await loadSessionDoc(i.trim(), t);
       }
@@ -799,8 +847,12 @@ export const AtifViewerPage: React.FC = () => {
       if (requestId !== loadRequestIdRef.current) return;
       try {
         const parsed = JSON.parse(ev.target?.result as string);
-        if (!parsed.schema_version || !String(parsed.schema_version).startsWith('ATIF')) {
+        if (!isRecord(parsed) || typeof parsed.schema_version !== 'string' || !parsed.schema_version.startsWith('ATIF')) {
           setError(t('atif.jsonParseFailedNotATIF'));
+          return;
+        }
+        if (!isAtifDocument(parsed)) {
+          setError(t('atif.malformedDocument'));
           return;
         }
         setDoc(parsed as AtifDocument);
