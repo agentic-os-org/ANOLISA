@@ -92,6 +92,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "ureq",
+ "url",
  "uuid",
  "xattr",
 ]
