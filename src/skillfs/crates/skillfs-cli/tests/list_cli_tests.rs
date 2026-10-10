@@ -174,3 +174,65 @@ fn list_escapes_terminal_control_bytes_in_load_error_diagnostics() {
         "the escaped name must be reported, stderr={stderr}"
     );
 }
+
+/// A SKILL.md whose frontmatter explicitly disables the skill.
+const DISABLED_SKILL: &str = "---\nname: disabled-skill\ndescription: A disabled skill\nenabled: false\n---\n# Disabled Skill\n";
+
+/// `--enabled-only` on a tree where every skill is disabled must not print
+/// the `Skills in <source>:` section header followed by zero entries: the
+/// header promises content the filtered view does not have, and a script
+/// parsing the output sees a dangling section instead of the explicit
+/// empty-result summary the empty-store case prints.
+#[test]
+fn list_enabled_only_reports_an_all_disabled_tree() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    create_skill_dir(source.path(), "disabled-skill", DISABLED_SKILL);
+
+    let out = Command::new(bin_path())
+        .args(["list", "--enabled-only", source.path().to_str().unwrap()])
+        .output()
+        .expect("invoke skillfs list --enabled-only");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "list --enabled-only should succeed, stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("No enabled skills found in"),
+        "an all-disabled tree must print the empty-result summary, stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("Skills in "),
+        "the section header must not promise entries the filtered view lacks, stdout={stdout}"
+    );
+}
+
+/// The mixed tree pins the filter itself: `--enabled-only` lists the enabled
+/// skill and omits the disabled one, so the all-disabled summary above cannot
+/// regress into an unconditional "no enabled skills" answer.
+#[test]
+fn list_enabled_only_keeps_enabled_skills_and_drops_disabled_ones() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    create_skill_dir(source.path(), "disabled-skill", DISABLED_SKILL);
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let out = Command::new(bin_path())
+        .args(["list", "--enabled-only", source.path().to_str().unwrap()])
+        .output()
+        .expect("invoke skillfs list --enabled-only");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "list --enabled-only should succeed, stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("good-skill"),
+        "the enabled skill must stay listed, stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("disabled-skill"),
+        "the disabled skill must be omitted from the --enabled-only listing, stdout={stdout}"
+    );
+}
