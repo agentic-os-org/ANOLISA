@@ -36,30 +36,40 @@ async fn test_watcher_detects_new_skill() {
     let source_dir = tempdir().unwrap();
     let source = source_dir.path().to_path_buf();
 
-    // Start watching
-    let mut rx = watch_source(source.clone(), 100)
+    let (mut rx, handle) = watch_source_with_handle(source, 100)
         .await
         .expect("should start watcher");
 
-    // Create a new skill directory and file
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let skill_dir = source.join("new-skill");
+    let skill_dir = source_dir.path().join("new-skill");
     std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: new-skill\n---\n").unwrap();
+    let manifest = skill_dir.join("SKILL.md");
+    std::fs::write(&manifest, "---\nname: new-skill\n---\n").unwrap();
 
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
-
-    assert!(event.is_ok(), "should receive event within timeout");
-    let event = event.unwrap();
-    assert!(event.is_some(), "should receive Some(event)");
-
-    match event.unwrap() {
-        SkillEvent::Created(path) | SkillEvent::Modified(path) => {
-            assert!(path.to_string_lossy().contains("new-skill"));
+    // Recursive watch attachment can emit only the directory event for a
+    // manifest written immediately after mkdir; both shapes identify the skill.
+    let event = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(event) = rx.recv().await {
+            let created = match &event {
+                SkillEvent::DirCreated(path) => path == &skill_dir,
+                SkillEvent::Created(path) | SkillEvent::Modified(path) => path == &manifest,
+                _ => false,
+            };
+            if created {
+                return Some(event);
+            }
         }
-        _ => panic!("expected Created or Modified event"),
-    }
+        None
+    })
+    .await;
+    handle.shutdown().await;
+    assert!(
+        matches!(event, Ok(Some(_))),
+        "should receive a creation event for the exact skill within timeout: {event:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(manifest).unwrap(),
+        "---\nname: new-skill\n---\n"
+    );
 }
 
 #[tokio::test]
