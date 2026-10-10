@@ -157,15 +157,18 @@ export class SelectiveContextEngine implements ContextEngine {
     this.activeSessionId = params.sessionId;
     this.touchSession(params.sessionId);
 
+    let records: MessageRecord[];
     if (params.messages && params.messages.length > 0) {
-      this.reconcileMessages(params.sessionId, params.messages);
+      records = this.reconcileMessages(params.sessionId, params.messages);
+    } else {
+      records = this.store.getMessages(params.sessionId);
     }
 
     let messages: AgentMessage[];
     if (params.messages && params.messages.length > 0) {
       messages = params.messages;
     } else {
-      const stored = this.store.getMessages(params.sessionId);
+      const stored = records;
       if (stored.length === 0) {
         return { messages: [], estimatedTokens: 0 };
       }
@@ -180,11 +183,8 @@ export class SelectiveContextEngine implements ContextEngine {
     const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
 
-    if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      await this.generateMissingSummaries(params.sessionId, turns);
-    }
-
-    const summaries = this.getSummariesForSession(params.sessionId);
+    const bindings = this.bindSummaryTurns(params.sessionId, turns, records);
+    const summaries = await this.generateMissingSummaries(params.sessionId, turns, bindings);
 
     const result = this.assembler.assemble({
       messages,
@@ -225,7 +225,8 @@ export class SelectiveContextEngine implements ContextEngine {
     this.cacheTurnMessages(params.sessionId, turns);
 
     if (turns.length > this.config.freshTailTurns && this.summarizeFn) {
-      await this.generateMissingSummaries(params.sessionId, turns);
+      const bindings = this.bindSummaryTurns(params.sessionId, turns, stored);
+      await this.generateMissingSummaries(params.sessionId, turns, bindings);
     }
   }
 
@@ -273,8 +274,9 @@ export class SelectiveContextEngine implements ContextEngine {
     return { found: result.length, turns: result };
   }
 
-  private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
-    const stored = this.store.getMessages(sessionId);
+  private reconcileMessages(sessionId: string, messages: AgentMessage[]): MessageRecord[] {
+    const records = this.store.getMessages(sessionId);
+    const stored = records.map(({ role, content }) => ({ role, content }));
     const incoming = messages.map((message) => ({
       role: this.normalizeRole(message.role),
       content: this.extractContent(message),
@@ -290,11 +292,15 @@ export class SelectiveContextEngine implements ContextEngine {
       }
     }
 
-    if (matchLen < messages.length) {
-      const overlap = suffixOverlap(stored.slice(matchLen), incoming.slice(matchLen));
-      const toImport = messages.slice(matchLen + overlap);
-      this.importMessages(sessionId, toImport);
-    }
+    const overlap = suffixOverlap(stored.slice(matchLen), incoming.slice(matchLen));
+    const toImport = messages.slice(matchLen + overlap);
+    this.importMessages(sessionId, toImport);
+    const imported = this.store.getMessages(sessionId).slice(stored.length);
+    return [
+      ...records.slice(0, matchLen),
+      ...records.slice(records.length - overlap),
+      ...imported,
+    ];
   }
 
   private importMessages(sessionId: string, messages: AgentMessage[]): void {
@@ -324,43 +330,77 @@ export class SelectiveContextEngine implements ContextEngine {
     }
   }
 
+  private bindSummaryTurns(
+    sessionId: string,
+    turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
+    records: MessageRecord[],
+  ): Map<number, number> {
+    const archived = new Map<number, MessageRecord[]>();
+    for (const record of this.store.getMessages(sessionId)) {
+      const group = archived.get(record.turnSeq) ?? [];
+      group.push(record);
+      archived.set(record.turnSeq, group);
+    }
+
+    const bindings = new Map<number, number>();
+    let offset = 0;
+    for (const turn of turns) {
+      const group = records.slice(offset, offset + turn.messages.length);
+      offset += turn.messages.length;
+      const archiveTurn = group[0]?.turnSeq;
+      if (archiveTurn === undefined) continue;
+      const complete = archived.get(archiveTurn);
+      // Partial or rewritten turns keep a live summary without replacing an archive anchor.
+      if (
+        complete && group.length === complete.length &&
+        group.every((record, index) => record.seq === complete[index].seq)
+      ) {
+        bindings.set(turn.turnSeq, archiveTurn);
+      }
+    }
+    return bindings;
+  }
+
   private async generateMissingSummaries(
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
-  ): Promise<void> {
+    bindings: Map<number, number>,
+  ): Promise<Map<number, string>> {
+    const archived = this.getSummariesForSession(sessionId);
+    const summaries = new Map<number, string>();
+    for (const [liveTurn, archiveTurn] of bindings) {
+      const summary = archived.get(archiveTurn);
+      if (summary !== undefined) summaries.set(liveTurn, summary);
+    }
+
     const olderTurns = turns.slice(0, -this.config.freshTailTurns);
-    if (olderTurns.length === 0) return;
-
-    const summaries = this.getSummariesForSession(sessionId);
-    const needSummary = olderTurns.filter((t) => !summaries.has(t.turnSeq));
-    if (needSummary.length === 0) return;
-
-    const summarizeFn = this.summarizeFn!;
+    const summarizeFn = this.summarizeFn;
+    if (!summarizeFn || olderTurns.length === 0) return summaries;
+    const needSummary = olderTurns.filter((turn) => !summaries.has(turn.turnSeq));
 
     const results = await Promise.allSettled(
       needSummary.map((turn) => {
         const text = turn.messages
-          .map((m) => `${m.role}: ${this.extractContent(m)}`)
+          .map((message) => `${message.role}: ${this.extractContent(message)}`)
           .join("\n");
         return summarizeFn(text).then((summary) => ({ turnSeq: turn.turnSeq, summary }));
       }),
     );
 
-    if (!this.turnSummaryCache.has(sessionId)) {
-      this.turnSummaryCache.set(sessionId, new Map());
-    }
-    const cache = this.turnSummaryCache.get(sessionId)!;
-
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        cache.set(r.value.turnSeq, r.value.summary);
-        try {
-          this.store.setTurnSummary(sessionId, r.value.turnSeq, r.value.summary);
-        } catch {
-          // best-effort persist
-        }
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      const { turnSeq, summary } = result.value;
+      summaries.set(turnSeq, summary);
+      const archiveTurn = bindings.get(turnSeq);
+      if (archiveTurn === undefined) continue;
+      archived.set(archiveTurn, summary);
+      try {
+        this.store.setTurnSummary(sessionId, archiveTurn, summary);
+      } catch {
+        // best-effort persist
       }
     }
+    return summaries;
   }
 
   private cacheTurnMessages(
