@@ -33,6 +33,7 @@ pub mod planner;
 pub mod process;
 pub mod providers;
 pub mod provisioner;
+pub mod proxy;
 pub mod record_sink;
 pub mod register;
 pub mod resolver;
@@ -110,6 +111,7 @@ pub use provisioner::{
     ManualDependency, ProvisionOutcome, ProvisionPlan, ProvisionStrategy, ProvisionablePackage,
     UnresolvableDependency,
 };
+pub use proxy::env_proxy_for;
 pub use register::{
     ConsentState, HistoryAction, HistoryEntry, RegisterRecord, RegisterSource, RegisterState,
     RegistrationManager, SubscriptionError, current_operator, generate_link_id, require_root,
