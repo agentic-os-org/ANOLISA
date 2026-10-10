@@ -45,6 +45,7 @@ const DEFAULT_PATH_KEEP_FIELDS: &[&str] = &[
     "gen_ai.usage.cache_creation.input_tokens",
     "gen_ai.usage.cache_read.input_tokens",
     "agentsight.agent.name",
+    "agentsight.binding.id",
     "agentsight.http.domain",
     "agent.skill.name",
     "agent.skill.load_count",
@@ -666,6 +667,9 @@ pub fn events_to_flat_records(
                 if let Some(sid) = call.metadata.get("session_id") {
                     m.insert("gen_ai.session.id".to_string(), sid.clone());
                 }
+                if let Some(binding_id) = call.metadata.get("binding_id") {
+                    m.insert("agentsight.binding.id".to_string(), binding_id.clone());
+                }
 
                 // ── AgentSkill extensions: skill names and counts as JSON arrays ──
                 // Default to null when no skills are detected; write arrays when present.
@@ -1062,6 +1066,20 @@ pub mod tests {
                 "unexpected conversation-content field leaked when traceEnabled=false: {key}",
             );
         }
+    }
+
+    #[test]
+    fn test_binding_id_is_exported_and_survives_default_path_slimming() {
+        let binding_id = uuid::Uuid::new_v4().to_string();
+        let mut call = make_full_llm_call();
+        call.metadata
+            .insert("binding_id".to_string(), binding_id.clone());
+        let mut records = events_to_flat_records(&[GenAISemanticEvent::LLMCall(call)], None, false);
+
+        assert_eq!(records[0].get("agentsight.binding.id"), Some(&binding_id));
+
+        slim_records_for_default_path(&mut records);
+        assert_eq!(records[0].get("agentsight.binding.id"), Some(&binding_id));
     }
 
     #[test]

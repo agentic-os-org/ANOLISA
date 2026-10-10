@@ -1150,7 +1150,7 @@ pub struct AgentsightConfig {
     /// Whether FFI mode subscribes to normalized security audit events.
     /// This is configured only through the C API and is not part of agentsight.json.
     pub ffi_enable_security_audit: bool,
-    /// Local enforcer socket used by the optional FFI security subscription.
+    /// Local enforcer socket used by FFI security subscription and GenAI correlation.
     pub ffi_enforcer_socket: PathBuf,
 
     // --- Procfs Root ---
@@ -1248,7 +1248,9 @@ impl Default for AgentsightConfig {
             http_targets: Vec::new(),
             ffi_enable_raw_https: false,
             ffi_enable_security_audit: false,
-            ffi_enforcer_socket: PathBuf::from("/run/agentsight/enforcer.sock"),
+            ffi_enforcer_socket: std::env::var_os("AGENTSIGHT_ENFORCER_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/run/agentsight/enforcer.sock")),
 
             // Read our own procfs unless a deployment points us elsewhere.
             procfs_root: PathBuf::from(crate::utils::procfs::DEFAULT_PROC_ROOT),

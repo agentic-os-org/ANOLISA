@@ -82,6 +82,11 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。启动对应 unit 即可；源码构建
 请使用 `make build-all`。
 
+LLM 调用的 PID 和进程启动时间与 enforced binding 的 root 进程精确匹配时，AgentSight 会把同一个
+`agentsight.binding.id` 写入 Logtail 和 C FFI 输出，用它关联模型调用与标准化 security event，不依赖两侧
+独立生成的 session ID。binding 每 30 秒从本地 enforcer 刷新，新 binding 最长可能等待 30 秒才出现；连续
+90 秒刷新失败后会丢弃缓存快照。当前不会推断子进程归属。
+
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
 
