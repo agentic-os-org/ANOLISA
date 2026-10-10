@@ -459,6 +459,88 @@ fn events_log_dangling_symlink_into_source_fails_startup() {
 }
 
 #[test]
+fn events_log_hard_link_into_source_fails_startup() {
+    // Hard links are the alias the containment guard cannot see: the external
+    // name canonicalizes outside the source root, yet it is the same inode as
+    // the file inside it, so an append through the external name rewrites the
+    // source file. The writer must refuse the shared inode and abort startup.
+    let source = empty_source();
+    let manifest = source.path().join("SKILL.md");
+    std::fs::write(&manifest, "# trusted manifest\n").expect("write the source file");
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let link_parent = tempfile::tempdir().expect("link parent tempdir");
+    let link = link_parent.path().join("events.jsonl");
+    std::fs::hard_link(&manifest, &link).expect("create the external hard link");
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--decision-command",
+            "/bin/true",
+            "--events-log",
+            link.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    // The gate rejects while the writer is opened, before the FUSE session
+    // starts, so the child must exit promptly. If it is still alive the guard
+    // did not fire (a regression would leave a live mount behind): tear it
+    // down and fail.
+    let mut status = None;
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("wait for skillfs: {e}"),
+        }
+    }
+    let status = match status {
+        Some(s) => s,
+        None => {
+            stop_mount_child(&mut child, mount.path());
+            panic!("mount with a hard-linked in-source --events-log must not start");
+        }
+    };
+    assert!(
+        !status.success(),
+        "expected non-zero exit for a hard link into the source"
+    );
+
+    use std::io::Read;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("hard links"),
+        "expected the hard-link refusal, got: {combined}"
+    );
+    assert!(
+        !is_mounted(mount.path()),
+        "the refusal must happen before the FUSE session starts"
+    );
+    assert_eq!(
+        std::fs::read(&manifest).expect("read the source file"),
+        b"# trusted manifest\n",
+        "a refused events log must not append to the source file it aliases"
+    );
+}
+
+#[test]
 fn invalid_activation_mode_value_fails_startup() {
     let source = empty_source();
     let mount = tempfile::tempdir().expect("mount tempdir");
