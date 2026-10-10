@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """DashScope image generation (wanx models)."""
-import argparse, base64, json, os, sys, time, urllib.request, urllib.error
+import argparse
+import base64
+import json
+import os
+import stat
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
 
 def _key():
     # 1. 环境变量
@@ -59,14 +69,43 @@ def _compat(prompt, model, size, key, base):
     if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
 
-def _save(src, path):
+
+def _publish_image(data: bytes, path: str) -> None:
+    # Resolve symlinks to preserve the previous open(path, "wb") behavior.
+    destination = os.path.realpath(path)
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(os.stat(destination).st_mode)
+    except FileNotFoundError:
+        mode = None
+
+    fd, staging = tempfile.mkstemp(prefix=".image-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        if mode is not None:
+            os.chmod(staging, mode)
+        os.replace(staging, destination)
+    finally:
+        if os.path.exists(staging):
+            # Windows refuses to unlink staging files given a read-only mode.
+            if os.name == "nt":
+                os.chmod(staging, stat.S_IREAD | stat.S_IWRITE)
+            os.unlink(staging)
+
+
+def _save(src: str, path: str) -> None:
     if src.startswith("b64:"):
         data = base64.b64decode(src[4:])
     else:
-        with urllib.request.urlopen(urllib.request.Request(src,headers={"User-Agent":"Mozilla/5.0"}),timeout=60) as r: data = r.read()
-    os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
-    with open(path,"wb") as f: f.write(data)
+        with urllib.request.urlopen(
+            urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"}), timeout=60
+        ) as r:
+            data = r.read()
+    _publish_image(data, path)
     print(f"Saved {path} ({len(data)/1024:.1f}KB)")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -81,6 +120,7 @@ def main():
     wanx = ["wanx-v1","wanx2.1-t2i-turbo","wanx2.1-t2i-plus","wanx2.0-t2i-turbo"]
     src = _wanx(a.prompt,a.model,size,key) if a.model in wanx else _compat(a.prompt,a.model,size,key,a.api_base)
     _save(src, a.output)
+
 
 if __name__ == "__main__":
     main()
