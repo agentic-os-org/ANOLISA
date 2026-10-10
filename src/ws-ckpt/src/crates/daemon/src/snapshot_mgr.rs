@@ -276,17 +276,24 @@ pub async fn checkpoint(
     // make sure index directory exists
     tokio::fs::create_dir_all(&snap_dir).await?;
 
-    // 7. Create readonly snapshot via backend
+    // 7. Parse metadata BEFORE the backend creates the subvolume. A parse
+    //    failure after `create_snapshot` would strand an on-disk snapshot the
+    //    index never records: `list` cannot see it, `delete` answers
+    //    SnapshotNotFound, a same-ID retry fails with a raw btrfs EEXIST, and
+    //    only a daemon restart adopts it as a pinned recovered orphan. The
+    //    guarded V2 path validates metadata first for the same reason.
+    let parsed_metadata = match metadata {
+        Some(ref s) => Some(serde_json::from_str(s).context("invalid metadata JSON")?),
+        None => None,
+    };
+
+    // 8. Create readonly snapshot via backend
     state
         .backend
         .create_snapshot(&ws.ws_id, &snapshot_id)
         .await?;
 
-    // 8. Build metadata
-    let parsed_metadata = match metadata {
-        Some(ref s) => Some(serde_json::from_str(s)?),
-        None => None,
-    };
+    // 9. Build metadata
     let meta = SnapshotMeta {
         message,
         metadata: parsed_metadata,
@@ -297,7 +304,7 @@ pub async fn checkpoint(
         child_ids: vec![ws_ckpt_common::LIVE_CHILD.to_string()],
     };
 
-    // 9. Update index (maintain DAG bidirectional pointers)
+    // 10. Update index (maintain DAG bidirectional pointers)
     if let Some(old_head) = ws.index.head.clone() {
         if let Some(hm) = ws.index.snapshots.get_mut(&old_head) {
             hm.child_ids.retain(|c| c != ws_ckpt_common::LIVE_CHILD);
@@ -307,19 +314,19 @@ pub async fn checkpoint(
     ws.index.snapshots.insert(snapshot_id.clone(), meta);
     ws.index.head = Some(snapshot_id.clone());
 
-    // 10. Persist index
+    // 11. Persist index
     index_store::save(&snap_dir, &ws.index).await?;
 
-    // 10a. Release write lock before save_manifest (try_read inside
+    // 11a. Release write lock before save_manifest (try_read inside
     //      collect_workspace_entries would fail while write lock is held)
     drop(ws);
 
-    // 10b. Save manifest
+    // 11b. Save manifest
     if let Err(e) = state.save_manifest().await {
         tracing::warn!("save_manifest failed after checkpoint: {:#}", e);
     }
 
-    // 11. Return success
+    // 12. Return success
     Ok(Response::CheckpointOk { snapshot_id })
 }
 
@@ -1755,6 +1762,171 @@ mod tests {
             }
             other => panic!("expected SnapshotAlreadyExists, got {other:?}"),
         }
+    }
+
+    // ── Checkpoint metadata validation ordering ──
+
+    /// Backend stand-in whose `create_snapshot` materializes the snapshot
+    /// directory (like a real btrfs subvolume would) and counts calls.
+    struct CreateRecordingBackend {
+        data_root: PathBuf,
+        snapshots_root: PathBuf,
+        create_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CreateRecordingBackend {
+        fn new(root: PathBuf) -> Self {
+            Self {
+                snapshots_root: root.join(ws_ckpt_common::SNAPSHOTS_DIR),
+                data_root: root,
+                create_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn create_calls(&self) -> usize {
+            self.create_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for CreateRecordingBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.snapshots_root
+        }
+        async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            self.create_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let target = self.snapshots_root.join(ws_id).join(snapshot_id);
+            std::fs::create_dir_all(&target)?;
+            Ok(())
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn cleanup_snapshots(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_invalid_metadata_creates_no_backend_snapshot() {
+        // `metadata` must be parsed BEFORE the backend snapshot is created.
+        // Parsing after the create strands an on-disk snapshot the index never
+        // records: `list` cannot see it, `delete` answers SnapshotNotFound,
+        // a same-ID retry fails with a raw btrfs EEXIST, and only the next
+        // daemon restart adopts it as a pinned recovered orphan.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_root = tmp.path().join("create-rec-data");
+        let backend = Arc::new(CreateRecordingBackend::new(data_root.clone()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            tmp.path().join("state"),
+        ));
+
+        let ws_id = "ws-meta-order";
+        let subvol = data_root.join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("content"), b"non-empty").unwrap();
+        let ws_path = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_path.clone(),
+                SnapshotIndex::new(ws_path),
+            )
+            .unwrap();
+
+        let err = checkpoint(
+            &state,
+            ws_id,
+            "snap-1",
+            None,
+            Some("{not json".into()),
+            false,
+        )
+        .await
+        .expect_err("invalid metadata JSON must fail the checkpoint");
+
+        assert_eq!(
+            backend.create_calls(),
+            0,
+            "backend create_snapshot must not run for invalid metadata"
+        );
+        assert!(
+            !backend.snapshots_root.join(ws_id).join("snap-1").exists(),
+            "a failed checkpoint must not strand an unindexed subvolume"
+        );
+        assert!(
+            format!("{err:#}").to_lowercase().contains("json"),
+            "error should explain the metadata failure, got: {err:#}"
+        );
+
+        // The failed attempt left the ID unrecorded, so a corrected retry
+        // succeeds instead of tripping over the leftover subvolume.
+        assert!(matches!(
+            checkpoint(
+                &state,
+                ws_id,
+                "snap-1",
+                None,
+                Some(r#"{"k":1}"#.into()),
+                false
+            )
+            .await
+            .unwrap(),
+            Response::CheckpointOk { .. }
+        ));
+        assert_eq!(backend.create_calls(), 1);
     }
 
     // ── SnapshotMeta pinned logic test ──
