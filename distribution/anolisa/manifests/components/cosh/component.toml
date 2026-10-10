@@ -7,7 +7,7 @@ display_name = "Copilot Shell"
 description = "AI copilot shell - interactive terminal agent for Linux operations"
 owner = "copilot-shell-team"
 license = "Apache-2.0"
-repository = "https://github.com/alibaba/anolisa"
+repository = "https://github.com/agentic-os-org/ANOLISA"
 conflicts = ["cosh-ng"]
 
 [component.contract]

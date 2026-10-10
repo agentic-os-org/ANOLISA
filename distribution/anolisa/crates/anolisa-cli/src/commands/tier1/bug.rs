@@ -18,7 +18,8 @@ use crate::response::{CliError, render_json};
 mod cosh_ng;
 
 const COMMAND: &str = "bug";
-const ISSUE_URL: &str = "https://github.com/alibaba/anolisa/issues/new?template=bug_report.yml";
+const ISSUE_URL: &str =
+    "https://github.com/agentic-os-org/ANOLISA/issues/new?template=bug_report.yml";
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 /// Canonical component name that activates the cosh-shell diagnostic bridge.

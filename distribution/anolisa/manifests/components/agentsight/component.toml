@@ -7,7 +7,7 @@ display_name = "AgentSight"
 description = "Agent observability - eBPF execution tracing, resource metering, token attribution"
 owner = "agentsight-team"
 license = "Apache-2.0"
-repository = "https://github.com/alibaba/anolisa"
+repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"

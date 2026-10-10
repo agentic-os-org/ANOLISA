@@ -7,7 +7,7 @@ display_name = "Workspace Checkpoint"
 description = "Workspace checkpoint - btrfs COW session-level isolation and rollback"
 owner = "ws-ckpt-team"
 license = "Apache-2.0"
-repository = "https://github.com/alibaba/anolisa"
+repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
