@@ -545,6 +545,31 @@ mod tests {
     }
 
     #[test]
+    fn initial_reads_bound_never_idle_senders_at_the_absolute_limit() {
+        // However active a sender is, the whole window stays bounded by the
+        // absolute limit: the protocol's maximum remaining call deadline.
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            sender.write_all(&1000_u32.to_be_bytes()).unwrap();
+            for _ in 0..20 {
+                thread::sleep(Duration::from_millis(100));
+                sender.write_all(b"x").unwrap();
+            }
+        });
+        let start = Instant::now();
+        let error = read_initial::<Value>(
+            &mut receiver,
+            Duration::from_millis(500),
+            Instant::now() + Duration::from_millis(1200),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        // The limit fires while the writer is still actively sending.
+        assert!(start.elapsed() < Duration::from_millis(1900));
+        writer.join().unwrap();
+    }
+
+    #[test]
     fn writes_round_trip_and_checks_bounds_before_sending() {
         let (mut sender, mut receiver) = UnixStream::pair().unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
