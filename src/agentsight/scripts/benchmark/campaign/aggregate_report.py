@@ -137,7 +137,13 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
     grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
     for _, run in items:
         if run.get("scenario") == "matrix":
-            grouped[(int(run["qps"]), run["version"])].append(run)
+            try:
+                qps = int(run["qps"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                # Keep the record in the inventory and final audit, but do not
+                # invent a load level for unusable evidence in comparisons.
+                continue
+            grouped[(qps, run["version"])].append(run)
     rows = []
     for (qps, version), runs in sorted(grouped.items()):
         row: dict[str, Any] = {
