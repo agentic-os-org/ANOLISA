@@ -2290,6 +2290,23 @@ mod tests {
                 "command_output",
             ),
             (ContentOrigin::ApiResponse, "cat data.json", "api_response"),
+            // Quiet spellings beyond `-n` are plain prints too.
+            (
+                ContentOrigin::CommandOutput,
+                "sed --quiet '1,80p' data.json",
+                "file_read",
+            ),
+            (
+                ContentOrigin::CommandOutput,
+                "sed -ne '5p' data.json",
+                "file_read",
+            ),
+            // A substituting script rides along after a print-only one.
+            (
+                ContentOrigin::CommandOutput,
+                "sed -n -e 5p -e s/./x/p data.json",
+                "command_output",
+            ),
         ] {
             let request = PostToolRequest {
                 content_origin: origin,
