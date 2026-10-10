@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/alibaba/anolisa",
+    "url": "https://github.com/agentic-os-org/ANOLISA",
     "directory": "distribution/anolisa"
   },
   "os": ["darwin"],

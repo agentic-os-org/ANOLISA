@@ -1931,7 +1931,7 @@ mod tests {
             display_name = "Tokenless"
             owner = "tokenless-team"
             license = "MIT"
-            repository = "https://github.com/alibaba/anolisa"
+            repository = "https://github.com/agentic-os-org/ANOLISA"
 
             [component.contract]
             schema_version = "1.0"

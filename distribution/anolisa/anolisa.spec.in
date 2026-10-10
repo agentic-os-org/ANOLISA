@@ -12,7 +12,7 @@ Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        ANOLISA - Agentic OS helper CLI
 License:        Apache-2.0
-URL:            https://github.com/alibaba/anolisa
+URL:            https://github.com/agentic-os-org/ANOLISA
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
 
