@@ -21,7 +21,7 @@
 //! ```
 
 use crate::aggregator::AggregatedResult;
-use crate::analyzer::token::merge_response_output_text;
+use crate::analyzer::token::{merge_response_output_text, merge_response_tool_calls};
 use crate::parser::sse::{ParsedSseEvent, SSEParser};
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
@@ -251,7 +251,8 @@ pub fn count_response_tokens(
     // Accumulate content from all SSE chunks. The shared merge counts each
     // delta once and reads the Responses closing events only as a fallback,
     // so a complete capture is not counted two or three times.
-    let (all_content, all_reasoning, all_tool_calls) = merge_response_output_text(response_jsons);
+    let (all_content, all_reasoning, _) = merge_response_output_text(response_jsons);
+    let tool_calls = merge_response_tool_calls(response_jsons);
 
     let mut has_content = false;
 
@@ -289,51 +290,9 @@ pub fn count_response_tokens(
         });
     }
 
-    // Add tool calls with Qwen template format
-    // According to tokenizer_config.json, <tool_call>, <function=...>, <parameter=...> are NOT special tokens,
-    // so they ARE counted as output tokens by the API
-    //
-    // NOTE: For SSE streaming, tool_calls come in chunks:
-    // - First chunk: "exec: " (function name + colon)
-    // - Following chunks: ": {...}" (colon + arguments fragments)
-    // We need to aggregate all chunks first to get the complete tool call
-    if !all_tool_calls.is_empty() {
-        // Parallel tool calls (a chat-completions `tool_calls` array, or the
-        // Responses API's interleaved function_call items) carry several
-        // `name: arguments` streams in one response. Joining every fragment
-        // into a single string kept only the FIRST call intact: later
-        // announcements were swallowed into the first call's arguments, the
-        // concatenated JSON failed to parse, and the render fell back to raw
-        // text — losing every name after the first and the <parameter=...>
-        // formatting the token count depends on. Split the fragments into
-        // individual calls first: a fragment opens a new call when it begins
-        // with an identifier followed by ": " (the chat-completions first
-        // chunk carries the name; the Responses `output_item.added`
-        // announcement is `{name}: `); every other fragment continues the
-        // current call — chat-completions continuations start with ": ",
-        // Responses deltas start with the raw partial JSON, and neither can
-        // begin with an identifier-plus-colon.
-        let mut aggregated_calls: Vec<String> = Vec::new();
-        for tc in &all_tool_calls {
-            let starts_new_call = matches!(
-                tc.split_once(": "),
-                Some((name, _))
-                    if !name.is_empty()
-                        && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
-            );
-            if starts_new_call || aggregated_calls.is_empty() {
-                aggregated_calls.push(tc.clone());
-            } else {
-                // Subsequent chunks start with ": ", skip the leading ": "
-                let fragment = tc.strip_prefix(": ").unwrap_or(tc);
-                aggregated_calls
-                    .last_mut()
-                    .expect("aggregated_calls is non-empty in this branch")
-                    .push_str(fragment);
-            }
-        }
-
-        for aggregated in &aggregated_calls {
+    // Each protocol call is complete before rendering its Qwen template.
+    if !tool_calls.is_empty() {
+        for aggregated in &tool_calls {
             // Now parse the aggregated "name: arguments" string
             let (name, arguments) = if let Some(pos) = aggregated.find(": ") {
                 (&aggregated[..pos], &aggregated[pos + 2..])
@@ -2428,7 +2387,7 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         let added = |name: &str, id: &str| {
             serde_json::json!({
                 "type": "response.output_item.added",
-                "output_index": 0,
+                "output_index": if id == "fc_1" { 0 } else { 1 },
                 "item": {
                     "type": "function_call",
                     "id": id,
@@ -2441,7 +2400,7 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
             serde_json::json!({
                 "type": "response.function_call_arguments.delta",
                 "item_id": id,
-                "output_index": 0,
+                "output_index": if id == "fc_1" { 0 } else { 1 },
                 "delta": fragment,
             })
         };
