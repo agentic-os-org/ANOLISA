@@ -104,8 +104,8 @@ test-raw-package: ## Validate Linux and macOS raw package assembly
 	@bash scripts/test-package-raw.sh
 
 .PHONY: test-scripts
-test-scripts: ## Run the scripts/ Python test suites
-	cd $(CURDIR) && python3 -m pytest scripts/tests -q
+test-scripts: ## Run the scripts/ Python test suites (recursive discovery)
+	cd $(CURDIR) && python3 -m pytest scripts -q
 
 .PHONY: test
 test: test-rpm-packaging test-raw-package test-scripts ## Run unit tests (fast, no coverage)

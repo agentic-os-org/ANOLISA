@@ -70,7 +70,7 @@ jobs:
 
       - name: Run scripts test suites
         working-directory: src/agentsight
-        run: uv run --python 3.11.6 --with pytest --no-project -m pytest scripts/tests -q
+        run: uv run --python 3.11.6 --with pytest --no-project -m pytest scripts -q
 
       - name: Lint
         working-directory: src/agentsight
