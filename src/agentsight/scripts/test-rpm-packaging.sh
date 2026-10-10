@@ -75,8 +75,165 @@ for file in \
     printf 'fixture: %s\n' "$file" > "$fixture_root/$file"
 done
 
-AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
+# Run a copy of the real wrapper with fake Git/Cargo/Rust only. No network,
+# real compilation, or changes to the checkout/source cache are permitted here.
+cp "$repo_root/src/agentsight/scripts/build-enforcer.sh" "$fixture_root/scripts/"
+cp "$repo_root/src/agentsight/scripts/copy-enforcer.py" "$fixture_root/scripts/"
+mkdir -p "$tmp_dir/tools" "$tmp_dir/actplane/.git" "$tmp_dir/actplane/bpf/prebuilt"
+python3 - "$fixture_root" "$tmp_dir/tools" "$tmp_dir/actplane" <<'PY'
+import pathlib
+import re
+import sys
+
+root, tools, source = map(pathlib.Path, sys.argv[1:])
+constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
+                           (root / "scripts/build-enforcer.sh").read_text(), re.M))
+(root / "Cargo.toml").write_text(f'rev = "{constants["ACTPLANE_REVISION"]}"\n' * 2)
+engine = root / "crates/ebpf-ifc-engine"
+(engine / "prebuilt").mkdir(parents=True)
+for name in ("process.bpf.c", "process.h", "taint.h", "taint_engine.bpf.h",
+             "capability.bpf.h", "channel.bpf.h"):
+    (engine / name).write_text(name)
+(engine / "prebuilt/process.bpf.o").write_bytes(b"full-object")
+(engine / "prebuilt/process-inode-only.bpf.o").write_bytes(b"inode-object")
+(source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+(tools / "git").write_text('''#!/usr/bin/env python3
+import pathlib, sys
+constants = ''' + repr(constants) + '''
+source, command, *args = sys.argv[2:]
+if command == "rev-parse":
+    print(constants["ACTPLANE_REVISION"])
+elif command == "checkout":
+    # Model the source reset performed by the real cache checkout/reset.
+    (pathlib.Path(source) / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+    print("fixture Git diagnostic")
+elif command == "hash-object":
+    path = pathlib.Path(source) / args[0]
+    key = {"lib.rs": "PATCHED_BPF_LIB", "build.rs": "PATCHED_BPF_BUILD",
+           "Makefile": "PATCHED_BPF_MAKEFILE", "process-inode-only.bpf.o": "STAGED_INODE_BPF"}.get(path.name)
+    if key is None:
+        key = "PREBUILT_BPF" if path.read_bytes() == b"upstream-object" else "STAGED_PREBUILT_BPF"
+    print(constants["ACTPLANE_" + key + "_BLOB"])
+elif command not in ("reset", "clean", "diff", "ls-files", "submodule"):
+    sys.exit("unexpected fixture Git command: " + command)
+''')
+(tools / "rustc").write_text('#!/bin/sh\nprintf "host: x86_64-unknown-linux-gnu\\n"\n')
+(tools / "cargo").write_text('''#!/usr/bin/env python3
+import os, pathlib, sys
+args = sys.argv
+root = pathlib.Path.cwd()
+target = pathlib.Path(args[args.index("--target-dir") + 1])
+host = args[args.index("--target") + 1]
+assert str(target) == os.environ["CARGO_TARGET_DIR"]
+assert target.is_absolute() and target.parent.name.startswith("enforcer.")
+assert target != root / "target"
+output = target / host / "release/agentsight-enforcer"
+output.parent.mkdir(parents=True)
+output.write_bytes(str(target).encode() + b"full-object inode-object")
+if os.environ.get("FIXTURE_BAD_OBJECT"):
+    output.write_bytes(b"missing embedded objects")
+output.chmod(0o755)
+# A different Cargo invocation replaces the old shared executable before return.
+(root / "target/release/agentsight-enforcer").write_bytes(b"unattested shared replacement")
+print("fixture Cargo diagnostic")
+''')
+for tool in tools.iterdir():
+    tool.chmod(0o755)
+PY
+
+fixture_env=(env -u ENFORCER_BIN -u CARGO_BUILD_TARGET -u ACTPLANE_REBUILD_BPF
+    "PATH=$tmp_dir/tools:$PATH" "CARGO=$tmp_dir/tools/cargo"
+    "CARGO_TARGET_DIR=$tmp_dir/cargo parent" "ACTPLANE_SOURCE_DIR=$tmp_dir/actplane")
+first_bin="$("${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" 2>"$tmp_dir/build.err")"
+second_bin="$("${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" 2>>"$tmp_dir/build.err")"
+[[ "$first_bin" = /* && "$second_bin" = /* && "$first_bin" != "$second_bin" ]]
+[[ "$first_bin" != *$'\n'* && "$second_bin" != *$'\n'* ]]
+[[ -x "$first_bin" && -f "$first_bin.sha256" && -x "$second_bin" ]]
+grep -q 'fixture Cargo diagnostic' "$tmp_dir/build.err"
+grep -q 'fixture Git diagnostic' "$tmp_dir/build.err"
+[[ "$(stat -c %a "$(dirname "$first_bin")")" = 700 ]]
+
+ENFORCER_BIN="$first_bin" AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
     bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$fixture_payload"
+ENFORCER_BIN="$second_bin" AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
+    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$tmp_dir/payload-two"
+cmp "$first_bin" "$fixture_payload/agentsight-enforcer"
+cmp "$second_bin" "$tmp_dir/payload-two/agentsight-enforcer"
+if cmp -s "$first_bin" "$second_bin"; then
+    printf 'independent builds unexpectedly returned the same bytes\n' >&2
+    exit 1
+fi
+
+# Even with a shared binary present, no handoff means another fresh attested build.
+"${fixture_env[@]}" AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
+    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$tmp_dir/fresh-payload" \
+    2>>"$tmp_dir/build.err"
+if cmp -s "$tmp_dir/fresh-payload/agentsight-enforcer" "$second_bin"; then
+    printf 'RPM staging reused a previous build without an explicit handoff\n' >&2
+    exit 1
+fi
+for failure in CARGO_BUILD_TARGET=other-target FIXTURE_BAD_OBJECT=1; do
+    if "${fixture_env[@]}" "$failure" "$fixture_root/scripts/build-enforcer.sh" \
+        >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
+        printf 'attested build accepted %s\n' "$failure" >&2
+        exit 1
+    fi
+    [[ ! -s "$tmp_dir/failed-path" ]]
+done
+
+# Make install must hand off the captured path in the same recipe shell.
+"${fixture_env[@]}" make --no-print-directory -C "$fixture_root" \
+    -f "$repo_root/src/agentsight/Makefile" -o build -o build-frontend install \
+    "DESTDIR=$tmp_dir/install" SETCAP=0 INSTALL_SYSTEMD=0 >"$tmp_dir/make.out" 2>"$tmp_dir/make.err"
+[[ -x "$tmp_dir/install/usr/local/bin/agentsight-enforcer" ]]
+! cmp -s "$tmp_dir/install/usr/local/bin/agentsight-enforcer" \
+    "$fixture_root/target/release/agentsight-enforcer"
+make --no-print-directory -C "$fixture_root" -f "$repo_root/src/agentsight/Makefile" \
+    -o build -o build-frontend install ENFORCER_BUILD=false "ENFORCER_BIN=$first_bin" \
+    "DESTDIR=$tmp_dir/install" SETCAP=0 INSTALL_SYSTEMD=0 >>"$tmp_dir/make.out" 2>>"$tmp_dir/make.err"
+cmp "$first_bin" "$tmp_dir/install/usr/local/bin/agentsight-enforcer"
+
+# Mutate the source just after hashing: the destination must still receive the
+# checked buffer, not bytes from a subsequent reopen of that source path.
+python3 - "$repo_root/src/agentsight/scripts/copy-enforcer.py" "$first_bin" "$tmp_dir" <<'PY'
+import hashlib
+import pathlib
+import runpy
+import sys
+from unittest.mock import patch
+
+copy_enforcer = runpy.run_path(sys.argv[1])["copy_enforcer"]
+source = pathlib.Path(sys.argv[3]) / "copy-input"
+original = pathlib.Path(sys.argv[2]).read_bytes()
+source.write_bytes(original)
+source.chmod(0o755)
+pathlib.Path(str(source) + ".sha256").write_text(hashlib.sha256(original).hexdigest())
+digest = hashlib.sha256
+
+def replace_after_hash(data):
+    result = digest(data)
+    source.write_bytes(b"replacement after hash")
+    return result
+
+output = source.with_name("copy-output")
+with patch.object(hashlib, "sha256", side_effect=replace_after_hash):
+    copy_enforcer(source, output)
+assert output.read_bytes() == original
+try:
+    copy_enforcer(source, output)
+except ValueError:
+    pass
+else:
+    raise AssertionError("stale receipt accepted")
+assert output.read_bytes() == original
+pathlib.Path(str(source) + ".sha256").unlink()
+try:
+    copy_enforcer(source, output)
+except FileNotFoundError:
+    pass
+else:
+    raise AssertionError("missing receipt accepted")
+PY
 
 for file in \
     agentsight \
@@ -142,9 +299,13 @@ else
 fi
 
 require_literal src/agentsight/scripts/rpm-build.sh \
-    './scripts/stage-rpm-payload.sh "$TARBALL_DIR"'
+    'ENFORCER_BIN="$(./scripts/build-enforcer.sh)"'
+require_literal src/agentsight/scripts/rpm-build.sh \
+    'ENFORCER_BIN="$ENFORCER_BIN" ./scripts/stage-rpm-payload.sh "$TARBALL_DIR"'
 require_literal scripts/rpm-build.sh \
-    '"${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"'
+    './scripts/build-enforcer.sh >&3'
+require_literal scripts/rpm-build.sh \
+    'ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"'
 require_literal .github/workflows/_rpm-build.yaml \
     '"$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"'
 require_literal .github/workflows/_rpm-build.yaml \

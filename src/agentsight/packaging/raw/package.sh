@@ -88,7 +88,7 @@ stage_payload() {
     install -p -m 0755 "$BIN_DIR/agentsight" "$stage/bin/agentsight"
     if [ "$TARGET_OS" = "linux" ]; then
         install -d -m 0755 "$stage/share/anolisa/agentsight"
-        install -p -m 0755 "$BIN_DIR/agentsight-enforcer" \
+        python3 "$DEFAULT_ROOT/scripts/copy-enforcer.py" "$ENFORCER_BIN" \
             "$stage/bin/agentsight-enforcer"
         install -p -m 0755 "$SOURCE_ROOT/scripts/agentsight-start.sh" \
             "$stage/bin/agentsight-start"
@@ -141,9 +141,11 @@ if [ "$TARGET_OS" = "linux" ]; then
         "$SOURCE_ROOT/scripts/agentsight-enforcer.service"; do
         require_file "$input"
     done
-    [ -x "$BIN_DIR/agentsight-enforcer" ] || \
-        die "missing executable: $BIN_DIR/agentsight-enforcer"
-    BINARIES+=("$BIN_DIR/agentsight-enforcer")
+    # Keep cross-target packaging prebuilt-only; never substitute a native rebuild.
+    ENFORCER_BIN="${ENFORCER_BIN:-$BIN_DIR/agentsight-enforcer}"
+    [ -x "$ENFORCER_BIN" ] || die "missing executable: $ENFORCER_BIN"
+    require_file "$ENFORCER_BIN.sha256"
+    BINARIES+=("$ENFORCER_BIN")
 fi
 
 VERSION="$(

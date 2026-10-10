@@ -137,18 +137,16 @@ echo "$HF_PATCH" >> Cargo.toml
 trap 'truncate -s "$CARGO_TOML_SIZE" Cargo.toml' EXIT
 
 cargo build --release --bin agentsight
-./scripts/build-enforcer.sh
+ENFORCER_BIN="$(./scripts/build-enforcer.sh)"
 
 # Restore Cargo.toml (remove appended patch)
 truncate -s "$CARGO_TOML_SIZE" Cargo.toml
 
-# Verify binary exists
-for binary in agentsight agentsight-enforcer; do
-    if [[ ! -f "target/release/$binary" ]]; then
-        log_error "Binary not found: target/release/$binary"
-        exit 1
-    fi
-done
+# The enforcer is validated from its private artifact by the staging helper.
+if [[ ! -f "target/release/agentsight" ]]; then
+    log_error "Binary not found: target/release/agentsight"
+    exit 1
+fi
 
 log_info "Binary built successfully"
 
@@ -157,7 +155,7 @@ TARBALL_NAME="agentsight-${VERSION}"
 TARBALL_DIR="${OUTPUT_DIR}/${TARBALL_NAME}"
 
 log_info "Preparing tarball contents..."
-./scripts/stage-rpm-payload.sh "$TARBALL_DIR"
+ENFORCER_BIN="$ENFORCER_BIN" ./scripts/stage-rpm-payload.sh "$TARBALL_DIR"
 
 log_info "Files prepared in: $TARBALL_DIR"
 

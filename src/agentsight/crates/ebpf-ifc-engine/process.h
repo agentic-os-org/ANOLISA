@@ -5,6 +5,9 @@
 
 #define TASK_COMM_LEN 16
 #define MAX_FILENAME_LEN 127
+/* Event-only operation codes for inode-guard denials; rules never use them. */
+#define TE_EVENT_OP_UNLINK 5
+#define TE_EVENT_OP_RENAME 6
 
 #define TE_POLICY_PATH_CONTAINS (1U << 0)
 #define TE_POLICY_PATH_SUFFIX   (1U << 1)

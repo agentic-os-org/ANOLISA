@@ -176,6 +176,8 @@ struct {
 struct inode_guard_val {
 	__u32 flags;
 	__u32 domain_id;
+	__u32 rule_id;	/* lowered rule reported in the violation event */
+	__u32 _pad;
 };
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -184,11 +186,26 @@ struct {
 	__type(value, struct inode_guard_val);
 } te_inode_guard SEC(".maps");
 
+/* Canonical path of each policy-relevant inode, registered by userspace. The
+ * inode-only build cannot name an opened file (no bpf_d_path in LSM hooks),
+ * so file_open resolves the path here and runs the normal path pipeline. */
+struct inode_path_val {
+	char path[MAX_FILENAME_LEN];
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct file_domain_id);
+	__type(value, struct inode_path_val);
+} te_inode_path SEC(".maps");
+
 #define INODE_GUARD_UNLINK  1
 #define INODE_GUARD_RENAME  2
 #define INODE_GUARD_WRITE   4
 
-static __always_inline int te_inode_guarded(
+/* Returns the guard entry when the inode is guarded for guard_flag in the
+ * caller's domain, NULL otherwise. */
+static __always_inline const struct inode_guard_val *te_inode_guarded(
 	const void *a, const void *b, __u32 ref_kind, __u32 guard_flag,
 	pid_t pid)
 {
@@ -206,21 +223,21 @@ static __always_inline int te_inode_guarded(
 		inode = BPF_CORE_READ((struct file *)a, f_inode);
 		break;
 	default:
-		return 0;
+		return NULL;
 	}
 	if (!inode)
-		return 0;
+		return NULL;
 
 	fid.ino = BPF_CORE_READ(inode, i_ino);
 	fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
 
 	struct inode_guard_val *val = bpf_map_lookup_elem(&te_inode_guard, &fid);
 	if (!val || !(val->flags & guard_flag))
-		return 0;
+		return NULL;
 	/* Verify the guard belongs to the caller's domain so bindings
 	 * from different agents do not cross-block each other. */
 	__u32 *domain = bpf_map_lookup_elem(&cap_task, &pid);
-	return domain && *domain == val->domain_id;
+	return domain && *domain == val->domain_id ? val : NULL;
 }
 
 static __always_inline int te_pid_protected(pid_t pid)
@@ -2124,13 +2141,20 @@ static __always_inline int te_handle_file_permission(struct file *file,
 	if (!te_pid_active(pid))
 		return 0;
 	__builtin_memset(scratch, 0, sizeof(*scratch));
-	/* bpf_d_path is not accepted by the verifier for file_permission on
-	 * some kernels. Use the dentry name for display/target matching but keep
-	 * the inode-backed file_id so fd-level flow still joins with open-time
-	 * labels for the same file object. */
-	if (file_basename(file, scratch->path, sizeof(scratch->path)) < 0)
+	if (!te_is_regular_or_dir(file, NULL, TE_REF_FILE) ||
+	    te_resolve_file_id_from_file(file, &scratch->fid) < 0)
 		return 0;
-	te_resolve_file_id(TE_REF_FILE, file, 0, scratch->path, &scratch->fid);
+	struct file_domain_id key = {
+		.fid = scratch->fid,
+		.domain_id = cap_domain_for_pid(pid),
+	};
+	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &key);
+	if (known) {
+		__builtin_memcpy(scratch->path, known->path, sizeof(scratch->path));
+		scratch->path[sizeof(scratch->path) - 1] = '\0';
+	} else if (file_basename(file, scratch->path, sizeof(scratch->path)) < 0) {
+		return 0;
+	}
 
 	return te_handle_file_event(pid, scratch->path, &scratch->fid, access, mode);
 }
@@ -2415,7 +2439,8 @@ SEC("lsm/file_open")
 int BPF_PROG(enforce_file_open, struct file *file)
 {
 #ifdef INODE_GUARD_ONLY
-	return 0; /* No path resolution available; file-open not guarded in inode mode */
+	return te_handle_file_permission(file,
+		te_access_from_open_flags(BPF_CORE_READ(file, f_flags)), TE_MODE_BLOCK);
 #else
 	return te_handle_file(TE_REF_FILE, file, 0,
 			      te_access_from_open_flags(BPF_CORE_READ(file, f_flags)),
@@ -2481,26 +2506,29 @@ int BPF_PROG(enforce_path_truncate, const struct path *path_arg)
 
 /* Emit a violation event for an inode-guard block so the audit chain
  * sees the denied operation even when the fast path short-circuits
- * the full taint evaluation. */
+ * the full taint evaluation. The target is the registered canonical path,
+ * or the dentry name when the inode has none. */
 static __always_inline void te_inode_guard_violation(
-	pid_t pid, const void *a, const void *b, __u32 ref_kind, __u32 op)
+	pid_t pid, struct dentry *dentry, const struct inode_guard_val *guard,
+	__u32 op)
 {
 	struct file_id fid = {};
-	struct inode *inode = NULL;
-	switch (ref_kind) {
-	case TE_REF_PATH_DENTRY:
-		inode = BPF_CORE_READ((struct dentry *)b, d_inode);
-		break;
-	default:
-		break;
-	}
+	struct inode *inode = BPF_CORE_READ(dentry, d_inode);
+	const char *target = NULL;
+	__u32 rule_id = guard->rule_id;
+	__u32 dom_id = guard->domain_id;
+
 	if (inode) {
 		fid.ino = BPF_CORE_READ(inode, i_ino);
 		fid.dev = BPF_CORE_READ(inode, i_sb, s_dev);
 	}
-	__u32 *domain = bpf_map_lookup_elem(&cap_task, &pid);
-	__u32 dom_id = domain ? *domain : 0;
-	emit_violation(pid, /*rule_id=*/0, /*target=*/NULL, /*conn_ip=*/0,
+	struct file_domain_id key = { .fid = fid, .domain_id = dom_id };
+	struct inode_path_val *known = bpf_map_lookup_elem(&te_inode_path, &key);
+	if (known)
+		target = known->path;
+	else
+		target = (const char *)BPF_CORE_READ(dentry, d_name.name);
+	emit_violation(pid, rule_id, target, /*conn_ip=*/0,
 		      TE_OBJ_FILE, &fid, dom_id, /*matched_labels=*/0,
 		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
 }
@@ -2510,11 +2538,12 @@ int BPF_PROG(enforce_path_unlink, const struct path *dir, struct dentry *dentry)
 {
 	/* Inode guard fast path: O(1) hash lookup, no bpf_d_path needed */
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
-	if (enforce_mode && te_pid_active(pid) &&
-	    te_inode_guarded(dir, dentry, TE_REF_PATH_DENTRY,
-			     INODE_GUARD_UNLINK, pid)) {
-		te_inode_guard_violation(pid, dir, dentry, TE_REF_PATH_DENTRY,
-					TOP_WRITE);
+	const struct inode_guard_val *guard = NULL;
+	if (enforce_mode && te_pid_active(pid))
+		guard = te_inode_guarded(dir, dentry, TE_REF_PATH_DENTRY,
+					 INODE_GUARD_UNLINK, pid);
+	if (guard) {
+		te_inode_guard_violation(pid, dentry, guard, TE_EVENT_OP_UNLINK);
 		return -EPERM;
 	}
 
@@ -2536,11 +2565,12 @@ int BPF_PROG(enforce_path_rename, const struct path *old_dir,
 
 	/* Inode guard fast path for the source (renamed-from) file */
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
-	if (enforce_mode && te_pid_active(pid) &&
-	    te_inode_guarded(old_dir, old_dentry, TE_REF_PATH_DENTRY,
-			     INODE_GUARD_RENAME, pid)) {
-		te_inode_guard_violation(pid, old_dir, old_dentry,
-					TE_REF_PATH_DENTRY, TOP_WRITE);
+	const struct inode_guard_val *guard = NULL;
+	if (enforce_mode && te_pid_active(pid))
+		guard = te_inode_guarded(old_dir, old_dentry, TE_REF_PATH_DENTRY,
+					 INODE_GUARD_RENAME, pid);
+	if (guard) {
+		te_inode_guard_violation(pid, old_dentry, guard, TE_EVENT_OP_RENAME);
 		return -EPERM;
 	}
 

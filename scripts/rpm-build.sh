@@ -505,7 +505,10 @@ build_agentsight() {
         log "clang not found, installing..."
         install_package clang || { err "Failed to install clang"; return 1; }
     fi
-    (
+    local ENFORCER_BIN
+    ENFORCER_BIN=$(
+        set -e
+        exec 3>&1 1>&2
         cd "$SIGHT_DIR"
         # Build frontend (embed into Rust binary via include_dir!)
         if [ -d "${SIGHT_DIR}/dashboard" ] && command -v npm &>/dev/null; then
@@ -523,7 +526,7 @@ build_agentsight() {
             exit 1
         fi
         cargo build --release --bin agentsight
-        ./scripts/build-enforcer.sh
+        ./scripts/build-enforcer.sh >&3
     )
 
     # Step 2: Process spec template and create tarball
@@ -534,7 +537,7 @@ build_agentsight() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"
+    ENFORCER_BIN="$ENFORCER_BIN" "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
