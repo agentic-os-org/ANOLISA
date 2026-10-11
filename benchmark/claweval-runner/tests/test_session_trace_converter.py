@@ -136,6 +136,86 @@ class TestToolCallParsing:
         assert result["param1"] == "value1"
 
 
+class TestMcporterDispatchExtraction:
+    """The virtual mcporter tool_dispatch must not misread result text.
+
+    A successful MCP call (isError=False) whose body merely contains the
+    substring "unknown" — e.g. unknown@example.com in a gmail listing —
+    must stay response_status=200: claw-eval's compute_robustness counts
+    dispatch status >= 400 as an error, so a substring heuristic on
+    successful bodies corrupts the robustness score.
+    """
+
+    MCP_CMD = (
+        "mcporter call --config /home/u/.openclaw/mcporter/"
+        "claw-eval-T001zh_email_triage.json "
+        "claw-eval-mock-T001zh_email_triage gmail_list_messages"
+    )
+
+    def _convert(self, tmp_path, result_text: str) -> list:
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session = [
+            {"type": "message", "timestamp": "2026-10-03T09:00:00+00:00",
+             "message": {"role": "user",
+                         "content": [{"type": "text", "text": "list mail"}]}},
+            {"type": "message", "timestamp": "2026-10-03T09:00:05+00:00",
+             "message": {"role": "assistant", "stopReason": "toolUse",
+                         "usage": {"input": 8000, "output": 435},
+                         "content": [{"type": "toolCall", "id": "tc1",
+                                      "name": "exec",
+                                      "arguments": {"command": self.MCP_CMD}}]}},
+            {"type": "message", "timestamp": "2026-10-03T09:00:07+00:00",
+             "message": {"role": "toolResult", "toolName": "exec",
+                         "toolCallId": "tc1", "isError": False,
+                         "content": [{"type": "text", "text": result_text}]}},
+        ]
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text(
+            "\n".join(json.dumps(e) for e in session) + "\n", encoding="utf-8")
+
+        task = {
+            "task_id": "T001zh_email_triage",
+            "tools": [{"name": "gmail_list_messages"}],
+            "tool_endpoints": [{"tool_name": "gmail_list_messages",
+                                "url": "http://localhost:9100/gmail/list_messages",
+                                "method": "POST"}],
+            "services": [],
+        }
+        output_file = tmp_path / "output.jsonl"
+        convert_session_to_trace(str(session_file), task, str(output_file))
+        return [json.loads(line)
+                for line in output_file.read_text().strip().split("\n")]
+
+    def test_successful_body_containing_unknown_stays_200(self, tmp_path):
+        events = self._convert(
+            tmp_path,
+            '{"messages": [{"id": "msg_001",'
+            ' "from": "unknown@example.com", "subject": "hi"}]}')
+        dispatches = [e for e in events if e.get("type") == "tool_dispatch"
+                      and e.get("tool_name") == "gmail_list_messages"]
+        assert dispatches, "virtual mcporter dispatch missing"
+        assert dispatches[0]["response_status"] == 200
+
+    def test_clean_successful_body_is_200(self, tmp_path):
+        events = self._convert(
+            tmp_path,
+            '{"messages": [{"id": "msg_001",'
+            ' "from": "noreply@example.com", "subject": "hi"}]}')
+        dispatches = [e for e in events if e.get("type") == "tool_dispatch"
+                      and e.get("tool_name") == "gmail_list_messages"]
+        assert dispatches
+        assert dispatches[0]["response_status"] == 200
+
+    def test_mcporter_error_body_is_still_500(self, tmp_path):
+        events = self._convert(
+            tmp_path, "Error: unknown tool gmail_list_messages")
+        dispatches = [e for e in events if e.get("type") == "tool_dispatch"
+                      and e.get("tool_name") == "gmail_list_messages"]
+        assert dispatches
+        assert dispatches[0]["response_status"] == 500
+
+
 class TestTimestampNormalization:
     """Test timestamp normalization."""
 
