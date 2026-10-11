@@ -41,7 +41,8 @@ def escape_text(s: str) -> tuple[str, bool]:
     Return (escaped_text, needs_preserve).
     needs_preserve is True if the string has leading or trailing whitespace.
     """
-    escaped = html.escape(s, quote=False)
+    # XML parsers normalize literal CR characters to LF, even with xml:space.
+    escaped = html.escape(s, quote=False).replace("\r", "&#13;")
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 
