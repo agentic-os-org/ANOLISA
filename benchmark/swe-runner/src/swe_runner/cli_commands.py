@@ -50,6 +50,11 @@ class TraceAnalysisCommandResult:
     summary_csv: Path
     trace_metrics_csv: Path
 
+    @property
+    def model_summary_csv(self) -> Path:
+        """Model budget report alongside the per-instance summary."""
+        return self.summary_csv.with_name("trace_model_summary.csv")
+
 
 def command_output_dir(output_root: Path, command_name: str) -> Path:
     """Return the per-command output directory under an output root."""

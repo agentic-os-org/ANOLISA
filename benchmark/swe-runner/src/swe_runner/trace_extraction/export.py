@@ -18,7 +18,7 @@ import csv
 from pathlib import Path
 
 from swe_runner.trace_extraction.analysis import analyze_trace_files
-from swe_runner.trace_extraction.helpers import sanitize_path_component
+from swe_runner.trace_extraction.helpers import _format_metric, _mean, sanitize_path_component
 
 _DETAIL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("用例ID", "instance_id"),
@@ -75,9 +75,46 @@ _METRIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("文件编辑工具次数", "file_edit_tool_count"),
 )
 
+_MODEL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("模型", "model"),
+    ("用例数", "instance_count"),
+    ("执行次数", "execution_count"),
+    ("总输入Token数", "total_input_tokens"),
+    ("总输出Token数", "total_output_tokens"),
+    ("总Token数", "total_tokens"),
+    ("平均输入Token数", "avg_input_tokens"),
+    ("平均输出Token数", "avg_output_tokens"),
+    ("平均总Token数", "avg_total_tokens"),
+    ("平均执行步骤数", "avg_steps"),
+)
+
 
 def _localized_row(row: dict[str, str | int], columns: tuple[tuple[str, str], ...]) -> dict[str, str | int]:
     return {header: row.get(key, "") for header, key in columns}
+
+
+def _model_summary_rows(per_trace_rows: list[dict[str, str | int]]) -> list[dict[str, str | int]]:
+    grouped: dict[str, list[dict[str, str | int]]] = {}
+    for row in per_trace_rows:
+        grouped.setdefault(str(row["model"]), []).append(row)
+    summaries: list[dict[str, str | int]] = []
+    for model, rows in sorted(grouped.items()):
+        inputs = [int(row["total_input_tokens"]) for row in rows]
+        outputs = [int(row["total_output_tokens"]) for row in rows]
+        totals = [input_count + output_count for input_count, output_count in zip(inputs, outputs, strict=True)]
+        summaries.append({
+            "model": model,
+            "instance_count": len({row["instance_id"] for row in rows}),
+            "execution_count": len(rows),
+            "total_input_tokens": sum(inputs),
+            "total_output_tokens": sum(outputs),
+            "total_tokens": sum(totals),
+            "avg_input_tokens": _format_metric(_mean(inputs)),
+            "avg_output_tokens": _format_metric(_mean(outputs)),
+            "avg_total_tokens": _format_metric(_mean(totals)),
+            "avg_steps": _format_metric(_mean([int(row["total_steps"]) for row in rows])),
+        })
+    return summaries
 
 
 def write_trace_analysis_csvs(
@@ -133,5 +170,10 @@ def write_trace_analysis_csvs(
         )
         writer.writeheader()
         writer.writerows([_localized_row(row, _METRIC_COLUMNS) for row in per_trace_rows])
+
+    with open(output_path / "trace_model_summary.csv", "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[header for header, _ in _MODEL_COLUMNS])
+        writer.writeheader()
+        writer.writerows([_localized_row(row, _MODEL_COLUMNS) for row in _model_summary_rows(per_trace_rows)])
 
     return detail_dir, per_instance_csv
