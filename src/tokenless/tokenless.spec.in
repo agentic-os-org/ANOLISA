@@ -71,6 +71,10 @@ Register it with `qwen extensions link`, or run the install script: qwencode/scr
 OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and Tool
 Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
 Register it by running the install script: opencode/scripts/install.sh
+Trae (TraeCode) adapter (RTK command rewriting on the standardized RunCommand tool,
+response/TOON compression via additionalContext, and Tool Ready) is available under
+/usr/share/anolisa/adapters/tokenless/trae/. Register it by running the install
+script: trae/scripts/install.sh
 
 %prep
 %setup -q -n %{name}-%{version}
@@ -116,6 +120,8 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/hooks
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
 
 # Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
@@ -225,6 +231,15 @@ install -m 0755 adapters/tokenless/qwencode/scripts/detect.sh %{buildroot}%{_dat
 install -m 0755 adapters/tokenless/qwencode/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/
 install -m 0755 adapters/tokenless/qwencode/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/
 
+# Install Trae (TraeCode) adapter (hooks template + scripts). Hook commands
+# are stamped with the installed adapter directory at install time because
+# Trae has no plugin-root substitution.
+install -m 0644 adapters/tokenless/trae/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/hooks/
+install -m 0755 adapters/tokenless/trae/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/hooks/
+install -m 0755 adapters/tokenless/trae/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/scripts/
+install -m 0755 adapters/tokenless/trae/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/scripts/
+install -m 0755 adapters/tokenless/trae/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/trae/scripts/
+
 # Install cosh extension for auto-discovery at /usr/share/anolisa/extensions/tokenless/
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/extensions/tokenless/commands
@@ -279,6 +294,9 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/trae
+%dir %{_datadir}/anolisa/adapters/tokenless/trae/hooks
+%dir %{_datadir}/anolisa/adapters/tokenless/trae/scripts
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/manifest.json
 %attr(0644,root,root) %{_datadir}/anolisa/components/tokenless/component.toml
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/common/tool-ready-spec.json
@@ -346,6 +364,11 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/uninstall.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/trae/hooks/hooks.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/trae/hooks/run-hook.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/trae/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/trae/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/trae/scripts/uninstall.sh
 # Cosh extension — auto-discovered from /usr/share/anolisa/extensions/
 %dir %{_datadir}/anolisa/extensions
 %dir %{_datadir}/anolisa/extensions/tokenless
@@ -438,6 +461,15 @@ if [ $1 -eq 0 ]; then
     OPENCODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh"
     if [ -x "$OPENCODE_SCRIPT" ]; then
         bash "$OPENCODE_SCRIPT" || true
+    fi
+
+    # --- Trae hooks cleanup ---
+    # Note: %preun runs as root so this only touches root's ~/.trae-cn /
+    # ~/.trae hooks.json; per-user installations must run the uninstall
+    # script themselves.
+    TRAE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/trae/scripts/uninstall.sh"
+    if [ -x "$TRAE_SCRIPT" ]; then
+        bash "$TRAE_SCRIPT" || true
     fi
 
     # --- Qwen Code plugin cleanup ---

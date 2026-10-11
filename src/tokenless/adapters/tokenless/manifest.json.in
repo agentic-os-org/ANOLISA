@@ -157,6 +157,21 @@
         "install":   "qwenpaw/scripts/install.sh",
         "uninstall": "qwenpaw/scripts/uninstall.sh"
       }
+    },
+    "trae": {
+      "compatibleVersions": "*",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "response-diagnostics"
+        ]
+      },
+      "actions": {
+        "detect":    "trae/scripts/detect.sh",
+        "install":   "trae/scripts/install.sh",
+        "uninstall": "trae/scripts/uninstall.sh"
+      }
     }
   }
 }
