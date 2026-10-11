@@ -235,8 +235,11 @@ Examples:
         print(f"  python3 formula_check.py {args.output}")
         sys.exit(0)
     else:
-        # Distinguish "not installed" (exit 2) from "failed" (exit 1)
-        if "not found" in message.lower() or "not available" in message.lower():
+        # Exit 2 is reserved for "Tier 2 unavailable" (LibreOffice missing). Every
+        # other failure is a recalculation failure (exit 1): the classification must
+        # not depend on message wording, because failure messages embed raw
+        # LibreOffice stderr that may itself contain "not found".
+        if find_soffice() is None:
             print(f"SKIP (Tier 2 unavailable): {message}")
             sys.exit(2)
         else:
