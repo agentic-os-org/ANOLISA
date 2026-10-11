@@ -26,11 +26,12 @@ async function targetFile(urlPath) {
 for (const htmlFile of htmlFiles) {
   const html = await readFile(htmlFile, 'utf8');
   const relativeHtmlPath = path.relative(buildDir, htmlFile).split(path.sep).join('/');
-  const currentPath = relativeHtmlPath.endsWith('/index.html')
+  const artifactPath = relativeHtmlPath.endsWith('/index.html')
     ? `/${relativeHtmlPath.slice(0, -'index.html'.length)}`
     : relativeHtmlPath === 'index.html'
       ? '/'
       : `/${relativeHtmlPath}`;
+  const currentPath = `${basePath ? `/${basePath}` : ''}${artifactPath}`;
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
   const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
   for (const id of new Set(duplicates)) {
