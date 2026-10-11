@@ -18,7 +18,7 @@ use super::soft_newline::{
     contains_soft_newline_sequence, draft_text_from_bytes, render_soft_newline_markers,
 };
 use super::spawn::ZshPathPromptBuffering;
-use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
+use super::{MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
 pub(super) struct InputRelayContext<'a> {
     pub(super) master: &'a mut File,
@@ -40,33 +40,6 @@ pub(super) struct InputRelayContext<'a> {
     /// Zsh-only capability that keeps slash candidates out of ZLE until Rust
     /// can route or submit the complete line.
     pub(super) zsh_path_prompt_buffering: Option<&'a mut ZshPathPromptBuffering>,
-}
-
-/// Writes real user bytes to the PTY, bumping the shared input generation
-/// first so replayed-prompt state armed for an older generation expires
-/// before the resulting PTY output can be parsed. The event also reports how
-/// many line submissions the write carried, so the output loop can match
-/// them against shell prompt boundaries.
-pub(super) fn write_user_bytes_to_pty(
-    master: &mut File,
-    input_generation: &UserPtyInputGeneration,
-    line_submits: &mut LineSubmitCounter,
-    input_events: &dyn RawInputEventSink,
-    main_prompt_gate: &MainPromptGate,
-    bytes: &[u8],
-) -> io::Result<()> {
-    let line_submits = line_submits.count(bytes);
-    if line_submits > 0 {
-        // A submitted line leaves the primary prompt until the marker emits
-        // the next prompt_ready (#1721 D16).
-        main_prompt_gate.set_at_prompt(false);
-    }
-    let generation = input_generation.bump();
-    let _ = input_events.send(RawInputEvent::PtyUserWrite {
-        generation,
-        line_submits,
-    });
-    write_all_pty(master, bytes)
 }
 
 pub(super) fn send_raw_input_events(bytes: &[u8], input_events: &dyn RawInputEventSink) {
@@ -685,6 +658,7 @@ mod bash_submission_guard;
 mod candidate;
 mod exit_tracker;
 mod path_prompt_submit;
+mod pty_write;
 mod soft_newline_upgrade;
 mod tab_handoff;
 use bash_submission_guard::{
@@ -692,6 +666,7 @@ use bash_submission_guard::{
     history_private_submission,
 };
 pub(super) use exit_tracker::ExplicitExitTracker;
+pub(super) use pty_write::write_user_bytes_to_pty;
 use soft_newline_upgrade::{handle_prompt_line_soft_newline, PromptLineSoftNewline};
 
 #[cfg(test)]

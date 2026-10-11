@@ -110,6 +110,8 @@ impl OscParser {
             prompt_presentation_display_starts: Vec::new(),
             prompt_epoch_exchange: None,
             prompt_epoch: None,
+            prompt_idle_probe_supported: false,
+            prompt_idle_probe_observed: false,
             synthetic_prompt_repaint_armed: false,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
@@ -126,6 +128,7 @@ impl OscParser {
             shell_prompt_cwd: crate::input::ShellPromptCwd::default(),
             shell_path_command_names: crate::input::ShellPathCommandNames::default(),
             pty_input_barrier_pushed: false,
+            prompt_input_barrier_pushed: false,
             visible_tail: VisibleTailTracker::default(),
             alt_screen: AltScreenTracker::default(),
         })

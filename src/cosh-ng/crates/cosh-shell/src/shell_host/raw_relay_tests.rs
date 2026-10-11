@@ -119,6 +119,28 @@ fn feed_enhanced_prompt_ready(parser: &mut OscParser) {
 }
 
 #[test]
+fn compact_bash_prompt_enables_authenticated_idle_probe_markers() {
+    let mut parser = parser_for_test("readline-idle-probe");
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"p\",\"t\":\"test-marker-token\",\"s\":0}\x07")
+        .expect("feed compact prompt");
+    assert!(parser.supports_prompt_idle_probe());
+    assert!(!parser.take_prompt_idle_probe());
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"prompt_idle\",\"t\":\"wrong-token\"}\x07")
+        .expect("feed untrusted idle marker");
+    assert!(!parser.take_prompt_idle_probe());
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"prompt_idle\",\"t\":\"test-marker-token\"}\x07")
+        .expect("feed trusted idle marker");
+    assert!(parser.take_prompt_idle_probe());
+    assert!(!parser.take_prompt_idle_probe());
+}
+
+#[test]
 fn prompt_snapshot_publishes_only_after_pty_is_drained() {
     for (name, drained, expected) in [
         ("not-drained", false, b"".as_slice()),
@@ -305,19 +327,17 @@ fn relay_write_event_expires_armed_prompt_replay() {
 
     // The write event for a user keystroke travels through the event
     // channel ahead of the echo bytes it triggers.
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
 
     assert!(!prompt_replay.is_armed());
 }
 
 #[test]
-fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
-    // Production wiring: a PTY write with zero detected line submits
-    // (submit detection cannot see custom `accept-line` bindings)
-    // must still emit the shell_pty_input barrier event that the
-    // dispatcher consumes to invalidate the prompt-cwd report.
-    // Consecutive writes collapse into one event; a fresh
-    // command-less prompt report re-arms the barrier.
+fn pty_user_writes_emit_independent_prompt_evidence_barriers() {
+    // Production wiring must invalidate both cwd evidence and prompt occupancy
+    // even when submit detection cannot see a custom `accept-line` binding.
+    // Cwd evidence is restored only by `ShellReady`, while every precmd restores
+    // prompt occupancy and independently re-arms that barrier.
     let mut parser = parser_for_test("pty-write-cwd-barrier");
     let (generation, mut prompt_replay) = tracker_for_test();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -325,12 +345,12 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     let mut echoed = 0usize;
     let prompt_presentation = PromptPresentation::new(false);
 
-    let barrier_count = |parser: &OscParser| {
+    let barrier_count = |parser: &OscParser, component| {
         parser
             .events
             .iter()
             .filter(|event| {
-                event.component.as_deref() == Some("shell_pty_input")
+                event.component.as_deref() == Some(component)
                     && event.message.as_deref() == Some("write")
             })
             .count()
@@ -355,9 +375,9 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     )
     .expect("drain pty writes");
     assert_eq!(
-        barrier_count(&parser),
+        barrier_count(&parser, "shell_pty_input"),
         1,
-        "consecutive writes must collapse into one barrier event"
+        "consecutive writes must collapse into one cwd barrier event"
     );
 
     // A fresh command-less prompt report re-arms the barrier, so the
@@ -380,9 +400,43 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     )
     .expect("drain post-prompt write");
     assert_eq!(
-        barrier_count(&parser),
+        barrier_count(&parser, "shell_pty_input"),
         2,
-        "a fresh prompt report must re-arm the barrier"
+        "a command-less prompt report must re-arm the cwd barrier"
+    );
+
+    parser
+        .feed(
+            b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":\"true\",\"cwd\":\"/tmp\"}\x07",
+        )
+        .expect("feed preexec");
+    feed_shell_ready(&mut parser);
+    sender
+        .send(crate::raw_input::RawInputEvent::PtyUserWrite {
+            generation: generation.bump(),
+            line_submits: 0,
+        })
+        .expect("queue post-command write");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("drain post-command write");
+
+    assert_eq!(
+        barrier_count(&parser, "shell_pty_input"),
+        2,
+        "command completion must not restore invalidated cwd evidence"
+    );
+    assert_eq!(
+        barrier_count(&parser, "shell_prompt_input"),
+        3,
+        "command completion must re-arm the prompt occupancy barrier"
     );
 }
 
@@ -702,7 +756,7 @@ fn handoff_refuses_to_arm_over_pending_user_input() {
 fn prompt_restore_arms_again_after_the_response_reaches_a_prompt_boundary() {
     let (generation, mut prompt_replay) = tracker_for_test();
 
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.arm_for_replay(b"prompt> ");
     assert!(!prompt_replay.is_armed());
 
@@ -719,8 +773,8 @@ fn typeahead_submission_blocks_arm_until_its_own_prompt_boundary() {
 
     // A command line, then an empty Enter typed ahead while it runs; both
     // write events are drained before the command's precmd arrives.
-    prompt_replay.observe_user_write(generation.bump(), 1);
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
 
     // The command's precmd only accounts for the command's own submission,
     // so a command insight or handoff must not arm over the queued Enter.
@@ -735,11 +789,90 @@ fn typeahead_submission_blocks_arm_until_its_own_prompt_boundary() {
 }
 
 #[test]
+fn uncounted_away_prompt_input_waits_for_the_in_band_idle_probe() {
+    let (generation, mut prompt_replay) = tracker_for_test();
+    prompt_replay.set_idle_reconcile_window(Duration::ZERO);
+
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 0);
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+
+    // Prompt paint and arbitrary silence cannot prove that Readline exhausted
+    // custom accept-line keys buffered ahead of the next command.
+    assert!(!prompt_replay.reconcile_idle_at_prompt(false, true, None));
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(!prompt_replay.is_armed());
+
+    assert!(prompt_replay.observe_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(prompt_replay.is_armed());
+}
+
+#[test]
+fn uncounted_write_without_probe_support_never_holds_prompt_occupancy() {
+    // zsh (and any shell without the Bash `prompt_idle` Readline binding)
+    // produces line_submits==0 writes for ordinary keystrokes. Marking those
+    // as unclassified would pin the occupancy hold forever, because no probe
+    // can ever release it — breaking later upgrade notice rendering.
+    let (generation, mut prompt_replay) = tracker_for_test();
+
+    prompt_replay.observe_user_write(generation.bump(), 0, false);
+    assert!(!prompt_replay.observe_prompt_boundary());
+    assert!(!prompt_replay.arm_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(prompt_replay.is_armed());
+}
+
+#[test]
+fn consecutive_uncounted_submissions_hold_through_every_command_boundary() {
+    let (generation, mut prompt_replay) = tracker_for_test();
+
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
+    // One coalesced PTY write may contain any number of custom accept-line
+    // keys, so it deliberately records no guessed submission count.
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 0);
+
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+    // The foreground command and both queued commands may each produce a
+    // boundary, but none is proof that Readline exhausted queued input.
+    for _ in 0..2 {
+        assert!(prompt_replay.observe_prompt_boundary());
+        assert!(!prompt_replay.arm_idle_probe());
+        prompt_replay.arm_for_replay(b"prompt> ");
+        assert!(!prompt_replay.is_armed());
+    }
+
+    assert!(prompt_replay.observe_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(prompt_replay.is_armed());
+}
+
+#[test]
+fn user_write_invalidates_an_earlier_idle_probe_generation() {
+    let (generation, mut prompt_replay) = tracker_for_test();
+
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 0);
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 0);
+    assert!(!prompt_replay.observe_idle_probe());
+    prompt_replay.arm_for_replay(b"prompt> ");
+    assert!(!prompt_replay.is_armed());
+
+    assert!(prompt_replay.observe_prompt_boundary());
+    assert!(prompt_replay.arm_idle_probe());
+    assert!(prompt_replay.observe_idle_probe());
+}
+
+#[test]
 fn several_enters_in_one_write_block_arm_until_all_boundaries_arrive() {
     let (generation, mut prompt_replay) = tracker_for_test();
 
     // One relay write carrying two accept-line keys (e.g. "\r\r").
-    prompt_replay.observe_user_write(generation.bump(), 2);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 2);
 
     prompt_replay.observe_prompt_boundary();
     prompt_replay.arm_for_replay(b"prompt> ");
@@ -757,7 +890,7 @@ fn boundary_without_a_matching_submission_is_ignored() {
     // A Ctrl-C style prompt repaint yields a boundary with no submission.
     prompt_replay.observe_prompt_boundary();
 
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.arm_for_replay(b"prompt> ");
     assert!(!prompt_replay.is_armed());
 
@@ -773,7 +906,7 @@ fn intercepted_submission_does_not_block_arming_over_its_repaint() {
     // A recalled slash line is submitted and killed by the DEBUG trap; its
     // precmd has not arrived when the panel's RestorePrompt fires, but its
     // only remaining response is the repaint the arm exists to strip.
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.observe_intercept_cut();
 
     prompt_replay.arm_for_replay(b"prompt> ");
@@ -786,7 +919,7 @@ fn typeahead_enter_still_blocks_arming_alongside_an_intercept() {
 
     // Recalled slash + empty Enter in one write: only the slash line was
     // intercepted; the Enter's response is still pending.
-    prompt_replay.observe_user_write(generation.bump(), 2);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 2);
     prompt_replay.observe_intercept_cut();
 
     prompt_replay.arm_for_replay(b"prompt> ");
@@ -801,7 +934,7 @@ fn uncounted_custom_accept_line_intercept_never_swallows_typeahead_enter() {
     // submission is invisible to the byte counter, so the typeahead Enter in
     // the same write is the only counted submit and the intercept cut lets
     // the panel restore arm over it.
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.observe_intercept_cut();
     prompt_replay.arm_for_replay(b"prompt> \x1b[?2004h");
     assert!(prompt_replay.is_armed());
@@ -828,8 +961,8 @@ fn foreground_consumed_submission_is_written_off_at_an_idle_prompt() {
 
     // `read value` (one submit) plus "hello\r" consumed by `read` itself:
     // only the command's precmd arrives, leaving a permanent +1 balance.
-    prompt_replay.observe_user_write(generation.bump(), 1);
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.observe_prompt_boundary();
 
     prompt_replay.arm_for_replay(b"prompt> ");
@@ -848,8 +981,8 @@ fn idle_reconcile_is_refused_while_a_command_is_running() {
     prompt_replay.set_idle_reconcile_window(Duration::from_millis(0));
 
     // Command submitted, then a typeahead Enter while it runs.
-    prompt_replay.observe_user_write(generation.bump(), 1);
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.observe_prompt_boundary();
 
     // A long-running command keeps the PTY silent, but the typeahead Enter
@@ -867,8 +1000,8 @@ fn idle_reconcile_is_refused_until_the_prompt_is_painted() {
     // Command plus a typeahead Enter; the command's precmd marker arrived
     // but the user's slow PROMPT_COMMAND still runs, so no prompt bytes are
     // painted and readline has not consumed the queued Enter yet.
-    prompt_replay.observe_user_write(generation.bump(), 1);
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     prompt_replay.observe_prompt_boundary();
 
     // However long the silence lasts, the ledger must survive until the
@@ -888,7 +1021,7 @@ fn idle_reconcile_is_refused_until_the_prompt_is_painted() {
 fn idle_reconcile_waits_for_pty_and_relay_silence() {
     let (generation, mut prompt_replay) = tracker_for_test();
 
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
 
     // A write just drained: the reconcile window has not elapsed, so the
     // pending submission survives (its echo may still be in flight).
@@ -907,7 +1040,7 @@ fn idle_reconcile_is_refused_while_a_write_is_undrained() {
     let (generation, mut prompt_replay) = tracker_for_test();
     prompt_replay.set_idle_reconcile_window(Duration::from_millis(0));
 
-    prompt_replay.observe_user_write(generation.bump(), 1);
+    prompt_replay.observe_user_write_with_probe(generation.bump(), 1);
     // A second write bumped the shared generation but its event has not
     // been drained yet: the ledger is not settled.
     generation.bump();

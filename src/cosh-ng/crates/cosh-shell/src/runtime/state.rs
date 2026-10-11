@@ -31,6 +31,7 @@ use crate::runtime::state_prelude::{
 use crate::runtime::trust_state::ApprovalTrustState;
 use crate::slash::session::SessionControlState;
 use crate::types::{AgentContextBinding, ShellEvent, ShellEventKind};
+use crate::upgrade::check::StartupUpgradeState;
 
 pub(crate) struct AnalysisThrottle {
     recent: HashMap<String, (Instant, usize)>,
@@ -112,6 +113,12 @@ pub(crate) struct InlineState {
     /// until the marker channel has proven itself — a session without
     /// any marker traffic never gets a value here.
     pub(crate) shell_prompt_cwd: Option<String>,
+    /// Whether the latest decisive shell event proves that the shell is at a prompt.
+    /// Any PTY input invalidates this until a fresh prompt boundary arrives.
+    pub(crate) shell_at_prompt: bool,
+    /// Submitted lines whose matching prompt boundary has not arrived yet.
+    /// A command-completion marker cannot prove idleness while this is non-zero.
+    pub(crate) pending_shell_submits: usize,
     pub(crate) shell_session_id: Option<String>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
@@ -150,6 +157,7 @@ pub(crate) struct InlineState {
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
     pub(crate) startup_auth: StartupAuthState,
+    pub(crate) startup_upgrade: StartupUpgradeState,
     pub(crate) personalization: PersonalizationState,
     pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }
