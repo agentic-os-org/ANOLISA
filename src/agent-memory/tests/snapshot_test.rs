@@ -147,3 +147,50 @@ fn snapshot_excludes_meta_directory() {
         );
     }
 }
+
+#[test]
+fn repeated_restore_preserves_each_displaced_tree() {
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "baseline", false).unwrap();
+    svc.write("notes/inner.md", "baseline nested", false)
+        .unwrap();
+    let snap = svc.mem_snapshot(None).unwrap();
+
+    for version in ["first", "second"] {
+        svc.write("doc.md", version, true).unwrap();
+        svc.write("notes/inner.md", version, true).unwrap();
+        svc.mem_snapshot_restore(&snap.id).unwrap();
+        assert_eq!(svc.read("doc.md").unwrap(), "baseline");
+        assert_eq!(svc.read("notes/inner.md").unwrap(), "baseline nested");
+    }
+    let mut versions: Vec<_> = std::fs::read_dir(svc.mount.meta_dir.join("trash"))
+        .unwrap()
+        .map(|entry| {
+            let dir = entry.unwrap().path();
+            let file = std::fs::read_to_string(dir.join("doc.md")).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.join("notes/inner.md")).unwrap(),
+                file
+            );
+            file
+        })
+        .collect();
+    versions.sort();
+    assert_eq!(versions, ["first", "second"]);
+}
+
+#[test]
+fn unavailable_trash_keeps_displaced_content_in_meta() {
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "baseline", false).unwrap();
+    let snap = svc.mem_snapshot(None).unwrap();
+    std::fs::write(svc.mount.meta_dir.join("trash"), "occupied").unwrap();
+    svc.write("doc.md", "recoverable", true).unwrap();
+    svc.mem_snapshot_restore(&snap.id).unwrap();
+    assert_eq!(svc.read("doc.md").unwrap(), "baseline");
+    let rollback = svc
+        .mount
+        .meta_dir
+        .join(format!(".{}.rollback.doc.md", snap.id));
+    assert_eq!(std::fs::read_to_string(rollback).unwrap(), "recoverable");
+}

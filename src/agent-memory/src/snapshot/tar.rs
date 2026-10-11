@@ -312,30 +312,30 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     // as the swap succeeded — an unrecoverable destruction of the prior
     // state. Operators (or a future GC tool) can purge `.anolisa/trash/`
     // explicitly when they decide the restore is good.
-    let trash_dir = mount
-        .meta_dir
-        .join("trash")
-        .join(format!("{}-{id}", Utc::now().format("%Y%m%dT%H%M%SZ")));
-    if let Err(e) = std::fs::create_dir_all(&trash_dir) {
-        // Trash creation failed — fall back to leaving rollback entries in
-        // place so the user still has a recovery path. Log loudly.
-        tracing::warn!(
-            "could not create trash dir {} ({e}); rollback entries left in meta dir",
-            trash_dir.display()
-        );
-    } else {
-        for (original, rolled) in rollbacks {
-            let leaf = original
-                .file_name()
-                .map(|s| s.to_os_string())
-                .unwrap_or_else(|| std::ffi::OsString::from("entry"));
-            let dest = trash_dir.join(&leaf);
-            if let Err(e) = std::fs::rename(&rolled, &dest) {
-                tracing::warn!(
-                    "could not move rollback {} → {}: {e}",
-                    rolled.display(),
-                    dest.display()
-                );
+    let trash_root = mount.meta_dir.join("trash");
+    let trash_name = format!("{}-{id}", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    match reserve_trash_dir(&trash_root, &trash_name) {
+        Err(e) => {
+            // Preserve rollback entries if no recovery directory can be reserved.
+            tracing::warn!(
+                "could not reserve trash dir in {} ({e}); rollback entries left in meta dir",
+                trash_root.display()
+            );
+        }
+        Ok(trash_dir) => {
+            for (original, rolled) in rollbacks {
+                let leaf = original
+                    .file_name()
+                    .map(|s| s.to_os_string())
+                    .unwrap_or_else(|| std::ffi::OsString::from("entry"));
+                let dest = trash_dir.join(&leaf);
+                if let Err(e) = std::fs::rename(&rolled, &dest) {
+                    tracing::warn!(
+                        "could not move rollback {} → {}: {e}",
+                        rolled.display(),
+                        dest.display()
+                    );
+                }
             }
         }
     }
@@ -345,6 +345,25 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         tracing::warn!("staging cleanup {}: {e}", staging.display());
     }
     Ok(())
+}
+
+fn reserve_trash_dir(root: &Path, name: &str) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(root)?;
+    // Reserve with create_dir: an existing backup must never be reused, even
+    // when sequential restores share a timestamp and snapshot ID.
+    for suffix in 0..u64::MAX {
+        let dir = root.join(if suffix == 0 {
+            name.to_owned()
+        } else {
+            format!("{name}-{suffix}")
+        });
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("trash directory suffixes exhausted"))
 }
 
 fn write_sidecar(path: &Path, info: &SnapshotInfo) -> Result<()> {
@@ -388,6 +407,27 @@ fn read_sidecar(path: &Path) -> Result<SnapshotInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_reservation_preserves_existing_backups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("trash");
+        let first = reserve_trash_dir(&root, "same-second-same-id").unwrap();
+        std::fs::write(first.join("doc.md"), "first backup").unwrap();
+        // Files as well as directories occupy names; neither may be reused.
+        std::fs::write(root.join("same-second-same-id-1"), "occupied").unwrap();
+        let second = reserve_trash_dir(&root, "same-second-same-id").unwrap();
+        assert_eq!(second, root.join("same-second-same-id-2"));
+        assert_eq!(
+            std::fs::read_to_string(first.join("doc.md")).unwrap(),
+            "first backup"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("same-second-same-id-1")).unwrap(),
+            "occupied"
+        );
+        assert!(std::fs::read_dir(second).unwrap().next().is_none());
+    }
 
     #[test]
     fn validate_snapshot_id_accepts_generated_form() {
