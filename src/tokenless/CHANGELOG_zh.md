@@ -9,6 +9,41 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.5] - 2026-10-11
+
+### 新增
+
+- 现在会在成功写入 SQLite Stash 时回收过期的载荷，只有压缩写入的工作负载无需先执行检索即可清理旧载荷。这不会立即缩小数据库文件，也不代表安全擦除已删除的数据（[#3565](https://github.com/agentic-os-org/ANOLISA/pull/3565)）。
+
+### 变更
+
+- CLI、Runtime 和 Python SDK 现在默认开启完整 HTML 页面的渲染。可通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；环境变量为空时保留默认值。Git diff 上下文裁剪仍需显式开启（[#3473](https://github.com/agentic-os-org/ANOLISA/pull/3473)）。
+
+### 修复
+
+- 对于提供命令行的适配器，包括 OpenClaw、DSH、QwenPaw 和 AgentScope，`cat page.html` 等普通 Shell 文件读取现在会保持 HTML 源码原样。JSON、表格及其他支持的文件数据仍可压缩（[#3481](https://github.com/agentic-os-org/ANOLISA/pull/3481)）。
+- 单个起始字节顺序标记不再阻止 HTML、JSON、表格或堆栈跟踪进入对应的内容处理器；支持恢复的转换会保留原始字节（[#3486](https://github.com/agentic-os-org/ANOLISA/pull/3486)、[#4888](https://github.com/agentic-os-org/ANOLISA/pull/4888)）。
+- 首尾带括号但并非单个有效 JSON 文档的工具输出，包括拼接的文档和 NDJSON，现在保持原样，不再导致 PostTool 调用失败（[#4159](https://github.com/agentic-os-org/ANOLISA/pull/4159)）。
+- 带有 `env -i`、`env -u` 或 Cargo `+toolchain` 的构建、测试命令现在会保留原生日志供构建日志压缩使用，不再交给 RTK（[#4270](https://github.com/agentic-os-org/ANOLISA/pull/4270)）。
+- 即使父进程退出后子孙进程仍持有 stdout，RTK 命令改写也会遵守超时限制，并清理所属进程组（[#3552](https://github.com/agentic-os-org/ANOLISA/pull/3552)）。
+- 并发 hook 初始化或迁移统计数据库时不再竞争添加相同的列，失败的迁移会整体回滚（[#3607](https://github.com/agentic-os-org/ANOLISA/pull/3607)）。
+- 统计历史和会话差异报告现在按实际时间排序，包括混合 UTC 偏移及亚毫秒差异，使最新记录的数量限制和压缩链保持正确（[#3848](https://github.com/agentic-os-org/ANOLISA/pull/3848)）。
+- 统计记录和检索事件写入失败时现在会输出 `[tokenless-stats]` 警告，同时继续完成压缩和检索；stderr 本身不可写时也不会中断（[#3587](https://github.com/agentic-os-org/ANOLISA/pull/3587)）。
+- AgentScope 1.x 的全新安装现在包含较新 SQLAlchemy 所需的 `greenlet` 依赖。以位置参数传入的应用 postprocessor 也会正确衔接，并先于 Tokenless 处理执行（[#3496](https://github.com/agentic-os-org/ANOLISA/pull/3496)、[#3706](https://github.com/agentic-os-org/ANOLISA/pull/3706)）。
+- Hermes 现在会为失败或已停止的 Shell 调用保留完整错误封装，避免丢失只存在于 output 字段之外的诊断信息（[#3815](https://github.com/agentic-os-org/ANOLISA/pull/3815)）。
+- OpenCode 现在会转发非零 Bash 退出码供诊断，清理超时 hook 及其子孙进程，并按 UTF-8 字节执行 1 MiB 的 hook 输出限制。超限的 hook 响应会使工具输出保持原样（[#4398](https://github.com/agentic-os-org/ANOLISA/pull/4398)、[#3818](https://github.com/agentic-os-org/ANOLISA/pull/3818)、[#4757](https://github.com/agentic-os-org/ANOLISA/pull/4757)）。
+- OpenCode 宿主对已返回工具 Schema 的修改不再影响后续调用使用的缓存 Schema（[#4731](https://github.com/agentic-os-org/ANOLISA/pull/4731)）。
+- Qwen Code 适配器安装使用 `--dry-run` 时不再调用宿主 CLI、写入清单或改变当前扩展链接（[#4397](https://github.com/agentic-os-org/ANOLISA/pull/4397)）。
+- `npm rebuild` 现在可替换失效的 `tokenless` 和 `rtk` 启动器符号链接，并支持重复执行（[#4711](https://github.com/agentic-os-org/ANOLISA/pull/4711)）。
+- OpenClaw 查找二进制时现在会跳过 `PATH` 中的同名目录，继续找到后面的可执行文件或可执行符号链接（[#4855](https://github.com/agentic-os-org/ANOLISA/pull/4855)）。
+- Selective-Claw 轮次召回现在按请求顺序合并实时与归档轮次，并绑定宿主会话，避免交错处理的会话将 `expand_turn` 重定向到另一段对话（[#4670](https://github.com/agentic-os-org/ANOLISA/pull/4670)、[#4782](https://github.com/agentic-os-org/ANOLISA/pull/4782)）。
+- Selective-Claw 现在会区分开头的 system 或隐式轮次与后续 user 轮次，并将旧归档迁移为一致的序数轮次 ID（[#4673](https://github.com/agentic-os-org/ANOLISA/pull/4673)、[#4693](https://github.com/agentic-os-org/ANOLISA/pull/4693)）。
+- Selective-Claw 首次创建全文索引时，现在会使已有归档消息也能被搜索到（[#4689](https://github.com/agentic-os-org/ANOLISA/pull/4689)）。
+- Selective-Claw 重复执行生命周期调用时不再重复导入已替换的对话历史，重启引擎后也保持一致（[#4700](https://github.com/agentic-os-org/ANOLISA/pull/4700)）。
+- Selective-Claw 从归档恢复结构化宿主消息，在组装存储上下文时保留工具标识、内容块、角色别名和元数据（[#4699](https://github.com/agentic-os-org/ANOLISA/pull/4699)）。
+- Selective-Claw 现在会持久化不含 user 消息的轮次摘要，并将摘要与回退预览计入上下文 Token 估算（[#4698](https://github.com/agentic-os-org/ANOLISA/pull/4698)、[#4662](https://github.com/agentic-os-org/ANOLISA/pull/4662)）。
+- Selective-Claw 现在遵循 OpenClaw 的 `pluginConfig` 选项并展开 `~/` 归档路径，包括禁用注册的设置（[#4822](https://github.com/agentic-os-org/ANOLISA/pull/4822)）。
+
 ## [0.8.4] - 2026-09-22
 
 ### 新增
