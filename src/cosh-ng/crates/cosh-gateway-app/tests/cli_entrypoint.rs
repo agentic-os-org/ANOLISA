@@ -120,6 +120,50 @@ fn task_rejects_a_relative_gateway_socket_from_the_environment() {
     assert!(stdout.contains("COSH_GATEWAY_SOCKET path must be absolute"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn gated_web_exits_before_any_workspace_token_or_daemon_validation() {
+    // Every argument below is individually invalid; the build gate must fire first.
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args([
+            "web",
+            "--workspace",
+            "relative-workspace",
+            "--token-file",
+            "missing-token",
+            "--output",
+            "jsonl",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(12));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"web_failed\""), "{stdout}");
+    assert!(
+        stdout.contains("not yet available in this build"),
+        "{stdout}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn top_level_help_hides_the_gated_web_subcommand() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("web ")),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn run_reads_prompt_from_stdin_and_escapes_terminal_controls() {
     let workspace = tempfile::tempdir().unwrap();

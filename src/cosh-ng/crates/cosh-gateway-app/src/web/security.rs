@@ -220,4 +220,29 @@ mod tests {
         capabilities.runtimes.clear();
         assert!(validate_capabilities(&capabilities, &workspace).is_err());
     }
+
+    #[test]
+    fn no_readiness_combination_makes_the_sealed_catalog_attestable() {
+        let workspace = WorkspaceRef {
+            scope_digest: Digest::parse("a".repeat(64)).unwrap(),
+            display_name: None,
+        };
+        let ready = LaunchReadiness::ready();
+        let unavailable = LaunchReadiness::unavailable(BoundedText::new("disabled").unwrap());
+        for mask in 0..8u8 {
+            let pick = |bit: u8| {
+                if mask & (1 << bit) == 0 {
+                    ready.clone()
+                } else {
+                    unavailable.clone()
+                }
+            };
+            let capabilities =
+                TaskLaunchCatalog::new(workspace.clone(), pick(0), pick(1), pick(2)).capabilities();
+            assert!(
+                validate_capabilities(&capabilities, &workspace).is_err(),
+                "readiness mask {mask} unexpectedly passed attestation"
+            );
+        }
+    }
 }

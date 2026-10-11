@@ -51,7 +51,10 @@ file descriptor through procfs. It queries daemon capabilities before listening,
 binds the workspace through the existing canonical path/device/inode digest,
 and rejects delegated or unbrokered Runtime authority, including unavailable
 entries. The built-in Core/Codex catalog currently fails that admission check;
-there is no admitted production Web configuration in this release. Moving a
+there is no admitted production Web configuration in this release, so the `web`
+subcommand is hidden from help and gated with a `web_failed` not-yet-available
+error before any workspace, token, or daemon work, keeping the startup
+attestation as the future-ready check. Moving a
 same-user token outside the workspace is insufficient isolation. The former
 caller-supplied capability-profile label has been removed.
 

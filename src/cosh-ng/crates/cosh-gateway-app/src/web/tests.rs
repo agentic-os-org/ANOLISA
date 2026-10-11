@@ -24,90 +24,53 @@ fn private_tempdir() -> tempfile::TempDir {
 }
 
 #[test]
-fn web_attests_workspace_and_authority_before_binding_http() {
-    let directory = private_tempdir();
-    let admitted = directory.path().join("admitted");
-    let declared = directory.path().join("declared");
-    fs::create_dir(&admitted).unwrap();
-    fs::create_dir(&declared).unwrap();
-    fs::set_permissions(&admitted, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::set_permissions(&declared, fs::Permissions::from_mode(0o700)).unwrap();
-    let token = admitted.join("token");
-    fs::write(&token, "0123456789abcdef0123456789abcdef").unwrap();
-    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
-    let resolver = TrustedWorkspaceResolver::new(
-        GatewayCapabilityProfile::task_only_v1().governed_target(),
-        &admitted,
-    )
-    .unwrap();
-    let socket = directory.path().join("gateway.sock");
-    let mut daemon = GatewayDaemon::bind(GatewayDaemonConfig {
-        socket_path: socket.clone(),
-        database_path: directory.path().join("gateway.db"),
-        installation_id: None,
-        launch_catalog: TaskLaunchCatalog::new(
-            resolver.workspace_ref().clone(),
-            LaunchReadiness::ready(),
-            LaunchReadiness::ready(),
-            LaunchReadiness::ready(),
-        ),
-    })
-    .unwrap();
-    // An occupied port makes a missing admission check fail immediately, not hang.
+fn web_gate_rejects_startup_before_workspace_token_socket_and_bind_checks() {
+    // Every argument below is individually invalid; the gate must fire first.
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let args = WebArgs {
         bind: occupied.local_addr().unwrap(),
-        socket: Some(socket.clone()),
-        workspace: declared,
-        token_file: token.clone(),
+        socket: Some(PathBuf::from("relative/gateway.sock")),
+        workspace: PathBuf::from("relative-workspace"),
+        token_file: PathBuf::from("missing-token"),
         output: Output::Jsonl,
     };
-    let external_token = directory.path().join("token");
-    fs::copy(token, &external_token).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let daemon_stop = Arc::clone(&stop);
-    let server = std::thread::spawn(move || daemon.serve_until(&daemon_stop));
-    let mismatch = web(
-        args.clone(),
+    let error = web(
+        args,
         &Reporter {
             output: Output::Jsonl,
         },
-    );
-    let authority = web(
-        WebArgs {
-            workspace: admitted,
-            token_file: external_token,
-            ..args.clone()
-        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("not yet available in this build"), "{error}");
+    assert!(error.contains("cosh-gateway task"), "{error}");
+}
+
+#[test]
+fn web_gate_rejects_even_a_fully_valid_configuration() {
+    let directory = private_tempdir();
+    let workspace = directory.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = directory.path().join("token");
+    fs::write(&token, "0123456789abcdef0123456789abcdef").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let args = WebArgs {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        socket: Some(directory.path().join("gateway.sock")),
+        workspace,
+        token_file: token,
+        output: Output::Jsonl,
+    };
+    let error = web(
+        args,
         &Reporter {
             output: Output::Jsonl,
         },
-    );
-    stop.store(true, Ordering::Relaxed);
-    server.join().unwrap().unwrap();
-    let mismatch = mismatch.unwrap_err().to_string();
-    assert!(
-        mismatch.contains("admitted workspace does not match"),
-        "{mismatch}"
-    );
-    let authority = authority.unwrap_err().to_string();
-    assert!(
-        authority.contains("brokered-only token boundary"),
-        "{authority}"
-    );
-    let unavailable = web(
-        WebArgs {
-            token_file: directory.path().join("token"),
-            ..args
-        },
-        &Reporter {
-            output: Output::Jsonl,
-        },
-    );
-    assert!(unavailable
-        .unwrap_err()
-        .to_string()
-        .contains("cannot attest Gateway capabilities"));
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("not yet available in this build"), "{error}");
 }
 
 #[test]

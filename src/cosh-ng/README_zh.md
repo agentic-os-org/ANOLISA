@@ -305,10 +305,12 @@ Task API 还支持 `append`、`cancel`、`retry` 与 `resolve-approval`。`docto
 Codex provider、SSH 断开流程与 systemd service，当前验收依据是 deterministic local
 coverage。
 
-实验性的 `cosh agent web` 命令仅在 Linux 上提供。它在打开 HTTP listener 前查询所选
-Daemon 的 capabilities，并验证 canonical workspace 身份与 Runtime 权限。当前 Core/Codex
-catalog 的两个条目都声明拥有本地用户权限，即使 token 位于工作区外也可读取，因此 Web
-会拒绝启动。这个版本请通过 `/task` 或 `cosh agent task` 继续任务。原来的
+实验性的 `cosh agent web` 命令仅在 Linux 上提供，且**本构建尚未开放（not yet
+available in this build）**。所有 sealed Runtime 都以 delegated local authority 执行
+effect，Web adapter 要求的 brokered-only token 边界无法通过 attestation。该子命令已从
+`--help` 隐藏，并在任何 workspace、token 或 Daemon 操作之前以 `web_failed` 的
+not-yet-available 错误退出；启动 attestation 保留为未来就绪检查。这个版本请通过
+`/task` 或 `cosh agent task` 继续任务。原来的
 `--capability-profile` 声明已移除，因为它从未限制 Daemon 的权限。平台限制与准入边界详见
 [Web 命令参考](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)。
 
