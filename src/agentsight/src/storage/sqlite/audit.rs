@@ -166,6 +166,7 @@ impl AuditStore {
         since_ns: u64,
         event_type: Option<AuditEventType>,
     ) -> Result<Vec<AuditRecord>> {
+        let since_ns = ns_to_sqlite(since_ns, "since bound")?;
         let (sql, type_str);
         let query_params: Vec<Box<dyn rusqlite::types::ToSql>>;
 
@@ -179,7 +180,7 @@ impl AuditStore {
             );
             query_params = vec![
                 Box::new(pid),
-                Box::new(since_ns as i64),
+                Box::new(since_ns),
                 Box::new(type_str.clone()),
             ];
         } else {
@@ -189,7 +190,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(pid), Box::new(since_ns as i64)];
+            query_params = vec![Box::new(pid), Box::new(since_ns)];
         }
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -286,13 +287,14 @@ impl AuditStore {
 
     /// Get summary statistics since a given timestamp
     pub fn summary(&self, since_ns: u64) -> Result<AuditSummary> {
+        let since_ns = ns_to_sqlite(since_ns, "since bound")?;
         // Count by event type
         let total_llm_calls: u64 = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
                 self.table_name
             ),
-            params![since_ns as i64],
+            params![since_ns],
             |row| row.get(0),
         )?;
 
@@ -301,7 +303,7 @@ impl AuditStore {
                 "SELECT COUNT(*) FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'process_action'",
                 self.table_name
             ),
-            params![since_ns as i64],
+            params![since_ns],
             |row| row.get(0),
         )?;
 
@@ -316,7 +318,7 @@ impl AuditStore {
                 "SELECT extra FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
                 self.table_name
             ))?;
-            let rows = stmt.query_map(params![since_ns as i64], |row| {
+            let rows = stmt.query_map(params![since_ns], |row| {
                 let extra_str: String = row.get(0)?;
                 Ok(extra_str)
             })?;
@@ -370,7 +372,7 @@ impl AuditStore {
                     self.table_name
                 ),
             )?;
-            let rows = stmt.query_map(params![since_ns as i64], |row| {
+            let rows = stmt.query_map(params![since_ns], |row| {
                 let comm: String = row.get(0)?;
                 let extra_str: String = row.get(1)?;
                 Ok((comm, extra_str))
@@ -869,5 +871,29 @@ mod tests {
             1,
             "a representable cutoff still purges"
         );
+    }
+
+    /// `query_by_pid` and `summary` take the same u64 nanosecond window bound
+    /// as the entry points hardened above, but their own queries still used a
+    /// raw `as i64`, so a bound past `i64::MAX` wrapped negative and matched
+    /// every row instead of refusing.
+    #[test]
+    fn pid_and_summary_windows_refuse_beyond_i64() {
+        let store = in_memory_store();
+        store.insert(&process_action_at(1_000)).unwrap();
+        let beyond = u64::MAX;
+
+        assert!(
+            store.query_by_pid(42, beyond, None).is_err(),
+            "query_by_pid must refuse a since bound beyond i64 ns, not wrap it negative and match every row"
+        );
+        assert!(
+            store.summary(beyond).is_err(),
+            "summary must refuse a since bound beyond i64 ns, not wrap it negative and count the whole table"
+        );
+
+        // Representable bounds keep working.
+        assert_eq!(store.query_by_pid(42, 1_000, None).unwrap().len(), 1);
+        assert_eq!(store.summary(1_000).unwrap().total_process_actions, 1);
     }
 }
