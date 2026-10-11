@@ -170,15 +170,18 @@ export function findNodeByPath(root: TrajNode, path: string[]): TrajNode {
  * whole tree so a ref inside a nested trajectory still resolves.
  */
 export function findNodeByRef(root: TrajNode, ref: SubagentTrajectoryRef): TrajNode | null {
-  const wanted = [ref.trajectory_id, ref.session_id].filter(Boolean) as string[];
-  if (wanted.length === 0) return null;
+  const wanted = ref.trajectory_id || ref.session_id;
+  if (!wanted) return null;
 
   const stack: TrajNode[] = [root];
   while (stack.length > 0) {
     const node = stack.pop()!;
     const last = node.path[node.path.length - 1];
-    const ids = [last, node.doc?.trajectory_id, node.doc?.session_id, node.externalSessionId];
-    if (wanted.some(w => ids.includes(w))) return node;
+    // Session ids are run-scoped; an explicit trajectory id identifies the document.
+    const ids = ref.trajectory_id
+      ? [node.doc?.trajectory_id]
+      : [last, node.doc?.session_id, node.externalSessionId];
+    if (ids.includes(wanted)) return node;
     stack.push(...node.children);
   }
   return null;
