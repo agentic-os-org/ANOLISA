@@ -427,27 +427,27 @@ fn full_scan(
     Ok(())
 }
 
-/// Compute and store embeddings for every indexed file that lacks one.
-/// The embedding HTTP call happens outside the store mutex so concurrent
-/// searches are not blocked; only the brief path-query and final vec-write
-/// hold the lock. No-op when no provider is configured.
+/// Compute and store embeddings for every indexed file that lacks one, and
+/// re-embed indexed files whose stored vector was produced by a *different*
+/// embedding model (dimensionality mismatch). The embedding HTTP calls
+/// happen outside the store mutex so concurrent searches are not blocked;
+/// only the brief path-query and final vec-write hold the lock. No-op when
+/// no provider is configured.
 fn backfill_vectors(
     mount: &MountPointLite,
     store: &Arc<Mutex<BM25Store>>,
     embedding: Option<&dyn EmbeddingProvider>,
     rt_handle: Option<&tokio::runtime::Handle>,
 ) -> Result<()> {
-    if embedding.is_none() {
+    let Some(provider) = embedding else {
         return Ok(());
-    }
+    };
+
     // Phase 1 (locked, brief): which indexed paths lack a vector?
     let missing: Vec<String> = {
         let store = store.lock().unwrap_or_else(|e| e.into_inner());
         store.paths_without_vec()?
     };
-    if missing.is_empty() {
-        return Ok(());
-    }
 
     // Phase 2 (lock-free): read body + embed. Holding the mutex across an
     // embedding HTTP call would block every concurrent search.
@@ -469,6 +469,73 @@ fn backfill_vectors(
         for (rel, v) in to_upsert {
             if let Err(e) = store.upsert_vec(&rel, &v) {
                 tracing::warn!("index full-scan vec upsert failed for {rel}: {e}");
+            }
+        }
+    }
+
+    // Phase 4: embedding-model migration. Switching the configured model
+    // leaves every stored vector at the OLD model's dimensionality, and
+    // `search_vec` silently skips length-mismatched rows — vector and
+    // hybrid recall die until the rows are re-embedded. The rows exist, so
+    // the missing-vector backfill above cannot surface them; probe by
+    // byte length instead. This costs one SQL query per full scan in the
+    // steady state (no mismatch → return below).
+    let suspects: Vec<String> = {
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        store.paths_with_stale_vec(provider.dimensions())?
+    };
+    if suspects.is_empty() {
+        return Ok(());
+    }
+
+    // `dimensions()` is only a constructor-time estimate on some providers
+    // (an unknown OpenAI model reports 1536 until the first real response
+    // corrects it — see OpenAiEmbedding::new), so confirm with one fresh
+    // embedding of a suspect's body before re-embedding the corpus: a
+    // wrong estimate that happens to differ from the stored
+    // dimensionality would otherwise rewrite every vector on every start.
+    let probe_rel = suspects[0].clone();
+    let Some(probe_body) = extract_text(mount.root_fd.as_fd(), Path::new(&probe_rel)) else {
+        return Ok(());
+    };
+    let Some(probe) = embed_sync(embedding, rt_handle, &probe_body) else {
+        tracing::warn!(
+            "cannot verify embedding dimensionality for vector migration; \
+             skipping until the next full scan"
+        );
+        return Ok(());
+    };
+    let stale: Vec<String> = {
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        store.paths_with_stale_vec(probe.len())?
+    };
+    if stale.is_empty() {
+        return Ok(());
+    }
+    tracing::warn!(
+        "re-embedding {} file(s) whose vectors were stored by a different \
+         embedding model (dimensionality changed)",
+        stale.len()
+    );
+
+    // The probe already holds a fresh embedding of its own body.
+    let mut to_upsert: Vec<(String, Vec<f32>)> = vec![(probe_rel.clone(), probe)];
+    for rel in stale {
+        if rel == probe_rel {
+            continue;
+        }
+        let Some(body) = extract_text(mount.root_fd.as_fd(), Path::new(&rel)) else {
+            continue;
+        };
+        if let Some(v) = embed_sync(embedding, rt_handle, &body) {
+            to_upsert.push((rel, v));
+        }
+    }
+    if !to_upsert.is_empty() {
+        let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+        for (rel, v) in to_upsert {
+            if let Err(e) = store.upsert_vec(&rel, &v) {
+                tracing::warn!("index model-migration vec upsert failed for {rel}: {e}");
             }
         }
     }
