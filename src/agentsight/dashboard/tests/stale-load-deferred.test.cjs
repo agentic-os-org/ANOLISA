@@ -1065,6 +1065,12 @@ function renderAtifPage() {
     '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
     '../utils/apiClient': { ...stubs },
     '../utils/roundModel': roundModel,
+    '../utils/optimizationStrategies': (() => {
+      const out = transpile('src/utils/optimizationStrategies.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
     '../utils/savings': (() => {
       const out = transpile('src/utils/savings.ts');
       const mod = { exports: {} };

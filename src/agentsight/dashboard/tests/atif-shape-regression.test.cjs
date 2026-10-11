@@ -46,6 +46,7 @@ function viewer(locale = 'en-US') {
         if (name === '../i18n') return { useI18n: () => ({ t }), useLocaleTag: () => locale };
         if (name === '../utils/trajectoryTree') return tree;
         if (name === '../utils/roundModel') return roundModel;
+        if (name === '../utils/optimizationStrategies') return require(join(output, '../utils/optimizationStrategies.js'));
         if (name === '../utils/savings') return require(join(output, '../utils/savings.js'));
         if (name === '../utils/trajectoryTextFilter') return require(join(output, '../utils/trajectoryTextFilter.js'));
         if (name === '../utils/apiClient') return {

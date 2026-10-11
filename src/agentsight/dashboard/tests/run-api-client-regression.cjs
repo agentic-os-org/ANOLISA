@@ -41,7 +41,9 @@ try {
       'src/pages/security/utils.ts',
       'src/pages/LoginPage.tsx',
       'src/components/OptimizationSettings.tsx',
+      'src/utils/optimizationStrategies.ts',
       'src/pages/AtifViewerPage.tsx',
+      'src/pages/TokenSavingsPage.tsx',
       'src/utils/trajectoryTree.ts',
       'src/utils/trajectoryTextFilter.ts',
       'src/utils/roundModel.ts',
@@ -49,7 +51,7 @@ try {
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/strategy-presentation-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -67,6 +69,8 @@ try {
       AGENTSIGHT_SECURITY_UTILS_BUILD: join(outputDir, 'pages', 'security', 'utils.js'),
       AGENTSIGHT_LOGIN_PAGE_BUILD: join(outputDir, 'pages', 'LoginPage.js'),
       AGENTSIGHT_LLM_CONFIG_BUILD: join(outputDir, 'components', 'OptimizationSettings.js'),
+      AGENTSIGHT_STRATEGIES_BUILD: join(outputDir, 'utils', 'optimizationStrategies.js'),
+      AGENTSIGHT_SAVINGS_PAGE_BUILD: join(outputDir, 'pages', 'TokenSavingsPage.js'),
       AGENTSIGHT_ATIF_PAGE_BUILD: join(outputDir, 'pages', 'AtifViewerPage.js'),
       AGENTSIGHT_TRAJECTORY_TREE_BUILD: join(outputDir, 'utils', 'trajectoryTree.js'),
       AGENTSIGHT_TRAJECTORY_FILTER_BUILD: join(outputDir, 'utils', 'trajectoryTextFilter.js'),

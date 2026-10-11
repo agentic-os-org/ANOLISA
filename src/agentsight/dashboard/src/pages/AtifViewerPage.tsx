@@ -20,6 +20,7 @@ import type { MessageKey } from '../i18n';
 import type { Round } from '../utils/roundModel';
 import { groupIntoRounds, initialRound, roundStats } from '../utils/roundModel';
 import { compoundedSavingsRate } from '../utils/savings';
+import { OPTIMIZATION_STRATEGIES } from '../utils/optimizationStrategies';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -89,22 +90,6 @@ function highlightedSections(doc: AtifDocument, callId: string | null): Set<stri
 // The round model (grouping, initial highlighted/default selection and
 // per-round statistics) lives in ../utils/roundModel; the viewer keeps
 // fetching, importing, navigation and rendering.
-
-// ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
-
-const STRATEGY_STYLES: Record<string, { color: string; bg: string }> = {
-  'compress-schema':   { color: 'text-blue-700',   bg: 'bg-blue-100' },
-  'compress-response': { color: 'text-violet-700', bg: 'bg-violet-100' },
-  'rewrite-command':   { color: 'text-orange-700', bg: 'bg-orange-100' },
-  'compress-toon':     { color: 'text-teal-700',  bg: 'bg-teal-100' },
-};
-
-const STRATEGY_LABEL_KEYS: Record<string, MessageKey> = {
-  'compress-schema':   'ts.schemaCompression',
-  'compress-response': 'ts.responseCompression',
-  'rewrite-command':   'ts.commandRewrite',
-  'compress-toon':     'ts.toonEncoding',
-};
 
 // ─── Source styling ───────────────────────────────────────────────────────────
 
@@ -382,8 +367,8 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, Optimi
     : JSON.stringify(tc.arguments, null, 2) ?? '';
   const isLongArgs = argsStr.length > 200;
   const savings = savingsMap?.get(tc.tool_call_id);
-  const stratStyle = savings ? (STRATEGY_STYLES[savings.strategy] ?? { color: 'text-gray-700', bg: 'bg-gray-100' }) : null;
-  const stratLabelKey = savings ? STRATEGY_LABEL_KEYS[savings.strategy] : undefined;
+  const stratStyle = savings ? (OPTIMIZATION_STRATEGIES[savings.strategy] ?? { color: 'text-gray-700', bg: 'bg-gray-100' }) : null;
+  const stratLabelKey = savings ? OPTIMIZATION_STRATEGIES[savings.strategy]?.labelKey : undefined;
 
   return (
     <div className="border border-orange-100 rounded-lg overflow-hidden">
