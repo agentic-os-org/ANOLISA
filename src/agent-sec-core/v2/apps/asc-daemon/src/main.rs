@@ -237,9 +237,11 @@ async fn run(
     let health_task = watch_policy_health(policy_runtime.enqueuer(), telemetry.reporter());
     // The signal task is spawned before the retention catch-up so a stop
     // signal arriving during the (unbounded) startup pass is observed at
-    // once: the catch-up then abandons admission and the daemon goes
-    // straight to the shutdown flow instead of making systemd wait out
-    // `TimeoutStopSec` and SIGKILL the process mid-catch-up.
+    // once: the catch-up then abandons admission immediately - the verdict
+    // overtakes the still-running pass - and the daemon goes straight to
+    // the shutdown flow, whose shared stop deadline therefore starts at
+    // the signal, instead of making systemd wait out `TimeoutStopSec` and
+    // SIGKILL the process mid-catch-up.
     let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     // The retention lifecycle: the startup catch-up pass runs to completion
     // before `serve` admits requests (a stop signal abandons admission

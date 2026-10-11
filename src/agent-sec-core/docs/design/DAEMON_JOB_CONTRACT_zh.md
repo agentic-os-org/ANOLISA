@@ -520,8 +520,9 @@ gate marker/lock，同一 pass 内组合执行；任一库 `Failed`/`Contended` 
 - **trigger**：启动 catch-up 一次（`retention::run_startup_catchup`，在 UDS admission 之前
   完成），此后每 `check_interval`（默认 1h）重查共享跨进程 daily gate；gate 本身仍决定是否
   真正执行。pass 内部失败按 `failure_retry`（默认 60s）退避重试。catch-up 与 shutdown 信号
-  `select!` 竞争（信号任务先于 catch-up 启动）：信号先到则放弃 admission，in-flight pass
-  仍由任务持有至终局 join（DJOB-RET-014）。
+  `select!` 竞争（信号任务先于 catch-up 启动）：信号先到则**立即**放弃 admission——verdict
+  在 pass 仍在途时送达，组合根当即进入共享 stop deadline 下的停机流程（停机耗时不再叠加
+  无界的补跑剩余时间），in-flight pass 仍由任务持有至终局 join（DJOB-RET-014）。
 - **Ready 关系**：服务不是 readiness-critical，无自己的 Ready gate。admission 只按顺序等待
   启动 catch-up 这一次 pass 完成；catch-up 失败或 contended 不阻塞 admission，转由周期任务
   按 `failure_retry` 重试。daemon 完成启动只代表 retention 已排队，不代表已成功。
@@ -565,7 +566,7 @@ gate marker/lock，同一 pass 内组合执行；任一库 `Failed`/`Contended` 
 | DJOB-RET-008 | join 超时返回 false（调用方须跳过 final pass） | `a_stuck_pass_times_out_the_terminal_join` |
 | DJOB-RET-009 | tick 与 cancellation 同时就绪时不得调度新 pass（取消优先） | `a_tick_and_cancellation_ready_together_schedule_no_new_pass` |
 | DJOB-RET-010 | 检查-提交窗口内到达的取消信号仍阻止该 pass（gate 串行化） | `retention.rs` 单测 `a_signal_inside_the_submission_window_still_prevents_the_pass` |
-| DJOB-RET-014 | catch-up 期间到达的 shutdown 放弃 admission，且终局 join 仍覆盖 in-flight pass | `retention.rs` 单测 `a_shutdown_during_the_startup_catchup_abandons_admission_and_joins_the_pass` |
+| DJOB-RET-014 | catch-up 期间到达的 shutdown 在 pass 仍在途时即送达 `false` 放弃 admission（组合根即时进入停机流程），且终局 join 仍覆盖 in-flight pass | `retention.rs` 单测 `a_shutdown_during_the_startup_catchup_abandons_admission_and_joins_the_pass` |
 | DJOB-RET-015 | 剩余停机预算不足 2s 时 final pass 被跳过（marker 不前进、连接仍关闭） | `asc-sqlite-kernel` 单测 `a_final_pass_that_cannot_fit_the_stop_budget_is_skipped` |
 | DJOB-RET-016 | 剩余预算充足时 final pass 照常执行 | `asc-sqlite-kernel` 单测 `a_final_pass_with_budget_left_still_runs` |
 | DJOB-RET-011 | `cancel` 与「检查+提交」段互斥（gate 被持有时不得完成） | `retention.rs` 单测 `cancel_serializes_with_the_submission_section` |
