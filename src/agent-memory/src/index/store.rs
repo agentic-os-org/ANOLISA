@@ -258,6 +258,19 @@ impl BM25Store {
         Ok(())
     }
 
+    /// Remove one file's metadata, text, and vector without matching descendants.
+    pub(super) fn remove_file(&mut self, rel_path: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM files_fts WHERE rowid IN (SELECT rowid FROM files WHERE path = ?1)",
+            params![rel_path],
+        )?;
+        tx.execute("DELETE FROM files WHERE path = ?1", params![rel_path])?;
+        tx.execute("DELETE FROM files_vec WHERE path = ?1", params![rel_path])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Remove a file's index entry. Returns true if any row existed.
     ///
     /// Cascade semantics: if `rel_path` matches a stored row exactly, that
