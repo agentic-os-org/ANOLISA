@@ -114,6 +114,135 @@ class PreToolContractTest(unittest.TestCase):
         self.assertEqual(missing_id.spawns, [])
 
 
+
+class WorkBuddyContractTest(unittest.TestCase):
+    """WorkBuddy PreToolUse contract: modifiedInput needs a decision.
+
+    WorkBuddy/CodeBuddy hosts apply modifiedInput only together with
+    permissionDecision "allow" (official PreToolUse contract and its
+    troubleshooting Q5). Protocol v2 never reports rtk's permission
+    verdict to the hook, so the hook cannot attest the rewrite; the safe
+    default passes the original command through and
+    TOKENLESS_WORKBUDDY_AUTO_ALLOW=1 opts into the bypass.
+    """
+
+    def run_case(self, behavior: str | None, extra_env: dict | None = None):
+        agent_env = {"TOKENLESS_AGENT_ID": "workbuddy"}
+        if extra_env:
+            agent_env.update(extra_env)
+        return contract_runner.run_case(
+            corpus.PRE_TOOL_HOOK,
+            json.dumps(pre_tool_payload()),
+            agent_env,
+            behavior,
+        )
+
+    def test_rewrite_passes_through_without_opt_in(self) -> None:
+        """Unattested-by-default: no bypass without the explicit opt-in."""
+        result = self.run_case("applied")
+        self.assertEqual(result.envelope, {})
+        # The gate fires before Core: no compression subprocess, no state.
+        self.assertEqual(result.spawns, [])
+        self.assertEqual(result.requests, [])
+
+    def test_auto_allow_opt_in_emits_modified_input(self) -> None:
+        """TOKENLESS_WORKBUDDY_AUTO_ALLOW=1 opts into the documented bypass."""
+        result = self.run_case(
+            "applied", {"TOKENLESS_WORKBUDDY_AUTO_ALLOW": "1"}
+        )
+        self.assertEqual(result.spawns, ["compress"])
+        self.assertEqual(
+            result.envelope,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "tool_input": {"command": "/mock/rtk grep error log"},
+                    "updatedInput": {
+                        "command": "/mock/rtk grep error log",
+                        "timeout": 30,
+                    },
+                    # Partial override payload: only the rewritten field,
+                    # not the full input.
+                    "modifiedInput": {"command": "/mock/rtk grep error log"},
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": (
+                        "Tokenless: rtk rewrite auto-allowed via "
+                        "TOKENLESS_WORKBUDDY_AUTO_ALLOW "
+                        "(host confirmation bypassed)"
+                    ),
+                }
+            },
+        )
+        request = result.requests[0]
+        self.assertEqual(request["attribution"]["agent_id"], "workbuddy")
+
+    def test_auto_allow_works_with_documented_idless_contract(self) -> None:
+        """The documented workbuddy HookInput carries no tool-call ID.
+
+        The official CLI, IDE and Enterprise HookInput shapes contain
+        only session_id, transcript_path, cwd, permission_mode,
+        hook_event_name and the event fields — no tool_use_id /
+        toolCallId / call_id — so the opt-in rewrite must not depend on
+        one; replaying exactly that shape must reach Core and apply.
+        """
+        result = contract_runner.run_case(
+            corpus.PRE_TOOL_HOOK,
+            json.dumps(pre_tool_payload(call_id="")),
+            {
+                "TOKENLESS_AGENT_ID": "workbuddy",
+                "TOKENLESS_WORKBUDDY_AUTO_ALLOW": "1",
+            },
+            "applied",
+        )
+        self.assertEqual(result.spawns, ["compress"])
+        hook_out = result.envelope.get("hookSpecificOutput", {})
+        self.assertEqual(
+            hook_out.get("modifiedInput"),
+            {"command": "/mock/rtk grep error log"},
+        )
+        self.assertEqual(hook_out.get("permissionDecision"), "allow")
+        # No call ID: the attribution omits the field entirely, and no
+        # PreTool->PostTool optimization mark is written (an ID-less mark
+        # could never be consumed).
+        request = result.requests[0]
+        self.assertNotIn("tool_use_id", request["attribution"])
+
+    def test_auto_allow_opt_in_keeps_fail_open_classes(self) -> None:
+        for behavior in [
+            "no_savings",
+            "passthrough",
+            "error_disposition",
+            "nonzero_exit",
+            "malformed_stdout",
+        ]:
+            with self.subTest(behavior=behavior):
+                result = self.run_case(
+                    behavior, {"TOKENLESS_WORKBUDDY_AUTO_ALLOW": "1"}
+                )
+                self.assertEqual(result.envelope, {})
+                self.assertEqual(result.spawns, ["compress"])
+
+    def test_non_workbuddy_keeps_rewrite_without_decision(self) -> None:
+        """Other agents keep the v2 rewrite; no WorkBuddy dialect fields.
+
+        Their output carries no permissionDecision, so the host permission
+        flow still applies to the rewritten command.
+        """
+        result = contract_runner.run_case(
+            corpus.PRE_TOOL_HOOK,
+            json.dumps(pre_tool_payload()),
+            {"TOKENLESS_AGENT_ID": "claude-code"},
+            "applied",
+        )
+        hook_out = result.envelope.get("hookSpecificOutput", {})
+        self.assertEqual(
+            hook_out.get("tool_input", {}).get("command"),
+            "/mock/rtk grep error log",
+        )
+        self.assertNotIn("modifiedInput", hook_out)
+        self.assertNotIn("permissionDecision", hook_out)
+
+
 class HookLifecycleStateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -208,6 +337,27 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(requests[-2]["attribution"]["agent_id"], "copilot-shell")
         self.assertEqual(requests[-1]["attribution"]["agent_id"], "copilot-shell")
         self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
+
+
+    def test_workbuddy_default_skip_writes_no_state(self) -> None:
+        """The WorkBuddy default pass-through leaves the ledger untouched.
+
+        Without TOKENLESS_WORKBUDDY_AUTO_ALLOW the PreTool gate fires
+        before Core, so no rtk state is persisted and the PostTool hook
+        still sees an unoptimized result.
+        """
+        env = {**self.env, "TOKENLESS_AGENT_ID": "workbuddy"}
+        output = self.run_hook(
+            corpus.PRE_TOOL_HOOK, pre_tool_payload(), env=env
+        )
+        self.assertEqual(output, {})
+
+        self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"), env=env)
+        self.assertEqual(len(self.requests()), 1)
+        self.assertEqual(self.requests()[-1]["operation"], "post_tool")
+        self.assertEqual(
+            self.requests()[-1]["input"]["output_optimization"], "none"
+        )
 
     def test_abandoned_state_is_bounded_on_next_rewrite(self) -> None:
         state_dir = self.home / ".tokenless" / "hook-state"
