@@ -142,6 +142,9 @@ def evaluate(
     predictions: Path = typer.Option("./output/run/preds.json", "--predictions", "-p", help="Path to preds.json file"),
     subset: str = typer.Option("lite", "--subset", "-s", help="Dataset subset (lite/verified/full/multilingual)"),
     split: str = typer.Option("test", "--split", help="Dataset split"),
+    instance_id: str | None = typer.Option(
+        None, "--instance-id", "-i", help="Exact instance ID(s), comma-separated; default: all non-empty predictions"
+    ),
     output: Path = typer.Option("./output", "--output", "-o", help="Output root directory"),
     workers: int = typer.Option(4, "--workers", "-w", help="Number of parallel workers"),
     timeout: int = typer.Option(1800, "--timeout", help="Evaluation timeout in seconds per instance"),
@@ -160,6 +163,7 @@ def evaluate(
             predictions=predictions,
             subset=subset,
             split=split,
+            instance_id=instance_id,
             output=output,
             workers=workers,
             timeout=timeout,

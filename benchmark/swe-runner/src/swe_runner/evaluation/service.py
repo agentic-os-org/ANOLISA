@@ -50,6 +50,24 @@ def _pushd(path: Path) -> Iterator[None]:
 # Instance-id helpers
 # ---------------------------------------------------------------------------
 
+
+class EvaluationSelectionError(ValueError):
+    """Requested IDs cannot be evaluated from the recorded predictions."""
+
+
+def _select_instance_ids(available: list[str], requested: list[str] | None) -> list[str]:
+    if requested is None:
+        return available
+    if not requested or any(not isinstance(iid, str) or not iid.strip() for iid in requested):
+        raise EvaluationSelectionError("Instance selection requires non-empty instance IDs")
+    selected = list(dict.fromkeys(iid.strip() for iid in requested))
+    available_set = set(available)
+    missing = [iid for iid in selected if iid not in available_set]
+    if missing:
+        raise EvaluationSelectionError(f"Instances lack non-empty predictions: {', '.join(missing)}")
+    return selected
+
+
 def _get_instance_ids(preds_path: Path) -> list[str]:
     """Read a predictions JSON file and return instance IDs with non-empty patches."""
     if not preds_path.exists():
@@ -73,6 +91,7 @@ def _get_instance_ids(preds_path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 # Evaluation runner
 # ---------------------------------------------------------------------------
+
 
 def _normalize_tar_owner(tar_info: tarfile.TarInfo) -> tarfile.TarInfo:
     tar_info.uid = 0
@@ -133,6 +152,7 @@ def _ensure_docker_host_for_rootless_context(
     os.environ["DOCKER_HOST"] = f"unix://{rootless_socket}"
     logger.info("EVAL_DOCKER_HOST_ROOTLESS docker_host=%s", os.environ["DOCKER_HOST"])
 
+
 def run_evaluation(
     preds_path: Path,
     output_dir: Path,
@@ -144,14 +164,16 @@ def run_evaluation(
     run_id: str = "eval",
     cache_level: str = "env",
     namespace: str | None = "swebench",
+    instance_ids: list[str] | None = None,
 ) -> None:
+    selected_ids = _select_instance_ids(_get_instance_ids(preds_path), instance_ids)
+
     from swebench import run_evaluation as swebench_run_evaluation
 
     _install_swebench_rootless_copy_patch()
     _ensure_docker_host_for_rootless_context()
 
-    instance_ids = _get_instance_ids(preds_path)
-    if not instance_ids:
+    if not selected_ids:
         logger.warning("EVAL_NO_VALID_PREDICTIONS preds_path=%s", preds_path)
 
     dataset_name = get_dataset_name(subset)
@@ -162,7 +184,7 @@ def run_evaluation(
         swebench_run_evaluation(
             dataset_name=dataset_name,
             split=split,
-            instance_ids=instance_ids,
+            instance_ids=selected_ids,
             predictions_path=str(preds_path),
             max_workers=workers,
             run_id=run_id,
@@ -181,6 +203,7 @@ def run_evaluation(
 # ---------------------------------------------------------------------------
 # Report generation
 # ---------------------------------------------------------------------------
+
 
 def generate_report_text(report: EvalReport) -> str:
     table = Table(title="SWE-bench Evaluation Results")
