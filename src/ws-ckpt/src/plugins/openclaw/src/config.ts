@@ -142,7 +142,7 @@ export class PluginConfigManager {
 
   /** Return the resolved configuration. */
   public getConfig(): PluginConfig {
-    return { ...this.config };
+    return { ...this.config, cronSchedules: this.config.cronSchedules?.slice() };
   }
 
   /**

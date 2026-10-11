@@ -169,6 +169,17 @@ describe("PluginConfigManager", () => {
     expect(a).toEqual(b);
   });
 
+  it.each([{ schedules: [] }, { schedules: ["0 * * * *"] }])("isolates returned schedule snapshots: $schedules", ({ schedules }) => {
+    const expected = schedules;
+    const mgr = new PluginConfigManager({ cronSchedules: expected });
+    const snapshot = mgr.getConfig();
+    snapshot.cronSchedules!.push("unvalidated schedule");
+
+    expect(mgr.getConfig().cronSchedules).toEqual(expected);
+    expect(mgr.getConfig().cronSchedules).not.toBe(snapshot.cronSchedules);
+    expect(expected).not.toContain("unvalidated schedule");
+  });
+
   it("validate returns valid with no errors", () => {
     const mgr = new PluginConfigManager();
     const v = mgr.validate();
