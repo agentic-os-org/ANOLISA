@@ -32,6 +32,7 @@ mod extractor;
 pub use extractor::extract_token_data_from_json;
 pub use extractor::openai::extract_response_content;
 pub(crate) use extractor::openai::merge_response_output_text;
+pub(crate) use extractor::openai::merge_response_tool_calls;
 
 // Re-export record types
 pub use record::TokenRecord;
