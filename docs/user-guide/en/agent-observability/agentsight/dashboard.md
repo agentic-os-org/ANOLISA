@@ -139,6 +139,13 @@ optimization type, plus a savings ranking and concrete tips.
 Press **Query** after choosing a range; the page starts empty on purpose. Setup:
 [Integrations](integrations.md#tokenless-token-savings).
 
+Click the input tokens, output tokens, saved tokens or savings rate column heading
+to sort highest first. Click it again for lowest first, then once more to restore
+the query order. Saved tokens and savings rate use the displayed values including
+compounding. Equal values retain the query order; your sort choice also applies
+to the next query result. The arrow marks the current direction, and headings
+work with the keyboard.
+
 **Export CSV** downloads the displayed sessions from the last successful query as
 `token-savings.csv`, in their displayed order. It includes session IDs, Agent names,
 request counts and Token metrics; rates use fractions (for example, `0.4` means 40%).

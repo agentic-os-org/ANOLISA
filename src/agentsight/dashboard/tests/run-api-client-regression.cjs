@@ -45,11 +45,13 @@ try {
       'src/utils/trajectoryTree.ts',
       'src/utils/trajectoryTextFilter.ts',
       'src/utils/roundModel.ts',
+      'src/utils/savingsSort.ts',
+      'src/pages/TokenSavingsPage.tsx',
       'tests/apiClient-globals.d.ts',
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/savings-sort-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -71,6 +73,8 @@ try {
       AGENTSIGHT_TRAJECTORY_TREE_BUILD: join(outputDir, 'utils', 'trajectoryTree.js'),
       AGENTSIGHT_TRAJECTORY_FILTER_BUILD: join(outputDir, 'utils', 'trajectoryTextFilter.js'),
       AGENTSIGHT_ROUND_MODEL_BUILD: join(outputDir, 'utils', 'roundModel.js'),
+      AGENTSIGHT_SAVINGS_SORT_BUILD: join(outputDir, 'utils', 'savingsSort.js'),
+      AGENTSIGHT_SAVINGS_PAGE_BUILD: join(outputDir, 'pages', 'TokenSavingsPage.js'),
     },
     stdio: 'inherit',
   });
