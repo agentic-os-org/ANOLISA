@@ -366,6 +366,22 @@ fn code_blocks_keep_language_and_verbatim_whitespace() {
 }
 
 #[test]
+fn inline_code_spans_containing_double_backticks_keep_one_fence() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>Run <code>a``b</code>, <kbd>ctl``alt</kbd> and <samp>x `` y</samp>,          plain <code>a`b</code> stays.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}
+
+Run ```a``b```, ```ctl``alt``` and ```x `` y```, plain ``a`b`` stays."
+        )
+    );
+}
+
+#[test]
 fn lists_nest_and_ordered_lists_honor_start() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><ul><li>one<ul><li>one.a</li><li>one.b</li></ul></li>\

@@ -1212,7 +1212,13 @@ impl Renderer<'_> {
                     if text.is_empty() {
                         return;
                     }
-                    let ticks = if text.contains('`') { "``" } else { "`" };
+                    // A code span is closed by a backtick run of the same
+                    // length as its fence, so the fence must outgrow the
+                    // longest run in the text, exactly like a code block's.
+                    let mut ticks = "`".to_owned();
+                    while text.contains(&ticks) {
+                        ticks.push('`');
+                    }
                     let _ = write!(out, "{ticks}{text}{ticks}");
                 }
                 "label" => {
