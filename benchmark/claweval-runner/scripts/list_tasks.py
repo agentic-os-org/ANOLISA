@@ -23,12 +23,14 @@ Usage:
 """
 
 import argparse
+import csv
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = REPO_ROOT / "claw-eval" / "tasks"
+CSV_FIELDS = ("task_id", "task_name", "difficulty", "prefix", "category", "tags")
 
 
 def _load_yaml_simple(path: Path) -> dict:
@@ -36,7 +38,7 @@ def _load_yaml_simple(path: Path) -> dict:
     import re
 
     result = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip()
             if not line or line.startswith("#"):
@@ -137,6 +139,15 @@ def print_grouped(tasks: list[dict]):
     print(f"{'='*60}\n")
 
 
+def print_csv(tasks: list[dict]) -> None:
+    """Emit a UTF-8 metadata table without changing the scanner's row order."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", newline="")
+    writer = csv.DictWriter(sys.stdout, fieldnames=CSV_FIELDS, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(tasks)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="List and group claw-eval tasks by prefix and difficulty",
@@ -146,10 +157,15 @@ def main():
     parser.add_argument("--difficulty",
                         choices=["simple", "easy", "medium", "hard", "expert"],
                         help="Filter by difficulty")
+    parser.add_argument("--format", choices=["grouped", "csv"], default="grouped",
+                        help="Grouped text or UTF-8 CSV metadata")
 
     args = parser.parse_args()
 
     tasks = scan_tasks(prefix_filter=args.prefix, difficulty_filter=args.difficulty)
+    if args.format == "csv":
+        print_csv(tasks)
+        return
     if not tasks:
         print("No tasks found matching the filters.")
         return
