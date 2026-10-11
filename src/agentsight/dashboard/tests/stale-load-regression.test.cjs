@@ -320,3 +320,34 @@ test('reuse-labels: toggling a criterion compares the selected rows', () => {
   assert.match(source, /sameMembers\(current, pending\) \? new Set\(\) : pending/);
   assert.match(source, /sameMembers\(current, ids\) \? new Set\(\) : ids/);
 });
+
+test('system-audit: case filter changes re-issue the query from the first page', () => {
+  // The case list is filtered server-side (agent_id/status/blocked) and paged
+  // by offset. The loader used to omit the three filter states from its
+  // dependency list, so changing a filter never re-issued the request: the
+  // list kept the previous server-side filter, `total`/pagination described
+  // the old set, and a stale offset would have requested the wrong page.
+  const source = readSource('src/pages/SystemAuditPage.tsx');
+
+  assert.match(
+    source,
+    /\[caseOffset, eventOffset, sessionOffset, caseAgentFilter, caseStatusFilter, caseBlockedOnly, t\]/,
+    'SystemAuditPage.load must depend on the case filter states',
+  );
+
+  // Every filter mutation goes through a wrapper that also resets the offset,
+  // so the re-issued request starts at page 0.
+  assert.match(source, /const applyCaseStatusFilter = \(value: 'all' \| SecurityReviewStatus\) => \{\s*setCaseStatusFilter\(value\);\s*setCaseOffset\(0\);/);
+  assert.match(source, /const applyCaseBlockedOnly = \(value: boolean\) => \{\s*setCaseBlockedOnly\(value\);\s*setCaseOffset\(0\);/);
+  assert.match(source, /const clearAgentFilter = \(\) => \{\s*setCaseAgentFilter\(null\);\s*setCaseOffset\(0\);/);
+
+  // The raw setters must not be used from the controls any more.
+  for (const call of [
+    /onChange=\{\(event\) => setCaseStatusFilter\(/,
+    /onChange=\{\(event\) => setCaseBlockedOnly\(/,
+    /setActiveTab\('cases'\); setCaseBlockedOnly\(/,
+    /setActiveTab\('cases'\); setCaseStatusFilter\(/,
+  ]) {
+    assert.ok(!call.test(source), `SystemAuditPage must not bypass the offset-resetting wrapper: ${call}`);
+  }
+});
