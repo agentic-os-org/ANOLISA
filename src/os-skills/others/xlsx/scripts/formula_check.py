@@ -178,8 +178,16 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
         return results
 
     with z:
-        sheet_names = get_sheet_names(z)
-        sheet_files = get_sheet_files(z)
+        try:
+            sheet_names = get_sheet_names(z)
+            sheet_files = get_sheet_files(z)
+        except KeyError as e:
+            # A valid ZIP that is not an xlsx (missing workbook part or rels)
+            results["errors"].append(
+                {"type": "file_error", "message": f"missing part in archive: {e.args[0]}"}
+            )
+            results["error_count"] = 1
+            return results
         valid_sheet_names = set(sheet_names.values())
         defined_names = get_defined_names(z)
 
