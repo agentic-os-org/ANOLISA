@@ -230,8 +230,18 @@ def main() -> None:
             tool_input = json.loads(tool_input)
         except (json.JSONDecodeError, ValueError):
             _skip()
+    if not isinstance(tool_input, dict):
+        # A JSON-encoded tool_input can decode to a list, number, or plain
+        # string. There is no command to rewrite in any of them, so take the
+        # silent pass-through path instead of raising AttributeError on
+        # .get() — the sibling common/hooks/rewrite_hook.py holds the same
+        # guard, and the fail-open contract ("all error paths exit 0 with
+        # empty stdout") covers decoded-but-unusable nested shapes too.
+        _skip()
     cmd = tool_input.get("command", "")
-    if not cmd:
+    if not isinstance(cmd, str) or not cmd:
+        # A non-string command would only fail later inside the subprocess
+        # call's broad except; skip it here so the guard is explicit.
         _skip()
 
     # 5. Set up RTK env context for stats
