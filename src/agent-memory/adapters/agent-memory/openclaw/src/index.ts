@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { McpStdioClient } from "./mcp-client.js";
 import { resolveConfig, type AgentMemoryConfig } from "./config.js";
 import { looksLikePromptInjection, wrapMemoryResultsForPrompt } from "./safety.js";
-import { buildRecallQueries, MAX_RESULTS, RRF_K } from "./keyword-extract.js";
+import { buildRecallQueries, RecallRankFusion } from "./keyword-extract.js";
 import {
   AGENT_MEMORY_CORPUS,
   fromCorpusReadHandle,
@@ -134,24 +134,7 @@ export default definePluginEntry({
           // keyword-extract.ts for the extraction logic.
           const queryCandidates = buildRecallQueries(userMessage);
 
-          // Reciprocal-rank fusion (RRF) across all candidates.
-          //
-          // Raw BM25 scores from different queries are NOT comparable
-          // (different IDF, term counts, corpus coverage).  Instead we
-          // assign each hit an RRF score: sum of 1/(RRF_K + rank) where
-          // rank is the hit's 1-based position within its own candidate
-          // result set.  This makes scores comparable across candidates.
-          //
-          // Deduplication is by memory path (stable identity).  A single
-          // failing candidate (e.g. query > 1024 bytes) does NOT discard
-          // previously merged results.  Final result count is capped at
-          // MAX_RESULTS (5).
-          interface RrfEntry {
-            hit: Record<string, unknown>;
-            rrfScore: number;
-            bestContribution: number;
-          }
-          const pathToEntry = new Map<string, RrfEntry>();
+          const ranking = new RecallRankFusion();
 
           for (const query of queryCandidates) {
             let rawText: string;
@@ -179,38 +162,10 @@ export default definePluginEntry({
               continue;
             }
             if (!Array.isArray(batch)) continue;
-            // Within this candidate, hits are already sorted by BM25
-            // score.  Assign RRF score based on rank (0-based index,
-            // so rank 0 → contribution 1/(k+1), rank 1 → 1/(k+2), etc).
-            for (let rank = 0; rank < batch.length; rank++) {
-              const hit = batch[rank] as Record<string, unknown>;
-              const rrfContribution = 1 / (RRF_K + rank + 1);
-              const hitPath = String(hit.path ?? "");
-              const key = hitPath || JSON.stringify(hit);
-              const existing = pathToEntry.get(key);
-              if (existing) {
-                existing.rrfScore += rrfContribution;
-                // Keep the hit from the candidate where it ranked
-                // highest (largest contribution = lowest rank).
-                if (rrfContribution > existing.bestContribution) {
-                  existing.hit = hit;
-                  existing.bestContribution = rrfContribution;
-                }
-              } else {
-                pathToEntry.set(key, {
-                  hit,
-                  rrfScore: rrfContribution,
-                  bestContribution: rrfContribution,
-                });
-              }
-            }
+            ranking.addBatch(batch);
           }
 
-          // Sort by RRF score descending and limit to MAX_RESULTS.
-          const finalHits = Array.from(pathToEntry.values())
-            .sort((a, b) => b.rrfScore - a.rrfScore)
-            .slice(0, MAX_RESULTS)
-            .map((entry) => entry.hit);
+          const finalHits = ranking.results();
 
           if (finalHits.length === 0) {
             api.logger.info?.(

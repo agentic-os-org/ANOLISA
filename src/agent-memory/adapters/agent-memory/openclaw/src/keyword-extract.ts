@@ -49,6 +49,52 @@ export const MAX_RESULTS = 5;
  */
 export const RRF_K = 60;
 
+interface RankedRecallHit {
+  hit: Record<string, unknown>;
+  score: number;
+  bestContribution: number;
+}
+
+/**
+ * Fuse ordered search batches by path using reciprocal ranks. Raw BM25 scores
+ * from different queries are incomparable; the best individual rank chooses
+ * the payload, while the summed contributions choose the final order.
+ */
+export class RecallRankFusion {
+  private readonly entries = new Map<string, RankedRecallHit>();
+
+  /** Add one candidate's hits in the order returned by memory_search. */
+  addBatch(batch: readonly Record<string, unknown>[]): void {
+    for (let rank = 0; rank < batch.length; rank++) {
+      const hit = batch[rank];
+      const contribution = 1 / (RRF_K + rank + 1);
+      const key = String(hit.path ?? "") || JSON.stringify(hit);
+      const existing = this.entries.get(key);
+      if (existing) {
+        existing.score += contribution;
+        if (contribution > existing.bestContribution) {
+          existing.hit = hit;
+          existing.bestContribution = contribution;
+        }
+      } else {
+        this.entries.set(key, {
+          hit,
+          score: contribution,
+          bestContribution: contribution,
+        });
+      }
+    }
+  }
+
+  /** Top hits, preserving first-occurrence order when fused scores tie. */
+  results(): Record<string, unknown>[] {
+    return Array.from(this.entries.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_RESULTS)
+      .map((entry) => entry.hit);
+  }
+}
+
 /**
  * Extract salient keywords from text.
  *
