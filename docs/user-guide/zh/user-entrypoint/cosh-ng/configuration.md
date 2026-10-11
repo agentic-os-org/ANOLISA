@@ -188,5 +188,36 @@ sudo touch /etc/anolisa/.telemetry_disabled
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | 允许使用 Bash history 生成建议 |
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |
 | `COSH_AUDIT_DIR` | 审计存储根目录 |
+| `COSH_CORE_APPROVAL_TIMEOUT_SECS` | Core 审批响应超时（秒），1 到 2592000；非法值告警并回退默认 |
+| `COSH_CORE_PATH` | 内置 shell 适配器使用的 `cosh-core` 二进制路径 |
+| `COSH_CLAUDE_MAX_BUDGET_USD` | 传给 `claude` 适配器的花费上限（默认 `1.00`） |
+| `COSH_AGENT_START_TIMEOUT_SECS`、`COSH_AGENT_IDLE_TIMEOUT_SECS`、`COSH_AGENT_APPROVAL_WAIT_TIMEOUT_SECS`、`COSH_AGENT_HARD_TIMEOUT_SECS`、`COSH_AGENT_CANCEL_GRACE_MS` | Agent 看门狗超时：启动 20 秒、空闲 90 秒、审批等待 600 秒、硬超时 600 秒、取消宽限 2000 毫秒；零或无法解析的值回退默认 |
+| `COSH_AGENT_STDERR_TAIL_BYTES` | 失败报告保留的 agent stderr 字节数（默认 4096） |
+| `COSH_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS` | 待定 shell 证据关闭前的空闲窗口 |
+| `COSH_SHELL_HANDOFF_TIMEOUT_SECS` | Enhanced shell 交接超时（秒） |
+| `COSH_SHELL_DEBUG` | Shell 调试开关；当日志级别仍为默认值时提升为 `debug` |
+| `COSH_SHELL_RAW_SHELL` | `cosh --raw` 使用的 shell 二进制 |
+| `COSH_SHELL_RENDER` | 设为 `plain` 或 `text` 关闭样式化渲染 |
+| `COSH_SHELL_STARTUP_BANNER` | 显示启动横幅（`1`/`true`/`yes`/`on`/`always`）；其余值关闭，默认按终端检测 |
+| `COSH_SHELL_STARTUP_HOOKS` | 运行启动钩子（`1`/`true`/`yes`/`on`/`builtin`）；默认关闭 |
+| `COSH_SHELL_ANIMATION` | 动画指示：`always` 或 `never` |
+| `COSH_SHELL_WIDTH` | 渲染宽度覆盖（限制在支持范围内） |
+| `COSH_SHELL_HEALTH_SCAN` | 健康扫描模式：`0`/`off`/`false`/`disabled` 关闭，`fixture:<路径>` 加载夹具，其余值执行实时扫描（启动扫描仅 Linux） |
+| `COSH_RECOMMENDATIONS_ENABLED` | `0`/`false`/`off` 强制关闭建议，即使配置已启用 |
+| `COSH_SLASH_VIA_SHELL` | 精确斜杠命令经由 Bash history 路由；`0` 保持内置拦截路径 |
+| `COSH_AUDIT_LOG` | 审计日志文件路径覆盖 |
+| `COSH_AUDIT_POLICY` | 审计策略 TOML 文件覆盖 |
+| `COSH_SYSOM_VPC_PROXY_HOST`、`COSH_SYSOM_PROBE_TIMEOUT_MS` | SysOM 端点探测：VPC 代理主机与探测超时（毫秒） |
+| `COSH_METADATA_HOST` | 区域检测使用的 ECS metadata 端点（默认 `100.100.100.200:80`） |
+| `COSH_SHELL_PROJECT_TRUST_STORE` | 项目信任存储路径覆盖 |
+| `COSH_SHELL_HOOK_FEEDBACK_STORE` | 钩子反馈存储路径覆盖 |
+| `COSH_SHELL_HEALTH_SUPPRESSION_STORE` | 健康抑制存储路径覆盖 |
+| `COSH_GATEWAY_EXECUTABLE` | `/task` 使用的 `cosh-gateway` 二进制绝对路径 |
+| `COSH_CLI_BIN` | `/audit` 调用的 `cosh-cli` 二进制 |
 
 相关二进制支持时，环境变量优先于配置文件。日志在 `~/.copilot-shell/logs/` 下按日轮转，旧文件保留七天。
+
+面向测试的路径覆盖（`COSH_STATES_DIR`、`COSH_TELEMETRY_DISABLED_PATH`、
+`COSH_INSTALLATION_ID_PATH`、`COSH_SLS_LOG_PATH`、`COSH_SLS_TRACK_URL`、
+`COSH_METADATA_PROBE_TIMEOUT_SECS`）用于隔离测试中重定位状态、遥测与
+metadata 探测；正常安装无需设置。

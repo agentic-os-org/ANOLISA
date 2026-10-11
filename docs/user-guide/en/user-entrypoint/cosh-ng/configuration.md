@@ -217,7 +217,38 @@ required.
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |
 | `COSH_AUDIT_DIR` | Audit storage root |
+| `COSH_CORE_APPROVAL_TIMEOUT_SECS` | Core approval response timeout in seconds (1 to 2592000; invalid values warn and fall back) |
+| `COSH_CORE_PATH` | `cosh-core` binary used by the built-in shell adapter |
+| `COSH_CLAUDE_MAX_BUDGET_USD` | Spend cap passed to the `claude` adapter (default `1.00`) |
+| `COSH_AGENT_START_TIMEOUT_SECS`, `COSH_AGENT_IDLE_TIMEOUT_SECS`, `COSH_AGENT_APPROVAL_WAIT_TIMEOUT_SECS`, `COSH_AGENT_HARD_TIMEOUT_SECS`, `COSH_AGENT_CANCEL_GRACE_MS` | Agent watchdog timeouts: 20 s start, 90 s idle, 600 s approval wait, 600 s hard, 2000 ms cancel grace; zero or unparsable values fall back to the defaults |
+| `COSH_AGENT_STDERR_TAIL_BYTES` | Bytes of agent stderr kept for failure reports (default 4096) |
+| `COSH_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS` | Idle window before pending shell evidence is closed |
+| `COSH_SHELL_HANDOFF_TIMEOUT_SECS` | Enhanced shell handoff timeout in seconds |
+| `COSH_SHELL_DEBUG` | Shell debug flag; upgrades the log level to `debug` when it is still at the default |
+| `COSH_SHELL_RAW_SHELL` | Shell binary used by `cosh --raw` |
+| `COSH_SHELL_RENDER` | `plain` or `text` disables styled rendering |
+| `COSH_SHELL_STARTUP_BANNER` | Show the startup banner (`1`/`true`/`yes`/`on`/`always`); anything else turns it off, defaulting to terminal detection |
+| `COSH_SHELL_STARTUP_HOOKS` | Run startup hooks (`1`/`true`/`yes`/`on`/`builtin`); off by default |
+| `COSH_SHELL_ANIMATION` | `always` or `never` for animated indicators |
+| `COSH_SHELL_WIDTH` | Rendering width override (clamped to the supported range) |
+| `COSH_SHELL_HEALTH_SCAN` | Health scan mode: `0`/`off`/`false`/`disabled` disables it, `fixture:<path>` loads a fixture, any other value runs a live scan (the startup scan is Linux-only) |
+| `COSH_RECOMMENDATIONS_ENABLED` | `0`/`false`/`off` forces recommendations off even when configuration enables them |
+| `COSH_SLASH_VIA_SHELL` | Route exact slash submissions through Bash history; `0` keeps the built-in intercept path |
+| `COSH_AUDIT_LOG` | Audit log file path override |
+| `COSH_AUDIT_POLICY` | Audit policy TOML file override |
+| `COSH_SYSOM_VPC_PROXY_HOST`, `COSH_SYSOM_PROBE_TIMEOUT_MS` | SysOM endpoint probing: VPC proxy host and probe timeout in milliseconds |
+| `COSH_METADATA_HOST` | ECS metadata endpoint used for region detection (default `100.100.100.200:80`) |
+| `COSH_SHELL_PROJECT_TRUST_STORE` | Project trust store path override |
+| `COSH_SHELL_HOOK_FEEDBACK_STORE` | Hook feedback store path override |
+| `COSH_SHELL_HEALTH_SUPPRESSION_STORE` | Health suppression store path override |
+| `COSH_GATEWAY_EXECUTABLE` | Absolute path of the `cosh-gateway` binary used by `/task` |
+| `COSH_CLI_BIN` | `cosh-cli` binary invoked by `/audit` |
 
 Environment values take precedence when the relevant binary supports them.
 Logs rotate daily under `~/.copilot-shell/logs/` and old files are kept for
 seven days.
+
+Test-oriented path overrides (`COSH_STATES_DIR`, `COSH_TELEMETRY_DISABLED_PATH`,
+`COSH_INSTALLATION_ID_PATH`, `COSH_SLS_LOG_PATH`, `COSH_SLS_TRACK_URL`,
+`COSH_METADATA_PROBE_TIMEOUT_SECS`) relocate state, telemetry, and metadata
+probing for isolated test runs; normal installs never need them.
