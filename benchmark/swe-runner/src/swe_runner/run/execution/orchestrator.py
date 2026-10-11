@@ -40,11 +40,15 @@ class Orchestrator:
         settings: Settings | None = None,
         *,
         redo: bool = False,
+        retry_failed: bool = False,
         progress_factory: Callable[[int], BatchProgressReporter] = RichBatchProgress,
     ) -> None:
+        if redo and retry_failed:
+            raise ValueError("redo and retry_failed are mutually exclusive")
         self._agent = agent
         self._settings = settings or Settings(agent=AgentConfig(name=agent.name))
         self._redo = redo
+        self._retry_failed = retry_failed
         self._progress_factory = progress_factory
 
     def run_single(self, instance: SWEInstance, output_dir: Path) -> InstanceResult:
@@ -58,12 +62,14 @@ class Orchestrator:
 
         output_store = RunOutputStore(output_dir)
         if not self._redo:
-            attempted = output_store.load_attempted_instance_ids()
+            attempted = output_store.load_attempted_instance_ids(successful_only=self._retry_failed)
             if attempted:
                 skipped = [i for i in instances if i.instance_id in attempted]
                 instances = [i for i in instances if i.instance_id not in attempted]
                 if skipped:
-                    logger.info("SKIP_ATTEMPTED instance=global skipped=%s", len(skipped))
+                    logger.info(
+                        "SKIP_ATTEMPTED instance=global skipped=%s retry_failed=%s", len(skipped), self._retry_failed
+                    )
 
         if not instances:
             return []

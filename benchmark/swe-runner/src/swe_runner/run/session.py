@@ -37,9 +37,12 @@ logger = logging.getLogger(__name__)
 class RunSession:
     """Encapsulates the full run lifecycle: env check → agent → dataset → batch → metadata."""
 
-    def __init__(self, settings: Settings, *, redo: bool = False) -> None:
+    def __init__(self, settings: Settings, *, redo: bool = False, retry_failed: bool = False) -> None:
+        if redo and retry_failed:
+            raise ValueError("redo and retry_failed are mutually exclusive")
         self._settings = settings
         self._redo = redo
+        self._retry_failed = retry_failed
 
     def execute(self) -> RunReport:
         """Execute the run session and return an aggregated report.
@@ -65,7 +68,7 @@ class RunSession:
         if not instances:
             return RunReport(succeeded=0, failed=0, total=0, instance_ids=[], metadata_path=None)
 
-        orchestrator = Orchestrator(agent_instance, self._settings, redo=self._redo)
+        orchestrator = Orchestrator(agent_instance, self._settings, redo=self._redo, retry_failed=self._retry_failed)
         started_at_ns = time.time_ns()
         results = orchestrator.run_batch(instances, output_dir)
         ended_at_ns = time.time_ns()
