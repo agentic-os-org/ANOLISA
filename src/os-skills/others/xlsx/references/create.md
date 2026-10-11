@@ -258,6 +258,12 @@ python3 SKILL_DIR/scripts/shared_strings_builder.py --file strings.txt \
   > /tmp/xlsx_work/xl/sharedStrings.xml
 ```
 
+The builder uses SpreadsheetML `ST_Xstring` escaping for XML-disallowed
+characters and XML character references for carriage returns. Literal text such
+as `Report_x000A_` escapes its initial underscore so Excel retains the name instead
+of decoding a newline.
+Ordinary Unicode, line feeds, tabs, and leading/trailing whitespace are retained.
+
 ---
 
 ### Step 5 — Write Worksheet Data
