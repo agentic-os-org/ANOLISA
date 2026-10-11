@@ -50,7 +50,11 @@ def check_config() -> list[str]:
     issues = []
 
     if not OPENCLAW_CONFIG.exists():
-        return [f"Config not found: {OPENCLAW_CONFIG}"]
+        # A machine that never ran openclaw has no config to pollute, and
+        # fix_env() already tolerates this state ("skipping config cleanup").
+        # Reporting it as an issue made check-only exit 1 and --fix exit 2 on
+        # clean environments, breaking the documented exit-code contract.
+        return []
 
     with open(OPENCLAW_CONFIG) as f:
         config = json.load(f)
