@@ -179,11 +179,16 @@ export const AgentSessionsPage: React.FC = () => {
   // The 10 s poll replaces `merged` (and thus `base`) with a fresh array even
   // when the payload is unchanged, so depending on `base` directly would
   // re-arm this effect on every poll and re-issue a paid request with an
-  // identical body. Depend on a value-compared key of the candidate ids
-  // instead: the search only re-runs when the query or the candidate set
-  // really changes.
+  // identical body. Compare the fields sent for ranking: existing sessions
+  // can acquire new message previews or project labels without changing ids.
+  // Token/count-only updates keep the same key and do not repeat the search.
   const semanticCandidateKey = useMemo(
-    () => base.slice(0, 50).map((s) => s.session_id).join('\u0000'),
+    () => JSON.stringify(base.slice(0, 50).map((s) => ({
+      session_id: s.session_id,
+      first_message: s.first_message,
+      last_message: s.last_message,
+      project: s.project,
+    }))),
     [base],
   );
 

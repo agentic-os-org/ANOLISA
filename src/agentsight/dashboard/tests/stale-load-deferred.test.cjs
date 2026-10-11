@@ -1010,6 +1010,134 @@ test('agent sessions: an unchanged 10 s poll must not re-issue the semantic sear
   );
 });
 
+// ─── AgentSessionsPage: ranking input changes despite stable candidate ids ──
+
+for (const mutation of ['last_message', 'first_message', 'project', 'unchanged', 'tokens_only']) {
+  test(`agent sessions: polling ${mutation} refreshes only changed ranking input`, async () => {
+    const { calls, stubs } = deferredFetchStubs([
+      'fetchSessions', 'fetchTrajectories', 'fetchOptimizeConfig', 'semanticSearchSessions',
+    ]);
+    const t = (key) => key;
+    const driver = createHooksDriver();
+    const page = loadPageModule('src/pages/AgentSessionsPage.tsx', {
+      'react-router-dom': { useNavigate: () => () => {} },
+      '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': stubs,
+      '../utils/semanticSearchFilter': loadPageModule('src/utils/semanticSearchFilter.ts', {}),
+      '../utils/sessionModel': loadPageModule('src/utils/sessionModel.ts', {}),
+      '../components/CopyButton': componentStub('CopyButton'),
+    }, driver).AgentSessionsPage;
+
+    const realSetTimeout = global.setTimeout;
+    const timers = [];
+    const intervals = [];
+    const mounted = [];
+    const settleRequests = () => new Promise((resolve) => realSetTimeout(resolve, 0));
+    const runEffects = (rendered) => {
+      const originals = [global.setTimeout, global.clearTimeout, global.setInterval, global.clearInterval];
+      global.setTimeout = (callback) => { timers.push(callback); return timers.length; };
+      global.clearTimeout = () => {};
+      global.setInterval = (callback) => { intervals.push(callback); return intervals.length; };
+      global.clearInterval = () => {};
+      try {
+        rendered.effects.forEach((effect, index) => {
+          const previous = mounted[index];
+          if (previous && sameDeps(previous.deps, effect.__deps)) return;
+          previous?.cleanup?.();
+          mounted[index] = { deps: effect.__deps, cleanup: effect() };
+        });
+      } finally {
+        [global.setTimeout, global.clearTimeout, global.setInterval, global.clearInterval] = originals;
+      }
+    };
+    const activeMs = Date.now() - 1_000;
+    const sessions = () => Array.from({ length: 6 }, (_, i) => ({
+      session_id: `session-${i}`,
+      agent_name: 'claude', model: 'fixture', conversation_count: 1,
+      first_seen_ns: (activeMs - 60_000) * 1_000_000,
+      last_seen_ns: (activeMs - i * 1_000) * 1_000_000,
+      total_input_tokens: 10, total_output_tokens: 5,
+      first_user_query: `question ${i}`, last_user_query: `answer ${i}`,
+    }));
+    const logs = (project = 'project-a') => [{
+      session_id: 'session-0', schema_version: 'ATIF-v1.7', agent_name: 'claude',
+      model_name: 'fixture', num_steps: 1, total_prompt_tokens: null, total_completion_tokens: null,
+      start_time: null, end_time: null, first_user_message: null, last_user_message: null,
+      project, source: 'claude', is_subagent: false, collected_at_ns: activeMs * 1_000_000,
+    }];
+
+    let rendered = driver.render(page);
+    assert.equal(driver.slots[6].value, '', 'slot 6 must be the search input');
+    assert.equal(driver.slots[12].value, false, 'slot 12 must be autoRefresh');
+    runEffects(rendered);
+    calls.fetchSessions[0].resolve(sessions());
+    calls.fetchTrajectories[0].resolve(logs());
+    calls.fetchOptimizeConfig[0].resolve({ configured: true });
+    await settleRequests();
+    rendered = driver.render(page);
+    runEffects(rendered);
+    assert.equal(driver.slots[7].value, true, 'the configured search is enabled');
+
+    driver.slots[12].setter(true);
+    rendered = driver.render(page);
+    runEffects(rendered);
+    assert.equal(intervals.length, 1, 'auto-refresh registers one poll');
+    const searchInput = findElement(rendered.element, (node) => (
+      node.type === 'input' && node.props.placeholder === 'as.searchPlaceholder'
+    ));
+    assert.ok(searchInput, 'the real search input is rendered');
+    searchInput.props.onChange({ target: { value: 'find the widget' } });
+    rendered = driver.render(page);
+    runEffects(rendered);
+    assert.equal(timers.length, 1, 'one debounced search is scheduled');
+    timers[0]();
+    assert.equal(calls.semanticSearchSessions.length, 1);
+    calls.semanticSearchSessions[0].resolve({
+      results: [{ session_id: 'session-1', relevance: 'high', reason: 'original match' }],
+    });
+    await settleRequests();
+    rendered = driver.render(page);
+    runEffects(rendered);
+    assert.ok(elementText(rendered.element).includes('session-1'), 'the original match appears');
+    assert.ok(!elementText(rendered.element).includes('session-0'), 'only the ranked row appears');
+
+    intervals[0]();
+    const refreshed = sessions();
+    if (mutation === 'first_message') refreshed[0].first_user_query = 'review the widget';
+    if (mutation === 'last_message') refreshed[0].last_user_query = 'fix the widget parser';
+    if (mutation === 'tokens_only') refreshed[0].total_output_tokens = 15;
+    calls.fetchSessions[1].resolve(refreshed);
+    calls.fetchTrajectories[1].resolve(logs(mutation === 'project' ? 'widget-project' : 'project-a'));
+    await settleRequests();
+    const before = timers.length;
+    rendered = driver.render(page);
+    runEffects(rendered);
+    if (timers.length > before) timers.at(-1)();
+
+    const changed = !['unchanged', 'tokens_only'].includes(mutation);
+    assert.equal(calls.semanticSearchSessions.length, changed ? 2 : 1,
+      'only a changed ranking payload must issue another request');
+    if (!changed) {
+      assert.ok(elementText(driver.render(page).element).includes('session-1'));
+      return;
+    }
+    const initialBody = calls.semanticSearchSessions[0].args[0];
+    const updatedBody = calls.semanticSearchSessions[1].args[0];
+    assert.deepEqual(initialBody.candidates.map((row) => row.session_id),
+      updatedBody.candidates.map((row) => row.session_id), 'candidate IDs and order remain identical');
+    assert.equal(updatedBody.candidates[0][mutation], {
+      first_message: 'review the widget', last_message: 'fix the widget parser', project: 'widget-project',
+    }[mutation]);
+    calls.semanticSearchSessions[1].resolve({
+      results: [{ session_id: 'session-0', relevance: 'high', reason: 'updated match' }],
+    });
+    await settleRequests();
+    const updated = driver.render(page);
+    assert.ok(elementText(updated.element).includes('session-0'), 'the updated ranking appears');
+    assert.ok(!elementText(updated.element).includes('session-1'), 'the previous match is replaced');
+  });
+}
+
 // ─── AtifViewerPage: import vs in-flight load, live input vs loaded id ───────
 
 // The viewer renders rounds through the shared round model extracted into
