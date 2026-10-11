@@ -57,6 +57,8 @@ Breakdown by Operation:
 
 `Character Savings` and `Chars` in this output are the byte-based compatibility labels described above.
 
+The `Breakdown by Operation` rows are ordered by descending record count, and equal counts are broken on the operation name. The same records therefore render in the same order on every run, matching the sorted `by_operation` keys of `--json`.
+
 For machine-readable output:
 
 ```bash
