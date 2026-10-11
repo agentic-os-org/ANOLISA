@@ -2,7 +2,7 @@ use std::os::fd::AsFd;
 use std::path::Path;
 
 use crate::audit::AuditEntry;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::ns::paths::{relative_to_mount, resolve_path};
 use crate::safe_fs;
 use crate::service::MemoryService;
@@ -52,8 +52,32 @@ pub fn diff(svc: &MemoryService, path1: &str, path2: &str) -> Result<String> {
             return Err(e);
         }
     };
-    let patch = diffy::create_patch(&body1, &body2);
-    let formatted = format!("--- {rel1}\n+++ {rel2}\n{patch}");
+    let mut options = diffy::DiffOptions::new();
+    options
+        .set_original_filename(rel1.clone())
+        .set_modified_filename(rel2.clone());
+    let patch = options.create_patch(&body1, &body2);
+    let mut formatted = patch.to_string();
+    if rel1.contains(&['\n', '\t', '\r'][..]) || rel2.contains(&['\n', '\t', '\r'][..]) {
+        // diffy 0.4 escapes these filename characters as backslash + the
+        // literal control, while its parser expects the printable escape.
+        // An empty patch gives the exact header prefix, including any embedded
+        // newlines, so only filenames are repaired and hunks stay untouched.
+        let headers = options.create_patch("", "").to_string();
+        let repaired = headers
+            .replace("\\\n", "\\n")
+            .replace("\\\t", "\\t")
+            .replace("\\\r", "\\r");
+        let hunks = match formatted.strip_prefix(&headers) {
+            Some(hunks) => hunks,
+            None => {
+                let err = MemoryError::Other("diff formatter returned inconsistent headers".into());
+                svc.audit_log(AuditEntry::new(TOOL).error(err.to_string()));
+                return Err(err);
+            }
+        };
+        formatted = format!("{repaired}{hunks}");
+    }
 
     svc.audit_log(
         AuditEntry::new(TOOL)
