@@ -282,6 +282,10 @@ swe-runner run \
 - 将 sandbox 内的 `/workspace/.runner/tokenless/bin` 放到 `PATH` 前部。
 - 在运行结果中写出 tokenless evidence，用于确认配置和运行期 hook 状态。
 
+Host 二进制必须是可执行的普通文件（包括指向可执行文件的 symlink）。
+不可执行的候选会被跳过，以继续查找后续安装位置。两个 helper 都解析成功后
+才会写入注入文件，复制时保留源文件权限。
+
 ### Run 参数速查
 
 | 参数 | 默认值 | 说明 |
