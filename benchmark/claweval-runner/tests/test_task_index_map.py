@@ -17,7 +17,7 @@
 Covers:
 - Normal path: 1-based index assigned over name-sorted task dirs
 - Index ordering matches discover_tasks (name-sorted)
-- --prefix filtering keeps original global indices
+- --prefix filtering re-indexes the filtered list and round-trips with --range
 - Backward-compat default tasks-dir resolves
 - Edge cases: empty dir, dirs without task.yaml, non-existent dir
 """
@@ -29,6 +29,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from task_index_map import scan_task_index  # noqa: E402
 
@@ -66,11 +67,36 @@ class TestScanTaskIndex:
         result = scan_task_index(tmp_path)
         assert result == [(1, "T001_ok")]
 
-    def test_prefix_filter_keeps_global_index(self, tmp_path):
+    def test_prefix_filter_reindexes_filtered_list(self, tmp_path):
         _make_tasks(tmp_path, ["C01_a", "M01_b", "T01_c", "T02_d"])
         result = scan_task_index(tmp_path, prefix="T")
-        # Global order: C01_a(1), M01_b(2), T01_c(3), T02_d(4)
-        assert result == [(3, "T01_c"), (4, "T02_d")]
+        # discover_tasks applies --prefix *before* --range slicing, so the index
+        # is the 1-based position within the prefix-filtered list, not global.
+        assert result == [(1, "T01_c"), (2, "T02_d")]
+
+    def test_prefix_index_round_trips_with_range(self, tmp_path):
+        """A printed index fed back into --range N-N selects the same task."""
+        from ce_runner.run_task import discover_tasks
+
+        _make_tasks(tmp_path, ["C01_a", "C02_b", "M01_c", "T001_d",
+                               "T002_e", "T003_f", "T004_g", "T005_h"])
+        mapping = scan_task_index(tmp_path, prefix="T")
+        assert mapping == [(1, "T001_d"), (2, "T002_e"), (3, "T003_f"),
+                           (4, "T004_g"), (5, "T005_h")]
+        index, task_id = mapping[3]
+        selected = discover_tasks(str(tmp_path), prefix="T", range_str=f"{index}-{index}")
+        assert [Path(p).name for p in selected] == [task_id]
+
+    def test_no_prefix_index_round_trips_with_range(self, tmp_path):
+        """Without --prefix the index is unchanged and still round-trips."""
+        from ce_runner.run_task import discover_tasks
+
+        _make_tasks(tmp_path, ["C01_a", "M01_b", "T01_c", "T02_d"])
+        mapping = scan_task_index(tmp_path)
+        assert mapping == [(1, "C01_a"), (2, "M01_b"), (3, "T01_c"), (4, "T02_d")]
+        for index, task_id in mapping:
+            selected = discover_tasks(str(tmp_path), range_str=f"{index}-{index}")
+            assert [Path(p).name for p in selected] == [task_id]
 
     def test_prefix_no_match(self, tmp_path):
         _make_tasks(tmp_path, ["T001_a"])
