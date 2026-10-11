@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 import time
 import uuid
@@ -184,6 +185,53 @@ def derive_response_status(response_body: Any, is_error: bool) -> int:
     return 500 if is_error else 200
 
 
+def _parse_mcporter_call(command: str, task_tools: set[str]) -> tuple[str, dict[str, str]] | None:
+    """Recognize supported mcporter calls and retain shell argument boundaries."""
+    if not isinstance(command, str):
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+
+    separators = {";", "&&", "||", "|", "&", "(", ")", ">", ">>", "<"}
+    command_boundaries = {";", "&&", "||", "|", "&", "("}
+    arguments: list[str] = []
+    for index, token in enumerate(tokens[:-1]):
+        if (
+            token.rsplit("/", 1)[-1] == "mcporter"
+            and tokens[index + 1] == "call"
+            and (index == 0 or tokens[index - 1] in command_boundaries)
+        ):
+            for argument in tokens[index + 2:]:
+                if argument in separators:
+                    break
+                arguments.append(argument)
+            break
+    if arguments[:1] == ["--config"]:
+        arguments = arguments[2:]
+    if not arguments:
+        return None
+
+    first_arg, *parameters = arguments
+    if first_arg in task_tools:
+        tool_name = first_arg
+    elif first_arg.startswith("claw-eval-") and "." in first_arg:
+        tool_name = first_arg.split(".", 1)[1]
+    elif first_arg.startswith("claw-eval-") and parameters:
+        tool_name, *parameters = parameters
+    else:
+        return None
+    if tool_name not in task_tools:
+        return None
+
+    input_params = dict(part.split(":", 1) for part in parameters if ":" in part)
+    return tool_name, input_params
+
+
 def convert_session_to_trace(
     session_path: str,
     task: dict,
@@ -241,34 +289,11 @@ def convert_session_to_trace(
     ) -> dict | None:
         """If an exec call uses mcporter, return a virtual tool_dispatch for the actual tool."""
         cmd = tc_info.get("input", {}).get("command", "")
-        # Match: mcporter call --config <config> <server_or_tool> [args...]
-        import re
-        m = re.search(r"mcporter\s+call\s+(?:--config\s+\S+\s+)?(\S+)", cmd)
-        if not m:
+        task_tools = {name for t in task.get("tools", []) if isinstance(name := t.get("name"), str)}
+        parsed = _parse_mcporter_call(cmd, task_tools)
+        if parsed is None:
             return None
-        first_arg = m.group(1)
-        # Check if first arg looks like an MCP server name (contains '-' or 'mock')
-        # In mcporter, the pattern is: mcporter call --config <cfg> <server> <tool> <args>
-        # or: mcporter call --config <cfg> <tool> <args> (when server name is omitted)
-        task_tools = {t.get("name") for t in task.get("tools", [])}
-        if first_arg in task_tools:
-            tool_name = first_arg
-        elif "." in first_arg and first_arg.startswith("claw-eval-"):
-            # Dot syntax: mcporter call --config <cfg> server.tool args...
-            parts = first_arg.split(".", 1)
-            if parts[1] in task_tools:
-                tool_name = parts[1]
-            else:
-                return None
-        elif first_arg.startswith("claw-eval-"):
-            # Server name — extract tool from remaining args
-            rest = cmd[m.end():].strip().split()
-            if rest and rest[0] in task_tools:
-                tool_name = rest[0]
-            else:
-                return None
-        else:
-            return None
+        tool_name, input_params = parsed
 
         # Build virtual tool_dispatch
         endpoint_url = ""
@@ -276,24 +301,6 @@ def convert_session_to_trace(
             if ep.get("tool_name") == tool_name:
                 endpoint_url = ep.get("url", "")
                 break
-
-        # Extract input params from remaining command args
-        input_params = {}
-        rest_args = cmd[m.end():].strip()
-        if first_arg in task_tools:
-            rest_args = rest_args  # already after tool name
-        elif "." in first_arg and first_arg.startswith("claw-eval-"):
-            # Dot syntax: rest is already all tool args
-            pass
-        elif first_arg.startswith("claw-eval-"):
-            # Space syntax: skip the server name, take tool args
-            rest_args = cmd[m.end():].strip().split(None, 1)
-            rest_args = rest_args[1] if len(rest_args) > 1 else ""
-
-        for part in rest_args.split():
-            if ":" in part:
-                k, v = part.split(":", 1)
-                input_params[k] = v
 
         result_body = tc_info.get("result", "")
         is_error = tc_info.get("is_error", False)
