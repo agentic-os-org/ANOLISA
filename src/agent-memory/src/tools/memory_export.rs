@@ -84,10 +84,20 @@ fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     let mut fm = HashMap::new();
     let body;
 
+    // Fence matching mirrors the canonical reader (parse_frontmatter_flat
+    // in user_profile.rs): the closing `---` is recognized at a line start
+    // whether or not a newline follows it. Requiring "\n---\n" dropped the
+    // whole frontmatter block for files whose closing fence ends the file
+    // without a trailing newline.
     if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
+        if let Some(end) = rest.find("\n---") {
             let fm_str = &rest[..end];
-            body = rest[end + 5..].to_string();
+            let after_fence = &rest[end + 4..];
+            body = after_fence
+                .strip_prefix("\r\n")
+                .or_else(|| after_fence.strip_prefix('\n'))
+                .unwrap_or(after_fence)
+                .to_string();
             let mut current_list_key: Option<String> = None;
             let mut current_list_items: Vec<String> = Vec::new();
             for line in fm_str.lines() {
@@ -261,5 +271,17 @@ mod tests {
         assert_eq!(fm.get("title").unwrap(), "Test");
         assert!(fm.contains_key("next_steps"));
         assert!(body.contains("Body"));
+    }
+
+    #[test]
+    fn parse_frontmatter_accepts_fence_without_trailing_newline() {
+        // Regression: requiring "\n---\n" made the whole frontmatter block
+        // disappear for files whose closing fence ends the file, so an
+        // export dropped id/category and category filtering misfiled them.
+        let content = "---\nid: abc123\ncategory: lesson\n---";
+        let (fm, body) = parse_frontmatter(content);
+        assert_eq!(fm.get("id").unwrap(), "abc123");
+        assert_eq!(fm.get("category").unwrap(), "lesson");
+        assert_eq!(body, "");
     }
 }

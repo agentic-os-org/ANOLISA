@@ -201,9 +201,17 @@ fn parse_frontmatter_flat(content: &str) -> std::collections::HashMap<String, St
 }
 
 fn extract_body(content: &str) -> String {
+    // Fence matching mirrors the canonical reader (parse_frontmatter_flat
+    // in user_profile.rs): accept a closing `---` at a line start even
+    // when no newline follows it.
     if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            return rest[end + 5..].trim().to_string();
+        if let Some(end) = rest.find("\n---") {
+            let after_fence = &rest[end + 4..];
+            let body = after_fence
+                .strip_prefix("\r\n")
+                .or_else(|| after_fence.strip_prefix('\n'))
+                .unwrap_or(after_fence);
+            return body.trim().to_string();
         }
     }
     content.trim().to_string()
