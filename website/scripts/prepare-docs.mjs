@@ -53,8 +53,27 @@ async function sourceDocuments(locale) {
   return documents;
 }
 
+function validateDocumentPaths(documents, locale) {
+  const targets = new Map();
+  const routes = new Map();
+  for (const document of documents) {
+    for (const [kind, key, seen] of [
+      ['file', document.target, targets],
+      ['route', publicDocumentPath(document.target), routes],
+    ]) {
+      const previous = seen.get(key);
+      if (previous) {
+        throw new Error(`${locale}: colliding document ${kind} "${key}": ${previous} and ${document.source}`);
+      }
+      seen.set(key, document.source);
+    }
+  }
+}
+
 const englishDocuments = await sourceDocuments('en');
 const chineseDocuments = await sourceDocuments('zh');
+validateDocumentPaths(englishDocuments, 'en');
+validateDocumentPaths(chineseDocuments, 'zh');
 const publicPaths = new Map();
 for (const document of englishDocuments) {
   publicPaths.set(document.source, `/docs/${publicDocumentPath(document.target)}`);
