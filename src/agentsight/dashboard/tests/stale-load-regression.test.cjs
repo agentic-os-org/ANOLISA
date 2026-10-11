@@ -320,3 +320,40 @@ test('reuse-labels: toggling a criterion compares the selected rows', () => {
   assert.match(source, /sameMembers\(current, pending\) \? new Set\(\) : pending/);
   assert.match(source, /sameMembers\(current, ids\) \? new Set\(\) : ids/);
 });
+
+test('causal-attribution: switching rounds must not keep the previous verdict', () => {
+  const source = readSource('src/components/CausalAttributionPanel.tsx');
+
+  // The panel's state belongs to one (session, round, scope). The history
+  // effect only wrote on a hit, so selecting a round without history kept the
+  // previous round's verdict, graph and fix on screen under the new header.
+  const effectStart = source.indexOf('const past = readHistory(sessionId, roundIndex, idKind);');
+  assert.ok(effectStart >= 0, 'the history effect must read by identity');
+  const effectEnd = source.indexOf('}, [sessionId, roundIndex, idKind]);', effectStart);
+  assert.ok(effectEnd > effectStart, 'the history effect must depend on the identity');
+  const effect = source.slice(effectStart, effectEnd);
+  const historyBranch = effect.indexOf('if (past.length > 0) {');
+  assert.ok(historyBranch >= 0, 'the history hit branch must exist');
+  for (const reset of ['setCaseData(null);', "setComplaint('');", 'setCached(false);']) {
+    assert.ok(
+      effect.indexOf(reset) > historyBranch,
+      `CausalAttributionPanel: the no-history path must run ${reset}`,
+    );
+  }
+
+  // A run can take minutes; its result must not land in a panel that moved on.
+  assert.match(source, /const activeIdentityRef = React\.useRef\(identity\);/);
+  const runStart = source.indexOf('const res = await runCausalAttribution(req);');
+  assert.ok(runStart >= 0, 'CausalAttributionPanel.run must await the attribution');
+  const runBody = source.slice(runStart, source.indexOf('} catch (e) {', runStart));
+  const identityCheck = runBody.indexOf('if (activeIdentityRef.current !== runIdentity) return;');
+  assert.ok(
+    identityCheck >= 0 && identityCheck < runBody.indexOf('setCaseData(res.case);'),
+    'CausalAttributionPanel.run: the identity check must sit after the await and before the state write',
+  );
+  assert.match(
+    source,
+    /if \(activeIdentityRef\.current === runIdentity\) setLoading\(false\);/,
+    'CausalAttributionPanel: the loading flag must belong to the newest identity',
+  );
+});

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { runCausalAttribution } from '../utils/apiClient';
 import type {
   CausalAttrib,
@@ -498,11 +498,14 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   const [selectedAltIdx, setSelectedAltIdx] = useState<number | null>(null);
   const [stageIdx, setStageIdx] = useState(0);
   const [elapsed, setElapsed] = useState(0);
-  // Version token for the active (session, round, scope). An attribution run
-  // takes seconds; if the user switches rounds while one is in flight, its
-  // response describes the old key and must not be rendered — or filed — as
-  // the new one's result.
-  const requestVersion = useRef(0);
+
+  // Everything the panel shows belongs to one (session, round, scope): a run
+  // started for another identity must not write into this one, and its
+  // progress timer must stop as soon as the panel moves on.
+  const identity = historyKey(sessionId, roundIndex, idKind);
+  const activeIdentityRef = React.useRef(identity);
+  activeIdentityRef.current = identity;
+  const runTimerRef = React.useRef<number | null>(null);
 
   // Stage definitions with estimated durations (seconds)
   const stages = [
@@ -513,32 +516,40 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
 
   // Load prior runs for this (session, round, scope) on mount. If there's at
   // least one, auto-display the most recent so the user sees their last
-  // result without re-running the LLM pipeline. A key change also invalidates
-  // any in-flight run (bump the version) and clears the previous key's case:
-  // leaving it up would render the old round's verdict under the new label.
+  // result without re-running the LLM pipeline.
   useEffect(() => {
-    requestVersion.current += 1;
-    setLoading(false);
-    setError(null);
+    // Stop any progress animation the previous identity left running.
+    if (runTimerRef.current !== null) {
+      window.clearInterval(runTimerRef.current);
+      runTimerRef.current = null;
+    }
     const past = readHistory(sessionId, roundIndex, idKind);
     setHistory(past);
+    setSelectedAltIdx(null);
+    setLoading(false);
+    setError(null);
+    setStageIdx(0);
+    setElapsed(0);
     if (past.length > 0) {
       const latest = past[past.length - 1];
       setCaseData(latest.caseData);
       setComplaint(latest.complaint);
       setCached(true);
-    } else {
-      setCaseData(null);
-      setCached(false);
+      return;
     }
-    setSelectedAltIdx(null);
+    // No prior run for this (session, round, scope): without this reset the
+    // panel keeps showing the previous round's verdict, graph and fix under
+    // the newly selected round's header.
+    setCaseData(null);
+    setComplaint('');
+    setCached(false);
   }, [sessionId, roundIndex, idKind]);
 
   const canRun = complaint.trim().length > 0 && !loading;
 
   const run = async (force: boolean) => {
     if (!canRun) return;
-    const version = requestVersion.current;
+    const runIdentity = identity;
     setLoading(true);
     setError(null);
     setStageIdx(0);
@@ -546,7 +557,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
 
     // Animate stage progression based on estimated time per stage
     const timer = window.setInterval(() => {
-      if (requestVersion.current !== version) return;
+      if (activeIdentityRef.current !== runIdentity) return;
       setElapsed((prev) => {
         const next = prev + 1;
         let cumulative = 0;
@@ -560,6 +571,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         return next;
       });
     }, 1000);
+    runTimerRef.current = timer;
 
     try {
       const req: CausalAttributionRequest = {
@@ -570,10 +582,9 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         id_kind: idKind,
       };
       const res = await runCausalAttribution(req);
-      // The key changed while the request was in flight: this result belongs
-      // to the round the user has left, so discard it instead of renaming the
-      // old verdict, graph, and history under the new round's label.
-      if (requestVersion.current !== version) return;
+      // A run can take minutes; the user may have selected another round in
+      // the meantime. Its result belongs to the round that was asked for.
+      if (activeIdentityRef.current !== runIdentity) return;
       setCaseData(res.case);
       setCached(res.cached);
       setStageIdx(stages.length); // mark complete
@@ -587,12 +598,13 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       );
       setHistory(next);
     } catch (e) {
-      if (requestVersion.current === version) {
+      if (activeIdentityRef.current === runIdentity) {
         setError(e instanceof Error ? e.message : '归因失败');
       }
     } finally {
       window.clearInterval(timer);
-      if (requestVersion.current === version) setLoading(false);
+      if (runTimerRef.current === timer) runTimerRef.current = null;
+      if (activeIdentityRef.current === runIdentity) setLoading(false);
     }
   };
 
