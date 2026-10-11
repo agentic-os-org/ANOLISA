@@ -123,3 +123,18 @@ macro_rules! health_ids {
         );
     };
 }
+
+/// Kernel capability behind cosh-core's workspace confinement (#3413). This is
+/// a separate segment so it appends after every earlier segment: the public
+/// fieldless enum's existing discriminants must never shift.
+macro_rules! health_confinement_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HealthFindingWorkspaceConfinementUnsupported,
+            HealthInsightWorkspaceConfinementUnsupported,
+            HealthRemediationWorkspaceConfinement,
+        );
+    };
+}

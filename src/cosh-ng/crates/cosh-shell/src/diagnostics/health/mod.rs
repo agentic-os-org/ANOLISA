@@ -2,6 +2,7 @@ pub(crate) mod builder;
 pub(crate) mod collectors;
 pub(crate) mod context;
 pub(crate) mod env_collectors;
+pub(crate) mod kernel_confinement;
 pub(crate) mod model;
 mod prompt_selection;
 pub(crate) mod recommendation;

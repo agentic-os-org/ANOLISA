@@ -736,6 +736,9 @@ fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId {
         HealthMessageId::HealthFindingRecentOom => HealthMessageId::HealthInsightRecentOom,
         HealthMessageId::HealthFindingCpuLoadHigh => HealthMessageId::HealthInsightCpuLoadHigh,
         HealthMessageId::HealthFindingSwapPressure => HealthMessageId::HealthInsightSwapPressure,
+        HealthMessageId::HealthFindingWorkspaceConfinementUnsupported => {
+            HealthMessageId::HealthInsightWorkspaceConfinementUnsupported
+        }
         HealthMessageId::HealthFindingServiceFailed
         | HealthMessageId::HealthFindingServiceInactive => {
             HealthMessageId::HealthInsightServiceState
