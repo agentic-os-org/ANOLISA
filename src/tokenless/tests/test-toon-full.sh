@@ -573,6 +573,35 @@ else
     fail "long payload was not encoded by default"
 fi
 
+scenario "1.9 undecodable encodings are never emitted"
+
+# toon-format renders an array whose elements are all empty objects as a tabular block with
+# an empty field list ("items[2]{}:"), and its own decoder rejects that block with "Field
+# list cannot be empty for tabular arrays". compress-toon must keep the original JSON in
+# that case: the TOON path writes no stash entry, so handing the model an undecodable view
+# would lose the payload for good. The shape is smaller than its JSON spelling, so only the
+# decodability guard can hold it back.
+pad=$(printf 'z%.0s' $(seq 1 600))
+undecodable="{\"items\":[{},{}],\"meta\":{\"pad\":\"$pad\"}}"
+printf '%s' "$undecodable" > "$TMP_DIR/undecodable.json"
+printf '%s\n' "$undecodable" > "$TMP_DIR/undecodable-newline.json"
+assert_passthrough_bytes "all-empty-object array with savings, --min-toon-chars 0, no trailing newline" \
+    "$TMP_DIR/undecodable.json" "0"
+assert_passthrough_bytes "all-empty-object array with savings, --min-toon-chars 0, trailing newline" \
+    "$TMP_DIR/undecodable-newline.json" "0"
+
+# The same shape nested one level deeper: whatever the CLI emits has to be readable by
+# decompress-toon, or be the input byte for byte.
+nested="{\"data\":{\"rows\":[{},{},{}],\"pad\":\"$pad\"}}"
+nested_out=$(printf '%s' "$nested" | tokenless compress-toon "${TOON_FORCE[@]}" 2>/dev/null)
+if [ "$nested_out" = "$nested" ]; then
+    pass "nested all-empty-object array stays byte-exact JSON"
+elif printf '%s' "$nested_out" | tokenless decompress-toon >/dev/null 2>&1; then
+    pass "nested all-empty-object array encodes to a decodable view"
+else
+    fail "nested all-empty-object array produced an undecodable view"
+fi
+
 # ========== Scenario 2: Cosh-NG ==========
 section "Scenario 2: Cosh-NG hooks"
 

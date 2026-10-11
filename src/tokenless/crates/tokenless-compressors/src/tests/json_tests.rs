@@ -351,6 +351,35 @@ fn toon_is_an_internal_json_operation() {
     assert!(serde_json::from_str::<Value>(&outcome.output).is_err());
 }
 
+#[test]
+fn toon_is_rejected_when_its_own_decoder_cannot_read_it() {
+    // toon-format renders an array whose elements are all empty objects as a
+    // tabular block with an empty field list (`items[2]{}:`), and rejects that
+    // block on decode. Cleanup drops those empties first by default, so turn it
+    // off to reach the TOON step with the shape intact: the domain has to keep
+    // readable JSON rather than emit a view nothing can turn back.
+    let input = format!(
+        r#"{{"items":[{{}},{{}}],"meta":{{"pad":"{}"}}}}"#,
+        "z".repeat(600)
+    );
+    let context = JsonCompressionContext {
+        allow_toon: true,
+        min_toon_chars: 0,
+        ..context(None)
+    };
+    let compressor = JsonCompressor::new(JsonCompressionConfig {
+        drop_empty_fields: false,
+        drop_nulls: false,
+        ..JsonCompressionConfig::default()
+    });
+    let outcome = compressor.compress(&input, &context).unwrap();
+    assert!(!outcome.operations.contains(&JsonOperation::Toon));
+    assert_eq!(
+        output_value(&outcome),
+        serde_json::from_str::<Value>(&input).unwrap()
+    );
+}
+
 struct AlwaysFail;
 
 impl StashStore for AlwaysFail {
