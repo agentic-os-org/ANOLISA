@@ -193,10 +193,17 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/debug_task.py` | Single-task interactive debug with verbose output |
 | `scripts/analyze.py` | Analyze batch trace artifacts |
 | `scripts/summarize_results.py` | Summarize batch results across runs |
-| `scripts/generate_trial_reports.py` | Generate per-trial detailed reports |
+| `scripts/generate_trial_reports.py` | Generate per-trial detailed reports (`--no-llm` for offline export) |
 | `scripts/prompt_task.py` | Display the system prompt for a given task |
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
+
+To inspect existing trials without a second model request, run
+`python scripts/generate_trial_reports.py --no-llm --trace-dir /path/to/traces --tasks-dir /path/to/tasks --output-dir /path/to/reports`.
+This mode exports UTF-8 JSON with the recorded status, scores, task metadata,
+failure reasons, and execution timing. It omits `failure_classification` and
+requires neither judge credentials nor the OpenAI SDK. Classification remains
+enabled by default.
 
 ## Troubleshooting
 

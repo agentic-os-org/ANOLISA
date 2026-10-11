@@ -193,10 +193,15 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/debug_task.py` | 单任务交互式调试,输出详细信息 |
 | `scripts/analyze.py` | 分析批量 trace 产物 |
 | `scripts/summarize_results.py` | 汇总多次运行的批量结果 |
-| `scripts/generate_trial_reports.py` | 生成每次试验的详细报告 |
+| `scripts/generate_trial_reports.py` | 生成每次试验的详细报告（`--no-llm` 可离线导出） |
 | `scripts/prompt_task.py` | 显示指定任务的 system prompt |
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
+
+如需在不发起第二次模型请求的情况下审阅已有试验，可运行
+`python scripts/generate_trial_reports.py --no-llm --trace-dir /path/to/traces --tasks-dir /path/to/tasks --output-dir /path/to/reports`。
+此模式导出 UTF-8 JSON，保留已记录的状态、评分、任务元数据、失败原因和执行耗时，
+省略 `failure_classification`，无需评分模型凭据或 OpenAI SDK。默认模式仍启用模型分类。
 
 ## 故障排查
 
