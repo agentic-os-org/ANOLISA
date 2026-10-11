@@ -326,3 +326,17 @@ fn read_termios(terminal: &File) -> libc::termios {
     );
     value
 }
+
+/// Whether `zsh` resolves under the child's pinned `PATH=/usr/bin:/bin`. The
+/// screen harness clears the child environment and pins this exact PATH, so a
+/// zsh that only exists on the caller's PATH (for example a prefixed build)
+/// still fails at spawn and panics the PTY poll loop instead of skipping.
+/// Checking the caller's PATH is therefore not enough: it can expose a zsh
+/// the child cannot reach.
+pub(crate) fn zsh_available_in_screen_path() -> bool {
+    !Command::new("zsh")
+        .env("PATH", "/usr/bin:/bin")
+        .arg("--version")
+        .output()
+        .is_err()
+}
