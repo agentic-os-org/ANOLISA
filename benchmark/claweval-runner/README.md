@@ -200,6 +200,12 @@ Core logic: `src/ce_runner/tool_injector.py`
 
 ## Troubleshooting
 
+`scripts/analyze.py` and `scripts/summarize_results.py` select the latest directory containing
+`batch_results.json`, so a newer single-task run or unfinished batch does not hide completed
+batch results. A configured `defaults.trace_dir` can name a batch directory or its parent;
+relative paths are resolved from the configuration file's directory. `--input` remains an
+exact file selection for `summarize_results.py`.
+
 | Issue | Fix |
 |---|---|
 | `uv` command not found after setup | `python -m pip install --upgrade uv` (rerun setup) |
