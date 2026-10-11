@@ -18,6 +18,12 @@ impl ApprovalTrustState {
     pub(crate) fn session_trusted_commands(&self) -> &HashSet<String> {
         &self.session_trusted_commands
     }
+    /// Drops a single session trust key. Used when a command that may already
+    /// have taken effect ends failed or unknown: an earlier AlwaysTrust must
+    /// not cover a retry of it, so the next attempt has to ask again.
+    pub(crate) fn revoke_session_command(&mut self, key: &str) -> bool {
+        self.session_trusted_commands.remove(key)
+    }
     /// Grants turn-scope batch consent for `run_id`. In-memory only; every
     /// run exit path clears it so consent never outlives its turn.
     pub(crate) fn grant_run_batch_consent(&mut self, run_id: String) {

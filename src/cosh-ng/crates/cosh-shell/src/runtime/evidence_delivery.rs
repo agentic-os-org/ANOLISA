@@ -1,9 +1,11 @@
+use crate::approval::handoff::trust_key_from_command;
 use crate::evidence::{clean_terminal_control_sequences, redact_sensitive_output};
 use crate::runtime::approval_state::RuntimeApprovalRequest;
 use crate::runtime::prelude::{
-    redact_provider_command_text, AgentContextBinding, AgentEvent, AgentMode, AgentRequest,
-    AgentRunOrigin, ApprovalDecision, ApprovalResponse, CommandBlock, CommandStatus,
-    HostExecutedShellMetadata, HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
+    assess_shell_command, redact_provider_command_text, AgentContextBinding, AgentEvent, AgentMode,
+    AgentRequest, AgentRunOrigin, ApprovalDecision, ApprovalResponse, AssessmentSource,
+    AutoExecutionPolicy, CommandBlock, CommandStatus, HostExecutedShellMetadata,
+    HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
 };
 use crate::runtime::state::InlineState;
 use crate::tools::ReadonlyPipelineOutput;
@@ -34,6 +36,7 @@ pub(crate) fn record_shell_handoff_completion(
         .unwrap_or_default();
     let mut evidence =
         RuntimeShellCommandCompleted::from_shell_handoff(handoff, block, status, origin);
+    revoke_trust_after_uncertain_effect(state, handoff, status);
     discard_text_held_before_shell_result(state, &handoff.run_id);
     let delivery = deliver_host_executed_shell_result_if_supported(state, handoff, &evidence);
     if delivery.delivered {
@@ -118,17 +121,80 @@ pub(crate) fn stalled_provider_shell_handoff_continuation_request(
     Some(shell_handoff_continuation_request(&evidence, approval))
 }
 
+/// Notice appended to provider-visible evidence when a handoff reached a prompt
+/// boundary without ever being tracked by a preexec marker.
+///
+/// At that point "ran with an unknown result" and "never ran" are
+/// indistinguishable, so a rerun may only be suggested for a command whose
+/// rerun cannot repeat a side effect. Anything else must be reported as unknown
+/// and re-approved, otherwise the shell is inviting a blind replay of an effect
+/// it cannot account for.
+pub(crate) fn untracked_delivery_notice(evidence: &RuntimeShellCommandCompleted) -> &'static str {
+    if evidence.status != crate::types::SHELL_HANDOFF_UNTRACKED_STATUS {
+        return "";
+    }
+    if command_is_provably_readonly(&evidence.provider_command)
+        || command_is_provably_readonly(&evidence.command)
+    {
+        "\nexecution was not tracked (preexec marker missing); exit code and output are unavailable and must not be treated as a command result. Suggest rerunning the command if its outcome matters."
+    } else {
+        "\nexecution was not tracked (preexec marker missing); exit code and output are unavailable and must not be treated as a command result. The command may already have taken effect, so do not rerun it: report the outcome as unknown and ask the user for a fresh approval."
+    }
+}
+
+/// Positive read-only proof, not merely the absence of a side-effect class.
+///
+/// `SideEffectClass::None` is also how the classifier reports "needs a TTY,
+/// effects not assessed" (`tools/command_risk.rs`, reason `requires-tty`), so
+/// treating it as proof of safety would keep the rerun hint — and the session
+/// trust key — for `ssh`, `scp` or an interpreter run. `auto_allow` is set only
+/// by the readonly gate that would already have executed the command without
+/// asking, which makes it the one signal that positively establishes that a
+/// rerun cannot repeat an effect. An empty command is not proof, so it fails
+/// closed.
+fn command_is_provably_readonly(command: &str) -> bool {
+    if command.trim().is_empty() {
+        return false;
+    }
+    let policy = AutoExecutionPolicy::current_runtime()
+        .assessment_policy(AssessmentSource::ProviderShellTool);
+    assess_shell_command(command, policy).auto_allow.is_some()
+}
+
+/// Outcomes that leave the effect state uncertain. `completed` is a known
+/// success and `not_executed` is a known no-effect, so neither qualifies.
+fn outcome_leaves_effect_uncertain(status: &str) -> bool {
+    matches!(status, "failed" | "interrupted" | "timed_out")
+        || status == crate::types::SHELL_HANDOFF_UNTRACKED_STATUS
+}
+
+/// E05: once a command that can have effects ends failed or unknown, the
+/// session trust key minted by an earlier AlwaysTrust no longer covers it, so a
+/// retry raises a fresh card instead of replaying silently. Scoped to that one
+/// command's key: the run-scope batch consent (#1773) is deliberately untouched.
+fn revoke_trust_after_uncertain_effect(
+    state: &mut InlineState,
+    handoff: &ShellHandoffRequest,
+    status: &str,
+) {
+    if !outcome_leaves_effect_uncertain(status) {
+        return;
+    }
+    if command_is_provably_readonly(&handoff.command) {
+        return;
+    }
+    if let Some(key) = trust_key_from_command(&handoff.command) {
+        state.control.trust.revoke_session_command(&key);
+    }
+}
+
 fn deliver_host_executed_shell_result_if_supported(
     state: &mut InlineState,
     handoff: &ShellHandoffRequest,
     evidence: &RuntimeShellCommandCompleted,
 ) -> ShellEvidenceDelivery {
     let view = EvidenceState::provider_visible_view(evidence);
-    let untracked_notice = if evidence.status == crate::types::SHELL_HANDOFF_UNTRACKED_STATUS {
-        "\nexecution was not tracked (preexec marker missing); exit code and output are unavailable and must not be treated as a command result. Suggest rerunning the command if its outcome matters."
-    } else {
-        ""
-    };
+    let untracked_notice = untracked_delivery_notice(evidence);
     let llm_content = format!(
         "ShellCommandCompleted evidence\n\
          {}{untracked_notice}",

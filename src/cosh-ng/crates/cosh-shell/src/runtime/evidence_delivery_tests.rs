@@ -842,3 +842,197 @@ fn test_request() -> AgentRequest {
         recommended_skill: None,
     }
 }
+
+fn handoff_evidence(command: &str, status: &'static str) -> RuntimeShellCommandCompleted {
+    let handoff = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "provider-tool-call",
+        "agent",
+        "req-notice",
+        "run-notice",
+        10,
+    )
+    .expect("handoff");
+    let block = CommandBlock {
+        id: "cmd-notice".to_string(),
+        session_id: "notice-session".to_string(),
+        command: command.to_string(),
+        origin: Default::default(),
+        cwd: "/repo".to_string(),
+        end_cwd: "/repo".to_string(),
+        started_at_ms: 10,
+        ended_at_ms: 20,
+        duration_ms: 10,
+        exit_code: -1,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+    RuntimeShellCommandCompleted::from_shell_handoff(
+        &handoff,
+        &block,
+        status,
+        AgentRunOrigin::Standard,
+    )
+}
+
+#[test]
+fn untracked_notice_does_not_invite_a_rerun_of_a_side_effecting_command() {
+    // E04 / CE-2: an untracked handoff cannot tell "ran with unknown result"
+    // from "never ran", so the shell must not tell the model to rerun a command
+    // that may already have taken effect.
+    let evidence = handoff_evidence(
+        "touch /tmp/cosh-e04-effect",
+        crate::types::SHELL_HANDOFF_UNTRACKED_STATUS,
+    );
+
+    let notice = untracked_delivery_notice(&evidence);
+
+    assert!(!notice.is_empty(), "untracked evidence must carry a notice");
+    assert!(
+        !notice.contains("Suggest rerunning"),
+        "unknown outcome must not invite a blind replay: {notice}"
+    );
+    assert!(notice.contains("do not rerun"), "{notice}");
+    assert!(notice.contains("fresh approval"), "{notice}");
+}
+
+#[test]
+fn untracked_notice_keeps_the_rerun_hint_when_no_side_effect_is_possible() {
+    // Positive control: the hint stays useful for commands that cannot repeat
+    // an effect, so the fix must not blanket-remove it.
+    let evidence = handoff_evidence("df -h", crate::types::SHELL_HANDOFF_UNTRACKED_STATUS);
+
+    let notice = untracked_delivery_notice(&evidence);
+
+    assert!(notice.contains("Suggest rerunning"), "{notice}");
+    assert!(!notice.contains("do not rerun"), "{notice}");
+}
+
+#[test]
+fn rerun_hint_requires_positive_readonly_proof() {
+    // `SideEffectClass::None` is also how the classifier reports "needs a TTY,
+    // effects not assessed", so the predicate must demand the readonly gate's
+    // positive proof instead. The interactive and interpreter cases below are
+    // exactly the ones that would slip through a `None`-based check while still
+    // being able to change remote or local state.
+    assert!(command_is_provably_readonly("df -h"));
+    assert!(!command_is_provably_readonly(""));
+    assert!(!command_is_provably_readonly("   "));
+    assert!(!command_is_provably_readonly("touch /tmp/cosh-e04-effect"));
+    assert!(!command_is_provably_readonly("ssh some-host"));
+    assert!(!command_is_provably_readonly("scp a.img host:/tmp/"));
+    assert!(!command_is_provably_readonly("python script.py"));
+}
+
+#[test]
+fn tracked_completion_carries_no_untracked_notice() {
+    let evidence = handoff_evidence("touch /tmp/cosh-e04-effect", "completed");
+
+    assert_eq!(untracked_delivery_notice(&evidence), "");
+}
+
+/// Session trust keys that survive a handoff completion with `status`.
+fn trusted_commands_after_completion(
+    command: &str,
+    status: &'static str,
+) -> std::collections::HashSet<String> {
+    let mut state = InlineState::default();
+    let key = crate::approval::handoff::trust_key_from_command(command).expect("trust key");
+    state.control.trust.trust_session_command(key);
+    let handoff = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "provider-tool-call",
+        "agent",
+        "req-e05",
+        "run-e05",
+        10,
+    )
+    .expect("handoff");
+    let block = CommandBlock {
+        id: "cmd-e05".to_string(),
+        session_id: "e05-session".to_string(),
+        command: command.to_string(),
+        origin: Default::default(),
+        cwd: "/repo".to_string(),
+        end_cwd: "/repo".to_string(),
+        started_at_ms: 10,
+        ended_at_ms: 20,
+        duration_ms: 10,
+        exit_code: -1,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+
+    record_shell_handoff_completion(&mut state, &handoff, &block, status);
+
+    state.control.trust.session_trusted_commands().clone()
+}
+
+#[test]
+fn failed_outcome_revokes_the_session_trust_key() {
+    // E05: the command may already have taken effect before it failed, so the
+    // earlier AlwaysTrust must not cover a retry of it.
+    let command = "touch /tmp/cosh-e05-effect";
+
+    let trusted = trusted_commands_after_completion(command, "failed");
+
+    assert!(trusted.is_empty(), "{trusted:?}");
+    assert!(!crate::approval::handoff::command_matches_trust_key(
+        command, &trusted
+    ));
+}
+
+#[test]
+fn untracked_outcome_revokes_the_session_trust_key() {
+    let trusted = trusted_commands_after_completion(
+        "touch /tmp/cosh-e05-effect",
+        crate::types::SHELL_HANDOFF_UNTRACKED_STATUS,
+    );
+
+    assert!(trusted.is_empty(), "{trusted:?}");
+}
+
+#[test]
+fn timed_out_and_interrupted_outcomes_revoke_the_session_trust_key() {
+    for status in ["timed_out", "interrupted"] {
+        let trusted = trusted_commands_after_completion("touch /tmp/cosh-e05-effect", status);
+        assert!(trusted.is_empty(), "{status}: {trusted:?}");
+    }
+}
+
+#[test]
+fn completed_outcome_keeps_the_session_trust_key() {
+    // Positive control: a known success revokes nothing, otherwise every
+    // trusted command would need re-approval after each ordinary run.
+    let trusted = trusted_commands_after_completion("touch /tmp/cosh-e05-effect", "completed");
+
+    assert_eq!(trusted.len(), 1, "{trusted:?}");
+}
+
+#[test]
+fn known_no_effect_outcome_keeps_the_session_trust_key() {
+    let trusted = trusted_commands_after_completion("touch /tmp/cosh-e05-effect", "not_executed");
+
+    assert_eq!(trusted.len(), 1, "{trusted:?}");
+}
+
+#[test]
+fn uncertain_outcome_keeps_trust_for_a_provably_readonly_command() {
+    // Positive control against over-revocation: a command the readonly gate
+    // positively proves cannot leave an effect has nothing to re-approve.
+    let trusted = trusted_commands_after_completion("df -h", "failed");
+
+    assert_eq!(trusted.len(), 1, "{trusted:?}");
+}

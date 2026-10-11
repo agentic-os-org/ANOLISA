@@ -1716,3 +1716,126 @@ fn non_cosh_core_grace_released_tool_call_keeps_legacy_fallback() {
         "the M3 guard must not reach non-cosh-core drivers"
     );
 }
+
+#[test]
+fn command_that_failed_after_a_possible_effect_requires_a_fresh_approval() {
+    // E05 end to end: the same command is auto-approved while its trust key
+    // lives, then ends failed (so its effect state is uncertain), and the next
+    // attempt must raise a card again instead of replaying on the old approval.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    // A private audit root, so the auto-approval path can open a real segment
+    // writer. Without it every auto-approval degrades to
+    // `blocked_audit_required` and the test cannot tell "the user was asked"
+    // from "the audit sink was missing".
+    let audit_root = std::env::temp_dir().join(format!(
+        "cosh-shell-e05-reapproval-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&audit_root).expect("create audit root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&audit_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private audit root");
+    }
+    let audit_root = audit_root.canonicalize().expect("canonical audit root");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            &audit_root,
+        )),
+        ..InlineState::default()
+    };
+    let command = "touch /tmp/cosh-e05-effect";
+    state.control.trust.trust_session_command(
+        crate::approval::handoff::trust_key_from_command(command).expect("trust key"),
+    );
+    let dispatch = |attempt: usize| GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: format!("ctrl-e05-{attempt}"),
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({ "command": command }),
+            tool_use_id: format!("toolu-e05-{attempt}"),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "shell command".to_string(),
+        display_text: "shell command".to_string(),
+        auto_execute: false,
+    };
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &[dispatch(1)],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render first dispatch");
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved,
+        "precondition: the trusted command is auto-approved before it fails"
+    );
+
+    let handoff = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "provider-tool-call",
+        "agent",
+        "req-e05",
+        "run-1",
+        10,
+    )
+    .expect("handoff");
+    let block = CommandBlock {
+        id: "cmd-e05".to_string(),
+        session_id: "e05-session".to_string(),
+        command: command.to_string(),
+        origin: Default::default(),
+        cwd: "/repo".to_string(),
+        end_cwd: "/repo".to_string(),
+        started_at_ms: 10,
+        ended_at_ms: 20,
+        duration_ms: 10,
+        exit_code: 1,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+    crate::runtime::evidence_delivery::record_shell_handoff_completion(
+        &mut state, &handoff, &block, "failed",
+    );
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &[dispatch(2)],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render retry dispatch");
+
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[1].status,
+        ApprovalRequestStatus::Pending,
+        "a retry after an uncertain effect must ask again"
+    );
+    assert!(state.approvals.active_panel_id.is_some());
+}
