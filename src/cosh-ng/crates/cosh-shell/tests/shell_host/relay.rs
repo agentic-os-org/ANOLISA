@@ -6,14 +6,32 @@ fn xtrace_record_contains_secret(rendered: &str, trace_prefix: &str, secret: &st
         .any(|record| record.contains(trace_prefix) && record.contains(secret))
 }
 
-fn exact_screen_text_occurrences(screen: &str, expected: &str) -> usize {
+/// Counts how many times `expected` is rendered, letting a match span row
+/// boundaries because a command wider than the terminal is rendered wrapped.
+///
+/// A match followed by an ASCII alphanumeric *on the same row* is a longer
+/// token rather than this command, so it does not count. A match ending at a
+/// row boundary always counts: the next row's first character is not a
+/// continuation of the token. Treating it as one made this oracle report 0
+/// for a screen that rendered the command exactly once, whenever an unrelated
+/// row such as `exit` happened to follow (#3401).
+fn exact_screen_text_occurrences(rows: &[String], expected: &str) -> usize {
+    let screen = rows.concat();
+    let mut row_ends = Vec::with_capacity(rows.len());
+    let mut end_of_row = 0;
+    for row in rows {
+        end_of_row += row.len();
+        row_ends.push(end_of_row);
+    }
     screen
         .match_indices(expected)
         .filter(|(start, _)| {
-            screen
-                .as_bytes()
-                .get(start + expected.len())
-                .is_none_or(|next| !next.is_ascii_alphanumeric())
+            let end = start + expected.len();
+            match screen.as_bytes().get(end) {
+                None => true,
+                Some(next) if !next.is_ascii_alphanumeric() => true,
+                Some(_) => row_ends.contains(&end),
+            }
         })
         .count()
 }
@@ -148,7 +166,7 @@ fn assert_bash_slash_screen(
     let ascii_rendered: Vec<u8> = rendered.iter().copied().filter(u8::is_ascii).collect();
     let screen = render_terminal_screen(&ascii_rendered, usize::from(width), 50);
     assert_eq!(
-        exact_screen_text_occurrences(&screen.concat(), command),
+        exact_screen_text_occurrences(&screen, command),
         1,
         "screen: {screen:#?}"
     );
@@ -2408,4 +2426,40 @@ fn routing_c3_explicit_draft_remains_the_only_multiline_agent_entry() {
             && event.component.as_deref() == Some("prompt_draft")
             && event.message.as_deref() == Some("open")
     }));
+}
+
+#[test]
+fn screen_occurrence_oracle_counts_a_wrapped_command_once() {
+    let rows = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    // A command wider than the terminal renders across rows; that is one
+    // rendering, and the following row is not a continuation of the token.
+    assert_eq!(
+        exact_screen_text_occurrences(&rows(&["/mode aaaa", "aaaa", "exit"]), "/mode aaaaaaaa"),
+        1
+    );
+    // The duplicate shape CI reported for the recalled variant (#3401): the
+    // erased readline echo surviving above the panel's own copy.
+    assert_eq!(
+        exact_screen_text_occurrences(
+            &rows(&["[root@host ~]#  /mode", "[root@host ~]# /mode"]),
+            "/mode"
+        ),
+        2
+    );
+    // A longer token on the same row is still not a match.
+    assert_eq!(
+        exact_screen_text_occurrences(&rows(&["/modex"]), "/mode"),
+        0
+    );
+    assert_eq!(
+        exact_screen_text_occurrences(&rows(&["/mode", "/mode"]), "/mode"),
+        2
+    );
+    assert_eq!(exact_screen_text_occurrences(&rows(&[]), "/mode"), 0);
 }

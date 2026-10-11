@@ -177,6 +177,7 @@ fn buffered_pty_output_stays_before_queued_candidate_redraw() {
         &mut parser,
         &mut output,
         "prompt> ",
+        0,
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
@@ -349,6 +350,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         &mut parser,
         &mut output,
         "prompt> ",
+        0,
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
@@ -374,6 +376,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         &mut parser,
         &mut output,
         "prompt> ",
+        0,
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
@@ -410,6 +413,7 @@ fn composer_slash_retains_workspace_before_the_next_shell_ready() {
         &mut parser,
         &mut Vec::new(),
         "prompt$ ",
+        0,
         &mut 0,
         &mut prompt_replay,
         &PromptPresentation::new(false),
@@ -449,6 +453,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         &mut parser,
         &mut output,
         "",
+        0,
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
@@ -494,6 +499,7 @@ fn isolated_candidate_repaints_do_not_add_status_lines() {
         &mut parser,
         &mut output,
         "prompt> ",
+        0,
         &mut echoed,
         &mut prompt_replay,
         &prompt_presentation,
@@ -530,6 +536,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
             &mut parser,
             &mut output,
             prompt,
+            0,
             &mut echoed,
             &mut prompt_replay,
             &prompt_presentation,
@@ -1028,4 +1035,195 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         "{}",
         String::from_utf8_lossy(&output)
     );
+}
+
+#[test]
+fn wrapped_candidate_erase_clears_the_rows_above_the_cursor() {
+    let mut parser = parser_for_test("candidate-wrapped-erase");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    // A 46-column draft on a 40-column terminal cannot fit on the row the
+    // cursor sits on, so the echo wrapped. `\x08` never crosses a row
+    // boundary: backspacing the draft's column count stops at column 0 of the
+    // last row and leaves every row above it on screen, where the intercept
+    // panel then draws a second copy of the same command (#3401).
+    let mut echoed = 46usize;
+    let prompt_presentation = PromptPresentation::new(false);
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        40,
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("clear wrapped candidate");
+
+    // One whole-row clear for the cursor's own row plus one cursor-up clear
+    // for the row the echo wrapped onto, and no backspace run at all.
+    assert_eq!(output, b"\r\x1b[2K\x1b[A\r\x1b[2K");
+    assert_eq!(echoed, 0);
+}
+
+#[test]
+fn unwrapped_candidate_erase_keeps_the_backspace_path() {
+    let mut parser = parser_for_test("candidate-unwrapped-erase");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    // The draft fits on the cursor's own row, so the column-accurate backspace
+    // erase stays: it preserves the prompt, which a whole-row clear would wipe.
+    let mut echoed = 5usize;
+    let prompt_presentation = PromptPresentation::new(false);
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        40,
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("clear unwrapped candidate");
+
+    assert_eq!(
+        output,
+        b"\x08 \x08\x08 \x08\x08 \x08\x08 \x08\x08 \x08\x1b[K"
+    );
+    assert_eq!(echoed, 0);
+}
+
+#[test]
+fn unknown_terminal_width_never_clears_rows_above_the_cursor() {
+    let mut parser = parser_for_test("candidate-unknown-width-erase");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    // Without a terminal width the wrap cannot be computed, so a long draft
+    // must keep today's single-row behaviour rather than guess and clear rows
+    // that hold real scrollback.
+    let mut echoed = 46usize;
+    let prompt_presentation = PromptPresentation::new(false);
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        0,
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("clear candidate with unknown width");
+
+    assert!(
+        !output.windows(3).any(|window| window == b"\x1b[A"),
+        "cursor-up leaked: {output:?}"
+    );
+    assert_eq!(echoed, 0);
+}
+
+#[test]
+fn uncaptured_prompt_width_never_clears_rows_above_the_cursor() {
+    let mut parser = parser_for_test("candidate-uncaptured-prompt-erase");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    // The shell painted no prompt cosh captured, so its width is unknown: an
+    // empty `last_prompt_display()` covers both "no capture" and "prompt
+    // renders zero columns". A 35-column draft on a 40-column terminal fits on
+    // the cursor's row only if the real prompt is 5 columns or narrower, and
+    // nothing here can tell. Clearing a row above on that guess would erase
+    // output the shell really produced, so the single-row erase is kept even
+    // though the wrapped echo of #3401 survives in this one case (#3434
+    // review).
+    let mut echoed = 35usize;
+    let prompt_presentation = PromptPresentation::new(false);
+
+    assert!(
+        parser.last_prompt_display().is_empty(),
+        "the boundary under test is an uncaptured prompt"
+    );
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        40,
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("clear candidate with uncaptured prompt");
+
+    assert!(
+        !output.windows(3).any(|window| window == b"\x1b[A"),
+        "cursor-up leaked: {output:?}"
+    );
+    assert_eq!(echoed, 0);
+}
+
+#[test]
+fn captured_prompt_width_counts_toward_the_wrapped_echo_rows() {
+    let mut parser = parser_for_test("candidate-captured-prompt-erase");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    // The same 35-column draft on the same 40-column terminal, but the shell
+    // painted a 10-column prompt cosh captured: 10 + 35 crosses the row
+    // boundary, so the echo provably wrapped and the row above the cursor is
+    // cleared. This is the counterpart of the uncaptured case above — the
+    // width is used as soon as it is known, so the conservative path is
+    // specific to an unknown prompt and not a general refusal to count it.
+    let mut echoed = 35usize;
+    let prompt_presentation = PromptPresentation::new(false);
+
+    feed_shell_ready(&mut parser);
+    parser.feed(b"prompt-10>").expect("feed PS1 paint");
+    assert_eq!(parser.last_prompt_display(), b"prompt-10>");
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        40,
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("clear candidate with captured prompt");
+
+    let cursor_ups = output
+        .windows(3)
+        .filter(|window| *window == b"\x1b[A")
+        .count();
+    assert_eq!(cursor_ups, 1, "output: {output:?}");
+    assert!(
+        output.windows(10).any(|window| window == b"prompt-10>"),
+        "the cleared prompt was not redrawn: {output:?}"
+    );
+    assert_eq!(echoed, 0);
 }

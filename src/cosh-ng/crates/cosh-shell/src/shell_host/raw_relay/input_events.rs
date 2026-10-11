@@ -8,8 +8,8 @@ use unicode_width::UnicodeWidthChar;
 use crate::raw_input::RawInputEvent;
 
 use super::{
-    clear_prompt_ghost_line, OscParser, PromptPresentation, PromptReplayTracker, RESTORE_CURSOR,
-    SAVE_CURSOR,
+    clear_prompt_ghost_line, prompt_replay_bytes, OscParser, PromptPresentation,
+    PromptReplayTracker, RESTORE_CURSOR, SAVE_CURSOR,
 };
 
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
@@ -54,6 +54,50 @@ pub(super) fn candidate_display_columns(bytes: &[u8]) -> usize {
 fn erase_native_columns<W: Write>(output: &mut W, columns: usize) -> io::Result<()> {
     for _ in 0..columns {
         write!(output, "\x08 \x08")?;
+    }
+    Ok(())
+}
+
+/// Rows *above* the cursor that an echo of `columns` display columns occupied
+/// when it started at column `prompt_columns` on a `terminal_columns`-wide
+/// terminal. Zero means the echo stayed on the cursor's own row, where the
+/// existing single-row erase is already exact.
+///
+/// A prompt wider than the terminal has wrapped on its own, so the echo's
+/// first row is not derivable here; report zero and keep today's behaviour.
+///
+/// `prompt_columns` of zero is ambiguous in native mode: the parser hands back
+/// an empty capture both for a shell that never painted a prompt cosh saw and
+/// for one whose prompt really renders zero columns. Only rows the echo
+/// provably wrapped on its own are reported then. Guessing the missing prompt
+/// width would aim a cursor-up whole-row clear at a row that may never have
+/// held the echo and erase output the shell really produced, which is worse
+/// than the duplicated candidate #3401 describes, so the uncaptured case
+/// degrades to the single-row erase. Closing that gap needs the candidate's
+/// start column tracked independently of the prompt capture (#3434 review).
+fn wrapped_echo_extra_rows(
+    prompt_columns: usize,
+    columns: usize,
+    terminal_columns: usize,
+) -> usize {
+    if columns == 0 || terminal_columns == 0 || prompt_columns >= terminal_columns {
+        return 0;
+    }
+    prompt_columns.saturating_add(columns).saturating_sub(1) / terminal_columns
+}
+
+/// Erase the cursor's row plus `extra_rows` rows above it, leaving the cursor
+/// at column 0 of the topmost erased row.
+///
+/// `\x08` never crosses a row boundary and `\r\x1b[2K` only clears the
+/// cursor's own row, so erasing an echo that wrapped left its upper rows on
+/// screen: the typed command survived and the intercept panel then drew a
+/// second copy of it (#3401). Whole-row clears also wipe the prompt, so every
+/// caller redraws it afterwards.
+fn erase_wrapped_echo<W: Write>(output: &mut W, extra_rows: usize) -> io::Result<()> {
+    write!(output, "\r\x1b[2K")?;
+    for _ in 0..extra_rows {
+        write!(output, "\x1b[A\r\x1b[2K")?;
     }
     Ok(())
 }
@@ -106,11 +150,23 @@ pub(super) fn drain_raw_input_events<W: Write>(
     parser: &mut OscParser,
     output: &mut W,
     prompt: &str,
+    terminal_columns: usize,
     native_candidate_echoed_len: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
     prompt_presentation: &PromptPresentation,
 ) -> io::Result<bool> {
     let native_mode = prompt.is_empty();
+    // The prompt the whole-row erase has to put back. In prompt-known mode it
+    // is the caller's; otherwise take the one the parser captured from the
+    // shell, which is the only width available for the wrap maths below. An
+    // empty capture means that width is unknown rather than zero; see
+    // `wrapped_echo_extra_rows` for why the erase stays single-row then.
+    let erase_prompt: Vec<u8> = if native_mode {
+        prompt_replay_bytes(parser.last_prompt_display()).to_vec()
+    } else {
+        prompt.as_bytes().to_vec()
+    };
+    let prompt_columns = candidate_display_columns(&erase_prompt);
     let mut eof_shutdown_requested = false;
     while let Ok(event) = input_events.try_recv() {
         match event {
@@ -190,38 +246,37 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_prompt_draft_event("cancel", Some(&payload));
             }
             RawInputEvent::CandidateRedraw { input, hint } => {
-                if native_mode {
+                let echoed = *native_candidate_echoed_len;
+                let extra_rows = wrapped_echo_extra_rows(prompt_columns, echoed, terminal_columns);
+                if native_mode && extra_rows == 0 {
                     // Erase by display columns and rewrite the whole draft:
                     // byte-offset math breaks on CJK and marker bytes (#1721).
                     // Erase-to-EOL clears any stale inline hint residue.
-                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    erase_native_columns(output, echoed)?;
                     write!(output, "\x1b[K")?;
-                    output.write_all(&input)?;
-                    if let Some(hint) = hint {
-                        write_inline_hint(output, &hint)?;
-                    }
-                    *native_candidate_echoed_len = candidate_display_columns(&input);
                 } else {
-                    write!(output, "\r\x1b[2K")?;
-                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-                    output.write_all(&input)?;
-                    if let Some(hint) = hint {
-                        write_inline_hint(output, &hint)?;
-                    }
+                    erase_wrapped_echo(output, extra_rows)?;
+                    prompt_presentation.write_replayed_prompt(output, &erase_prompt)?;
                 }
+                output.write_all(&input)?;
+                if let Some(hint) = hint {
+                    write_inline_hint(output, &hint)?;
+                }
+                *native_candidate_echoed_len = candidate_display_columns(&input);
                 output.flush()?;
             }
             RawInputEvent::CandidateCommit(input) => {
-                if native_mode {
-                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                let echoed = *native_candidate_echoed_len;
+                let extra_rows = wrapped_echo_extra_rows(prompt_columns, echoed, terminal_columns);
+                if native_mode && extra_rows == 0 {
+                    erase_native_columns(output, echoed)?;
                     write!(output, "\x1b[K")?;
-                    output.write_all(&input)?;
-                    *native_candidate_echoed_len = 0;
                 } else {
-                    write!(output, "\r\x1b[2K")?;
-                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
-                    output.write_all(&input)?;
+                    erase_wrapped_echo(output, extra_rows)?;
+                    prompt_presentation.write_replayed_prompt(output, &erase_prompt)?;
                 }
+                output.write_all(&input)?;
+                *native_candidate_echoed_len = 0;
                 writeln!(output)?;
                 output.flush()?;
             }
@@ -267,14 +322,16 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_intercept_event(&session_id, input, None, &component);
             }
             RawInputEvent::CandidateClearLine => {
-                if native_mode {
-                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                let echoed = *native_candidate_echoed_len;
+                let extra_rows = wrapped_echo_extra_rows(prompt_columns, echoed, terminal_columns);
+                if native_mode && extra_rows == 0 {
+                    erase_native_columns(output, echoed)?;
                     write!(output, "\x1b[K")?;
-                    *native_candidate_echoed_len = 0;
                 } else {
-                    write!(output, "\r\x1b[2K")?;
-                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
+                    erase_wrapped_echo(output, extra_rows)?;
+                    prompt_presentation.write_replayed_prompt(output, &erase_prompt)?;
                 }
+                *native_candidate_echoed_len = 0;
                 output.flush()?;
             }
             RawInputEvent::UserIntercept(input, reason) => {
