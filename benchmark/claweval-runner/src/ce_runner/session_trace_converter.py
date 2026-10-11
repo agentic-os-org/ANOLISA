@@ -123,7 +123,7 @@ def fetch_audit_data(task: dict, port_offset: int = 0) -> dict[str, dict]:
     return audit_data
 
 
-def parse_openclaw_arguments(args_value: Any) -> dict:
+def parse_openclaw_arguments(args_value: Any) -> dict[str, Any]:
     """Parse openclaw toolCall arguments.
 
     Openclaw stores arguments as either:
@@ -133,24 +133,22 @@ def parse_openclaw_arguments(args_value: Any) -> dict:
 
     We need to extract the actual tool parameters.
     """
-    if isinstance(args_value, dict):
-        # Check if it has a 'kwargs' wrapper
-        if "kwargs" in args_value:
-            kwargs_str = args_value["kwargs"]
-            if isinstance(kwargs_str, str):
-                try:
-                    return json.loads(kwargs_str)
-                except json.JSONDecodeError:
-                    return {}
-            return kwargs_str if isinstance(kwargs_str, dict) else {}
-        # Direct dict - return as-is
-        return args_value
-    elif isinstance(args_value, str):
+    if isinstance(args_value, str):
         try:
-            return json.loads(args_value)
+            args_value = json.loads(args_value)
         except json.JSONDecodeError:
             return {}
-    return {}
+    if not isinstance(args_value, dict):
+        return {}
+
+    if "kwargs" in args_value:
+        args_value = args_value["kwargs"]
+        if isinstance(args_value, str):
+            try:
+                args_value = json.loads(args_value)
+            except json.JSONDecodeError:
+                return {}
+    return args_value if isinstance(args_value, dict) else {}
 
 
 def derive_response_status(response_body: Any, is_error: bool) -> int:
