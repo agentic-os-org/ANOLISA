@@ -49,6 +49,12 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## Spreadsheet Row Inputs
+
+XLSX row shifts require positive starting rows and row counts. Row insertion
+also requires positive `--at` and `--copy-style-from` values; invalid inputs
+fail before workbook edits. See the [user guide](../../docs/user-guide/en/user-entrypoint/os-skills.md).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

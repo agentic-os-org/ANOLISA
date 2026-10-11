@@ -46,6 +46,11 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 电子表格行参数
+
+XLSX 行移动要求起始行和行数为正整数。插入行也要求 `--at` 和 `--copy-style-from`
+为正数；无效参数会在编辑工作簿前报错。详见[用户指南](../../docs/user-guide/zh/user-entrypoint/os-skills.md)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
