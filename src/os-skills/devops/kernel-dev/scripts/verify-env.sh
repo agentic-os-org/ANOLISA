@@ -183,10 +183,13 @@ echo ""
 
 # Step 8: Test Compilation
 echo -e "${BLUE}Step 8: Test Compilation${NC}"
-TEST_DIR=$(mktemp -d)
-cd "$TEST_DIR"
-
-cat > test_module.c << 'EOF'
+if ! TEST_DIR=$(mktemp -d) || [ -z "$TEST_DIR" ] || [ ! -d "$TEST_DIR" ]; then
+    check_fail "Cannot create temporary compilation directory"
+else
+    # Keep the caller's directory intact, including when cd or fixture writes fail.
+    if (
+        cd "$TEST_DIR" || exit 1
+        cat > test_module.c << 'EOF' || exit 1
 #include <linux/init.h>
 #include <linux/module.h>
 MODULE_LICENSE("GPL");
@@ -196,7 +199,7 @@ module_init(test_init);
 module_exit(test_exit);
 EOF
 
-cat > Makefile << 'EOF'
+        cat > Makefile << 'EOF' || exit 1
 obj-m += test_module.o
 KERNEL_DIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
@@ -206,19 +209,19 @@ clean:
 	make -C $(KERNEL_DIR) M=$(PWD) clean
 EOF
 
-if make -s > /dev/null 2>&1; then
-    if [ -f "test_module.ko" ]; then
+        make -s > /dev/null 2>&1 || exit 2
+        [ -f "test_module.ko" ] || exit 3
+    ); then
         check_pass "Test module compiled successfully"
-        rm -f test_module.ko
     else
-        check_fail "Test module compilation produced no output"
+        case $? in
+            2) check_fail "Test module compilation failed" ;;
+            3) check_fail "Test module compilation produced no output" ;;
+            *) check_fail "Cannot prepare temporary compilation directory" ;;
+        esac
     fi
-else
-    check_fail "Test module compilation failed"
+    rm -rf -- "$TEST_DIR"
 fi
-
-cd - > /dev/null
-rm -rf "$TEST_DIR"
 echo ""
 
 # Summary
