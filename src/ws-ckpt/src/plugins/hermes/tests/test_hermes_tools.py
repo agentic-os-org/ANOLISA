@@ -629,6 +629,19 @@ class TestHandleWsCkptConfig:
         result = json.loads(handle_ws_ckpt_config({"action": "update", "key": "workspace", "value": "/new"}))
         assert result["success"] is False
 
+    @patch("hermes.cron.CrontabManager.migrate", return_value=[])
+    @patch("hermes.tools._persist_plugin_yaml", return_value="")
+    @patch("hermes.tools.get_manager")
+    @patch("os.getcwd", return_value="/new/sub")
+    def test_workspace_refuses_when_cwd_inside(self, _cwd, mock_mgr, _persist, mock_migrate):
+        mock_mgr.return_value = MagicMock()
+        result = json.loads(handle_ws_ckpt_config({"action": "update", "key": "workspace", "value": "/new"}))
+        assert result["success"] is False
+        assert "Refused" in result["error"]
+        mock_mgr.return_value.set_workspace.assert_not_called()
+        mock_migrate.assert_not_called()
+        _persist.assert_not_called()
+
     # --- cronSchedules ---
     def test_cronSchedules_no_value(self):
         result = json.loads(handle_ws_ckpt_config({"action": "update", "key": "cronSchedules"}))
