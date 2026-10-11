@@ -362,5 +362,28 @@ def test_sandbox_manager_rejects_wrong_explained_workspace(tmp_path: Path) -> No
         manager.configure(spec)
 
 
+def test_sandbox_manager_rejects_non_object_explain_json(tmp_path: Path) -> None:
+    """explain 输出为合法 JSON 但非对象（CLI 出错/警告路径的合理输出）时，
+    必须走既有的 invalid-JSON RuntimeError，而不是 AttributeError 裸崩
+    （修复前：'list' object has no attribute 'get'，实测）。
+    """
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text('{"agents":{"list":[{"id":"main","default":true}]}}', encoding="utf-8")
+    spec = _spec(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:5] == ["openclaw", "--profile", "profile-1", "sandbox", "explain"]:
+            return _completed(cmd, stdout="[]")
+        return _completed(cmd)
+
+    manager = OpenClawSandboxManager(config_path=config_path, profile="profile-1", cli_path="openclaw")
+
+    with (
+        patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run),
+        pytest.raises(RuntimeError, match="returned invalid JSON"),
+    ):
+        manager.configure(spec)
+
+
 def test_build_openclaw_agent_scope_key_matches_local_agent_scope() -> None:
     assert build_openclaw_agent_scope_key("django__django-13448") == "agent:django__django-13448:main"
