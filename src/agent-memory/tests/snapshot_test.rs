@@ -147,3 +147,47 @@ fn snapshot_excludes_meta_directory() {
         );
     }
 }
+
+#[test]
+fn restore_recovers_from_a_crashed_prior_restore() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/inner.md", "v1", false).unwrap();
+    let snap = svc.mem_snapshot(None).unwrap();
+
+    // Simulate a crash between the rename-aside step and the trash move of
+    // a prior restore of this id: its rollback entry is stranded in the
+    // meta directory. Retrying the restore must clear the residue instead
+    // of failing the rename forever.
+    let residue = svc
+        .mount
+        .meta_dir
+        .join(format!(".{}.rollback.notes", snap.id));
+    std::fs::create_dir_all(&residue).unwrap();
+    std::fs::write(residue.join("inner.md"), "displaced by the crashed restore").unwrap();
+
+    svc.write("notes/inner.md", "v2", true).unwrap();
+
+    svc.mem_snapshot_restore(&snap.id).unwrap();
+
+    assert_eq!(svc.read("notes/inner.md").unwrap(), "v1");
+    // The residue was parked under trash, never silently destroyed.
+    let residue_prefix = format!("residue-{}-", snap.id);
+    let mut parked: Vec<_> = std::fs::read_dir(svc.mount.meta_dir.join("trash"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&residue_prefix))
+        })
+        .collect();
+    assert_eq!(
+        parked.len(),
+        1,
+        "residue must be parked under trash exactly once"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parked.remove(0).join("notes").join("inner.md")).unwrap(),
+        "displaced by the crashed restore"
+    );
+}
