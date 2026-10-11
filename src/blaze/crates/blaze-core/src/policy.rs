@@ -955,6 +955,54 @@ memory = "2G"
     }
 
     #[test]
+    fn parse_memory_value_largest_representable_values() {
+        // Raw byte values up to u64::MAX are representable.
+        assert_eq!(parse_memory_value(&u64::MAX.to_string()).unwrap(), u64::MAX);
+        // Any suffix on u64::MAX must overflow instead of wrapping.
+        assert!(parse_memory_value(&format!("{}K", u64::MAX)).is_err());
+        assert!(parse_memory_value(&format!("{}Mi", u64::MAX)).is_err());
+        // One past u64::MAX is not parseable at all.
+        assert!(parse_memory_value("18446744073709551616").is_err());
+    }
+
+    #[test]
+    fn parse_memory_value_one_mib_boundary() {
+        // The smallest decimal-K value that clears the 1 MiB floor.
+        assert_eq!(parse_memory_value("1049K").unwrap(), 1_049_000);
+        assert!(parse_memory_value("1048K").is_err());
+        // Exact floor and one byte below it.
+        assert_eq!(parse_memory_value("1048576").unwrap(), 1 << 20);
+        assert!(parse_memory_value("1048575").is_err());
+    }
+
+    #[test]
+    fn parse_duration_largest_representable_values() {
+        // Largest value for each multiplier stays inside u64 seconds.
+        let max_secs = u64::MAX;
+        assert_eq!(
+            parse_duration(&format!("{max_secs}s")).unwrap(),
+            Duration::from_secs(max_secs)
+        );
+        for (unit, per) in [("m", 60u64), ("h", 3_600), ("d", 86_400)] {
+            let max_n = u64::MAX / per;
+            assert!(
+                parse_duration(&format!("{max_n}{unit}")).is_some(),
+                "max {unit} value must fit"
+            );
+            assert!(
+                parse_duration(&format!("{}{unit}", max_n + 1)).is_none(),
+                "one past the max {unit} value must overflow to None, not wrap"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_helpers_tolerate_surrounding_whitespace() {
+        assert_eq!(parse_memory_value(" 2M ").unwrap(), 2_000_000);
+        assert_eq!(parse_duration(" 30s ").unwrap(), Duration::from_secs(30));
+    }
+
+    #[test]
     fn vm_config_parses_and_validates() {
         let raw = r#"
 manifest_version = 1
