@@ -147,9 +147,20 @@ def main() -> None:
         scan_result = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         return  # fail-open on parse error
+    if not isinstance(scan_result, dict):
+        # A non-object ScanResult (null, array, string, number) carries no
+        # verdict to act on; the qwen/qoder siblings and the hermes
+        # capability already degrade this shape to fail-open.
+        return  # fail-open on non-object scan result
 
     # 5. Mode-based output
-    verdict = scan_result.get("verdict", "pass")
+    verdict = scan_result.get("verdict")
+    if not isinstance(verdict, str):
+        # Only a string verdict can name a risk; anything else (missing,
+        # number, boolean, nested object) must fail open instead of being
+        # treated as a warn/deny verdict — the qoder sibling coerces the
+        # same way through _safe_string(...) or "pass".
+        verdict = "pass"
 
     if verdict in ("pass", "error"):
         return  # allow (fail-open for error)

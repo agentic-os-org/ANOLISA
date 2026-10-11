@@ -199,6 +199,32 @@ class TestCoshHookSubprocess:
         output = self._run_hook({"session_id": "abc"})
         assert output["decision"] == "allow"
 
+    @pytest.mark.parametrize(
+        "non_object", ["null", '[{"verdict": "deny"}]', '"deny"', "7"]
+    )
+    def test_non_object_scan_result_allows(self, monkeypatch, capsys, non_object):
+        # A ScanResult that parses as JSON but is not an object carries no
+        # verdict; the hook must fail open with a diagnostic instead of
+        # crashing on scan_result.get, matching the qwen/qoder siblings.
+        monkeypatch.setattr(
+            prompt_scanner_hook.subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=non_object, stderr=""
+            ),
+        )
+        monkeypatch.setattr(
+            prompt_scanner_hook.sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "hello"})),
+        )
+
+        prompt_scanner_hook.main()
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"decision": "allow"}
+        assert "non-object" in captured.err
+
     def test_injects_trace_context_into_scan_prompt_command(self, monkeypatch, capsys):
         captured = {}
 
