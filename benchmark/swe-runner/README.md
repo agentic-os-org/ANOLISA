@@ -170,7 +170,7 @@ Custom datasets must expose SWE-bench-compatible fields: `instance_id`, `repo`,
 
 Filters are applied in this order:
 
-1. `--instance-id`
+1. `--instance-id` or `--instances-file`
 2. `--filter`
 3. `--slice`
 
@@ -189,6 +189,25 @@ swe-runner run \
   --agent cosh \
   --instance-id django__django-11999,matplotlib__matplotlib-18869
 ```
+
+For a reusable selection, put one instance ID per line in a UTF-8 file:
+
+```text
+# reviewed subset
+django__django-11999
+matplotlib__matplotlib-18869
+```
+
+```bash
+swe-runner run --agent cosh --instances-file selected-instances.txt
+```
+
+Blank lines, full-line `#` comments and an optional UTF-8 BOM are accepted.
+Duplicate IDs are ignored after their first occurrence. `--instances-file`
+and `--instance-id` are mutually exclusive; empty or unreadable files stop the
+run before execution. The file is read once into the run settings. Matching
+instances retain dataset order, then `--filter` and `--slice` apply as usual;
+IDs absent from the selected dataset do not match any instance.
 
 ### Resume and Rerun
 
@@ -302,6 +321,7 @@ When enabled, runner:
 | `--slice` | none | Instance slice, for example `0:10`, `10:`, `:5` |
 | `--filter` | none | Regex filter for instance IDs |
 | `--instance-id, -i` | none | Instance ID, or comma-separated instance IDs |
+| `--instances-file` | none | UTF-8 ID file, one per line; excludes `--instance-id` |
 | `--workers, -w` | `1` | Number of parallel workers |
 | `--docker-pull-registry` | none | Registry host used as the Docker pull source |
 | `--use-skill` | `false` | Load skill resources from `--skills-dir` |
