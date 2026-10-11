@@ -6,7 +6,11 @@
 
 import type { CommandModule } from 'yargs';
 import { createDebugLogger, getErrorMessage } from '@copilot-shell/core';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  loadSettings,
+  SettingScope,
+  withScopedHooks,
+} from '../../config/settings.js';
 
 const debugLogger = createDebugLogger('HOOKS_DISABLE');
 
@@ -22,7 +26,12 @@ export async function handleDisableHook(hookName: string): Promise<void> {
   const settings = loadSettings(workingDir);
 
   try {
-    // Get current hooks settings
+    // Read the disabled list from the merged view (any scope may have populated
+    // it) but write back only the workspace scope's own hooks object: writing the
+    // merged object copies every other scope's hooks into this file, and those
+    // hooks then merge with themselves and fire twice. The hooks come from
+    // originalSettings - the settings copy is already env-resolved, so its
+    // `$HOME/...` commands would freeze to absolute paths on disk.
     const mergedSettings = settings.merged as
       | Record<string, unknown>
       | undefined;
@@ -40,10 +49,10 @@ export async function handleDisableHook(hookName: string): Promise<void> {
 
     // Add hook to disabled list
     const newDisabledHooks = [...disabledHooks, hookName];
-    const newHooksSettings = {
-      ...hooksSettings,
-      disabled: newDisabledHooks,
-    };
+    const workspaceHooks = (
+      settings.workspace.originalSettings as Record<string, unknown>
+    )['hooks'] as Record<string, unknown> | undefined;
+    const newHooksSettings = withScopedHooks(workspaceHooks, newDisabledHooks);
 
     // Save updated settings
     settings.setValue(
