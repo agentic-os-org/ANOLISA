@@ -5,7 +5,7 @@
 //! so the suite also passes at an unprivileged uid. Genuinely two-owner
 //! scenarios express their owners through the explicit owner map
 //! (production `--map-owner`) instead of `CAP_CHOWN`. Observability sources
-//! are seeded with the v1 table contract (revision 1, no owner column) and
+//! are seeded with the v1 table contract (revision 1, no uid column) and
 //! a `JSONL` recovery stream.
 
 use std::fs;
@@ -203,10 +203,10 @@ fn apply_options(
     }
 }
 
-/// `(hook, session, run, owner)` of every observability row, id order.
+/// `(hook, session, run, uid)` of every observability row, id order.
 fn observability_rows(destination: &Path) -> Vec<(String, String, String, i64)> {
     let conn = Connection::open(destination).unwrap();
-    conn.prepare("SELECT hook, session_id, run_id, owner FROM observability_events ORDER BY id")
+    conn.prepare("SELECT hook, session_id, run_id, uid FROM observability_events ORDER BY id")
         .unwrap()
         .query_map([], |row| {
             Ok((
@@ -299,11 +299,11 @@ fn apply_imports_observability_under_the_verified_owner() {
     assert_eq!(report.totals.imported, 1);
     assert_eq!(report.totals.observability.imported, 3);
 
-    // The destination is the sibling system store, with the owner column.
+    // The destination is the sibling system store, with the uid column.
     assert!(observability_destination.exists());
     let columns = columns_of(&observability_destination, "observability_events");
-    assert_eq!(columns.len(), 11, "the ten v1 columns plus owner");
-    assert_eq!(columns.last(), Some(&"owner".to_owned()));
+    assert_eq!(columns.len(), 11, "the ten v1 columns plus uid");
+    assert_eq!(columns.last(), Some(&"uid".to_owned()));
 
     // Rows land under the verified owner, content preserved.
     let rows = observability_rows(&observability_destination);
@@ -583,7 +583,7 @@ fn observability_jsonl_recovery_is_explicit_and_fills_gaps() {
     let conn = Connection::open(&observability_destination).unwrap();
     let (metrics, owner): (String, i64) = conn
         .query_row(
-            "SELECT metrics_json, owner FROM observability_events \
+            "SELECT metrics_json, uid FROM observability_events \
              ORDER BY id LIMIT 1 OFFSET 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -784,7 +784,7 @@ fn a_v1_shaped_observability_destination_converges_without_losing_rows() {
     let destination = home.path().join("dest/security-events.db");
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
     // A pre-existing v1-shaped system observability store (for example left
-    // by an earlier deployment): revision 1, no owner column, one row.
+    // by an earlier deployment): revision 1, no uid column, one row.
     let observability_destination = home.path().join("dest/observability.db");
     {
         let conn = Connection::open(&observability_destination).unwrap();
@@ -837,17 +837,17 @@ fn a_v1_shaped_observability_destination_converges_without_losing_rows() {
         .unwrap();
     assert_eq!(
         version,
-        asc_persistence_sqlite::observability::SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION
+        asc_observability::OBSERVABILITY_SQLITE_SCHEMA_VERSION
     );
     let owners: Vec<Option<i64>> = conn
-        .prepare("SELECT owner FROM observability_events ORDER BY id")
+        .prepare("SELECT uid FROM observability_events ORDER BY id")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(owners.len(), 2, "the pre-existing row survived convergence");
-    assert_eq!(owners[0], None, "the v1 row keeps its NULL owner");
+    assert_eq!(owners[0], None, "the v1 row keeps its NULL uid");
     assert_eq!(owners[1], Some(i64::from(fixture_uid(1001))));
 }
 

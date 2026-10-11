@@ -3,8 +3,8 @@
 //! The v1 observability stream has no owner field and no stable identifier,
 //! which shapes everything here:
 //!
-//! * the destination is the system store's own schema — the v1 shape plus a
-//!   converged `owner` column — so imported rows carry the **verified** source
+//! * the destination is the system store's own schema — the v1 shape plus the
+//!   converged `uid` column — so imported rows carry the **verified** source
 //!   owner and nothing else decides who can see them later;
 //! * idempotency cannot ride an `event_id` conflict clause. A row is matched
 //!   by its full content **including the owner**: a re-run, a crashed attempt
@@ -18,10 +18,8 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use asc_observability::ObservabilityRecord;
-use asc_persistence_sqlite::observability::{
-    SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION, SYSTEM_OBSERVABILITY_TABLES,
-};
+use asc_observability::{OBSERVABILITY_SQLITE_SCHEMA_VERSION, ObservabilityRecord};
+use asc_persistence_sqlite::observability::OBSERVABILITY_TABLES;
 use asc_sqlite_kernel::{KernelError, SqliteStore};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -33,14 +31,14 @@ use crate::source::{
 /// The insert statement of the observability system store.
 const INSERT_SQL: &str = "INSERT INTO observability_events (hook, observed_at, \
      observed_at_epoch, session_id, run_id, metrics_json, metadata_json, call_id, tool_call_id, \
-     owner) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+     uid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 
 /// Finds one row by full content, owner included.
 ///
 /// `observed_at` (the wire text) pins the instant exactly as the source wrote
 /// it; two rows that spell the same instant differently are different content.
 /// `call_id` / `tool_call_id` compare with `IS` so `NULL` matches `NULL`.
-const FIND_SQL: &str = "SELECT id FROM observability_events WHERE owner = ?1 AND hook = ?2 AND \
+const FIND_SQL: &str = "SELECT id FROM observability_events WHERE uid = ?1 AND hook = ?2 AND \
      observed_at = ?3 AND session_id = ?4 AND run_id = ?5 AND metrics_json = ?6 AND \
      metadata_json = ?7 AND call_id IS ?8 AND tool_call_id IS ?9 LIMIT 1";
 
@@ -63,8 +61,8 @@ pub fn destination_for(security_destination: &Path) -> PathBuf {
 
 /// Opens the observability system store and forces schema convergence.
 ///
-/// A missing file is created; a v1-shaped file (revision 1, no `owner`)
-/// converges in place, because the system schema version is higher and the
+/// A missing file is created; a v1-shaped file (revision 1, no `uid`)
+/// converges in place, because the schema version moved past 1 and the
 /// kernel cannot take its version-match fast path.
 ///
 /// # Errors
@@ -81,8 +79,8 @@ pub fn open_destination(path: &Path) -> Result<SqliteStore, crate::MigratorError
     let store = SqliteStore::new(
         path,
         false,
-        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION,
-        SYSTEM_OBSERVABILITY_TABLES,
+        OBSERVABILITY_SQLITE_SCHEMA_VERSION,
+        OBSERVABILITY_TABLES,
         None,
         asc_observability::OBSERVABILITY_LOG_PREFIX,
     )?;
@@ -107,8 +105,8 @@ pub fn open_destination_readonly(path: &Path) -> Result<SqliteStore, crate::Migr
     Ok(SqliteStore::new(
         path,
         true,
-        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION,
-        SYSTEM_OBSERVABILITY_TABLES,
+        OBSERVABILITY_SQLITE_SCHEMA_VERSION,
+        OBSERVABILITY_TABLES,
         None,
         asc_observability::OBSERVABILITY_LOG_PREFIX,
     )?)

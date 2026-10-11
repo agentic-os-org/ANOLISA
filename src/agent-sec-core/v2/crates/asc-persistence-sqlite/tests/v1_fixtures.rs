@@ -24,7 +24,7 @@ use asc_persistence_sqlite::security_events::{
     EventFilters, SECURITY_EVENTS_TABLES, SecurityEventsMigrator, SqliteEventReader,
 };
 use asc_security_events::{SECURITY_EVENTS_SQLITE_SCHEMA_VERSION, SecurityEvent};
-use asc_sqlite_kernel::{SchemaMigrator, SqliteStore, TableSpec};
+use asc_sqlite_kernel::{KernelError, SchemaMigrator, SqliteStore, TableSpec};
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;

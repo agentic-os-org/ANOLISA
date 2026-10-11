@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "asc-state-migrator"
-version = "0.13.2"
+version = "1.0.0"
 dependencies = [
  "asc-event-log",
  "asc-observability",
