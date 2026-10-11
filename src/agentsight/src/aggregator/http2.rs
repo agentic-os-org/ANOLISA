@@ -1262,6 +1262,12 @@ impl Http2StreamAggregator {
     }
 
     /// Process a single frame within the context of a stream state
+    ///
+    /// The receiver is part of the state-handler shape (like `stream_from_state`)
+    /// and stays unused except for the `WaitingRequestData` re-entry, where a
+    /// response frame that beat the request's END_STREAM is handed to the
+    /// `RequestComplete` arm instead of being dropped.
+    #[allow(clippy::only_used_in_recursion)]
     fn process_frame_in_state(
         &self,
         state: Http2StreamState,
@@ -1309,8 +1315,27 @@ impl Http2StreamAggregator {
                         request_headers,
                         request_data_frames,
                     }
+                } else if request_headers.is_some() {
+                    // A server may answer before the client has sent the whole
+                    // request (RFC 7540 §8.1) — a gateway rejecting an upload
+                    // with 429/413/401 does exactly that. The request head we
+                    // already captured is enough to aggregate the response, so
+                    // re-enter through `RequestComplete` instead of dropping
+                    // the frame: dropping it lost the whole call, because the
+                    // client then aborts the upload with RST_STREAM and no
+                    // later frame ever completed the stream.
+                    self.process_frame_in_state(
+                        Http2StreamState::RequestComplete {
+                            request_headers,
+                            request_data_frames,
+                        },
+                        frame,
+                        direction,
+                        stream_id,
+                    )
                 } else {
-                    // Unexpected response before request complete, stay in waiting state
+                    // No request head at all (response-only capture): keep
+                    // waiting, there is nothing to pair the answer with yet.
                     Http2StreamState::WaitingRequestData {
                         request_headers,
                         request_data_frames,
@@ -2144,6 +2169,45 @@ mod tests {
         let stream = &completed[0];
         assert_eq!(stream.request_data_frames.len(), 1);
         assert_eq!(stream.response_data_frames.len(), 0);
+    }
+
+    /// RFC 7540 §8.1 lets a server answer before the client has sent the whole
+    /// request — the shape of a gateway rejecting an upload (429/413/401) — so a
+    /// response frame that arrives while the request body is still in flight
+    /// must not be discarded. Dropping it lost the call: the response frames
+    /// were gone, and the stream sat in `WaitingRequestData` until LRU eviction
+    /// because the client aborts such an upload with RST_STREAM. The HTTP/1
+    /// aggregator completes the pending request in the same situation.
+    #[test]
+    fn test_response_before_request_end_stream_is_aggregated() {
+        let mut aggregator = Http2StreamAggregator::new();
+
+        // Request HEADERS without END_STREAM plus a DATA frame without
+        // END_STREAM: the upload is still open when the answer arrives.
+        let req_event = create_test_event(1234, 0x1000, 1, 1000);
+        let req_headers = create_test_frame(1, 1, 0x04, vec![], req_event.clone());
+        let req_data = create_test_frame(1, 0, 0x00, b"{\"key\":\"value\"}".to_vec(), req_event);
+        assert!(
+            aggregator
+                .process_frames(vec![req_headers, req_data])
+                .is_empty()
+        );
+
+        let resp_event = create_test_event(1234, 0x1000, 0, 2000);
+        let mut encoder = Encoder::new();
+        let encoded = encoder.encode([(b":status".as_slice(), b"429".as_slice())]);
+        let resp_headers = create_test_frame(1, 1, 0x05, encoded, resp_event);
+
+        let completed = aggregator.process_frames(vec![resp_headers]);
+        assert_eq!(
+            completed.len(),
+            1,
+            "a response that arrives before the request's END_STREAM must be aggregated"
+        );
+        assert_eq!(completed[0].status_code(), 429);
+        assert_eq!(completed[0].request_data_frames.len(), 1);
+        assert!(completed[0].request_complete);
+        assert!(completed[0].response_complete);
     }
 
     #[test]
