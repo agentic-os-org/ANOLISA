@@ -312,7 +312,7 @@ df -h /
 
 - **详细示例**: 参见 [examples.md](examples.md)
 - **技术参考**: 参见 [reference.md](reference.md)
-- **依赖技能**: [aliyun-ecs](../aliyun-ecs/SKILL.md)
+- **依赖技能**: [aliyun-ecs](../../aliyun/aliyun-ecs/SKILL.md)
 
 ---
 
