@@ -202,6 +202,10 @@ mod tests {
 
     #[test]
     fn guarded_diagnostic_runs_without_shell() {
+        // The diagnostic spawns `df` by bare program name through the
+        // process PATH: hold the shared PATH lock so it never resolves
+        // through a PATH a concurrent shadow test is mutating.
+        let _path_guard = super::super::test_support::path_env_guard();
         let output = run_guarded_diagnostic(
             "df -h",
             &GuardedDiagnosticConfig {
@@ -226,6 +230,9 @@ mod tests {
         use std::io::Write;
         use std::sync::atomic::Ordering;
 
+        // Same bare-name `df` spawn as the run test: take the shared
+        // PATH lock for the whole loop.
+        let _path_guard = super::super::test_support::path_env_guard();
         let temp_dir = std::env::temp_dir();
         // Zero sightings only proves something when the temp dir is
         // actually enumerable.
