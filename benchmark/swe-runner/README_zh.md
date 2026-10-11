@@ -486,6 +486,11 @@ output/
 | `analyze-traces/trace_summary.csv` | 每个实例的汇总指标 |
 | `analyze-traces/trace_metrics/trace_metrics.csv` | 更细的 trace、工具调用和 token 指标 |
 
+批次时间元数据会合并多次 output store 写入。同一本地输出目录中的并发元数据
+写入会串行处理，读取者会看到完整的旧版或新版 `run_metadata.json`。这一保证仅
+覆盖元数据；独立运行的结果仍应使用不同输出目录。
+边界说明见[元数据存储](docs/design/RUN_METADATA_STORAGE.md)。
+
 ## 项目结构
 
 ```text
