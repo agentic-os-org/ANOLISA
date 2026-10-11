@@ -267,14 +267,26 @@ impl BM25Store {
     /// per-file unlinks for every leaf. Without the cascade those rows
     /// would linger as stale FTS hits forever.
     ///
+    /// The descendant match is a `LIKE` prefix pattern, so `rel_path` is
+    /// escaped with `escape_like_literal` and the statements carry
+    /// `ESCAPE '\'` — the same treatment `search_like` gives its tokens.
+    /// Without it, a `_` or `%` in the removed path acts as a wildcard:
+    /// deleting `notes/v2_final/` also cascaded onto `notes/v2-final/`
+    /// (one-char `_` match) and onto every `notes/v2…/` sibling (`%`
+    /// matches any run), wiping rows for directories that were never
+    /// deleted. The files stay on disk, so the watcher emits no remove
+    /// event for them and the index only heals at the next full scan.
+    ///
     /// Wraps everything in one transaction so `files` and `files_fts` stay
     /// consistent on partial failure.
     pub fn remove(&mut self, rel_path: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
-        let prefix = format!("{rel_path}/");
+        let prefix = format!("{}/", escape_like_literal(rel_path));
         let rowids: Vec<i64> = {
-            let mut stmt =
-                tx.prepare("SELECT rowid FROM files WHERE path = ?1 OR path LIKE ?2 || '%'")?;
+            let mut stmt = tx.prepare(
+                "SELECT rowid FROM files WHERE path = ?1 \
+                 OR path LIKE ?2 || '%' ESCAPE '\\'",
+            )?;
             let rows = stmt.query_map(params![rel_path, prefix], |r| r.get::<_, i64>(0))?;
             rows.flatten().collect()
         };
@@ -285,7 +297,8 @@ impl BM25Store {
         }
         // Cascade: remove corresponding vector embeddings.
         tx.execute(
-            "DELETE FROM files_vec WHERE path = ?1 OR path LIKE ?2 || '%'",
+            "DELETE FROM files_vec WHERE path = ?1 \
+             OR path LIKE ?2 || '%' ESCAPE '\\'",
             params![rel_path, prefix],
         )?;
         tx.commit()?;
@@ -1150,24 +1163,28 @@ fn agent_scope_sql_like(scope: &AgentScope) -> (String, Option<String>) {
     }
 }
 
+/// Backslash-escape the LIKE wildcards (`%`, `_`) and the escape character
+/// itself so `s` matches literally inside a pattern used with
+/// `ESCAPE '\'`. Shared by `like_pattern` (substring search) and `remove`'s
+/// descendant cascade, which binds a *prefix* pattern (`s + '/'`) and must
+/// not let a literal `_`/`%` in a store path widen the delete.
+fn escape_like_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '_' | '%' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Build a `LIKE` pattern matching `token` as a substring, backslash-escaping
 /// the `%` / `_` / `\` wildcards so they match literally. `sanitize_fts_query`
 /// keeps `_` (and drops `%`), but escaping all three is defensive against
 /// future sanitisation changes.
 fn like_pattern(token: &str) -> String {
-    let mut s = String::with_capacity(token.len() + 4);
-    s.push('%');
-    for c in token.chars() {
-        match c {
-            '_' | '%' | '\\' => {
-                s.push('\\');
-                s.push(c);
-            }
-            other => s.push(other),
-        }
-    }
-    s.push('%');
-    s
+    format!("%{}%", escape_like_literal(token))
 }
 
 /// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
@@ -1477,6 +1494,91 @@ mod tests {
         // FTS row for the cascaded body is also gone.
         let hits = s.search("alpha", 5, true).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn remove_cascade_escapes_underscore_wildcard() {
+        // Regression: the cascade used the raw path as a LIKE pattern, so a
+        // `_` in the removed directory acted as a one-char wildcard. Deleting
+        // `notes/v2_final` cascaded onto `notes/v2-final` — a directory that
+        // was never deleted. Its files stayed on disk, so the watcher never
+        // emitted a remove event for them and the rows were only rebuilt at
+        // the next full scan; until then those memories were unsearchable.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes/v2_final/a.md", 0, 0, "alpha", None)
+            .unwrap();
+        s.upsert("notes/v2-final/b.md", 0, 0, "bravo", None)
+            .unwrap();
+        s.upsert_vec("notes/v2-final/b.md", &[0.1, 0.2]).unwrap();
+
+        let existed = s.remove("notes/v2_final").unwrap();
+        assert!(existed, "the removed directory's own row must go");
+
+        // The sibling directory survives, in BM25 and in the vector store.
+        let paths = s.known_paths().unwrap();
+        assert_eq!(paths, vec!["notes/v2-final/b.md".to_string()]);
+        let hits = s.search("bravo", 5, true).unwrap();
+        assert_eq!(hits.len(), 1, "v2-final must remain searchable");
+        assert_eq!(hits[0].path, "notes/v2-final/b.md");
+        let missing = s.paths_without_vec().unwrap();
+        assert!(
+            !missing.contains(&"notes/v2-final/b.md".to_string()),
+            "vector row for the surviving sibling must not be cascaded away"
+        );
+
+        // The removed directory's own row is really gone.
+        let hits = s.search("alpha", 5, true).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn remove_cascade_escapes_percent_wildcard() {
+        // `%` in the removed path is the same class of bug but worse: it
+        // matches any run of characters, so deleting `reports/100%` cascaded
+        // onto every `reports/100…` sibling (here `reports/100pct`).
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("reports/100%/a.md", 0, 0, "alpha", None).unwrap();
+        s.upsert("reports/100pct/b.md", 0, 0, "bravo", None)
+            .unwrap();
+
+        let existed = s.remove("reports/100%").unwrap();
+        assert!(existed);
+
+        let paths = s.known_paths().unwrap();
+        assert_eq!(paths, vec!["reports/100pct/b.md".to_string()]);
+        let hits = s.search("bravo", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        // And the escaped pattern still matches the literal-`%` directory.
+        let hits = s.search("alpha", 5, true).unwrap();
+        assert!(hits.is_empty(), "rows under reports/100% itself must go");
+    }
+
+    #[test]
+    fn remove_cascade_still_matches_wildcard_named_dirs() {
+        // Escaping must not over-correct: a directory whose name really
+        // contains `_` still cascades onto its own descendants.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes/v2_final/a.md", 0, 0, "alpha", None)
+            .unwrap();
+        s.upsert("notes/v2_final/sub/b.md", 0, 0, "bravo", None)
+            .unwrap();
+        s.upsert_vec("notes/v2_final/sub/b.md", &[0.3, 0.4])
+            .unwrap();
+        s.upsert("notes/v2-final/c.md", 0, 0, "charlie", None)
+            .unwrap();
+
+        let existed = s.remove("notes/v2_final").unwrap();
+        assert!(existed);
+
+        let paths = s.known_paths().unwrap();
+        assert_eq!(paths, vec!["notes/v2-final/c.md".to_string()]);
+        // Both descendants' BM25 rows are gone…
+        assert!(s.search("alpha", 5, true).unwrap().is_empty());
+        assert!(s.search("bravo", 5, true).unwrap().is_empty());
+        // …and so is the cascaded vector row, while the sibling keeps its own.
+        let missing = s.paths_without_vec().unwrap();
+        assert!(missing.contains(&"notes/v2-final/c.md".to_string()));
+        assert!(!missing.contains(&"notes/v2_final/sub/b.md".to_string()));
     }
 
     #[test]
