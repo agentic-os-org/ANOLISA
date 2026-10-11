@@ -34,6 +34,8 @@ pub struct Cli {
 pub enum Plan<'a> {
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
+    /// Generate the observability record schema without a daemon endpoint.
+    ObservabilitySchema,
     /// Sent to the daemon listening on `socket`.
     Daemon {
         /// Resolved absolute endpoint of the running daemon.
@@ -119,6 +121,7 @@ impl Cli {
             // A local command must stay usable on hosts that never deploy a
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
+            None if arguments.command.is_observability_schema() => None,
             None => Some(resolve_socket(arguments.socket, socket_env)?),
         };
         Ok(Self {
@@ -150,6 +153,9 @@ impl Cli {
 
     /// Reports whether this invocation runs locally or against the daemon.
     pub fn plan(&self) -> Plan<'_> {
+        if self.command.is_observability_schema() {
+            return Plan::ObservabilitySchema;
+        }
         match (self.command.local(), self.socket.as_deref()) {
             (Some(command), _) => Plan::Local(command),
             (None, Some(socket)) => Plan::Daemon { socket },
@@ -174,6 +180,14 @@ impl Cli {
     /// the 5 s interactive default.
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(u64::from(self.timeout_ms))
+    }
+
+    /// Executes paged observability queries or an interactive review, when selected.
+    ///
+    /// # Errors
+    /// Returns input, daemon, terminal, or output failures without local-store fallback.
+    pub fn run_observability_query(&self, socket: &std::path::Path) -> Option<std::io::Result<u8>> {
+        self.command.run_observability_query(socket, self.timeout())
     }
 
     /// Delegates to the selected command to construct a typed daemon request.

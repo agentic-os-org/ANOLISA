@@ -111,12 +111,10 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@# The shared code-scanner E2E imports rule metadata before it can decide
 	@# whether source-only inventory assertions apply to this installed V2 RPM.
 	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
-	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=$(PII_HOOK_LAYOUT) SKILLSEC_HOOK_LAYOUT=$(SKILLSEC_HOOK_LAYOUT) python3 -m pytest tests/e2e/ tests/v2/ \
+	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 PII_E2E_RUNTIME=v2 OBS_E2E_RUNTIME=v2 SEC_EVENTS_E2E_RUNTIME=v2 PII_HOOK_LAYOUT=$(PII_HOOK_LAYOUT) SKILLSEC_HOOK_LAYOUT=$(SKILLSEC_HOOK_LAYOUT) python3 -m pytest tests/e2e/ tests/v2/ \
 		--import-mode=importlib -ra \
-		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
-		--ignore=tests/e2e/cli/test_session_report_e2e.py \
 		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
@@ -127,14 +125,15 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/linux-sandbox \
 		-v --tb=short
 	@# Pending V2 capabilities behind the ignores above:
-	@#   cli/test_events_e2e.py                   -> security event query
-	@#   cli/test_observability_record_*_e2e.py   -> observability record sinks
-	@#   cli/test_session_report_e2e.py           -> session report
 	@#   codex|qwen hook tests                    -> mixed V1 prompt/observability fixtures
 	@#   qoder skill hook tests                  -> V1 caller-local audit storage/schema
 	@#   daemon/test_daemon_e2e.py                -> V1 daemon wire protocol
 	@#   skill-ledger, skill-signing              -> retired V1 per-user keys and Agent hooks
 	@# Rust core lifecycle: tests/v2/e2e/test_skillsec_cli_e2e.py.
+	@# Observability ingestion and queries: tests/v2/e2e/test_observability_*_e2e.py.
+	@# V1 event/report tests use isolated V2 daemons from tests/conftest.py.
+	@# V1 record file-absence assertions differ from V2 daemon storage initialization;
+	@# their V2 contracts are covered by test_observability_record_e2e.py.
 	@# Installed SkillSec adapters: tests/v2/e2e/test_skillsec_hook_contracts.py.
 	@#   linux-sandbox                            -> privileged container (same as V1)
 

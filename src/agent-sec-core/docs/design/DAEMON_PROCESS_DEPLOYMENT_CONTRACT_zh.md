@@ -265,7 +265,11 @@ RPC error、SecurityEvent 或 telemetry。`agent-sec-daemon` binary 单元测试
 OTel 初始化后由 §11 的有界 hook 接管，仅输出固定诊断且不等待 stderr。
 
 该 slice 已由唯一的 concrete `DaemonDispatcher` 注册 first-version PAP daemon protocol，
-但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer
+并注册 `daemon.health`，供任意经过内核认证的本地调用方检查进程响应。
+返回 `status: "ok"`、`pid` 和从 dispatcher 初始化起计的 `uptime_seconds`；
+该快照不代表扫描模型、后台任务或存储的健康状态，也不包含 V1 的完整 jobs/queues 快照。
+`caller: "agentsight"` 沿用 V1 响应外壳，其余请求使用 V2 外壳。
+dispatcher 完成 envelope decode、request ID、kernel peer
 credentials 到 trusted Principal 的绑定、method allowlist、authorization 和 response
 encode；PAP 是其中一组显式注册的方法，不增加第二个 service dispatch 层。当前 composition
 root 使用 `RootManagedPrincipalPolicy`：UID 0 始终具有 PAP 管理权限。部署者可用
@@ -593,7 +597,7 @@ RPM 安装套件通过 914 项，并单独通过修正后的 systemd 生命周�
 ## [TARGET V2] 可观测采集存储接线（DPROC-022）
 
 `obs.record` 的 JSONL/SQLite writers 使用与安全事件相同的已解析 daemon 系统数据目录，
-显式装配、惰性初始化，无 HOME fallback。可观测双写仅通过 daemon 持有的
+显式装配，无 HOME fallback；obs schema 在启动时准备，JSONL 惰性初始化。可观测双写仅通过 daemon 持有的
 `ConfiguredObservabilitySinks` 实例，不提供进程全局可观测写入口。关闭时保留 sinks 到 transport/blocking drain
 之后再执行 close/保留期维护。具体路径、失败及有界关闭语义见
 [V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md#3-数据路径与生命周期)。
@@ -622,3 +626,42 @@ Scope update、Scope revision 参数及手动 Binding mutation 已移除，应�
 单进程 Scope/Binding 快照不构成 daemon 重启恢复证据。procfs/runtime/Adapter 的 scripted
 Client 组合验证自动 Binding 和清理；bootstrap SIGTERM 验证任务停止，CLI/UDS 验证权限与
 公开接口。本节不声明 RPM/systemd 实测、真实 AgentSight 或 kernel enforcement。
+
+## [TARGET V2 obs 已实现] 当前用户查询范围（DPROC-QRY-001）
+
+查询 reader 使用与 writer 一致的显式系统数据路径，由 daemon 装配；只读连接随每次查询结束关闭，writers 在请求 drain 后关闭。
+CLI/TUI 不直读数据库；普通用户按 UDS peer UID 过滤，root 可查询全部；非 root 的
+PolicyAdministrator 不获得跨 UID 查询权限。可观测数据已在单次 INSERT 中持久化 peer UID，历史无主记录
+仅 root 可见且标记为未知，不自动归 UID 0。
+启动时由 writer 将已配置的 revision 1 obs 数据库原子升级至 revision 2：补上 nullable `uid`
+及归属索引，保留历史 NULL 和已有 UID；失败回滚，obs 查询不可用且采集显式报错。
+此步骤不发现或导入 V1 per-user 数据，也不提供自动 schema 降级。
+数据迁移、失败/回滚边界和真实跨 UID 安装态验收见
+[V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)。
+三个 obs 查询和 CLI report/review 已接线，已有源码 CLI/daemon E2E 和 AgentSight 真实数据联调证据。
+2026-10-10 检查确认：宿主机运行 systemd，但当前账号无法免密 sudo，且未安装 V2 RPM；
+现有 root 调试容器的 PID 1 不是 systemd。因此本轮未执行安装态跨 UID/systemd 验证，
+已测范围及限制见查询设计 §9.2；库内 scope 测试和源码进程测试不作为安装态通过证据。
+
+启动边界：security SQLite 必要 schema 初始化失败仍阻止 READY；随后单独准备三项可选
+查询索引，失败记录具体原因并继续 admission，查询可能变慢。当前建索引仍在 READY 前同步
+执行；已有索引使用 IF NOT EXISTS，新索引需扫描/排序历史记录。大库首次启动成本未测量，
+此变更只隔离索引错误，不提供耗时上限或后台重建能力。obs 初始化失败的既有降级策略保持不变。
+
+DPROC-QRY-001 源码 fixture：
+`v2/crates/asc-event-sink/src/configured.rs::tests::query_index_failure_does_not_disable_required_storage`
+验证索引失败后仍可写安全事件；
+`v2/apps/asc-daemon/tests/bootstrap.rs::daemon_binds_when_optional_query_indexes_fail`
+在 root 分支验证真实二进制继续监听并输出诊断。非 root 执行仅验证 daemon 的启动身份拒绝，
+不算该启动场景通过。QRY-001..011 的逐项 fixture 映射见查询设计 §8，验证范围见 §9.2。
+
+
+DPROC-QRY-001 查询身份补充：所有查询的授权范围由 UDS peer UID 决定；
+root 为 All，普通用户固定 Own(peer_uid)。sec 按原始 session ID 筛选，root 返回所有
+UID 下的匹配记录；root 返回中的 `UID_session_id` 仅用于区分同名会话。
+obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒绝。
+可执行 fixture：`v2/apps/asc-cli/tests/observability_query.rs` 验证真实 peer、
+无 UID 的 report/review；`v2/crates/asc-persistence-sqlite/tests/owned_queries.rs` 验证 root
+组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
+`v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
+以上不替代安装态不同 UID/systemd 验收。

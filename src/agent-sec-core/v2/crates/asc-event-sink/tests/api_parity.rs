@@ -533,7 +533,7 @@ const V1_TO_V2: &[(&str, &str, &str)] = &[
     ),
     (
         "observability.record_observability",
-        "asc_event_sink::ConfiguredObservabilitySinks::record",
+        "asc_event_sink::ConfiguredObservabilitySinks::record_owned",
         "daemon-owned configured sink; returns Result with the v1 write ordering",
     ),
     (
@@ -767,7 +767,7 @@ fn reference_writer_and_reader_symbols() {
 )]
 fn reference_assembly_and_display_symbols() {
     let _: fn(&SecurityEvent) = asc_event_sink::log_event;
-    let _ = asc_event_sink::ConfiguredObservabilitySinks::record;
+    let _ = asc_event_sink::ConfiguredObservabilitySinks::record_owned;
     let _ = asc_event_sink::ConfiguredObservabilitySinks::new;
     let _ = asc_event_sink::ConfiguredObservabilitySinks::close;
     let _: fn() = asc_event_sink::shutdown_sinks;

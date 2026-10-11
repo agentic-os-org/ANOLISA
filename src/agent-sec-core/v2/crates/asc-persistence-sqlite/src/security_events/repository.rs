@@ -32,6 +32,8 @@ use crate::security_events::table::SECURITY_EVENTS_TABLES;
 /// `_CORRELATION_CANDIDATE_LIMIT`).
 pub const CORRELATION_CANDIDATE_LIMIT: u32 = 1000;
 
+const CORRELATION_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Hard cap on the buckets one `count_by` may collect.
 ///
 /// The grouping itself runs in SQL; this bounds the collected result so a
@@ -45,6 +47,26 @@ const SUMMARY_GROUP_FIELDS: &[&str] = &["category", "event_type", "result", "ses
 /// The columns every row read selects, in table order.
 const SELECT_COLUMNS: &str = "event_id, event_type, category, result, timestamp, timestamp_epoch, \
                               trace_id, pid, uid, session_id, run_id, call_id, tool_call_id, details";
+
+// Collision detection spans the store so labels survive pagination and time filtering.
+const QUALIFIED_SESSION: &str = "CASE WHEN EXISTS(SELECT 1 FROM security_events AS other \
+    WHERE other.session_id=security_events.session_id AND other.uid!=security_events.uid) \
+    THEN security_events.uid || '_' || security_events.session_id ELSE security_events.session_id END";
+
+fn session_column(scope: QueryScope) -> &'static str {
+    if scope == QueryScope::All {
+        QUALIFIED_SESSION
+    } else {
+        "session_id"
+    }
+}
+
+fn select_columns(scope: QueryScope) -> String {
+    SELECT_COLUMNS.replace(
+        ", session_id,",
+        &format!(", {} AS session_id,", session_column(scope)),
+    )
+}
 
 /// The filters of one correlation-candidate query.
 ///
@@ -132,8 +154,9 @@ impl SecurityEventRepository {
         params.push(SqlValue::Integer(i64::from(limit)));
         params.push(SqlValue::Integer(offset));
         let sql = format!(
-            "SELECT {SELECT_COLUMNS} FROM security_events{where_clause} \
+            "SELECT {} FROM security_events{where_clause} \
              ORDER BY timestamp_epoch DESC, event_id DESC LIMIT ?{} OFFSET ?{}",
+            select_columns(*scope),
             params.len() - 1,
             params.len()
         );
@@ -166,7 +189,10 @@ impl SecurityEventRepository {
                 ],
             ),
             QueryScope::All => (
-                format!("SELECT {SELECT_COLUMNS} FROM security_events WHERE event_id = ?1"),
+                format!(
+                    "SELECT {} FROM security_events WHERE event_id = ?1",
+                    select_columns(*scope)
+                ),
                 vec![SqlValue::Text(event_id.to_owned())],
             ),
         };
@@ -179,11 +205,13 @@ impl SecurityEventRepository {
     ///
     /// Ordered ascending by `(timestamp_epoch, event_id)` so the caller sees a
     /// stable chronological sequence. An empty `categories` or an all-empty
-    /// `tool_call_ids` short-circuits to no candidates, as in v1.
+    /// `tool_call_ids` short-circuits to no candidates, as in v1. Malformed
+    /// candidates are skipped; the collected payload is bounded to 4 MiB.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Sqlite`] when the query cannot run.
+    /// Returns [`KernelError::Sqlite`] when the query cannot run, or
+    /// [`KernelError::Malformed`] when the candidate payload exceeds its budget.
     pub fn query_correlation_candidates(
         &self,
         conn: &Connection,
@@ -234,14 +262,27 @@ impl SecurityEventRepository {
         let mut statement = conn.prepare(&sql)?;
         let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
         let mut candidates = Vec::new();
+        let mut bytes = 0;
         while let Some(row) = rows.next()? {
-            let epoch: f64 = row.get("timestamp_epoch")?;
-            if let Some(event) = row_to_event(row)? {
-                candidates.push(CorrelationCandidate {
-                    event,
-                    timestamp_epoch: epoch,
-                });
+            let candidate = row_to_candidate(row).unwrap_or_else(|_| {
+                tracing::warn!(target: "asc_process_diagnostic",
+                    "security correlation candidate skipped: malformed row");
+                None
+            });
+            let payload = candidate
+                .as_ref()
+                .map(|row| (&row.event, row.timestamp_epoch));
+            bytes += serde_json::to_vec(&payload)
+                .map_err(|_| {
+                    KernelError::Malformed("invalid correlation candidate payload".into())
+                })?
+                .len();
+            if bytes > CORRELATION_CANDIDATE_BYTES {
+                return Err(KernelError::Malformed(
+                    "security correlation candidates exceed resource limits".into(),
+                ));
             }
+            candidates.extend(candidate);
         }
         Ok(candidates)
     }
@@ -300,6 +341,11 @@ impl SecurityEventRepository {
         offset: i64,
     ) -> Result<GroupCounts, KernelError> {
         let column = validate_group_field(group_field)?;
+        let column = if column == "session_id" {
+            session_column(*scope)
+        } else {
+            column
+        };
 
         let (mut where_clause, mut params) = build_filters(filters, *scope);
         if column == "verdict" && filters.verdict.is_none() {
@@ -360,9 +406,14 @@ impl SecurityEventRepository {
         let branches: Vec<String> = SUMMARY_GROUP_FIELDS
             .iter()
             .map(|field| {
+                let column = if *field == "session_id" {
+                    session_column(*scope)
+                } else {
+                    field
+                };
                 format!(
-                    "SELECT '{field}' AS group_field, {field} AS group_value, COUNT(*) AS count \
-                     FROM security_events{where_clause} GROUP BY {field}"
+                    "SELECT '{field}' AS group_field, {column} AS group_value, COUNT(*) AS count \
+                     FROM security_events{where_clause} GROUP BY {column}"
                 )
             })
             .collect();
@@ -612,6 +663,17 @@ fn row_to_event(row: &Row<'_>) -> Result<Option<SecurityEvent>, KernelError> {
         call_id: row.get("call_id")?,
         tool_call_id: row.get("tool_call_id")?,
         details,
+    }))
+}
+
+fn row_to_candidate(row: &Row<'_>) -> Result<Option<CorrelationCandidate>, KernelError> {
+    // Correlation skips invalid identities instead of applying the legacy reader's zero fallback.
+    row.get::<_, u32>("pid")?;
+    row.get::<_, u32>("uid")?;
+    let timestamp_epoch = row.get("timestamp_epoch")?;
+    Ok(row_to_event(row)?.map(|event| CorrelationCandidate {
+        event,
+        timestamp_epoch,
     }))
 }
 

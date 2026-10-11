@@ -9,11 +9,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+asc-daemon-core = { workspace = true }
 tracing.workspace = true
 asc-observability = { workspace = true }
 asc-security-events = { workspace = true }
 asc-sqlite-kernel = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks", "limits"] }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 

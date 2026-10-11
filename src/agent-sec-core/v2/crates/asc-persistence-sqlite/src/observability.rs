@@ -1,7 +1,7 @@
 //! Observability `SQLite` binding: table spec, repository, policy.
 //!
-//! This stream passes **no** migrator to the kernel: it is still at schema
-//! revision 1, so generic convergence is all it needs.
+//! Legacy facades retain revision 1. The system daemon uses [`owned`] at revision 2;
+//! the kernel transactionally converges its nullable owner column and indexes.
 
 pub mod policy;
 pub mod reader;
@@ -14,3 +14,6 @@ pub use reader::ObservabilityReader;
 pub use repository::ObservabilityEventRepository;
 pub use table::OBSERVABILITY_TABLES;
 pub use writer::{ObservabilitySqliteWriter, ObservabilityWriterError};
+
+/// System-daemon owner-aware schema and atomic writer.
+pub mod owned;

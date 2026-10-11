@@ -385,7 +385,7 @@ fn count_of(row: &Row<'_>, index: usize) -> Result<u64, KernelError> {
 /// Falls back `user_input` → `prompt` → `None`, and truncates to
 /// [`USER_INPUT_PREVIEW_LIMIT`]. Unparseable JSON yields `None` so the UI can
 /// render a placeholder instead of failing the whole list.
-fn extract_user_input_preview(metrics_json: &str) -> Option<String> {
+pub(crate) fn extract_user_input_preview(metrics_json: &str) -> Option<String> {
     let Ok(Value::Object(metrics)) = serde_json::from_str::<Value>(metrics_json) else {
         return None;
     };

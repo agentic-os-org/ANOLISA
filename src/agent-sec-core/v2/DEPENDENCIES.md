@@ -14,6 +14,10 @@ belongs to the actual AgentSight/ActPlane deployment.
 | `asc-agentsight-client -> ureq -> rustls / rustls-webpki -> ring` | AgentSight API HTTP/TLS. ureq 2.12.1 explicitly selects the ring provider for its default TLS config. This Client is wired into the daemon through Policy Runtime. |
 | `rustls -> ring` | The AgentSight client crypto boundary contains unsafe/native code. Workspace-local unsafe prohibition does not establish a zero-unsafe dependency tree. |
 | `ureq / clients -> url -> idna / ICU` | URL and domain-name handling. Keep input bounds and evaluate advisories for the resolved graph. |
+| `asc-cli -> crossterm -> mio / rustix / signal-hook / signal-hook-mio / parking_lot / lock_api` | Interactive review terminal, mouse and resize support. Adds OS, signal and synchronization code outside the workspace unsafe prohibition. Platform-specific lockfile dependencies include redox_syscall; that is not a Linux runtime dependency. |
+| `asc-cli -> signal-hook` | Registers SIGINT/SIGTERM/SIGHUP as atomic flags; the UI thread restores the terminal and returns exit codes 130/143/129. Reuses the version already pulled by crossterm. No terminal I/O occurs in signal handlers. |
+| `asc-cli -> unicode-width` | Unicode display width for review layout; no network or process lifecycle capability. |
+| `asc-persistence-sqlite -> rusqlite[hooks,limits]` | Read-query cancellation and SQLite resource bounds. Only this crate requests these extensions; the workspace baseline remains bundled. Workspace builds still unify enabled features. |
 | `tokio -> libc / mio / socket2` | Existing OS/socket boundary, also outside workspace-local `unsafe_code = "forbid"`. |
 | `Client -> uuid (v5) -> sha1_smol` | Deterministic target identity, not an authentication or signature algorithm. The v5 feature is requested only by the Client. Workspace builds can still unify features. |
 | `asc-capability-code-scan -> fancy-regex` | Backtracking regex engine for the code-scan rule set, needed because the rules use look-around that `regex` does not support. The crate itself contains no `unsafe`; its `regex-automata` dependency does. |
@@ -62,6 +66,13 @@ cargo tree --workspace --edges normal,build,features --locked --offline
 
 The removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml` chain remains
 absent from this workspace lockfile.
+
+## Test prerequisites
+
+`cargo test -p asc-cli` requires Linux PTYs and `python3` for the terminal process
+fixture in `apps/asc-cli/tests/observability_query.rs`. The Python standard library
+drives the PTY and verifies terminal attributes and signal cleanup. This is a test
+harness requirement; neither V2 binary invokes Python at runtime.
 
 ## Native build and packaging
 

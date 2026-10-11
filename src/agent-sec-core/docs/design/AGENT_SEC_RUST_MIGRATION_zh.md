@@ -97,10 +97,21 @@ revision、搜索路径、已有测试和未自动验证项；不使用构建产
    不位于用户 HOME 或 XDG_RUNTIME_DIR。
 3. 同一 daemon 服务多个本地 UID/Agent。peer UID/GID/PID 来自内核，token 用于认证绑定；
    daemon 构造可信 Principal。客户端自报的 UID、role、scope 只能作为不可信输入。
-4. QueryScope 由服务端生成并与请求 filter 求交。普通 principal 只能访问 owner scope，
-   auditor/admin 才能跨 UID。
+4. QueryScope 仅由服务端 UDS 身份生成，再应用业务过滤条件。非 root principal 只能访问自身 UID 的数据，
+   UID 0 的 root 默认可查询全部；非 root 的 PolicyAdministrator 无跨 UID 查询权限。
+   非 root auditor 的显式授权留待后续工作包。
 5. CLI/TUI 不得直读 SQLite，不得绕过 daemon 直接调用 PCP 或 Repository。
 6. 恢复完成后 daemon 才进入 READY；shutdown 先停止 admission，再 drain 或 checkpoint。
+
+查询首批实施范围见 [V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)
+（obs 三个 RPC、report/review 与 sec 查询已实现）：普通用户只查询 UDS peer UID 对应的数据，root 可查询全部；
+非 root 的 PolicyAdministrator 无查询绕过，auditor 跨 UID 能力留待后续工作包。
+
+查询授权变更记录（本次 obs 查询工作包，决策方：本次需求提出者）：
+`[SUPERSEDED]` 此前 auditor/admin 可跨用户查询的目标，首阶段替换为 root 全量、
+非 root 按 UDS UID 隔离；这是已批准的 V2 目标收窄，不是删除已经发布的 auditor 接口。
+PolicyAdministrator 管理权限不隐含数据读取权限。后续如恢复非 root auditor，须由独立的
+查询授权工作包定义显式授权、撤销及隔离 fixtures；该工作包尚未排期。
 
 ### 3.3 运行时与领域边界
 
@@ -335,7 +346,7 @@ Mock E2E、server-side admission 和真实内核执行是不同证据层级，�
 - 第二个 Host daemon 实例被拒绝；
 - 两个不同 UID/Agent 通过同一 system socket 访问且 owner scope 隔离；
 - caller 自报 UID/role/scope 不能提升权限；
-- normal principal 不能跨 owner 查询，auditor/admin 受显式授权；
+- 非 root principal（含 PolicyAdministrator）不能跨 UID 查询；root 可查询全部；
 - CLI/TUI 无直接 SQLite 或 PCP 绕过路径；
 - 外部 job 保留 owner principal，内置任务使用 System principal。
 

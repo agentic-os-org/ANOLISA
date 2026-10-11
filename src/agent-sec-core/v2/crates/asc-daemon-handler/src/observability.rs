@@ -6,6 +6,7 @@ use serde_json::Value;
 
 pub(crate) fn handle(
     id: RequestId,
+    peer: asc_daemon_core::PeerCredentials,
     control: &DispatchControl,
     service: Option<&ObservabilityService>,
     params: Value,
@@ -31,7 +32,7 @@ pub(crate) fn handle(
             "observability ingestion unavailable",
         );
     };
-    match service.record(&params.hook, &params.observed_at, &params.metrics) {
+    match service.record(peer, &params.hook, &params.observed_at, &params.metrics) {
         Ok(()) => DaemonResponse::success(id, serde_json::json!({})),
         Err(ObservabilityWriteError::Invalid(_)) => DaemonResponse::error(
             id,

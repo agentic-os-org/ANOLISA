@@ -1,11 +1,11 @@
-//! Compatibility command for querying the caller's own security events.
+//! Compatibility command for querying security events visible to the caller.
 //!
 //! This is the v2 restoration of v1's `agent-sec-cli events` entry point
 //! (`agent_sec_cli/cli.py`). The v1 CLI read its per-user database directly;
-//! the v2 CLI goes through the system daemon, which enforces the owner scope
-//! from the connection's kernel peer credentials — the flags below can only
-//! narrow the query. `--owner-uid` is a filter within that scope: root may
-//! pick any UID (or read all owners), a non-root caller only itself.
+//! the v2 CLI goes through the system daemon, which derives the UID scope
+//! from the connection's kernel peer credentials. Root reads all UIDs;
+//! every other caller reads only its UID. Session filters use the original IDs;
+//! root response labels distinguish sessions shared by multiple UIDs.
 //!
 //! The v1 output contract is reproduced shape for shape: `--output json` is
 //! the event array, `jsonl` one event per line, `--count` a bare number,
@@ -31,6 +31,27 @@ use crate::commands::events_summary::format_summary;
 const COUNT_BY_ALLOWED: [&str; 3] = ["category", "event_type", "trace_id"];
 /// v1's `--output` formats, sorted for the error message.
 const OUTPUT_FORMATS: [&str; 3] = ["json", "jsonl", "table"];
+// V1's diagnostic vocabulary; unlisted producer values remain queryable.
+const EVENT_TYPES: [&str; 8] = [
+    "code_scan",
+    "harden",
+    "pii_scan",
+    "prompt_scan",
+    "sandbox_prehook",
+    "skill_ledger",
+    "summary",
+    "verify",
+];
+const CATEGORIES: [&str; 8] = [
+    "asset_verify",
+    "code_scan",
+    "hardening",
+    "pii_scan",
+    "prompt_scan",
+    "sandbox",
+    "skill_ledger",
+    "summary",
+];
 /// The daemon's hard cap on one page; the CLI paginates beyond it.
 const PAGE_LIMIT: u64 = 1000;
 /// v1's summary reads at most this many events (`limit=10000`).
@@ -46,7 +67,7 @@ type Window = (Option<u64>, Option<u64>);
 /// into a thousand.
 const NANOS_PER_HOUR: f64 = 3_600_000_000_000.0;
 
-/// Queries the caller's own security events through `asc-daemon`.
+/// Queries security events visible to the caller through `asc-daemon`.
 #[derive(Debug, Args)]
 pub struct EventsCommand {
     /// Filter by event type.
@@ -74,10 +95,10 @@ pub struct EventsCommand {
     #[arg(long, allow_hyphen_values = true)]
     last_hours: Option<f64>,
     /// Max results (default 100).
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100, value_parser = |value: &str| parse_integer(value, "--limit"))]
     limit: u64,
     /// Skip N results (default 0).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, value_parser = |value: &str| parse_integer(value, "--offset"))]
     offset: u64,
     /// Output only the count of matching events.
     #[arg(long)]
@@ -94,9 +115,6 @@ pub struct EventsCommand {
     /// Output a human-readable security posture summary (own text format).
     #[arg(long)]
     summary: bool,
-    /// Owner filter within the authorized scope; non-root may only name itself.
-    #[arg(long)]
-    owner_uid: Option<u32>,
 }
 
 /// One round trip to the daemon.
@@ -180,6 +198,30 @@ impl EventsCommand {
         stderr: &mut dyn io::Write,
     ) -> Result<u8, EventsRunError> {
         self.validate()?;
+        for (value, known, kind, label) in [
+            (
+                self.event_type.as_deref(),
+                &EVENT_TYPES,
+                "event_type",
+                "types",
+            ),
+            (
+                self.category.as_deref(),
+                &CATEGORIES,
+                "category",
+                "categories",
+            ),
+        ] {
+            if let Some(value) = value
+                && !known.contains(&value)
+            {
+                writeln!(
+                    stderr,
+                    "Warning: Unknown {kind} '{value}'. Known {label}: {}",
+                    known.join(", ")
+                )?;
+            }
+        }
         let output = self.output.clone().unwrap_or_else(|| "table".to_owned());
         if self.summary {
             return self.run_summary(transport, stdout, stderr);
@@ -407,7 +449,6 @@ impl EventsCommand {
             limit,
             offset,
             include_details: Some(self.include_details),
-            owner_uid: self.owner_uid,
             ..SecQueryParams::default()
         }
     }
@@ -522,6 +563,19 @@ impl EventsCommand {
                 "--count and --count-by are mutually exclusive.".to_owned(),
             ));
         }
+        for (field, value) in [
+            ("--since", self.since.as_deref()),
+            ("--until", self.until.as_deref()),
+        ] {
+            if let Some(value) = value {
+                asc_security_events::timestamp::normalize_iso_to_utc_iso(
+                    value,
+                    field,
+                    asc_security_events::timestamp::NaivePolicy::Local,
+                )
+                .map_err(|error| InputError::Events(error.to_string()))?;
+            }
+        }
         Ok(())
     }
 
@@ -575,6 +629,14 @@ impl EventsCommand {
         )?;
         Ok(())
     }
+}
+
+fn parse_integer(value: &str, option: &str) -> Result<u64, InputError> {
+    value.parse().map_err(|_| {
+        InputError::Events(format!(
+            "Invalid value for '{option}': '{value}' is not a valid integer."
+        ))
+    })
 }
 
 /// Returns the success result, or prints v1's query-failure wording and
@@ -711,14 +773,39 @@ mod tests {
         let params = events.params(None, None);
         assert_eq!(params.event_type.as_deref(), Some("sandbox_prehook"));
         assert_eq!(params.category.as_deref(), Some("exec"));
-        assert_eq!(params.owner_uid, None);
     }
 
     #[test]
-    fn owner_uid_is_forwarded_as_a_filter() {
-        let events = command(&["--owner-uid", "1000"]);
-        assert_eq!(events.owner_uid, Some(1000));
-        assert!(events.validate().is_ok());
+    fn unknown_filters_warn_without_hiding_matching_producer_events() {
+        let command = command(&[
+            "--event-type",
+            "future_type",
+            "--category",
+            "future_category",
+            "--output",
+            "json",
+        ]);
+        let mut row = event("future", "future_category");
+        row["event_type"] = json!("future_type");
+        let mut transport = Scripted::new(vec![page(&json!([row.clone()]), 1, None)]);
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        assert_eq!(
+            command
+                .run_with(&mut transport, &mut stdout, &mut stderr)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stdout).unwrap(),
+            json!([row])
+        );
+        assert_eq!(transport.requests[0].params["event_type"], "future_type");
+        assert_eq!(transport.requests[0].params["category"], "future_category");
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "Warning: Unknown event_type 'future_type'. Known types: code_scan, harden, pii_scan, prompt_scan, sandbox_prehook, skill_ledger, summary, verify\n\
+             Warning: Unknown category 'future_category'. Known categories: asset_verify, code_scan, hardening, pii_scan, prompt_scan, sandbox, skill_ledger, summary\n"
+        );
     }
 
     #[test]

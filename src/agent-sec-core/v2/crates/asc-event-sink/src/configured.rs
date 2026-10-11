@@ -89,6 +89,15 @@ impl ConfiguredSecurityEventSinks {
         Ok(())
     }
 
+    /// Prepares optional query indexes separately from required storage readiness.
+    ///
+    /// # Errors
+    /// Returns index preparation failures for the composition root to diagnose.
+    pub fn prepare_query_indexes(&self) -> Result<(), SinkError> {
+        self.sqlite_writer()?.prepare_query_indexes()?;
+        Ok(())
+    }
+
     /// Dual-writes one event while isolating the two persistence paths.
     pub fn log_event(&self, event: &SecurityEvent) {
         let jsonl = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -128,7 +137,7 @@ impl ConfiguredSecurityEventSinks {
 pub struct ConfiguredObservabilitySinks {
     sqlite_path: PathBuf,
     jsonl: asc_event_log::ObservabilityWriter,
-    sqlite: Slot<asc_persistence_sqlite::observability::ObservabilitySqliteWriter>,
+    owned: Slot<asc_persistence_sqlite::observability::owned::OwnedObservabilityWriter>,
 }
 
 impl ConfiguredObservabilitySinks {
@@ -138,30 +147,51 @@ impl ConfiguredObservabilitySinks {
         Self {
             sqlite_path,
             jsonl: asc_event_log::ObservabilityWriter::new(jsonl_path),
-            sqlite: Slot::new(),
+            owned: Slot::new(),
         }
     }
 
-    /// Appends JSONL, then commits `SQLite`. A `SQLite` failure does not undo JSONL.
+    /// Initializes the daemon schema before admitting read queries.
     ///
     /// # Errors
-    /// Surfaces either destination's failure; JSONL failure skips `SQLite` entirely.
-    pub fn record(&self, record: &asc_observability::ObservabilityRecord) -> Result<(), SinkError> {
+    /// Propagates migration or storage failures without silently enabling an unscoped reader.
+    pub fn warm_owned(&self) -> Result<(), SinkError> {
+        self.owned_writer()?.probe()?;
+        Ok(())
+    }
+
+    /// Writes JSONL, then atomically inserts the authenticated owner and `SQLite` record.
+    ///
+    /// # Errors
+    /// Propagates either destination's failure; `SQLite` failure may follow a JSONL append.
+    pub fn record_owned(
+        &self,
+        record: &asc_observability::ObservabilityRecord,
+        uid: u32,
+    ) -> Result<(), SinkError> {
         self.jsonl.write(record)?;
-        let sqlite = self.sqlite.get_or_try_init(|| {
+        self.owned_writer()?.write(record, uid)?;
+        Ok(())
+    }
+
+    fn owned_writer(
+        &self,
+    ) -> Result<
+        Arc<asc_persistence_sqlite::observability::owned::OwnedObservabilityWriter>,
+        SinkError,
+    > {
+        self.owned.get_or_try_init(|| {
             Ok(
-                asc_persistence_sqlite::observability::ObservabilitySqliteWriter::new(
+                asc_persistence_sqlite::observability::owned::OwnedObservabilityWriter::new(
                     &self.sqlite_path,
                 )?,
             )
-        })?;
-        sqlite.write_or_raise(record)?;
-        Ok(())
+        })
     }
 
     /// Runs retention maintenance and closes `SQLite` if a record initialized it.
     pub fn close(&self) {
-        if let Some(writer) = self.sqlite.peek() {
+        if let Some(writer) = self.owned.peek() {
             writer.close();
         }
     }
@@ -195,6 +225,34 @@ mod tests {
         );
         sinks.log_event(&SecurityEvent::new("code_scan", "code_scan", Map::new()));
         assert_eq!(fs::read_to_string(jsonl).expect("jsonl").lines().count(), 1);
+    }
+
+    /// DPROC-QRY-001: optional query DDL must not determine writer readiness.
+    #[test]
+    fn query_index_failure_does_not_disable_required_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let sinks =
+            ConfiguredSecurityEventSinks::new(dir.path().join("events.jsonl"), path.clone());
+        sinks.warm_sqlite().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE idx_security_uid_time (id INTEGER)")
+            .unwrap();
+        assert!(sinks.prepare_query_indexes().is_err());
+        sinks.warm_sqlite().unwrap();
+        sinks.log_event(&SecurityEvent::new("code_scan", "code_scan", Map::new()));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM security_events", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute_batch("DROP TABLE idx_security_uid_time")
+            .unwrap();
+        // Index preparation retries at startup with a fresh writer connection.
+        sinks.close();
+        sinks.prepare_query_indexes().unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_security_uid_%'", [], |r| r.get::<_, u64>(0)).unwrap(), 3);
     }
 
     #[test]
@@ -237,6 +295,7 @@ mod observability_tests {
     use asc_persistence_sqlite::observability::ObservabilityReader;
     use std::fs;
 
+    /// QRY-004: the configured daemon sink requires a UID on every write.
     #[test]
     fn both_paths_receive_the_record() {
         let dir = temp_dir();
@@ -252,10 +311,17 @@ mod observability_tests {
             !db.exists(),
             "closing unused sinks must not initialize storage"
         );
-        sinks.record(&record()).expect("both paths");
+        sinks.record_owned(&record(), 1000).expect("both paths");
 
         assert_eq!(fs::read_to_string(&log).expect("log").lines().count(), 1);
         assert_eq!(ObservabilityReader::new(&db).expect("reader").count(), 1);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT uid FROM observability_events", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            1000
+        );
         sinks.close();
         assert!(dir.path().join("observability.db.maintenance").exists());
     }
@@ -270,7 +336,7 @@ mod observability_tests {
         let sinks = ConfiguredObservabilitySinks::new(log.clone(), db.clone());
 
         let error = sinks
-            .record(&record())
+            .record_owned(&record(), 1000)
             .expect_err("the JSONL path must raise");
         assert!(matches!(error, SinkError::EventLog(_)));
 
@@ -290,7 +356,7 @@ mod observability_tests {
         let sinks = ConfiguredObservabilitySinks::new(log.clone(), db.clone());
 
         let error = sinks
-            .record(&record())
+            .record_owned(&record(), 1000)
             .expect_err("the SQLite path must raise");
         assert!(matches!(error, SinkError::Kernel(_)));
         assert_eq!(

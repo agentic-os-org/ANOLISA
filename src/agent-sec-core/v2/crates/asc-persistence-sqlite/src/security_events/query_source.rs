@@ -243,7 +243,62 @@ mod tests {
         assert_eq!(owner_a.len(), 2);
         for event in owner_a {
             assert_eq!(event.uid, 1000);
+            assert_eq!(event.session_id.as_deref(), Some("s-1"));
         }
+    }
+
+    #[test]
+    fn plain_session_filters_keep_every_authorized_owner_and_numeric_prefixes_literal() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("events.db");
+        seed_two_owners(&path);
+        let source = SqliteEventQuerySource::new(&path).expect("source");
+        let filters = EventFilters {
+            session_id: Some("s-1".into()),
+            ..EventFilters::default()
+        };
+        let events = source.list(&filters, QueryScope::All, 100, 0).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.session_id == Some(format!("{}_s-1", event.uid)))
+        );
+        assert_eq!(source.count(&filters, QueryScope::All, 0).unwrap(), 3);
+        let own = source
+            .list(&filters, QueryScope::Owner(1000), 100, 0)
+            .unwrap();
+        assert_eq!(own.len(), 2);
+        assert!(own.iter().all(|event| event.uid == 1000));
+
+        let literal_filters = EventFilters {
+            session_id: Some("1000_s-1".into()),
+            ..EventFilters::default()
+        };
+        assert!(
+            source
+                .list(&literal_filters, QueryScope::All, 100, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let writer = SqliteEventWriter::new(&path).expect("writer");
+        let mut literal = SecurityEvent::new("code_scan", "code_scan", Map::new());
+        literal.uid = 3000;
+        literal.session_id = Some("1000_s-1".into());
+        writer.write(&literal);
+        writer.close_at(1000.0);
+        let events = source
+            .list(&literal_filters, QueryScope::All, 100, 0)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uid, 3000);
+        assert_eq!(events[0].session_id.as_deref(), Some("1000_s-1"));
+        assert!(
+            source
+                .list(&literal_filters, QueryScope::Owner(1000), 100, 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

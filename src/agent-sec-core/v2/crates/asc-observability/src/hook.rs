@@ -39,6 +39,22 @@ pub enum MetadataShape {
     ToolCall,
 }
 
+impl MetadataShape {
+    /// Canonical record fields in serialization order; true marks nullable optional fields.
+    pub(crate) const fn record_fields(self) -> &'static [(&'static str, bool)] {
+        match self {
+            Self::Common => &[("sessionId", false), ("runId", false)],
+            Self::ModelCall => &[("sessionId", false), ("runId", false), ("callId", true)],
+            Self::ToolCall => &[
+                ("sessionId", false),
+                ("runId", false),
+                ("toolCallId", false),
+                ("callId", true),
+            ],
+        }
+    }
+}
+
 /// All hooks, in v1 `OBSERVABILITY_RECORD_TYPES` order.
 pub const OBSERVABILITY_HOOKS: &[ObservabilityHook] = &[
     ObservabilityHook::BeforeAgentRun,

@@ -18,3 +18,6 @@ pub use pap::{
     EnqueueError, NotFoundResource, PolicyAdministration, PolicyAdministrationError,
     PolicyInputError, ResourcePage,
 };
+
+/// Authorized, transport-independent query services and persistence ports.
+pub mod query;

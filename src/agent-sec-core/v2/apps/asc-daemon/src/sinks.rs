@@ -82,9 +82,10 @@ impl asc_daemon_core::ObservabilitySink for ObservabilitySinkAdapter {
     fn write(
         &self,
         record: &asc_observability::ObservabilityRecord,
+        uid: u32,
     ) -> Result<(), asc_daemon_core::ObservabilityWriteError> {
         self.0
-            .record(record)
+            .record_owned(record, uid)
             .map_err(|_| asc_daemon_core::ObservabilityWriteError::Storage)
     }
 }

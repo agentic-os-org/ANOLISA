@@ -1,12 +1,7 @@
 """E2E test: CLI capability invocation → event query pipeline.
 
-Validates that invoking security capabilities through the CLI produces
-queryable security events in the SQLite store.
-
-NOTE: These tests verify the event-logging pipeline, not the security
-capabilities themselves.  `harden` may exit 127 (loongshield missing),
-`verify` may find zero skills — both are acceptable as long as an event
-is recorded.
+V1 invokes harden, verify and log-sandbox; V2 query tests use scan-code.
+Only historical and filter-specific records are seeded directly into SQLite.
 
 Isolation: Each test function uses its own dedicated temp directory (via
 AGENT_SEC_DATA_DIR env var) so that tests are fully independent — no
@@ -15,27 +10,26 @@ shared state, no ordering dependency, no cascade failures.
 
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from cli.conftest import iso_now, require_loongshield, run_cli
 
-
-def _run_harden_and_expected_event_result() -> str:
-    """Run harden and return the expected SecurityEvent.result value."""
-    result = run_cli("harden")
-    return "succeeded" if result.returncode == 0 else "failed"
-
+_IS_V2 = os.environ.get("SEC_EVENTS_E2E_RUNTIME") == "v2"
+_QUERY_EVENT_TYPE = "code_scan" if _IS_V2 else "harden"
+_QUERY_CATEGORY = "code_scan" if _IS_V2 else "hardening"
+_requires_v1 = pytest.mark.skipif(
+    _IS_V2,
+    reason="harden, verify and log-sandbox are not migrated to V2",
+)
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
-def _expected_event_result(cli_result):
-    return "succeeded" if cli_result.returncode == 0 else "failed"
 
 
 def _extract_verdict(details: dict) -> str | None:
@@ -135,17 +129,30 @@ def _write_security_event_row(
         conn.close()
 
 
+def _run_query_capability() -> str:
+    """Produce a real event and return its expected execution result."""
+    if _IS_V2:
+        result = run_cli(
+            "scan-code", "--code", "echo hello", "--language", "bash", "--mode", "regex"
+        )
+        assert result.returncode == 0, result.stderr
+    else:
+        # Missing loongshield still produces a failed harden event.
+        result = run_cli("harden")
+    return "succeeded" if result.returncode == 0 else "failed"
+
+
+@_requires_v1
 class TestHardenEventLogging:
-    """Verify that invoking `harden` produces a queryable event."""
+    """Verify that invoking harden produces queryable events."""
 
     def test_harden_produces_event(self):
-        """After `agent-sec-cli harden`, an event with event_type=harden is queryable."""
+        """Invoking harden produces a queryable harden event."""
         since = iso_now()
 
         # Small delay to ensure timestamp ordering
         time.sleep(0.05)
 
-        # Invoke harden — exit code doesn't matter (loongshield may be absent)
         run_cli("harden")
 
         # Small delay to let SQLite WAL flush
@@ -172,7 +179,7 @@ class TestHardenEventLogging:
         assert "details" in event
 
     def test_harden_event_count(self):
-        """--count returns exactly 1 after a single harden invocation."""
+        """--count returns exactly 1 after recording a single harden event."""
         since = iso_now()
         time.sleep(0.05)
 
@@ -187,15 +194,15 @@ class TestHardenEventLogging:
         assert count == 1
 
 
+@_requires_v1
 class TestVerifyEventLogging:
-    """Verify that invoking `verify` produces a queryable event."""
+    """Verify that invoking verify produces queryable events."""
 
     def test_verify_produces_event(self):
-        """After `agent-sec-cli verify`, an event with event_type=verify is queryable."""
+        """Invoking verify produces a queryable verify event."""
         since = iso_now()
         time.sleep(0.05)
 
-        # Invoke verify — may fail (no skills configured), that's acceptable
         run_cli("verify")
         time.sleep(0.1)
 
@@ -217,7 +224,7 @@ class TestVerifyEventLogging:
         assert "details" in event
 
     def test_verify_event_count_by_category(self):
-        """--count-by category shows asset_verify: 1 after a single verify invocation."""
+        """--count-by category shows asset_verify: 1 after recording a verify event."""
         since = iso_now()
         time.sleep(0.05)
 
@@ -237,12 +244,18 @@ class TestEventQueryFilters:
 
     def test_last_hours_filter(self):
         """--last-hours returns exactly the single event just created."""
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         # Fresh DB: only this test's event exists.
         result = run_cli(
-            "events", "--event-type", "harden", "--last-hours", "1", "--output", "json"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--last-hours",
+            "1",
+            "--output",
+            "json",
         )
         assert result.returncode == 0
         events = json.loads(result.stdout)
@@ -268,18 +281,17 @@ class TestEventQueryFilters:
         """Default output is human-readable table format."""
         since = iso_now()
         time.sleep(0.05)
-        harden_result = run_cli("harden")
-        expected_result = _expected_event_result(harden_result)
+        expected_result = _run_query_capability()
         time.sleep(0.1)
 
-        result = run_cli("events", "--event-type", "harden", "--since", since)
+        result = run_cli("events", "--event-type", _QUERY_EVENT_TYPE, "--since", since)
         assert result.returncode == 0
         # Default output is table — should NOT be parseable as JSON
         lines = result.stdout.strip().split("\n")
         # Header + 1 data row + blank line + footer
         assert len(lines) == 4
         assert lines[0].startswith("EVENT_TYPE")
-        assert "harden" in lines[1]
+        assert _QUERY_EVENT_TYPE in lines[1]
         assert expected_result in lines[1]
         assert "1 event" in lines[3]
 
@@ -357,12 +369,17 @@ class TestCLIValidation:
         """Verify that --output json returns a valid JSON array with complete event data."""
         since = iso_now()
         time.sleep(0.05)
-        harden_result = run_cli("harden")
-        expected_result = _expected_event_result(harden_result)
+        expected_result = _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "json"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "json",
         )
         assert result.returncode == 0
 
@@ -379,18 +396,24 @@ class TestCLIValidation:
         assert "result" in event
         assert "timestamp" in event
         assert "details" in event
-        assert event["event_type"] == "harden"
+        assert event["event_type"] == _QUERY_EVENT_TYPE
         assert event["result"] == expected_result
 
     def test_jsonl_output_format(self):
         """Verify that --output jsonl returns one JSON object per line."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "jsonl"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "jsonl",
         )
         assert result.returncode == 0
 
@@ -401,22 +424,21 @@ class TestCLIValidation:
         # Each line should be valid JSON
         event = json.loads(lines[0])
         assert isinstance(event, dict)
-        assert event["event_type"] == "harden"
+        assert event["event_type"] == _QUERY_EVENT_TYPE
         assert "event_id" in event
         assert "details" in event
 
     def test_result_field_in_table_output(self):
-        """Verify that result column shows the harden command outcome."""
+        """Verify that result column shows the capability execution outcome."""
         since = iso_now()
         time.sleep(0.05)
-        harden_result = run_cli("harden")
-        expected_result = _expected_event_result(harden_result)
+        expected_result = _run_query_capability()
         time.sleep(0.1)
 
-        result = run_cli("events", "--event-type", "harden", "--since", since)
+        result = run_cli("events", "--event-type", _QUERY_EVENT_TYPE, "--since", since)
         assert result.returncode == 0
 
-        # Table output should contain RESULT column with the command outcome.
+        # Table output should contain RESULT column with the recorded outcome.
         assert "RESULT" in result.stdout
         assert expected_result in result.stdout
 
@@ -429,8 +451,9 @@ class TestCLIValidation:
 class TestEventsSummaryFlag:
     """Verify the --summary flag on the events command."""
 
+    @_requires_v1
     def test_summary_happy_path(self):
-        """--summary produces a human-readable posture report after harden + verify."""
+        """--summary produces a human-readable posture report for harden + verify events."""
         run_cli("harden")
         run_cli("verify")
         time.sleep(0.1)
@@ -678,11 +701,10 @@ class TestEventsDefaultOutput:
         """TC-005: Default output is human-readable table format."""
         since = iso_now()
         time.sleep(0.05)
-        harden_result = run_cli("harden")
-        expected_result = _expected_event_result(harden_result)
+        expected_result = _run_query_capability()
         time.sleep(0.1)
 
-        result = run_cli("events", "--event-type", "harden", "--since", since)
+        result = run_cli("events", "--event-type", _QUERY_EVENT_TYPE, "--since", since)
         assert result.returncode == 0
 
         # Default output is table — should NOT be parseable as JSON
@@ -690,28 +712,28 @@ class TestEventsDefaultOutput:
         # Header + 1 data row + blank line + footer
         assert len(lines) == 4
         assert lines[0].startswith("EVENT_TYPE")
-        assert "harden" in lines[1]
+        assert _QUERY_EVENT_TYPE in lines[1]
         assert expected_result in lines[1]
         assert "1 event" in lines[3]
 
     def test_json_output_completeness(self):
         """TC-006: JSON output contains complete event structure.
 
-        NOTE: Harden event structure varies depending on:
-        - Whether loongshield is installed
-        - Whether harden ran in scan or reinforce mode
-        - The actual output from the harden command
-
-        We verify core fields that ALWAYS exist, and make seharden summary
-        statistics conditional.
+        Verify core fields and the real capability result payload.
         """
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "json"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "json",
         )
         assert result.returncode == 0
 
@@ -739,7 +761,11 @@ class TestEventsDefaultOutput:
         # Verify result sub-object contains command execution info
         # Structure varies: may have argv (raw command) or mode/config (parsed)
         result_data = event["details"]["result"]
-        assert "argv" in result_data or "mode" in result_data
+        if _IS_V2:
+            assert result_data["verdict"] == "pass"
+            assert result_data["language"] == "bash"
+        else:
+            assert "argv" in result_data or "mode" in result_data
 
         # Statistical fields are present when loongshield emits a parseable
         # seharden summary. A non-compliant scan may still exit 1 with stats.
@@ -754,11 +780,11 @@ class TestEventsDefaultOutput:
             assert isinstance(result_data["failed"], int)
             assert isinstance(result_data["total"], int)
 
+    @_requires_v1
     def test_harden_event_with_loongshield_stats(self):
         """TC-006 (extended): When loongshield is installed, verify full stats.
 
-        This test validates that when loongshield is available, the harden
-        event contains complete parsed seharden summary statistics.
+        Verify the statistics produced by a real loongshield scan.
         """
         require_loongshield()
 
@@ -813,22 +839,28 @@ class TestEventsDefaultOutput:
 class TestEventsCategoryFiltering:
     """Verify events category filtering (TC-007, TC-024)."""
 
-    def test_category_filter_hardening(self):
-        """TC-007: --category hardening returns only hardening events."""
+    def test_category_filter(self):
+        """TC-007: --category returns only events from the selected capability."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--category", "hardening", "--since", since, "--output", "json"
+            "events",
+            "--category",
+            _QUERY_CATEGORY,
+            "--since",
+            since,
+            "--output",
+            "json",
         )
         assert result.returncode == 0
 
         events = json.loads(result.stdout)
         assert len(events) >= 1
         for event in events:
-            assert event["category"] == "hardening"
+            assert event["category"] == _QUERY_CATEGORY
 
     def test_prompt_scan_category_valid(self):
         """TC-024: prompt_scan is a valid category.
@@ -854,14 +886,14 @@ class TestEventsTimeRange:
     def test_last_hours_decimal_precision(self):
         """TC-008: --last-hours works with decimal values."""
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         # Query with small time window (0.17 hours ≈ 10 minutes)
         result = run_cli(
             "events",
             "--event-type",
-            "harden",
+            _QUERY_EVENT_TYPE,
             "--last-hours",
             "0.17",
             "--output",
@@ -951,7 +983,7 @@ class TestEventsPagination:
     def _create_multiple_events(self, count: int = 10):
         """Helper to create multiple events for pagination testing."""
         for _ in range(count):
-            run_cli("harden")
+            _run_query_capability()
             time.sleep(0.05)
 
     def test_limit_parameter(self):
@@ -1064,11 +1096,17 @@ class TestEventsOutputFormats:
         """TC-035: --output json returns valid JSON array."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "json"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "json",
         )
         assert result.returncode == 0
         events = json.loads(result.stdout)
@@ -1078,11 +1116,17 @@ class TestEventsOutputFormats:
         """TC-035: --output jsonl returns one JSON object per line."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "jsonl"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "jsonl",
         )
         assert result.returncode == 0
 
@@ -1092,21 +1136,27 @@ class TestEventsOutputFormats:
         # Each line should be valid JSON
         event = json.loads(lines[0])
         assert isinstance(event, dict)
-        assert event["event_type"] == "harden"
+        assert event["event_type"] == _QUERY_EVENT_TYPE
 
     def test_table_output_format(self):
         """TC-035: --output table returns formatted table."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "table"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "table",
         )
         assert result.returncode == 0
         assert "EVENT_TYPE" in result.stdout
-        assert "harden" in result.stdout
+        assert _QUERY_EVENT_TYPE in result.stdout
 
     def test_summary_table_incompatibility(self):
         """TC-036: --summary with --output table should show error.
@@ -1116,7 +1166,7 @@ class TestEventsOutputFormats:
         Root cause: Validation only checks `output != "table"`, should check
                     all non-default output formats
         """
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli("events", "--summary", "--output", "table")
@@ -1139,12 +1189,13 @@ class TestEventsOutputFormats:
 class TestEventsSummaryCalculation:
     """Verify events summary calculations (TC-009, TC-010, TC-013, TC-015, TC-019, TC-023)."""
 
+    @_requires_v1
     def test_compliance_after_rescan(self):
         """TC-010: Compliance calculation after re-scan shows correct result."""
-        # This test requires loongshield to produce scan result data
+        # Retain the existing loongshield availability gate.
         require_loongshield()
 
-        # Run scan multiple times
+        # Run multiple scans
         run_cli("harden")
         time.sleep(0.1)
         run_cli("harden")
@@ -1157,6 +1208,7 @@ class TestEventsSummaryCalculation:
         assert "Compliance:" in result.stdout
         assert "Scans performed:" in result.stdout
 
+    @_requires_v1
     def test_summary_with_verify_failures(self):
         """TC-013: Summary shows verify failures correctly."""
         run_cli("harden")
@@ -1172,9 +1224,10 @@ class TestEventsSummaryCalculation:
         # Should show verification section (may show failures)
         assert "Total events:" in result.stdout
 
+    @_requires_v1
     def test_sandbox_summary_interventions(self):
         """TC-019: Sandbox summary shows total interventions count."""
-        # Create sandbox events (log-sandbox is hidden command)
+        # Invoke the hidden producer command to record sandbox events.
         run_cli("log-sandbox")
         time.sleep(0.05)
         run_cli("log-sandbox", "--command", "rm -rf a.txt")
@@ -1235,16 +1288,22 @@ class TestEventTypeValidation:
         """TC-025: --event-type with valid value filters correctly."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        _run_query_capability()
         time.sleep(0.1)
 
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "json"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "json",
         )
         assert result.returncode == 0
         events = json.loads(result.stdout)
         assert len(events) >= 1
-        assert events[0]["event_type"] == "harden"
+        assert events[0]["event_type"] == _QUERY_EVENT_TYPE
 
     def test_category_no_argument(self):
         """TC-026: --category without argument shows error."""
@@ -1270,31 +1329,55 @@ class TestEventTypeValidation:
         """TC-026: --category with valid value filters correctly."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("verify")
+        if _IS_V2:
+            _run_query_capability()
+        else:
+            run_cli("verify")
         time.sleep(0.1)
 
+        category = "code_scan" if _IS_V2 else "asset_verify"
         result = run_cli(
-            "events", "--category", "asset_verify", "--since", since, "--output", "json"
+            "events", "--category", category, "--since", since, "--output", "json"
         )
         assert result.returncode == 0
         events = json.loads(result.stdout)
         assert len(events) >= 1
-        assert events[0]["category"] == "asset_verify"
+        assert events[0]["category"] == category
 
     def test_trace_id_valid_lookup(self):
         """TC-027: --trace-id with valid ID returns matching event."""
         since = iso_now()
         time.sleep(0.05)
-        run_cli("harden")
+        trace_id = "events-e2e-trace"
+        producer = (
+            [
+                "scan-code",
+                "--code",
+                "echo hello",
+                "--language",
+                "bash",
+                "--mode",
+                "regex",
+            ]
+            if _IS_V2
+            else ["harden"]
+        )
+        run_cli("--trace-context", json.dumps({"traceId": trace_id}), *producer)
         time.sleep(0.1)
 
         # Get trace_id from JSON output
         result = run_cli(
-            "events", "--event-type", "harden", "--since", since, "--output", "json"
+            "events",
+            "--event-type",
+            _QUERY_EVENT_TYPE,
+            "--since",
+            since,
+            "--output",
+            "json",
         )
         events = json.loads(result.stdout)
         assert len(events) >= 1
-        trace_id = events[0]["trace_id"]
+        assert events[0]["trace_id"] == trace_id
 
         # Query by trace_id
         result = run_cli("events", "--trace-id", trace_id, "--output", "json")
@@ -1333,18 +1416,27 @@ class TestEventsHelpAndVersion:
     """Verify CLI help and version options (TC-001, TC-038)."""
 
     def test_main_help_format(self):
-        """TC-001: Main help message shows all commands with aligned descriptions.
-
-        Optimization items (not failures):
-        - scan-code description missing period at end
-        - scan-prompt description missing period at end
-        """
+        """TC-001: Main help lists commands supported by the selected runtime."""
         result = run_cli("--help")
         assert result.returncode == 0
 
         # Verify all expected commands are listed
-        assert "harden" in result.stdout
-        assert "verify" in result.stdout
+        if os.environ.get("SEC_EVENTS_E2E_RUNTIME") == "v2":
+            assert (
+                "Manage Policy, Scope and Binding through asc-daemon" in result.stdout
+            )
+            for command in (
+                "observability",
+                "policy",
+                "scope",
+                "binding",
+                "scan-pii",
+                "capabilities",
+            ):
+                assert command in result.stdout
+        else:
+            assert "harden" in result.stdout
+            assert "verify" in result.stdout
         assert "scan-code" in result.stdout
         assert "events" in result.stdout
         assert "skill-ledger" in result.stdout
@@ -1358,8 +1450,6 @@ class TestEventsHelpAndVersion:
 
         Expected: "agent-sec-cli <semver>" (e.g. "agent-sec-cli 0.4.0")
         """
-        import re
-
         result = run_cli("--version")
         assert result.returncode == 0
         assert "agent-sec-cli" in result.stdout

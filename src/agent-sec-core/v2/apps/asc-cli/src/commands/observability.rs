@@ -11,10 +11,18 @@ use serde_json::Value;
 
 use crate::InputError;
 
+mod query;
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum ObservabilityCommand {
     /// Record one observability JSON object from stdin.
     Record(RecordCommand),
+    /// Print the public record JSON Schema without contacting the daemon.
+    Schema,
+    /// Summarize one session using daemon queries.
+    Report(query::ReportCommand),
+    /// Browse sessions, runs, events and correlated security details interactively.
+    Review,
 }
 
 #[derive(Debug, Args)]
@@ -29,8 +37,29 @@ pub(crate) struct RecordCommand {
 
 impl ObservabilityCommand {
     pub(super) fn request(&self) -> Result<DaemonRequest, InputError> {
-        let Self::Record(command) = self;
-        command.request(std::io::stdin().lock())
+        match self {
+            Self::Record(command) => command.request(std::io::stdin().lock()),
+            _ => Err(InputError::Observability(
+                "query commands require their transport loop".into(),
+            )),
+        }
+    }
+
+    pub(super) fn run_query(
+        &self,
+        socket: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Option<std::io::Result<u8>> {
+        let client = |method: &str, params| query::call(socket, timeout, method, params);
+        match self {
+            Self::Record(_) | Self::Schema => None,
+            Self::Report(command) => Some(
+                command
+                    .run(&client, &mut std::io::stdout().lock())
+                    .map(|()| 0),
+            ),
+            Self::Review => Some(query::run_review(&client)),
+        }
     }
 }
 

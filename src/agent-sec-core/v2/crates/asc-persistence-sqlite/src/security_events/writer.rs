@@ -115,6 +115,19 @@ impl<S: DropSink> SqliteEventWriter<S> {
             .ok_or(KernelError::Disabled)
     }
 
+    /// Adds daemon query indexes without changing the V1 row format or schema revision.
+    ///
+    /// # Errors
+    /// Propagates initialization and index creation failures; readers never run this DDL.
+    pub fn prepare_query_indexes(&self) -> Result<(), KernelError> {
+        self.sink.store().with_connection(true, |conn| {
+            conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_security_uid_time ON security_events(uid,timestamp_epoch,event_id);
+                CREATE INDEX IF NOT EXISTS idx_security_uid_session_run_time ON security_events(uid,session_id,run_id,timestamp_epoch,event_id);
+                CREATE INDEX IF NOT EXISTS idx_security_uid_session_run_tool ON security_events(uid,session_id,run_id,tool_call_id,category,timestamp_epoch,event_id)")?;
+            Ok(())
+        })?.ok_or(KernelError::Disabled)
+    }
+
     /// Inserts `event`. Never fails, exactly like v1 `write()`.
     pub fn write(&self, event: &SecurityEvent) {
         self.sink.write(event);

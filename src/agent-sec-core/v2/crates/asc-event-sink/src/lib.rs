@@ -7,7 +7,7 @@
 //! | Entry point | `JSONL` path | `SQLite` path | Reported to caller |
 //! |---|---|---|---|
 //! | [`log_event`] | swallows | swallows | never |
-//! | [`ConfiguredObservabilitySinks::record`] | raises | raises | always |
+//! | [`ConfiguredObservabilitySinks::record_owned`] | raises | raises | always |
 //!
 //! Hosts close configured sinks directly. [`shutdown_sinks`] closes only the
 //! process-global security-event sink.

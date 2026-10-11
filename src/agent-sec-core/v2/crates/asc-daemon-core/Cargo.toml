@@ -9,6 +9,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+asc-security-events = { workspace = true }
+sha2 = { workspace = true }
 asc-observability.workspace = true
 asc-action-runtime.workspace = true
 asc-action-types.workspace = true

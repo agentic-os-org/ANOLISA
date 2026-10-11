@@ -17,28 +17,26 @@
 use crate::timestamp::utc_iso_to_epoch;
 use crate::{SecurityEvent, SecurityEventsSummary, TimestampError};
 
-/// The owner whose rows one server query is authorized to read.
+/// The UID scope one server query is authorized to read.
 ///
 /// A scope is constructed only by trusted server code from
 /// kernel-authenticated peer credentials — it is never decoded from request
-/// parameters, and caller-supplied identity fields never influence it. The
-/// `owner_uid` request parameter is a *filter within* the authorized scope,
-/// not a way to name one (root may pick any UID, a non-root caller only
-/// itself).
+/// parameters, and caller-supplied identity fields never influence it.
+/// Root reads all UIDs; every other peer reads only its own UID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryScope {
     /// Rows whose producing peer was kernel-authenticated as this UID.
     Owner(u32),
-    /// Every owner's rows.
+    /// Every UID's rows.
     ///
     /// Reserved for the kernel-authenticated root peer. Non-root principals —
     /// including `PolicyAdministrator` — never read through this scope: the
-    /// v2 daemon assigns no cross-owner audit role (issue #6608).
+    /// v2 daemon assigns no cross-UID audit role (issue #6608).
     All,
 }
 
 impl QueryScope {
-    /// Returns the owner UID this scope may read, or `None` for [`All`].
+    /// Returns the UID this scope may read, or `None` for [`Self::All`].
     #[must_use]
     pub const fn owner_uid(self) -> Option<u32> {
         match self {
@@ -136,7 +134,7 @@ pub enum QueryError {
     InvalidGroupField(String),
 }
 
-/// Read-only security-event queries one daemon can serve, scoped per owner.
+/// Read-only security-event queries one daemon can serve, scoped per UID.
 ///
 /// The port keeps daemon handlers free of storage decisions; the daemon
 /// composition root binds it to the same database the writers use.

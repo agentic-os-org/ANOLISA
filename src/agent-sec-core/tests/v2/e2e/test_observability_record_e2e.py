@@ -171,7 +171,9 @@ def test_daemon_rejects_invalid_params_and_missing_metadata_without_writes(inges
         response = ingestion.call(request)
         assert response["error"]["code"] == "invalid_argument", response
     assert not (ingestion.directory / "data/observability.jsonl").exists()
-    assert not (ingestion.directory / "data/observability.db").exists()
+    db = ingestion.directory / "data/observability.db"
+    assert db.is_file() and (db.stat().st_mode & 0o777) == 0o600
+    assert rows(ingestion) == []
 
 
 def test_concurrent_ingestion_isolates_baggage_and_no_carrier_does_not_inherit(
@@ -196,8 +198,9 @@ def test_concurrent_ingestion_isolates_baggage_and_no_carrier_does_not_inherit(
 
 @pytest.mark.parametrize("broken", ["observability.jsonl", "observability.db"])
 def test_write_failures_surface_without_retry_or_rollback(ingestion, broken):
-    ingestion.start(authorize=False)
+    (ingestion.directory / "data").mkdir(mode=0o700)
     (ingestion.directory / "data" / broken).mkdir()
+    ingestion.start(authorize=False)
     result = cli(ingestion, CASES[0]["input"])
     assert result.returncode == 1
     assert result.stdout == ""
@@ -206,7 +209,9 @@ def test_write_failures_surface_without_retry_or_rollback(ingestion, broken):
     if broken.endswith(".db"):
         assert len(log.read_text().splitlines()) == 1
     else:
-        assert not (ingestion.directory / "data/observability.db").exists()
+        db = ingestion.directory / "data/observability.db"
+        assert db.is_file() and (db.stat().st_mode & 0o777) == 0o600
+        assert rows(ingestion) == []
 
 
 def test_cli_input_errors_and_unavailable_daemon_never_fall_back(ingestion):

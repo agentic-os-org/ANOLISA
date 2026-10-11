@@ -4,6 +4,13 @@
 本批只有采集与落盘，不包含 Session/Run/Timeline 查询、report/review/schema 命令、
 插件切换或 OTLP/Collector 导出。V1 Python 仅用于生成回归 oracle，不是 V2 运行依赖。
 
+本分支后续增加的查询接口与 UDS UID 归属扩展见
+[V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)
+（obs 已实现）；当前 schema revision 2 支持 peer UID 原子落盘，并自动升级 revision 1。
+历史记录的 UID 保留 NULL，不归 UID 0；升级的补列、建索引与版本更新在同一事务内完成。
+下文首批采集验收是历史基线，
+本次查询扩展证据单列在该设计文档，不能将历史 PASS 等同于当前安装态验收。
+
 ## 1. CLI 兼容接口 [PRESERVE V1]
 
 ```bash
@@ -91,7 +98,8 @@ SQLite 或文件 writer。core 在请求的 OTel Context 中读取 metadata，�
 
 文件使用 daemon 已解析的系统数据目录，默认 `/var/log/agent-sec`，部署可用绝对路径
 `AGENT_SEC_DATA_DIR` 覆盖；不回退 HOME。文件为 `observability.jsonl` 和 `observability.db`，
-复用现有 owner-only writer。采集 writers 惰性初始化，存储故障由该次调用返回。
+复用现有仅所属 UID 可访问的文件权限。系统 obs schema 在启动时初始化/升级，JSONL 惰性创建；
+新记录与 peer UID 同次 INSERT。存储故障仍由调用显式返回，初始化失败的查询返回 unavailable。
 
 1. 先写 JSONL；失败就不尝试 SQLite。
 2. 再写 SQLite；失败不撤销已追加的 JSONL。

@@ -551,6 +551,8 @@ agent-sec-cli harden --downstream-help
 
 ## Observability
 
+Rust V2 report/review query the daemon exclusively. Ordinary users see their own records; root can query records across all UIDs. Query identity comes only from the UDS peer. Report keeps V1’s `--session-id`, `--last`, and `--format`; review takes no command-specific options. Report JSON adds no UID field. `observability schema` generates the V1-compatible record schema locally from the Rust contracts.
+
 ```bash
 # Interactive drill-down TUI (requires an interactive terminal)
 agent-sec-cli observability review
@@ -569,6 +571,10 @@ Details: [Observability User Guide](../../docs/user-guide/en/agent-security/agen
 
 Security events are written both as JSONL and into a SQLite store. Query the store
 with `agent-sec-cli events`:
+
+V2 queries use the UDS peer UID: ordinary users read their own events and root reads
+all UIDs. Filter with the original session ID; root receives matching events from all UIDs.
+For colliding session IDs, root response labels use `UID_session_id` to distinguish owners.
 
 ```bash
 agent-sec-cli events --last-hours 24

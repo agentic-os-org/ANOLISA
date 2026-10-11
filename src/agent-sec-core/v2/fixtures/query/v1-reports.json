@@ -1,0 +1,186 @@
+[
+  {
+    "name": "empty",
+    "session": {
+      "session_id": "session-123456789",
+      "first_seen_epoch": 1000.0,
+      "last_seen_epoch": 1000.0,
+      "turn_count": 1
+    },
+    "events": [],
+    "security": [],
+    "json": {
+      "session_id": "session-123456789",
+      "first_seen": "1970-01-01 00:16:40",
+      "last_seen": "1970-01-01 00:16:40",
+      "duration_seconds": 0.0,
+      "turn_count": 1,
+      "llm_calls": 0,
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "tool_breakdown": {},
+      "security_verdicts": {},
+      "security_hint": "security hooks may not pass session_id yet"
+    },
+    "text": "Session session-1234  (1970-01-01 00:16:40 \u2014 1970-01-01 00:16:40, 0s, 1 turns)\n\n  LLM calls:       0\n\n  Tools used:      (none)\n\n  Security:        (no security events) \u2014 security hooks may not pass session_id yet\n"
+  },
+  {
+    "name": "half_even",
+    "session": {
+      "session_id": "session-123456789",
+      "first_seen_epoch": 1000.0,
+      "last_seen_epoch": 1001.25,
+      "turn_count": 1
+    },
+    "events": [],
+    "security": [],
+    "json": {
+      "session_id": "session-123456789",
+      "first_seen": "1970-01-01 00:16:40",
+      "last_seen": "1970-01-01 00:16:41",
+      "duration_seconds": 1.2,
+      "turn_count": 1,
+      "llm_calls": 0,
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "tool_breakdown": {},
+      "security_verdicts": {},
+      "security_hint": "security hooks may not pass session_id yet"
+    },
+    "text": "Session session-1234  (1970-01-01 00:16:40 \u2014 1970-01-01 00:16:41, 1s, 1 turns)\n\n  LLM calls:       0\n\n  Tools used:      (none)\n\n  Security:        (no security events) \u2014 security hooks may not pass session_id yet\n"
+  },
+  {
+    "name": "minute_boundary",
+    "session": {
+      "session_id": "session-123456789",
+      "first_seen_epoch": 1000.0,
+      "last_seen_epoch": 1059.96,
+      "turn_count": 1
+    },
+    "events": [],
+    "security": [],
+    "json": {
+      "session_id": "session-123456789",
+      "first_seen": "1970-01-01 00:16:40",
+      "last_seen": "1970-01-01 00:17:39",
+      "duration_seconds": 60.0,
+      "turn_count": 1,
+      "llm_calls": 0,
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "tool_breakdown": {},
+      "security_verdicts": {},
+      "security_hint": "security hooks may not pass session_id yet"
+    },
+    "text": "Session session-1234  (1970-01-01 00:16:40 \u2014 1970-01-01 00:17:39, 60s, 1 turns)\n\n  LLM calls:       0\n\n  Tools used:      (none)\n\n  Security:        (no security events) \u2014 security hooks may not pass session_id yet\n"
+  },
+  {
+    "name": "full",
+    "session": {
+      "session_id": "session-123456789",
+      "first_seen_epoch": 1000.0,
+      "last_seen_epoch": 1125.3,
+      "turn_count": 1
+    },
+    "events": [
+      {
+        "hook": "after_llm_call",
+        "metrics": {
+          "request_payload_bytes": 12345,
+          "response_stream_bytes": 6789
+        }
+      },
+      {
+        "hook": "before_tool_call",
+        "metrics": {
+          "tool_name": "read"
+        }
+      },
+      {
+        "hook": "before_tool_call",
+        "metrics": {
+          "tool_name": "read"
+        }
+      },
+      {
+        "hook": "before_tool_call",
+        "metrics": {
+          "tool_name": "shell"
+        }
+      }
+    ],
+    "security": [
+      {
+        "category": "code_scan",
+        "result": "succeeded"
+      },
+      {
+        "category": "pii_scan",
+        "result": "failed"
+      }
+    ],
+    "json": {
+      "session_id": "session-123456789",
+      "first_seen": "1970-01-01 00:16:40",
+      "last_seen": "1970-01-01 00:18:45",
+      "duration_seconds": 125.3,
+      "turn_count": 1,
+      "llm_calls": 1,
+      "request_bytes": 12345,
+      "response_bytes": 6789,
+      "tool_breakdown": {
+        "read": 2,
+        "shell": 1
+      },
+      "security_verdicts": {
+        "code_scan": {
+          "succeeded": 1
+        },
+        "pii_scan": {
+          "failed": 1
+        }
+      },
+      "security_hint": null
+    },
+    "text": "Session session-1234  (1970-01-01 00:16:40 \u2014 1970-01-01 00:18:45, 2m 5s, 1 turns)\n\n  LLM calls:       1\n  Payload:         12,345 bytes sent, 6,789 bytes received\n\n  Tools used:      read(2), shell(1)\n\n  Security:\n    code_scan            succeeded: 1\n    pii_scan             failed: 1\n"
+  },
+  {
+    "name": "coercible_metrics",
+    "session": {
+      "session_id": "session-123456789",
+      "first_seen_epoch": 1000.0,
+      "last_seen_epoch": 1002.5,
+      "turn_count": 1
+    },
+    "events": [
+      {
+        "hook": "after_llm_call",
+        "metrics": {
+          "request_payload_bytes": "12",
+          "response_stream_bytes": 3.5
+        }
+      },
+      {
+        "hook": "before_tool_call",
+        "metrics": {}
+      }
+    ],
+    "security": [],
+    "json": {
+      "session_id": "session-123456789",
+      "first_seen": "1970-01-01 00:16:40",
+      "last_seen": "1970-01-01 00:16:42",
+      "duration_seconds": 2.5,
+      "turn_count": 1,
+      "llm_calls": 1,
+      "request_bytes": 12,
+      "response_bytes": 3,
+      "tool_breakdown": {
+        "unknown": 1
+      },
+      "security_verdicts": {},
+      "security_hint": "security hooks may not pass session_id yet"
+    },
+    "text": "Session session-1234  (1970-01-01 00:16:40 \u2014 1970-01-01 00:16:42, 2s, 1 turns)\n\n  LLM calls:       1\n  Payload:         12 bytes sent, 3 bytes received\n\n  Tools used:      unknown(1)\n\n  Security:        (no security events) \u2014 security hooks may not pass session_id yet\n"
+  }
+]
