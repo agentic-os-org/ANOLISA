@@ -207,8 +207,19 @@ fn parse_task(content: &str) -> Result<Task> {
     let (frontmatter, body) = content
         .strip_prefix("---\n")
         .and_then(|rest| {
-            rest.find("\n---\n")
-                .map(|pos| (&rest[..pos], &rest[pos + 5..]))
+            rest.find("\n---\n").map(|pos| {
+                let after_delim = &rest[pos + 5..];
+                // `to_markdown` closes the frontmatter with "---\n\n", so the
+                // first newline after the delimiter is the separator between
+                // frontmatter and body, not body content. Consume exactly one
+                // to make this split the inverse of the write: keeping it made
+                // every parse hand back a context one newline longer than what
+                // was stored, and since `memory_task_save` re-writes the
+                // context it loaded, each save/load cycle grew the file by one
+                // more blank line in front of the real body.
+                let body = after_delim.strip_prefix('\n').unwrap_or(after_delim);
+                (&rest[..pos], body)
+            })
         })
         .ok_or_else(|| MemoryError::Other("invalid task file: missing frontmatter".into()))?;
 
@@ -764,6 +775,138 @@ mod tests {
         assert_eq!(parsed.progress, 75);
         assert_eq!(parsed.next_steps.len(), 2);
         assert_eq!(parsed.files_modified.len(), 1);
+    }
+
+    /// Everything after the closing frontmatter delimiter, i.e. the raw body
+    /// exactly as it sits in the file (separator newline included). Measured
+    /// independently of `parse_task` so growth cannot be masked by the parser.
+    fn body_of(md: &str) -> &str {
+        md.split_once("\n---\n").map_or("", |(_, rest)| rest)
+    }
+
+    /// A task whose only body content is the frontmatter separator, i.e.
+    /// what `to_markdown` produces for an empty `context`.
+    fn task_with_context(context: &str) -> Task {
+        Task {
+            id: "test-id".into(),
+            title: "Test Task".into(),
+            status: TaskStatus::InProgress,
+            progress: 75,
+            next_steps: vec![],
+            blockers: vec![],
+            files_modified: vec![],
+            decisions: vec![],
+            session_history: vec![],
+            created_at: "2026-06-11T10:00:00Z".into(),
+            updated_at: "2026-06-11T12:00:00Z".into(),
+            context: context.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_task_does_not_return_the_separator_as_context() {
+        // `to_markdown` ends the frontmatter with "---\n\n": the blank line
+        // is a separator, not body content. Parsing it back must yield an
+        // empty context, otherwise every save/load cycle prepends one more
+        // newline to the stored context.
+        let md = task_with_context("").to_markdown();
+        let parsed = parse_task(&md).unwrap();
+        assert_eq!(parsed.context, "");
+        // A re-serialisation of what we parsed must be byte-identical.
+        assert_eq!(parsed.to_markdown(), md);
+    }
+
+    #[test]
+    fn parse_task_round_trips_the_context_verbatim() {
+        let md = task_with_context("Some context here.").to_markdown();
+        let parsed = parse_task(&md).unwrap();
+        // The trailing newline is the one `to_markdown` adds so the file ends
+        // with a line break; it must not be added again on the next write.
+        assert_eq!(parsed.context, "Some context here.\n");
+        assert_eq!(parsed.to_markdown(), md);
+        assert_eq!(
+            parse_task(&parsed.to_markdown()).unwrap().context,
+            parsed.context
+        );
+    }
+
+    #[test]
+    fn repeated_saves_do_not_grow_the_context() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Grow",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alpha"),
+            Some("grow-1"),
+        )
+        .unwrap();
+        let path = svc.mount.root.join(TASKS_DIR).join("grow-1.md");
+        let first_body = body_of(&std::fs::read_to_string(&path).unwrap()).to_string();
+
+        // A resume-then-save cycle in a later session usually carries only
+        // the fields that changed, so `context` is re-written as loaded.
+        for _ in 0..3 {
+            memory_task_save(
+                &svc,
+                "",
+                None,
+                Some(10),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("grow-1"),
+            )
+            .unwrap();
+        }
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        // Progress and `updated_at` are supposed to move; the body is not.
+        assert_eq!(
+            body_of(&after),
+            first_body,
+            "task body grew across saves:\n{after}"
+        );
+        let parsed = parse_task(&after).unwrap();
+        assert_eq!(parsed.context, "alpha\n");
+
+        let resume = memory_task_resume(&svc, "grow-1").unwrap();
+        assert!(
+            resume.contains("### Context\nalpha\n"),
+            "resume output was:\n{resume}"
+        );
+    }
+
+    #[test]
+    fn close_reason_is_not_prefixed_with_a_blank_line() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Close me",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("close-1"),
+        )
+        .unwrap();
+        memory_task_close(&svc, "close-1", Some("All done")).unwrap();
+
+        let path = svc.mount.root.join(TASKS_DIR).join("close-1.md");
+        let parsed = parse_task(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // The task had no context, so the reason is the whole body: no
+        // separator newline may survive in front of it.
+        assert_eq!(parsed.context, "**Closed**: All done\n");
     }
 
     #[test]
