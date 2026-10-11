@@ -82,10 +82,17 @@ def read_toml_version(path: str) -> str:
 
 
 def read_json_version(path: str) -> str:
-    version = json.loads(read_text(path)).get("version")
+    version = read_json_object(path).get("version")
     if not isinstance(version, str):
         raise ValueError(f"no JSON version field in {path} (component: {path.rsplit('/', 1)[0]})")
     return version
+
+
+def read_json_object(path: str) -> dict:
+    data = json.loads(read_text(path))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object, found {type(data).__name__}")
+    return data
 
 
 def read_version(path: str) -> str:
@@ -113,12 +120,17 @@ def check_template(errors: list[str], source: str, template: str) -> None:
 
 def check_agent_memory_lock(errors: list[str], expected: str) -> None:
     path = "src/agent-memory/adapters/agent-memory/openclaw/package-lock.json"
-    lock = json.loads(read_text(path))
+    lock = read_json_object(path)
     root_version = lock.get("version")
     if root_version != expected:
         errors.append(f"{path}: expected root version {expected}, found {root_version}")
-    packages_root = lock.get("packages", {}).get("")
-    if packages_root is not None:
+    packages = lock.get("packages", {})
+    if not isinstance(packages, dict):
+        raise ValueError(f"{path}: packages must be a JSON object")
+    packages_root = packages.get("")
+    if "" in packages:
+        if not isinstance(packages_root, dict):
+            raise ValueError(f"{path}: packages root entry must be a JSON object")
         pkg_version = packages_root.get("version")
         if pkg_version != expected:
             errors.append(f"{path}: expected packages root version {expected}, found {pkg_version}")
