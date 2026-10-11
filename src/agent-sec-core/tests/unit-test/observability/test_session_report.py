@@ -72,6 +72,29 @@ class TestBuildSessionReport:
         assert rpt.turn_count == 3
         assert rpt.security_hint == "security-events DB not found"
 
+    def test_malformed_metric_values_do_not_crash_report(self):
+        """Schema-typed-Any metric values (string/null) must not crash.
+
+        The record schema types metric fields as Any, so "12.5" and null
+        are accepted at record time; one malformed event must not take down
+        the whole report.
+        """
+        reader = MagicMock()
+        reader.list_sessions.return_value = [_fake_session()]
+        reader.list_runs.return_value = [_fake_run()]
+        reader.list_events.return_value = [
+            _fake_event(
+                "after_llm_call",
+                {"request_payload_bytes": "12.5", "response_stream_bytes": None},
+            ),
+            _fake_event("before_tool_call", {"tool_name": "read_file"}),
+        ]
+        rpt = build_session_report("sess-1", reader)
+        assert rpt.llm_calls == 1
+        assert rpt.request_bytes == 0
+        assert rpt.response_bytes == 0
+        assert rpt.tool_breakdown == {"read_file": 1}
+
     def test_security_verdicts(self):
         reader = MagicMock()
         reader.list_sessions.return_value = [_fake_session()]
