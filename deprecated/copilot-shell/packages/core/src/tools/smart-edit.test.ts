@@ -225,6 +225,41 @@ describe('SmartEditTool', () => {
       expect(result.occurrences).toBe(1);
     });
 
+    it('should keep the line after a mid-file flexible replacement intact', async () => {
+      // The replaced block is followed by another line: that line must
+      // survive on its own line instead of being fused with the last
+      // replacement line.
+      const content = '  alpha\n  bravo\n  charlie\n';
+      const result = await calculateReplacement({
+        params: {
+          file_path: 'test.txt',
+          instruction: 'test',
+          old_string: 'alpha\nbravo',
+          new_string: 'alpha-two\nbravo-two',
+        },
+        currentContent: content,
+        abortSignal,
+      });
+      expect(result.newContent).toBe('  alpha-two\n  bravo-two\n  charlie\n');
+      expect(result.occurrences).toBe(1);
+    });
+
+    it('should replace consecutive flexible matches', async () => {
+      const content = '  a\n  b\n  a\n  b\n';
+      const result = await calculateReplacement({
+        params: {
+          file_path: 'test.txt',
+          instruction: 'test',
+          old_string: 'a\nb',
+          new_string: 'x\ny',
+        },
+        currentContent: content,
+        abortSignal,
+      });
+      expect(result.newContent).toBe('  x\n  y\n  x\n  y\n');
+      expect(result.occurrences).toBe(2);
+    });
+
     it('should return 0 occurrences if no match is found', async () => {
       const content = 'hello world';
       const result = await calculateReplacement({
@@ -260,6 +295,51 @@ describe('SmartEditTool', () => {
       const expectedContent =
         '  const yourFunc = (a, b) => {\n    return a + b;\n  }';
       expect(result.newContent).toBe(expectedContent);
+      expect(result.occurrences).toBe(1);
+    });
+
+    it('should keep $& literal in a regex-based replacement', async () => {
+      // Reaches the regex fallback (exact and line-trimming flexible both
+      // fail because the intra-line whitespace differs). The file content
+      // and the replacement both contain '$&', which String.replace would
+      // otherwise expand to the whole matched text.
+      const content = '  cost[ i ] = $&;\n  total += 1;\n';
+      const result = await calculateReplacement({
+        params: {
+          file_path: 'test.js',
+          instruction: 'test',
+          old_string: 'cost[i] = $&;',
+          new_string: 'sum = $& + 1;',
+        },
+        currentContent: content,
+        abortSignal,
+      });
+
+      expect(result.newContent).toBe('  sum = $& + 1;\n  total += 1;\n');
+      expect(result.occurrences).toBe(1);
+    });
+
+    it('should edit only the first of two identical regex-fallback matches', async () => {
+      // Two identical lines that only the regex fallback can match (the
+      // intra-line whitespace differs from old_string). Only the first
+      // occurrence may be rewritten while occurrences is reported as 1 —
+      // replacing every identical match would silently edit extra
+      // locations and bypass the single-replacement guarantee.
+      const content = '  cost[ i ] = $&;\n  cost[ i ] = $&;\n  total += 1;\n';
+      const result = await calculateReplacement({
+        params: {
+          file_path: 'test.js',
+          instruction: 'test',
+          old_string: 'cost[i] = $&;',
+          new_string: 'sum = $& + 1;',
+        },
+        currentContent: content,
+        abortSignal,
+      });
+
+      expect(result.newContent).toBe(
+        '  sum = $& + 1;\n  cost[ i ] = $&;\n  total += 1;\n',
+      );
       expect(result.occurrences).toBe(1);
     });
   });
