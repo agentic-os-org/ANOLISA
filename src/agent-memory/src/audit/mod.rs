@@ -138,6 +138,68 @@ impl AuditLogger {
     }
 }
 
+/// Shortest query worth reporting, in bytes.
+const MIN_QUERY_BYTES: usize = 3;
+
+/// The query text a search audit record carries — `None` when it carries none.
+///
+/// `memory_search` puts `<mode>:<payload>` in `path`, and the payload has been
+/// `len=<N>` ever since a89dbc3bf ("audit_log sanitization") kept query text
+/// out of the audit log, which is also fanned out to systemd-journald. That
+/// marker is not a query. Reading it as one made consolidation write a
+/// `搜索: len=NN` fact into `facts/interest/` for every search of every session
+/// and made `mem_dream` report "interested in: len=14". `mem_grep` logs the
+/// directory it walked, which is not a query either.
+///
+/// Any other payload is returned as the query, so a record that does carry one
+/// — the pre-sanitization shape, or a future caller that logs one — keeps
+/// working. Both consumers of the field (the consolidation interest rule and
+/// the profile synthesis) read it through here, so the format has one reader;
+/// `tests/tier_b_test.rs` pins that reader to what `memory_search` really
+/// writes.
+pub fn search_query(tool: &str, path: &str) -> Option<String> {
+    if tool != "memory_search" {
+        return None;
+    }
+    let payload = path.split_once(':')?.1.trim();
+    if is_length_marker(payload) {
+        return None;
+    }
+    (payload.len() > MIN_QUERY_BYTES).then(|| payload.to_string())
+}
+
+/// The audit `path` in the form persisted memory may quote it.
+///
+/// Episodes and the lesson rule copy a record's `path` into facts, and
+/// FactWriter puts those under `facts/` where the index picks them up: whatever
+/// is quoted becomes searchable memory content. For `memory_search` the field is
+/// `<mode>:len=<N>`, and the length marker describes the audit record rather
+/// than the call. Quoting it verbatim wrote `bm25:len=14` into an episodic fact
+/// at confidence 0.9 — above the 0.8 `memory_session_context` injects into every
+/// later prompt — and into the lesson fact of a failed embedding. The mode does
+/// describe the call, so that is what survives here.
+///
+/// Every other record is quoted as it stands: `mem_grep`'s directory, a
+/// `mem_promote` pair and a payload that really is a query are the call's own
+/// input, not a marker.
+pub fn quotable_path<'a>(tool: &str, path: &'a str) -> &'a str {
+    if tool != "memory_search" {
+        return path;
+    }
+    match path.split_once(':') {
+        Some((mode, payload)) if is_length_marker(payload.trim()) => mode,
+        _ => path,
+    }
+}
+
+/// `<mode>:len=<N>` — the sanitized shape `memory_search` logs today.
+fn is_length_marker(payload: &str) -> bool {
+    match payload.strip_prefix("len=") {
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +226,82 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["error"], "nope");
+    }
+
+    #[test]
+    fn search_query_refuses_the_sanitized_marker() {
+        // Exactly what tools/memory_search.rs writes: "<mode>:len=<N>" for
+        // every mode, including the no-embedding fallback marker.
+        for path in [
+            "bm25:len=23",
+            "bm25(fallback from hybrid):len=9",
+            "vector:len=7",
+            "embed:len=7",
+        ] {
+            assert_eq!(
+                search_query("memory_search", path),
+                None,
+                "{path} read as a query"
+            );
+        }
+    }
+
+    #[test]
+    fn search_query_refuses_a_grep_directory() {
+        // mem_grep logs the directory it walked (tools/grep.rs), never the
+        // pattern.
+        assert_eq!(search_query("mem_grep", "notes/kconfig"), None);
+        assert_eq!(search_query("mem_grep", "bm25:len=9"), None);
+    }
+
+    #[test]
+    fn quotable_path_drops_the_marker_and_keeps_the_mode() {
+        // What tools/memory_search.rs writes, including the no-embedding
+        // fallback marker and the shape a failed embedding logs.
+        assert_eq!(quotable_path("memory_search", "bm25:len=23"), "bm25");
+        assert_eq!(
+            quotable_path("memory_search", "bm25(fallback from hybrid):len=9"),
+            "bm25(fallback from hybrid)"
+        );
+        assert_eq!(quotable_path("memory_search", "embed:len=7"), "embed");
+        // A payload that is not the marker is the record's own text.
+        assert_eq!(
+            quotable_path("memory_search", "bm25:rust ownership rules"),
+            "bm25:rust ownership rules"
+        );
+        assert_eq!(
+            quotable_path("memory_search", "bm25:len= without a number"),
+            "bm25:len= without a number"
+        );
+        assert_eq!(quotable_path("memory_search", ""), "");
+    }
+
+    #[test]
+    fn quotable_path_leaves_every_other_record_alone() {
+        // A grep directory and a promote pair are the call's own input.
+        assert_eq!(quotable_path("mem_grep", "notes/kconfig"), "notes/kconfig");
+        assert_eq!(
+            quotable_path("mem_promote", "scratch/a.md -> notes/a.md"),
+            "scratch/a.md -> notes/a.md"
+        );
+        assert_eq!(quotable_path("mem_read", "notes/a.md"), "notes/a.md");
+    }
+
+    #[test]
+    fn search_query_returns_a_payload_that_is_one() {
+        // The pre-sanitization shape, and the shape any future caller that
+        // logs the query itself would produce.
+        assert_eq!(
+            search_query("memory_search", "bm25:rust ownership rules").as_deref(),
+            Some("rust ownership rules")
+        );
+        // Below the minimum length, and with no mode prefix at all.
+        assert_eq!(search_query("memory_search", "bm25:rc"), None);
+        assert_eq!(search_query("memory_search", "notes/kconfig"), None);
+        // "len=" with no digits is a payload, not the marker.
+        assert_eq!(
+            search_query("memory_search", "bm25:len= without a number").as_deref(),
+            Some("len= without a number")
+        );
     }
 }
