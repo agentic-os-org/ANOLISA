@@ -6,10 +6,12 @@
 //! - A browsable "table of contents" for human users
 //! - Compatibility with Claude Code's `.claude/memory/MEMORY.md` format
 //!
-//! Format (one line per entry, ≤150 chars):
+//! Format (one line per entry, targeting 150 bytes):
 //! ```markdown
 //! - [title](relative-path) — one-line description
 //! ```
+//! Shorten display text to meet the entry target. Complete links take priority
+//! when their paths require longer lines; the whole-file byte cap still applies.
 //!
 //! Capacity: ≤200 lines, ≤25KB. Entries are sorted by path (alphabetical)
 //! and truncated when limits are reached. Run `mem_index_refresh` after
@@ -37,18 +39,38 @@ pub struct IndexEntry {
 impl IndexEntry {
     /// Format as a MEMORY.md line: `- [title](path) — description`
     fn to_line(&self) -> String {
-        let line = format!("- [{}]({}) — {}", self.title, self.path, self.description);
-        if line.len() > MAX_ENTRY_BYTES {
-            // '…' is 3 bytes in UTF-8; reserve space for it
-            let mut end = MAX_ENTRY_BYTES - 3;
-            while end > 0 && !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}…", &line[..end])
+        let link_bytes = format!("- []({}) — ", self.path).len();
+        let display_budget = MAX_ENTRY_BYTES.saturating_sub(link_bytes);
+        // Keep a visible label even when the path consumes the entry target.
+        let title_budget = if display_budget == 0 {
+            '…'.len_utf8()
         } else {
-            line
-        }
+            display_budget
+        };
+        let title = truncate_display(&self.title, title_budget);
+        let description_budget = MAX_ENTRY_BYTES.saturating_sub(link_bytes + title.len());
+        let description = truncate_display(&self.description, description_budget);
+        format!("- [{title}]({}) — {description}", self.path)
     }
+}
+
+fn truncate_display(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let marker = if max_bytes >= '…'.len_utf8() {
+        "…"
+    } else {
+        "."
+    };
+    let mut end = max_bytes - marker.len();
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{marker}", &text[..end])
 }
 
 /// Parse the existing MEMORY.md index into entries.
@@ -285,6 +307,141 @@ mod tests {
         };
         let line = entry.to_line();
         assert!(line.len() <= MAX_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn index_entry_keeps_long_ascii_title_link() {
+        let entry = IndexEntry {
+            title: "A".repeat(200),
+            path: "notes/ascii.md".into(),
+            description: "A short description".into(),
+        };
+        let line = entry.to_line();
+        assert!(line.len() <= MAX_ENTRY_BYTES, "{line}");
+        let parsed = parse_index(&line);
+        assert_eq!(parsed.len(), 1, "long title broke the link: {line}");
+        assert_eq!(parsed[0].path, entry.path);
+        assert!(parsed[0].title.ends_with('…'));
+    }
+
+    #[test]
+    fn index_entry_keeps_long_utf8_title_link() {
+        let entry = IndexEntry {
+            title: "记".repeat(80),
+            path: "notes/chinese.md".into(),
+            description: "中文说明".into(),
+        };
+        let line = entry.to_line();
+        assert!(line.len() <= MAX_ENTRY_BYTES, "{line}");
+        let parsed = parse_index(&line);
+        assert_eq!(parsed.len(), 1, "UTF-8 title broke the link: {line}");
+        assert_eq!(parsed[0].path, entry.path);
+        assert!(parsed[0].title.starts_with('记'));
+        assert!(parsed[0].title.ends_with('…'));
+    }
+
+    #[test]
+    fn index_entry_keeps_path_beyond_line_target() {
+        let entry = IndexEntry {
+            title: "Long path".into(),
+            path: format!("notes/{}.md", "p".repeat(170)),
+            description: "Description".into(),
+        };
+        let line = entry.to_line();
+        assert!(line.len() > MAX_ENTRY_BYTES);
+        let parsed = parse_index(&line);
+        assert_eq!(parsed.len(), 1, "long path broke the link: {line}");
+        assert_eq!(parsed[0].path, entry.path);
+        assert!(!parsed[0].title.is_empty());
+    }
+
+    #[test]
+    fn index_entry_keeps_utf8_label_at_tiny_display_budgets() {
+        for path_bytes in [137, 138, 139] {
+            let entry = IndexEntry {
+                title: "记忆标题".into(),
+                path: "p".repeat(path_bytes),
+                description: "中文说明".into(),
+            };
+            let line = entry.to_line();
+            let parsed = parse_index(&line);
+            assert_eq!(parsed.len(), 1, "tiny budget broke the link: {line}");
+            assert_eq!(parsed[0].path, entry.path);
+            assert!(!parsed[0].title.is_empty());
+            if path_bytes < 139 {
+                assert!(line.len() <= MAX_ENTRY_BYTES, "{line}");
+            }
+        }
+    }
+
+    fn setup_index_service() -> (tempfile::TempDir, MemoryService) {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = temporary.path().to_string_lossy().into_owned();
+        config.memory.session.base_dir = temporary
+            .path()
+            .join("sessions")
+            .to_string_lossy()
+            .into_owned();
+        config.memory.mount.strategy = crate::mount::MountStrategyKind::Userland;
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.cgroup.enabled = false;
+        config.memory.consolidation.enabled = false;
+        let service = MemoryService::new(config).unwrap();
+        (temporary, service)
+    }
+
+    #[test]
+    fn index_helpers_retain_long_title_targets() {
+        let (_temporary, service) = setup_index_service();
+        let original = IndexEntry {
+            title: "A".repeat(200),
+            path: "notes/original.md".into(),
+            description: "Original memory".into(),
+        };
+        write_index(&service, std::slice::from_ref(&original)).unwrap();
+        let added = IndexEntry {
+            title: "New memory".into(),
+            path: "notes/new.md".into(),
+            description: "Another memory".into(),
+        };
+        update_index_entry(&service, &added).unwrap();
+        let content = service.read(INDEX_FILE).unwrap();
+        let updated = parse_index(&content);
+        assert_eq!(updated.len(), 2, "upsert lost an existing link: {content}");
+        assert!(updated.iter().any(|entry| entry.path == original.path));
+        assert!(updated.iter().any(|entry| entry.path == added.path));
+
+        remove_index_entry(&service, &added.path).unwrap();
+        let remaining = parse_index(&service.read(INDEX_FILE).unwrap());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].path, original.path);
+    }
+
+    #[test]
+    fn long_link_entries_still_obey_global_byte_cap() {
+        let (_temporary, service) = setup_index_service();
+        let segment = "p".repeat(200);
+        let entries: Vec<_> = (0..MAX_LINES)
+            .map(|index| IndexEntry {
+                title: format!("Memory {index}"),
+                path: format!("notes/{segment}/{segment}/{index}.md"),
+                description: "Description".into(),
+            })
+            .collect();
+        write_index(&service, &entries).unwrap();
+        let content = service.read(INDEX_FILE).unwrap();
+        assert!(content.len() <= MAX_BYTES);
+        let parsed = parse_index(&content);
+        assert!(!parsed.is_empty(), "no complete links were emitted");
+        assert!(
+            parsed.len() < entries.len(),
+            "byte cap did not stop long entries"
+        );
+        for entry in parsed {
+            assert!(entries.iter().any(|original| original.path == entry.path));
+        }
     }
 
     #[test]
