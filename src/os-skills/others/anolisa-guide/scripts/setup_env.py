@@ -19,6 +19,8 @@ import sys
 import shutil
 from pathlib import Path
 
+from env_probe import dependencies_ready
+
 
 # 用户缓存目录
 USER_CACHE_DIR = Path.home() / ".cache" / "anolisa"
@@ -38,21 +40,7 @@ def check_venv() -> bool:
     if not VENV_DIR.exists():
         return False
     
-    venv_python = VENV_DIR / "bin" / "python"
-    if not venv_python.exists():
-        return False
-    
-    # 尝试导入依赖
-    try:
-        result = subprocess.run(
-            [str(venv_python), "-c", 
-             "import requests, bs4, markdownify"],
-            capture_output=True,
-            timeout=5
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    return dependencies_ready(get_venv_python())
 
 
 def create_venv() -> bool:
