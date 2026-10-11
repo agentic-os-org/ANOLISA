@@ -366,8 +366,8 @@ impl SkillFs {
     /// lifecycle roots (S3), installer staging roots (I2),
     /// activation-hidden skills (D1.1), and dot-prefixed directories the
     /// store loader skips (they are never managed Skills). Only skill-shaped
-    /// leaves are gated by activation — plain files and category directories
-    /// are passthrough content and stay visible.
+    /// leaves are gated by activation. Category directories stay visible;
+    /// plain root files are passthrough content only for in-place mounts.
     pub(super) fn hermes_root_entry_is_hidden(
         &self,
         name: &str,
@@ -381,6 +381,12 @@ impl SkillFs {
             if matcher.is_staging_root(name) {
                 return true;
             }
+        }
+        // Normal mounts resolve plain root entries as category directories,
+        // so listing a non-management file would expose an unreachable name.
+        // In-place mounts have a separate file passthrough path.
+        if !self.in_place && !is_hermes_management_path(name) && !physical.is_dir() {
+            return true;
         }
         // The store loader skips dot-prefixed directories, so they are never
         // managed Skills and the flat `/skills` listing cannot surface them.
@@ -615,6 +621,54 @@ mod tests {
             std::fs::canonicalize(fd_path).expect("canonical parent fd"),
             std::fs::canonicalize(&skill_dir).expect("canonical skill dir")
         );
+    }
+
+    #[test]
+    fn hermes_plain_root_files_are_visible_only_in_place() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        for name in [
+            "README.md",
+            ".gitignore",
+            ".bundled_manifest",
+            ".no-bundled-skills",
+        ] {
+            std::fs::write(source.path().join(name), "content").unwrap();
+        }
+        for name in [".hub", "category", "skill"] {
+            std::fs::create_dir(source.path().join(name)).unwrap();
+        }
+        std::fs::write(
+            source.path().join("skill/SKILL.md"),
+            "---\nname: skill\ndescription: example\n---\n",
+        )
+        .unwrap();
+        for in_place in [false, true] {
+            let mut store = SkillStore::new();
+            store.load_from_directory(source.path(), &ParseConfig::default());
+            let fs = SkillFs::new(
+                source.path().join("mount"),
+                source.path().to_path_buf(),
+                Arc::new(RwLock::new(store)),
+                in_place,
+            )
+            .with_skill_layout(crate::SkillLayout::Hermes);
+            for name in ["README.md", ".gitignore"] {
+                assert_eq!(
+                    fs.hermes_root_entry_is_hidden(name, &source.path().join(name)),
+                    !in_place,
+                    "{name}, in_place={in_place}"
+                );
+            }
+            for name in [
+                ".hub",
+                ".bundled_manifest",
+                ".no-bundled-skills",
+                "category",
+                "skill",
+            ] {
+                assert!(!fs.hermes_root_entry_is_hidden(name, &source.path().join(name)));
+            }
+        }
     }
 
     #[test]
