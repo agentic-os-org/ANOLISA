@@ -452,3 +452,37 @@ fn raw_cli_zsh_mcp_slash_is_intercepted() {
     assert!(output.contains("Usage: /mcp"), "{output}");
     assert!(output.contains("after-zsh-mcp"), "{output}");
 }
+// The zh-CN /help panel is the one panel with no forbidden-label guard, which is
+// how two group titles ("Registry", and "Hooks" before it was confirmed to be a
+// deliberate loanword) and an awkward /agent summary shipped untranslated. Pin
+// the rendered headers the same way the en-US test above pins its own, so a new
+// group cannot land with an English title by accident.
+#[test]
+fn raw_cli_help_renders_zh_group_titles() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/help\necho after-zh-help\nexit\n",
+        &[("TERM", "xterm-256color"), ("COSH_SHELL_LANG", "zh-CN")],
+    );
+    let normalized = strip_ansi_escape(&output);
+
+    // Group headers sit at column zero inside the panel.
+    for header in ["状态", "配置", "健康", "会话", "模式", "注册表"] {
+        assert!(
+            normalized.contains(&format!("│ {header}")),
+            "missing zh group header {header}: {output}"
+        );
+    }
+    // "Prompt" and "Hooks" stay English loanwords in the zh catalog: the bundle
+    // renders "Prompt 草稿卡" and "显示 Hook 状态" (the entry inside this very
+    // group) and never 钩子. See HelpGroupHooks in i18n/zh/help.rs.
+    assert!(normalized.contains("│ Prompt"), "{output}");
+    assert!(normalized.contains("│ Hooks"), "{output}");
+    assert!(normalized.contains("显示 Hook 状态"), "{output}");
+    // /agent composes a one-shot request; 组稿 is editorial copy and reads wrong
+    // here, and the multiline-draft 组稿 wording belongs to HelpFooter only.
+    assert!(normalized.contains("编写一次性 Agent 请求"), "{output}");
+    assert!(!normalized.contains("组稿一次性"), "{output}");
+    assert!(normalized.contains("after-zh-help"), "{output}");
+    assert_no_migrated_english_ui_labels(&normalized, HELP_ZH_FORBIDDEN_UI);
+}
