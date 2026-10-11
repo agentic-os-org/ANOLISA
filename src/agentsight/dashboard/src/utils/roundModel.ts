@@ -84,7 +84,8 @@ export function roundStats(round: Round): RoundStats {
     promptSum += s.metrics?.prompt_tokens ?? 0;
     completionSum += s.metrics?.completion_tokens ?? 0;
   }
-  const preview = (round.userStep?.message ?? round.steps.find(s => s.message)?.message ?? '')
+  const message = round.userStep?.message ?? round.steps.find(s => s.message)?.message ?? '';
+  const preview = (typeof message === 'string' ? message : JSON.stringify(message))
     .replace(/\s+/g, ' ')
     .trim();
   return { toolCallCount, promptSum, completionSum, firstTs: round.steps.find(s => s.timestamp)?.timestamp, preview };

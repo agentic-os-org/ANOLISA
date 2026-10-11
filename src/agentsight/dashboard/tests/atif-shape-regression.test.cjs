@@ -77,6 +77,10 @@ function viewer(locale = 'en-US') {
   }
   return {
     requests, downloads, parts: page.parts, t,
+    messageText(value) {
+      const card = page.parts.StepCard({ step: value, expandedSections: new Set(), onToggleSection() {} });
+      return nodes(card, node => node.type?.name === 'ExpandableText')[0]?.props.text;
+    },
     import(data) {
       const input = nodes(render(), (node) => node.type === 'input' && node.props.type === 'file')[0];
       input.props.onChange({ target: { files: [{ name: 'fixture.json' }], value: 'fixture.json' } });
@@ -122,7 +126,65 @@ const malformed = [
   document({ steps: [step({ metrics: { prompt_tokens: '3' } })] }),
   document({ final_metrics: { total_steps: {} } }), document({ final_metrics: [] }),
   document({ subagent_trajectories: [document({ steps: [null] })] }), document({ subagent_trajectories: [null] }),
+  ...[
+    [null], [{}], [{ type: 'text', text: 3 }],
+    [{ type: 'image', source: null }],
+    [{ type: 'image', source: { media_type: 'image/png', path: 3 } }],
+    [{ type: 'image', source: { media_type: 'text/plain', path: 'image.txt' } }],
+    [{ type: 'image', source: { media_type: ['image/png'], path: 'image.png' } }],
+    [{ type: 'text', text: 'text', source: { media_type: 'image/png', path: 'image.png' } }],
+    [{ type: 'image', text: 'unexpected text', source: { media_type: 'image/png', path: 'image.png' } }],
+    [{ type: 'unknown' }],
+  ].map(message => document({ steps: [step({ message })] })),
 ];
+
+const contentParts = [
+  { type: 'text', text: 'What color is the square?' },
+  { type: 'image', source: { media_type: 'image/png', path: 'images/square.png' } },
+];
+
+test('ATIF v1.6/v1.7 text and image message parts render and export unchanged', async () => {
+  const messages = [contentParts, [contentParts[0]], [], ...['image/jpeg', 'image/png', 'image/gif', 'image/webp'].map(media_type => [
+    { type: 'image', source: { media_type, path: 'images/fixture' } },
+  ])];
+  const cases = ['ATIF-v1.6', 'ATIF-v1.7'].flatMap(schema_version => messages.map(message => ({ schema_version, message })));
+  for (const { schema_version, message } of cases) {
+    const data = document({
+      schema_version,
+      agent: { name: 'fixture-agent', version: '1' },
+      steps: [step({ source: 'user', message })],
+      subagent_trajectories: [document({ trajectory_id: 'child', steps: [step({ message })] })],
+    });
+    const page = viewer();
+    assert.equal(page.parts.isAtifDocument(data), true);
+    page.import(data);
+    assert.equal(page.error(), undefined);
+    assert.equal(page.session(), 'fixture');
+    const rendered = JSON.stringify(page.renderAll());
+    if (message.length > 0) assert.ok(rendered.includes(message[0].text ?? message[0].source.path));
+    assert.equal(typeof page.messageText(data.steps[0]), 'string');
+    assert.deepEqual(JSON.parse(page.messageText(data.steps[0])), message);
+    const { roundMatchesText } = require(join(dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD), '../utils/trajectoryTextFilter.js'));
+    for (const part of message) {
+      assert.equal(roundMatchesText(data.steps, part.text ?? part.source.path), true);
+    }
+    page.download();
+    assert.deepEqual(JSON.parse(await page.downloads[0].text()), data);
+  }
+});
+
+test('valid content-part conversation and session responses remain viewable', async () => {
+  for (const kind of ['conversation', 'session']) {
+    const data = document({ steps: [step({ source: 'user', message: contentParts })] });
+    const page = viewer();
+    page.load(kind);
+    page.requests[0].resolve(data);
+    await new Promise(setImmediate);
+    assert.equal(page.session(), 'fixture');
+    assert.equal(page.error(), undefined);
+    assert.doesNotThrow(() => page.renderAll());
+  }
+});
 
 for (const [index, data] of malformed.entries()) {
   test(`consumed malformed shape ${index} cannot replace a valid import`, () => {
