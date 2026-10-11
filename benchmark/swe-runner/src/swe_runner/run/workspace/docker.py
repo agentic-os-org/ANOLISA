@@ -20,6 +20,7 @@ import contextlib
 import logging
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,7 @@ def prepare_workspace_from_image(
 ) -> Path:
     """Copy `/testbed` from a SWE-bench image into a host work directory."""
     target_dir = work_dir or _default_work_dir(instance_id)
-    container_name = f"swe-prep-{_safe_docker_name(instance_id)}"
+    container_name = f"swe-prep-{_safe_docker_name(instance_id)}-{uuid.uuid4().hex}"
 
     pull_docker_image(
         image_name,
