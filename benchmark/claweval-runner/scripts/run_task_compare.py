@@ -433,6 +433,16 @@ def _run_batch_mode(args) -> None:
         args.prefix, args.filter_str,
     ])
 
+    # The native claw-eval invocation has no --tasks-file support, so a
+    # tasks file left task_ids empty here: the native lane ran the ENTIRE
+    # corpus while the ce-runner lane ran the file's tasks, and the batch
+    # summary was keyed off the empty list. Load the file so both lanes
+    # cover the same task set.
+    if not task_ids and args.tasks_file:
+        with open(args.tasks_file, encoding="utf-8") as f:
+            task_ids = [line.strip() for line in f if line.strip()]
+        print(f"  Tasks (from --tasks-file):  {len(task_ids)} tasks")
+
     if not task_ids and not has_filter:
         print("❌ Batch mode requires --tasks, --range, --tag, --prefix, --filter, or --tasks-file",
               file=sys.stderr)
