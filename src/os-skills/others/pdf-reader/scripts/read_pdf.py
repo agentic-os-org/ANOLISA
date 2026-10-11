@@ -31,6 +31,22 @@ def _page_tables(page):
         out.append({"bbox": [float(v) for v in t.bbox], "rows": rows})
     return out
 
+def _engine_version(fitz):
+    v = getattr(fitz, "VersionFitz", "") or ""
+    if not v:
+        t = getattr(fitz, "version", ())
+        if isinstance(t, (tuple, list)) and t and isinstance(t[0], str):
+            v = t[0]
+    return v
+
+def _engine_supports_sort(fitz):
+    # Page.get_text(sort=True) exists since PyMuPDF 1.19.1
+    try:
+        major, minor = (int(p) for p in _engine_version(fitz).split(".")[:2])
+    except ValueError:
+        return True
+    return (major, minor) >= (1, 19)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-f","--file",required=True)
@@ -38,18 +54,33 @@ def main():
     ap.add_argument("-d","--metadata",action="store_true")
     ap.add_argument("-t","--tables",action="store_true",
                     help="report per-page table bboxes and cell rows (JSON output only)")
+    ap.add_argument("--outline",action="store_true",
+                    help="include the document bookmark outline in --format json output")
     ap.add_argument("--format",default="text",choices=["text","json"])
+    ap.add_argument("--annotations",action="store_true")
     ap.add_argument("-m","--max-length",type=int,default=0)
+    ap.add_argument("--sort",action="store_true",
+                    help="extract text in spatial reading order (PyMuPDF >= 1.19.1)")
     a = ap.parse_args()
     if a.tables and a.format != "json":
         ap.error("--tables requires --format json")
 
+    if a.outline and a.format != "json":
+        print("ERROR: --outline requires --format json",file=sys.stderr); sys.exit(1)
+    if a.annotations and a.format != "json":
+        print("ERROR: --annotations requires --format json",file=sys.stderr); sys.exit(2)
+
     fitz = _install()
+    if a.sort and not _engine_supports_sort(fitz):
+        print(f"ERROR: --sort requires PyMuPDF >= 1.19.1, engine is {_engine_version(fitz) or 'unknown'}",
+              file=sys.stderr); sys.exit(1)
     if not os.path.exists(a.file):
         print(f"ERROR: {a.file} not found",file=sys.stderr); sys.exit(1)
     doc = fitz.open(a.file)
     n = len(doc)
     idx = _pages(a.pages, n) if a.pages else list(range(n))
+
+    toc = doc.get_toc() if a.outline else None
 
     meta = {}
     if a.metadata and doc.metadata:
@@ -57,19 +88,28 @@ def main():
 
     pages = []
     for i in idx:
-        t = doc[i].get_text("text").strip()
+        page = doc[i]
+        t = page.get_text("text", sort=a.sort).strip()
         if not t:
-            blocks = doc[i].get_text("blocks")
+            blocks = page.get_text("blocks")
             t = "\n".join(b[4] for b in sorted(blocks,key=lambda b:(b[1],b[0])) if b[-1]==0).strip()
-        entry = {"page":i+1,"text":t}
+        rec = {"page":i+1,"text":t}
         if a.tables:
-            entry["tables"] = _page_tables(doc[i])
-        pages.append(entry)
+            rec["tables"] = _page_tables(page)
+        if a.annotations:
+            rec["annotations"] = [
+                {"type":an.type[1],
+                 "author":an.info.get("title",""),
+                 "content":an.info.get("content",""),
+                 "rect":[round(v,2) for v in an.rect]}
+                for an in page.annots()]
+        pages.append(rec)
     doc.close()
 
     if a.format == "json":
         out = {"total_pages":n,"pages":pages}
         if meta: out["metadata"] = meta
+        if toc is not None: out["outline"] = [list(e) for e in toc]
         r = json.dumps(out,ensure_ascii=False,indent=2)
     else:
         parts = []
