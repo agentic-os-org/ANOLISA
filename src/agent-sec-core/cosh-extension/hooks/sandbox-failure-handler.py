@@ -39,7 +39,7 @@ import sys
 # 若原始命令含 sudo，则格式为:
 #   ... -- bash -c 'COSH_RC=<base64> STRIPPED_CMD'
 _SANDBOX_CMD_RE = re.compile(
-    r"linux-sandbox\b.*?--\s+bash\s+-c\s+'((?:[^'\\]|\\.|'\\'')*)'",
+    r"linux-sandbox\b.*?--\s+bash\s+-c\s+'",
     re.DOTALL,
 )
 
@@ -57,9 +57,29 @@ SANDBOX_FAILURE_INDICATORS = [
 ]
 
 
-def unescape_bash_single_quote(s: str) -> str:
-    """将 bash 单引号转义 '\\'' 还原为 '"""
-    return s.replace("'\\''", "'")
+def _parse_single_quoted_payload(sandboxed_cmd: str, start: int) -> str | None:
+    """还原 build_sandbox_command 生成的单引号负载。
+
+    该格式里引号内的反斜杠是字面字符（build_sandbox_command 只转义单引
+    号），唯一的转义是嵌入单引号的 ``'\\''`` 边界。必须按边界逐段扫描还
+    原；若把 ``\\<char>`` 当作转义对处理，反斜杠会吞掉属于 ``'\\''`` 的
+    引号，导致还原的命令被截断或变形。遇到不带 ``'\\''`` 后续的引号即为
+    收尾引号；负载未闭合返回 None。
+    """
+    out: list[str] = []
+    i = start
+    while i < len(sandboxed_cmd):
+        ch = sandboxed_cmd[i]
+        if ch == "'":
+            if sandboxed_cmd.startswith("'\\''", i):
+                out.append("'")
+                i += 4
+            else:
+                return "".join(out)
+        else:
+            out.append(ch)
+            i += 1
+    return None
 
 
 def extract_original_command(sandboxed_cmd: str) -> str | None:
@@ -78,8 +98,7 @@ def extract_original_command(sandboxed_cmd: str) -> str | None:
     # 回退：从 bash -c '...' 提取（无 sudo 版本）
     m = _SANDBOX_CMD_RE.search(sandboxed_cmd)
     if m:
-        raw = m.group(1)
-        return unescape_bash_single_quote(raw)
+        return _parse_single_quoted_payload(sandboxed_cmd, m.end())
     return None
 
 
