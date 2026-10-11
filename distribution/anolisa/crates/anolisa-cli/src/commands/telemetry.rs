@@ -612,7 +612,13 @@ mod tests {
                                 .lines()
                                 .find_map(|line| line.strip_prefix("STATUS_READ_ERROR="))
                                 .unwrap();
-                            format!("[anolisa] warn: cannot read {path}: {reason}\n")
+                            // The child echoes the raw io error, while the
+                            // register module's Read cause renders the
+                            // fallback policy in the warning, like every
+                            // other degraded-record case above.
+                            format!(
+                                "[anolisa] warn: cannot read {path}: {reason}; treating as INIT\n"
+                            )
                         }
                         _ => String::new(),
                     };

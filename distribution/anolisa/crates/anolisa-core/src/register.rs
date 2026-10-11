@@ -237,9 +237,39 @@ impl RegistrationManager {
     ///
     /// Supports transparent v1 → v2 migration.
     pub fn read_record(&self) -> Option<RegisterRecord> {
+        match self.probe_record() {
+            Ok(opt) => opt,
+            Err(cause) => {
+                eprintln!("[anolisa] warn: {}", cause.read_warning());
+                None
+            }
+        }
+    }
+
+    /// Shared probe behind [`Self::read_record`] and the mutation gate.
+    ///
+    /// `Ok(None)` means the file is absent; `Ok(Some(_))` that it parsed
+    /// (v2 with an accepted schema version, or v1 transparently migrated);
+    /// `Err(cause)` that it exists but cannot be trusted.
+    fn probe_record(&self) -> Result<Option<RegisterRecord>, UnreadableRecordCause> {
         let path = &self.register_path;
-        if !path.exists() {
-            return None;
+        // Only a *definite* absence means "no record yet". `Path::exists()`
+        // folds stat errors into `false`, so a record reachable only
+        // through an unreadable path — a symlink whose target cannot be
+        // resolved (for example a self-loop), or a parent directory this
+        // process cannot search — would look absent here, the mutation
+        // path would build an empty INIT record, and the atomic rename
+        // would replace the entry: consent state this process merely
+        // failed to *see* would be destroyed.
+        match fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(UnreadableRecordCause::Metadata {
+                    path: path.clone(),
+                    error,
+                });
+            }
         }
 
         // Linux: reject files with unexpected permissions.
@@ -251,23 +281,18 @@ impl RegistrationManager {
                 let mode = meta.permissions().mode() & 0o777;
                 const VALID_MODES: &[u32] = &[0o600, 0o644];
                 if !VALID_MODES.contains(&mode) {
-                    eprintln!(
-                        "[anolisa] warn: {} has unexpected permissions {:o}; treating as INIT",
-                        path.display(),
-                        mode
-                    );
-                    return None;
+                    return Err(UnreadableRecordCause::Permissions {
+                        path: path.clone(),
+                        mode,
+                    });
                 }
             }
         }
 
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[anolisa] warn: cannot read {}: {}", path.display(), e);
-                return None;
-            }
-        };
+        let content = fs::read_to_string(path).map_err(|error| UnreadableRecordCause::Read {
+            path: path.clone(),
+            error,
+        })?;
 
         // Try v2 first
         if let Ok(rec) = serde_json::from_str::<RegisterRecord>(&content) {
@@ -280,29 +305,45 @@ impl RegistrationManager {
                 rec.schema_version.parse::<u32>(),
                 REGISTER_SCHEMA_VERSION.parse::<u32>(),
             ) {
-                (Ok(parsed), Ok(current)) if parsed <= current => return Some(rec),
+                (Ok(parsed), Ok(current)) if parsed <= current => return Ok(Some(rec)),
                 _ => {}
             }
-            eprintln!(
-                "[anolisa] warn: {} has schema_version {} (expected <= {}); treating as INIT",
-                path.display(),
-                rec.schema_version,
-                REGISTER_SCHEMA_VERSION
-            );
-            return None;
+            return Err(UnreadableRecordCause::FutureSchema {
+                path: path.clone(),
+                found: rec.schema_version,
+            });
         }
 
         // Try v1 migration
         if let Ok(v1) = serde_json::from_str::<RegisterRecordV1>(&content) {
             let migrated: RegisterRecord = v1.into();
-            return Some(migrated);
+            return Ok(Some(migrated));
         }
 
-        eprintln!(
-            "[anolisa] warn: failed to parse {}; treating as INIT",
-            path.display()
-        );
-        None
+        Err(UnreadableRecordCause::Parse { path: path.clone() })
+    }
+
+    /// Base record for a mutation. Only an **absent** file initializes a
+    /// fresh record; a present-but-unreadable one is refused: it may hold
+    /// consent state and history this process cannot see (unexpected
+    /// permissions, read error, corrupt JSON, or a future schema version),
+    /// and an atomic rename would destroy them. The same
+    /// absent-vs-unreadable rule ktuner's rollback ledger follows (017b89d6).
+    fn mutation_base_record(&self) -> Result<RegisterRecord, SubscriptionError> {
+        match self.probe_record() {
+            Ok(None) => Ok(RegisterRecord {
+                schema_version: REGISTER_SCHEMA_VERSION.to_string(),
+                state: RegisterState::Init,
+                history: Vec::new(),
+                source: None,
+                link_id: None,
+            }),
+            Ok(Some(rec)) => Ok(rec),
+            Err(cause) => Err(SubscriptionError::UnreadableRecord {
+                path: self.register_path.display().to_string(),
+                reason: cause.mutation_reason(),
+            }),
+        }
     }
 
     /// Map a `RegisterRecord` to `ConsentState`.
@@ -364,18 +405,12 @@ impl RegistrationManager {
         source: RegisterSource,
     ) -> Result<(), SubscriptionError> {
         let _lock = self.acquire_lock()?;
-        let (current, existing) = self.read_state_and_record();
-        if current == ConsentState::Registered {
+        // Unreadable record → refuse before any write; only an absent file
+        // initializes fresh state (see mutation_base_record).
+        let mut record = self.mutation_base_record()?;
+        if self.record_to_state(&record) == ConsentState::Registered {
             return Err(SubscriptionError::AlreadyRegistered);
         }
-
-        let mut record = existing.unwrap_or_else(|| RegisterRecord {
-            schema_version: REGISTER_SCHEMA_VERSION.to_string(),
-            state: RegisterState::Init,
-            history: Vec::new(),
-            source: None,
-            link_id: None,
-        });
 
         record.state = RegisterState::Registered;
         record.source = Some(source);
@@ -409,18 +444,12 @@ impl RegistrationManager {
         if is_sysom_registered() {
             return Err(SubscriptionError::SysomManaged);
         }
-        let (current, existing) = self.read_state_and_record();
-        if current == ConsentState::Unregistered {
+        // Unreadable record → refuse before any write; only an absent file
+        // initializes fresh state (see mutation_base_record).
+        let mut record = self.mutation_base_record()?;
+        if self.record_to_state(&record) == ConsentState::Unregistered {
             return Err(SubscriptionError::NotRegistered);
         }
-
-        let mut record = existing.unwrap_or_else(|| RegisterRecord {
-            schema_version: REGISTER_SCHEMA_VERSION.to_string(),
-            state: RegisterState::Init,
-            history: Vec::new(),
-            source: None,
-            link_id: None,
-        });
 
         record.state = RegisterState::Unregistered;
         record.push_history(HistoryEntry {
@@ -444,14 +473,9 @@ impl RegistrationManager {
     /// transitions to stay TOCTOU-safe.
     pub fn do_link(&self, link_id: &str) -> Result<(), SubscriptionError> {
         let _lock = self.acquire_lock()?;
-        let (_current, existing) = self.read_state_and_record();
-        let mut record = existing.unwrap_or_else(|| RegisterRecord {
-            schema_version: REGISTER_SCHEMA_VERSION.to_string(),
-            state: RegisterState::Init,
-            history: Vec::new(),
-            source: None,
-            link_id: None,
-        });
+        // Unreadable record → refuse before any write; only an absent file
+        // initializes fresh state (see mutation_base_record).
+        let mut record = self.mutation_base_record()?;
         record.link_id = Some(link_id.to_string());
         self.atomic_write(&record)?;
         Ok(())
@@ -460,13 +484,12 @@ impl RegistrationManager {
     /// Clear the telemetry `link_id` without touching the register `state`.
     ///
     /// No-op (still `Ok`) when register.json is missing or already unlinked.
+    /// A present-but-unreadable record is reported instead of being silently
+    /// left linked: the caller believes the unlink happened while the file
+    /// still carries the id.
     pub fn do_unlink(&self) -> Result<(), SubscriptionError> {
         let _lock = self.acquire_lock()?;
-        let (_current, existing) = self.read_state_and_record();
-        let mut record = match existing {
-            Some(rec) => rec,
-            None => return Ok(()),
-        };
+        let mut record = self.mutation_base_record()?;
         if record.link_id.is_none() {
             return Ok(());
         }
@@ -616,6 +639,68 @@ pub fn generate_link_id() -> String {
 
 // ── Error types ───────────────────────────────────────────────────────
 
+/// Why an existing record file cannot be trusted as a consent record.
+///
+/// Shared by the read path (which warns and falls back to INIT) and the
+/// mutation gate (which refuses to overwrite), so both paths always
+/// classify a broken file identically. Each caller renders its own
+/// message from the same facts: the read-path warning says the visible
+/// consent is being treated as INIT, the mutation-path reason never does
+/// — a refusal that also said "treating as INIT" would tell the operator
+/// two contradictory things about one command.
+#[derive(Debug)]
+enum UnreadableRecordCause {
+    /// `stat` itself failed (a parent directory this process cannot
+    /// search, or another metadata-level error).
+    Metadata { path: PathBuf, error: io::Error },
+    /// Permission bits outside the accepted set. Linux-only, exactly like
+    /// the hardening gate that constructs it; gating the variant keeps
+    /// non-Linux builds free of a dead constructor.
+    #[cfg(target_os = "linux")]
+    Permissions { path: PathBuf, mode: u32 },
+    /// The file could not be read (an unreadable symlink target such as
+    /// a self-loop, a transport-level read error, ...).
+    Read { path: PathBuf, error: io::Error },
+    /// Content is neither v2 nor v1 JSON.
+    Parse { path: PathBuf },
+    /// A schema version from the future.
+    FutureSchema { path: PathBuf, found: String },
+}
+
+impl UnreadableRecordCause {
+    /// The shared, neutral description of the condition.
+    fn describe(&self) -> String {
+        match self {
+            Self::Metadata { path, error } => {
+                format!("cannot inspect {}: {}", path.display(), error)
+            }
+            #[cfg(target_os = "linux")]
+            Self::Permissions { path, mode } => {
+                format!("{} has unexpected permissions {:o}", path.display(), mode)
+            }
+            Self::Read { path, error } => format!("cannot read {}: {}", path.display(), error),
+            Self::Parse { path } => format!("failed to parse {}", path.display()),
+            Self::FutureSchema { path, found } => format!(
+                "{} has schema_version {} (expected <= {})",
+                path.display(),
+                found,
+                REGISTER_SCHEMA_VERSION
+            ),
+        }
+    }
+
+    /// The read-path warning: the visible consent degrades to INIT.
+    fn read_warning(&self) -> String {
+        format!("{}; treating as INIT", self.describe())
+    }
+
+    /// The mutation-path reason. Deliberately does not mention INIT: the
+    /// record is not being reinitialized, it is being left untouched.
+    fn mutation_reason(&self) -> String {
+        self.describe()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SubscriptionError {
     #[error("this command requires root or sudo privileges")]
@@ -628,6 +713,10 @@ pub enum SubscriptionError {
     NotRegistered,
     #[error("Please operate from the OS console.")]
     SysomManaged,
+    #[error(
+        "register record {path} exists but cannot be read: {reason}; fix the file (permissions/content) and retry — refusing to overwrite the recorded consent state"
+    )]
+    UnreadableRecord { path: String, reason: String },
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────
@@ -1092,5 +1181,265 @@ mod tests {
         let id = generate_link_id();
         let parsed = uuid::Uuid::parse_str(&id).unwrap();
         assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
+    }
+
+    // ── Mutations refuse unreadable records ─────────────────────────────
+    //
+    // The consent record must survive a file this process cannot parse:
+    // only an absent file initializes fresh state (the rule ktuner's
+    // rollback ledger already follows, 017b89d6). Every test below stages
+    // a hostile-but-realistic register.json, runs a mutation, and asserts
+    // BOTH the error and that the file's bytes and mode are unchanged.
+
+    /// A record whose consent state and history must survive: the console
+    /// flow wrote a withdrawal, and an admin hardened the file to 0400.
+    /// Only the permission-hardening tests read it, and those are
+    /// Linux-only (the gate itself is), so the constant is too.
+    #[cfg(target_os = "linux")]
+    const WITHDRAWN_JSON: &str = r#"{"schema_version":"2","state":"unregistered","history":[{"action":"unregister","operator":"alice","timestamp":"2026-01-10T09:00:00Z"}],"source":"console"}"#;
+
+    fn assert_record_unchanged(m: &RegistrationManager, expected: &str, expected_mode: u32) {
+        assert_eq!(fs::read_to_string(&m.register_path).unwrap(), expected);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&m.register_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, expected_mode, "the mode must survive untouched");
+        }
+        // Keep the parameter meaningful on non-Linux builds, where the
+        // permission assertion above does not exist.
+        #[cfg(not(target_os = "linux"))]
+        let _ = expected_mode;
+    }
+
+    fn stage_unreadable(m: &RegistrationManager, content: &str, mode: u32) {
+        fs::write(&m.register_path, content).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&m.register_path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = mode;
+    }
+
+    fn assert_unreadable_refusal(result: Result<(), SubscriptionError>, path: &std::path::Path) {
+        match result {
+            Err(err) => {
+                let rendered = err.to_string();
+                match &err {
+                    SubscriptionError::UnreadableRecord { path: p, reason } => {
+                        assert_eq!(p, &path.display().to_string());
+                        assert!(!reason.is_empty(), "the refusal must name the reason");
+                    }
+                    _ => panic!("expected UnreadableRecord, got {err:?}"),
+                }
+                // The read path and the refusal must never contradict
+                // each other: the read-path warning says the consent is
+                // being treated as INIT, so the refusal must not.
+                assert!(
+                    rendered.contains("refusing to overwrite"),
+                    "the refusal must say so: {rendered}"
+                );
+                assert!(
+                    !rendered.contains("treating as INIT"),
+                    "a refusal must not also claim a reinitialization: {rendered}"
+                );
+            }
+            other => panic!("expected UnreadableRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn link_refuses_to_overwrite_unexpected_mode_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        stage_unreadable(&m, WITHDRAWN_JSON, 0o400);
+
+        let result = m.do_link("link-abc");
+        assert_unreadable_refusal(result, &m.register_path);
+        assert_record_unchanged(&m, WITHDRAWN_JSON, 0o400);
+    }
+
+    #[test]
+    fn link_refuses_to_overwrite_corrupt_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        stage_unreadable(&m, "not valid json {", 0o644);
+
+        let result = m.do_link("link-abc");
+        assert_unreadable_refusal(result, &m.register_path);
+        assert_record_unchanged(&m, "not valid json {", 0o644);
+    }
+
+    #[test]
+    fn link_refuses_to_overwrite_future_schema_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        let future = r#"{"schema_version":"3","state":"registered","history":[]}"#;
+        stage_unreadable(&m, future, 0o644);
+
+        let result = m.do_link("link-abc");
+        assert_unreadable_refusal(result, &m.register_path);
+        assert_record_unchanged(&m, future, 0o644);
+    }
+
+    #[test]
+    fn unregister_refuses_to_overwrite_unreadable_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        let corrupt = "not valid json {";
+        stage_unreadable(&m, corrupt, 0o644);
+
+        // The sysom probe is bypassed exactly as the existing tests do.
+        let result = m.do_unregister_with("bob", || false);
+        assert_unreadable_refusal(result, &m.register_path);
+        assert_record_unchanged(&m, corrupt, 0o644);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn unlink_reports_unreadable_record_instead_of_noop() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        let linked =
+            r#"{"schema_version":"2","state":"registered","history":[],"link_id":"link-abc"}"#;
+        stage_unreadable(&m, linked, 0o400);
+
+        // Today this returns Ok(()) while the link_id stays in the file —
+        // the caller believes the unlink happened.
+        let result = m.do_unlink();
+        assert_unreadable_refusal(result, &m.register_path);
+        assert_record_unchanged(&m, linked, 0o400);
+    }
+
+    #[test]
+    fn register_refuses_to_overwrite_unreadable_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        stage_unreadable(&m, "not valid json {", 0o644);
+
+        let result = m.do_register("admin", RegisterSource::Cli);
+        assert_unreadable_refusal(result, &m.register_path);
+        assert_record_unchanged(&m, "not valid json {", 0o644);
+    }
+
+    #[test]
+    fn link_still_creates_missing_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        // Absent file: linking may create the record — pinned so the
+        // refusal above cannot overreach into the fresh-host path.
+        m.do_link("link-abc").unwrap();
+        let rec = m.read_record().unwrap();
+        assert_eq!(rec.state, RegisterState::Init);
+        assert_eq!(rec.link_id.as_deref(), Some("link-abc"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn link_refuses_to_replace_an_unreachable_symlink_record() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        // A self-referential symlink: `Path::exists()` folds the ELOOP
+        // into `false`, so the old probe classified the record as absent,
+        // the mutation path built an empty INIT record, and the atomic
+        // rename replaced the link — the entry itself was destroyed by a
+        // process that merely failed to see through it. Any other
+        // unresolvable-target symlink (temporarily inaccessible mount,
+        // permission-denied parent) reaches the same read error.
+        std::os::unix::fs::symlink("register.json", &m.register_path).unwrap();
+
+        let result = m.do_link("link-abc");
+        assert_unreadable_refusal(result, &m.register_path);
+
+        // The entry is untouched: still a symlink, nothing was written
+        // through or over it.
+        let meta = fs::symlink_metadata(&m.register_path).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "the symlink must survive the refusal"
+        );
+    }
+
+    #[test]
+    fn unreadable_cause_renderings_split_read_and_refusal() {
+        // The read-path warning and the mutation-path refusal share one
+        // neutral description; only the warning may mention INIT, and
+        // every cause class keeps its distinguishing fragment in both.
+        let path = PathBuf::from("/etc/anolisa/register.json");
+        // The only mutation of `cases` is the Linux-only permission push
+        // below; on other platforms the binding stays immutable, so the
+        // `mut` is (and must be) conditionally allowed rather than
+        // conditionally removed — keeping one visible binding preserves
+        // the cross-platform rendering coverage of the loop below.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut cases: Vec<(UnreadableRecordCause, &str)> = vec![
+            (
+                UnreadableRecordCause::Parse { path: path.clone() },
+                "failed to parse /etc/anolisa/register.json",
+            ),
+            (
+                UnreadableRecordCause::FutureSchema {
+                    path: path.clone(),
+                    found: "3".to_string(),
+                },
+                "schema_version 3 (expected <= 2)",
+            ),
+            (
+                UnreadableRecordCause::Read {
+                    path: path.clone(),
+                    error: io::Error::from_raw_os_error(40),
+                },
+                "cannot read /etc/anolisa/register.json",
+            ),
+            (
+                UnreadableRecordCause::Metadata {
+                    path: path.clone(),
+                    error: io::Error::from(io::ErrorKind::PermissionDenied),
+                },
+                "cannot inspect /etc/anolisa/register.json",
+            ),
+        ];
+        // The permission cause exists only where the hardening gate does.
+        #[cfg(target_os = "linux")]
+        cases.push((
+            UnreadableRecordCause::Permissions { path, mode: 0o400 },
+            "unexpected permissions 400",
+        ));
+        for (cause, fragment) in cases {
+            let warning = cause.read_warning();
+            assert!(warning.contains(fragment), "warning: {warning}");
+            assert!(
+                warning.ends_with("; treating as INIT"),
+                "warning: {warning}"
+            );
+            let refusal = cause.mutation_reason();
+            assert!(refusal.contains(fragment), "refusal: {refusal}");
+            assert!(!refusal.contains("treating as INIT"), "refusal: {refusal}");
+        }
+    }
+
+    #[test]
+    fn read_paths_still_tolerate_unreadable_records() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        // Corrupt JSON at a valid mode is unreadable on every platform.
+        stage_unreadable(&m, "not valid json {", 0o644);
+
+        // Display paths keep today's tolerant degradation: no panic, no
+        // error, INIT/None for the caller.
+        assert_eq!(m.read_state(), ConsentState::InitFresh);
+        assert_eq!(m.read_link_id(), None);
+
+        // A hardened mode is unreadable-by-policy on Linux — same display
+        // behavior.
+        #[cfg(target_os = "linux")]
+        {
+            stage_unreadable(&m, WITHDRAWN_JSON, 0o400);
+            assert_eq!(m.read_state(), ConsentState::InitFresh);
+            assert_eq!(m.read_link_id(), None);
+        }
     }
 }
