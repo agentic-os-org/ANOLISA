@@ -69,11 +69,18 @@ def _shift_refs(text: str, at: int, delta: int) -> str:
         dollar_row = m.group(3)   # "$" or ""
         row_str = m.group(4)      # e.g. "7"
         row = int(row_str)
+        if not (1 <= col_number(col_part) <= 16384 and 1 <= row <= 1048576):
+            return m.group(0)
+        # LOG10 is a built-in function and also a valid A1 address. Other
+        # cell calls, such as A5(A7), still refer to the cell containing a LAMBDA.
+        if m.group(0) == "LOG10" and text[m.end():].startswith("("):
+            return m.group(0)
         if row >= at:
             row = max(1, row + delta)
         return f"{dollar_col}{col_part}{dollar_row}{row}"
 
-    pattern = r'(\$?)([A-Z]+)(\$?)(\d+)'
+    # A reference cannot be a fragment of a name or scientific constant.
+    pattern = r'(?<![\w.\\?$])(\$?)([A-Z]+)(\$?)(\d+)(?![\w.\\?$!])'
     return re.sub(pattern, replacer, text)
 
 
@@ -88,16 +95,23 @@ def shift_formula(formula: str, at: int, delta: int) -> str:
       B$7      (relative col, absolute — shifts)
       BUT NOT:  B:B  (whole-column reference — left as-is)
 
-    Skips content inside single-quoted sheet name prefixes to avoid
-    corrupting names like 'Budget FY2025' (where FY2025 is NOT a cell ref).
+    Preserves double-quoted strings (including escaped quotes), quoted and
+    unquoted sheet qualifiers, and bracketed tokens. Only complete A1 tokens
+    outside those fragments are shifted; function names and numeric constants
+    are left intact.
 
     Does NOT handle:
       - Named ranges
       - Structured references (Table[@Col])
       - R1C1 notation
     """
-    # Split on quoted sheet names: 'Sheet Name' portions are odd-indexed
-    segments = re.split(r"('[^']*(?:''[^']*)*')", formula)
+    # Protect lexical fragments before looking for references. The whole
+    # sheet qualifier is protected so 3D names such as SHEET5:SHEET7 survive.
+    segments = re.split(
+        r'("(?:[^"]|"")*"|\'(?:[^\']|\'\')*\''
+        r'|(?:\[[^\]]*\])?[\w.$]+(?::[\w.$]+)?!|\[[^\]]*\])',
+        formula,
+    )
     result = []
     for i, seg in enumerate(segments):
         if i % 2 == 1:
