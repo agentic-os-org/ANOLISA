@@ -61,7 +61,10 @@ def _runner_git_info() -> dict[str, Any]:
 
 
 def _manifest_path(output_dir: Path, instance_id: str) -> Path:
-    return output_dir / _INPUT_MANIFESTS_DIR / _safe_manifest_component(instance_id) / "input_manifest.json"
+    # The prefix is for display; the full digest carries raw instance identity.
+    prefix = _safe_manifest_component(instance_id).encode("utf-8")[:48].decode("utf-8", errors="ignore")
+    component = f"instance-{prefix}--{sha256_text(instance_id)}"
+    return output_dir / _INPUT_MANIFESTS_DIR / component / "input_manifest.json"
 
 
 def build_input_manifest(*, agent_name: str, prepared: PreparedAgentRun, manifest_path: Path) -> dict[str, Any]:

@@ -95,7 +95,13 @@ def test_write_input_manifest_records_hashes_and_redacts_openclaw_config(tmp_pat
     ):
         manifest_path = write_input_manifest(tmp_path / "run", agent_name="openclaw", prepared=prepared)
 
-    assert manifest_path == tmp_path / "run" / "input-manifests" / "django__django-1" / "input_manifest.json"
+    assert manifest_path == (
+        tmp_path
+        / "run"
+        / "input-manifests"
+        / f"instance-django__django-1--{_sha256_text('django__django-1')}"
+        / "input_manifest.json"
+    )
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert data["schema_version"] == 1
