@@ -21,28 +21,69 @@ def _key():
             pass
     print("ERROR: No API key. Set DASHSCOPE_API_KEY or configure ~/.openclaw/openclaw.json",file=sys.stderr); sys.exit(1)
 
+def _response_error(context, detail):
+    print(f"ERROR: {context}: {detail}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _response_json(body, context):
+    try:
+        value = json.loads(body)
+    except (json.JSONDecodeError, UnicodeError):
+        _response_error(context, "response is not valid UTF-8 JSON")
+    if not isinstance(value, dict):
+        _response_error(context, "response must be a JSON object")
+    return value
+
+
+def _response_output(response, context):
+    output = response.get("output", {})
+    if not isinstance(output, dict):
+        _response_error(context, "output must be an object")
+    return output
+
+
+def _image_results(value, base64_field, context):
+    if not isinstance(value, list):
+        _response_error(context, "image results must be a list")
+    if not value:
+        return None
+    image = value[0]
+    if not isinstance(image, dict):
+        _response_error(context, "image result must be an object")
+    for field in ("url", base64_field):
+        content = image.get(field)
+        if content is not None and not isinstance(content, str):
+            _response_error(context, f"{field} must be a string")
+    url = image.get("url")
+    encoded = image.get(base64_field)
+    return url or ("b64:" + encoded if encoded else None)
+
+
 def _wanx(prompt, model, size, key):
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
     h = {"Authorization":f"Bearer {key}","Content-Type":"application/json","X-DashScope-Async":"enable"}
     body = {"model":model,"input":{"prompt":prompt},"parameters":{"size":size,"n":1}}
     req = urllib.request.Request(url,json.dumps(body).encode(),h,method="POST")
     try:
-        with urllib.request.urlopen(req,timeout=60) as r: res = json.loads(r.read())
+        with urllib.request.urlopen(req,timeout=60) as r: res = _response_json(r.read(), "image request")
     except urllib.error.HTTPError as e:
         print(f"ERROR: HTTP {e.code} {e.read().decode() if e.readable() else ''}",file=sys.stderr); sys.exit(1)
-    tid = res.get("output",{}).get("task_id")
-    if not tid: print(f"ERROR: {json.dumps(res)}",file=sys.stderr); sys.exit(1)
+    tid = _response_output(res, "image request").get("task_id")
+    if not isinstance(tid, str) or not tid: print(f"ERROR: {json.dumps(res)}",file=sys.stderr); sys.exit(1)
     print(f"Task: {tid}",file=sys.stderr)
     ph = {"Authorization":f"Bearer {key}"}
     for i in range(120):
         time.sleep(2)
         req = urllib.request.Request(f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",headers=ph)
-        with urllib.request.urlopen(req,timeout=30) as r: st = json.loads(r.read())
-        s = st.get("output",{}).get("task_status","")
+        with urllib.request.urlopen(req,timeout=30) as r: st = _response_json(r.read(), "task poll")
+        output = _response_output(st, "task poll")
+        s = output.get("task_status", "")
+        if not isinstance(s, str):
+            _response_error("task poll", "task_status must be a string")
         if s == "SUCCEEDED":
-            rs = st["output"].get("results",[])
-            if rs and rs[0].get("url"): return rs[0]["url"]
-            if rs and rs[0].get("b64_image"): return "b64:"+rs[0]["b64_image"]
+            source = _image_results(output.get("results", []), "b64_image", "task result")
+            if source: return source
         elif s == "FAILED":
             print(f"ERROR: {st['output'].get('message','')}",file=sys.stderr); sys.exit(1)
     print("ERROR: Timeout",file=sys.stderr); sys.exit(1)
@@ -52,11 +93,11 @@ def _compat(prompt, model, size, key, base):
     body = {"model":model,"prompt":prompt,"size":size,"n":1,"response_format":"url"}
     req = urllib.request.Request(f"{base}/images/generations",json.dumps(body).encode(),h,method="POST")
     try:
-        with urllib.request.urlopen(req,timeout=120) as r: res = json.loads(r.read())
+        with urllib.request.urlopen(req,timeout=120) as r: res = _response_json(r.read(), "image request")
     except urllib.error.HTTPError:
         return _wanx(prompt, model, size, key)
-    d = res.get("data",[])
-    if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
+    source = _image_results(res.get("data", []), "b64_json", "image response")
+    if source: return source
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
 
 def _save(src, path):
