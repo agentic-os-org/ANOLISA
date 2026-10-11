@@ -145,6 +145,12 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         _skip()
 
+    # A valid-JSON but non-object payload (array/scalar/null) has no
+    # `tool_name`; take the same silent skip path as undecodable input
+    # instead of raising an unhandled AttributeError.
+    if not isinstance(input_data, dict):
+        _skip()
+
     tool_name = input_data.get("tool_name", "")
     tool_response = input_data.get("tool_response")
     if tool_name in SKIP_TOOLS or tool_response is None:
