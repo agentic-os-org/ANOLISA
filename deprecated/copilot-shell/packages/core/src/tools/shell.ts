@@ -661,8 +661,12 @@ export class ShellTool extends BaseDeclarativeTool<
       }
 
       const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
+      // Containment must run on the resolved path through isSubpath, exactly
+      // like the skills check above: a raw startsWith on the unresolved
+      // parameter accepts sibling prefixes ('/ws-evil' vs workspace '/ws')
+      // and '..' traversal ('/ws/../escape').
       const isWithinWorkspace = workspaceDirs.some((wsDir) =>
-        params.directory!.startsWith(wsDir),
+        isSubpath(wsDir, resolvedDirectoryPath),
       );
 
       if (!isWithinWorkspace) {
