@@ -184,7 +184,7 @@ pub(super) fn render_current_auth_panel<W: Write>(
     output.flush()
 }
 
-pub(super) fn clear_active_auth_panel<W: Write>(
+pub(crate) fn clear_active_auth_panel<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> io::Result<()> {
@@ -210,6 +210,15 @@ pub(super) fn clear_active_auth_panel<W: Write>(
     state.questions.active_panel_height = 0;
     state.questions.active_panel_cursor_row = None;
     state.questions.active_panel_width = None;
+    // When the auth flow is really over (its state is gone — phase changes
+    // keep the state present and repaint their own panel right after this),
+    // a question that queued behind the auth panel takes over the capture
+    // (pending_card_capture). Render it now so the visible card matches the
+    // input owner instead of leaving the user to type against a stale
+    // notice while the bytes feed the hidden question card.
+    if state.auth.state.is_none() {
+        crate::question::runtime::render_pending_user_question(state, output)?;
+    }
     Ok(())
 }
 

@@ -787,11 +787,14 @@ pub(super) fn cancel_auth_panel<W: std::io::Write>(
     if super::ecs_poll::cancel(state, output)? {
         return Ok(());
     }
-    clear_active_auth_panel(state, output)?;
     if let Some(auth) = state.auth.state.as_ref() {
         state.auth.completed_ids.insert(auth.id.clone());
     }
+    // Drop the auth state before clearing the panel so the clear path can
+    // hand the panel (and the capture) to a question that queued behind the
+    // auth flow, rendering it instead of leaving a hidden input owner.
     state.auth.state = None;
+    clear_active_auth_panel(state, output)?;
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     renderer.write_notice_panel(

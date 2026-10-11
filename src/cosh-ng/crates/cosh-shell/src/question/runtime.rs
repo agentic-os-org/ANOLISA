@@ -651,6 +651,29 @@ fn next_question_id(state: &InlineState) -> String {
     format!("q-{}", state.questions.items.len() + 1)
 }
 
+/// Renders the pending (newest unanswered) user question, for when an auth
+/// flow completes and hands the capture back to a question that queued
+/// behind it: the question was recorded while auth owned the panel and was
+/// therefore not rendered, so it must be painted now — what the user sees
+/// has to match where input goes.
+pub(crate) fn render_pending_user_question<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let Some(id) = state.questions.pending_id.clone() else {
+        return Ok(());
+    };
+    let answered = state
+        .questions
+        .items
+        .iter()
+        .any(|question| question.id == id && question.answer.is_some());
+    if answered {
+        return Ok(());
+    }
+    render_user_questions(state, &[id], output)
+}
+
 pub(crate) fn render_user_questions<W: Write>(
     state: &mut InlineState,
     question_ids: &[String],
