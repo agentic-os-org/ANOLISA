@@ -177,7 +177,15 @@ fn run_watcher(
             let timeout = deadline - now;
             match event_rx.recv_timeout(timeout) {
                 Ok(Ok(ev)) => {
-                    classify(&mount, ev, &mut pending_modify, &mut pending_remove);
+                    handle_event(
+                        &mount,
+                        &store,
+                        embedding.as_deref(),
+                        rt_handle.as_ref(),
+                        ev,
+                        &mut pending_modify,
+                        &mut pending_remove,
+                    )?;
                 }
                 Ok(Err(e)) => {
                     if is_overflow(&e) {
@@ -211,6 +219,28 @@ fn run_watcher(
         }
     }
 
+    Ok(())
+}
+
+fn handle_event(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+    ev: notify::Event,
+    pending_modify: &mut HashSet<PathBuf>,
+    pending_remove: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    // notify reports a kernel queue overflow as a successful, pathless
+    // Rescan event, so error handling and path classification cannot catch it.
+    if ev.need_rescan() {
+        tracing::warn!("watcher events lost; triggering full rescan");
+        full_scan(mount, store, embedding, rt_handle)?;
+        pending_modify.clear();
+        pending_remove.clear();
+    } else {
+        classify(mount, ev, pending_modify, pending_remove);
+    }
     Ok(())
 }
 
@@ -535,5 +565,96 @@ fn is_overflow(e: &notify::Error) -> bool {
         }
         notify::ErrorKind::MaxFilesWatch => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ns::Namespace;
+    use notify::event::{Flag, ModifyKind};
+
+    fn setup() -> (tempfile::TempDir, MountPointLite, Arc<Mutex<BM25Store>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = MountPoint::ensure(Namespace::user("tester").unwrap(), tmp.path()).unwrap();
+        let store = Arc::new(Mutex::new(BM25Store::open_in_memory().unwrap()));
+        (tmp, mount.clone_lite(), store)
+    }
+
+    #[test]
+    fn pathless_rescan_recovers_missed_changes_and_discards_pending_events() {
+        let (_tmp, mount, store) = setup();
+        {
+            let mut store = store.lock().unwrap();
+            store
+                .upsert("deleted.md", 0, 20, "cobaltzebra deleted", None)
+                .unwrap();
+            store.upsert_vec("deleted.md", &[1.0, 0.0]).unwrap();
+            store
+                .upsert("changed.md", 0, 20, "cobaltzebra obsolete", None)
+                .unwrap();
+        }
+        std::fs::write(mount.root.join("changed.md"), "heliotrope updated").unwrap();
+        std::fs::write(mount.root.join("created.md"), "heliotrope created").unwrap();
+        // A delete/recreate may straddle overflow; replaying the stale remove
+        // after rebuilding would erase the current file from the fresh index.
+        let mut modified = HashSet::from([mount.root.join("deleted.md")]);
+        let mut removed = HashSet::from([mount.root.join("created.md")]);
+        let event = notify::Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert!(event.paths.is_empty());
+
+        handle_event(
+            &mount,
+            &store,
+            None,
+            None,
+            event,
+            &mut modified,
+            &mut removed,
+        )
+        .unwrap();
+
+        assert!(modified.is_empty());
+        assert!(removed.is_empty());
+        let store = store.lock().unwrap();
+        assert!(store.search("cobaltzebra", 10, false).unwrap().is_empty());
+        assert!(store.search_vec(&[1.0, 0.0], 10).unwrap().is_empty());
+        let mut paths: Vec<_> = store
+            .search("heliotrope", 10, false)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["changed.md", "created.md"]);
+    }
+
+    #[test]
+    fn ordinary_modify_remains_debounced_without_a_full_scan() {
+        let (_tmp, mount, store) = setup();
+        std::fs::write(mount.root.join("changed.md"), "heliotrope updated").unwrap();
+        std::fs::write(mount.root.join("unannounced.md"), "heliotrope unrelated").unwrap();
+        let changed = mount.root.join("changed.md");
+        let mut modified = HashSet::new();
+        let mut removed = HashSet::new();
+        let event =
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(changed.clone());
+
+        handle_event(
+            &mount,
+            &store,
+            None,
+            None,
+            event,
+            &mut modified,
+            &mut removed,
+        )
+        .unwrap();
+
+        assert_eq!(modified, HashSet::from([changed]));
+        assert!(removed.is_empty());
+        assert_eq!(store.lock().unwrap().count().unwrap(), 0);
+        flush(&mount, &store, None, None, &mut modified, &mut removed).unwrap();
+        assert_eq!(store.lock().unwrap().known_paths().unwrap(), ["changed.md"]);
     }
 }
