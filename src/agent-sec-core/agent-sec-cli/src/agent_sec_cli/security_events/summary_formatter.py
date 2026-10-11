@@ -272,7 +272,7 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
                 lines.append(
                     "    Check system status using `agent-sec-cli harden --scan`"
                 )
-    elif scans:
+    elif scans and scans_ok == 0:
         # All scans failed — show the latest error so users aren't left in the dark
         latest_error = scans[0]
         error_msg = _safe_details(latest_error).get("error", "unknown error")
