@@ -449,6 +449,62 @@ describe('IdeClient', () => {
     });
   });
 
+  describe('openDiff', () => {
+    async function connectWithDiffingTools() {
+      const config = { port: '8080' };
+      vi.mocked(fs.promises.readFile).mockResolvedValue(JSON.stringify(config));
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue([]);
+      mockClient.request.mockResolvedValue({
+        tools: [{ name: 'openDiff' }, { name: 'closeDiff' }],
+      });
+
+      const ideClient = await IdeClient.getInstance();
+      await ideClient.connect();
+      return ideClient;
+    }
+
+    it('should reject without leaving an unhandled rejection when the diff request fails', async () => {
+      const ideClient = await connectWithDiffingTools();
+      mockClient.request.mockRejectedValue(new Error('diff request failed'));
+
+      const unhandledRejection = vi.fn();
+      process.on('unhandledRejection', unhandledRejection);
+      try {
+        await expect(
+          ideClient.openDiff('/test/workspace/file.ts', 'new content'),
+        ).rejects.toThrow('diff request failed');
+
+        // Give the event loop a chance to deliver any unhandled rejection.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(unhandledRejection).not.toHaveBeenCalled();
+      } finally {
+        process.removeListener('unhandledRejection', unhandledRejection);
+      }
+    });
+
+    it('should release the diff mutex when the diff request fails', async () => {
+      const ideClient = await connectWithDiffingTools();
+      mockClient.request
+        .mockRejectedValueOnce(new Error('first failure'))
+        .mockRejectedValueOnce(new Error('second failure'));
+
+      await expect(
+        ideClient.openDiff('/test/workspace/file.ts', 'new content'),
+      ).rejects.toThrow('first failure');
+
+      // If the mutex were not released, this second call would hang until
+      // the test times out instead of rejecting.
+      await expect(
+        ideClient.openDiff('/test/workspace/file.ts', 'other content'),
+      ).rejects.toThrow('second failure');
+    });
+  });
+
   describe('authentication', () => {
     it('should connect with an auth token if provided in the discovery file', async () => {
       const authToken = 'test-auth-token';

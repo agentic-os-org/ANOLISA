@@ -233,53 +233,57 @@ export class IdeClient {
   ): Promise<DiffUpdateResult> {
     const release = await this.acquireMutex();
 
-    const promise = new Promise<DiffUpdateResult>((resolve, reject) => {
-      if (!this.client) {
-        // The promise will be rejected, and the finally block below will release the mutex.
-        return reject(new Error('IDE client is not connected.'));
-      }
-      this.diffResponses.set(filePath, resolve);
-      this.client
-        .request(
-          {
-            method: 'tools/call',
-            params: {
-              name: `openDiff`,
-              arguments: {
-                filePath,
-                newContent,
+    // The mutex must be released only after the diff interaction completes.
+    // Await the diff promise in a try/finally so that, on failure, the
+    // rejection is delivered to the caller without also producing an
+    // unhandled rejection from a detached `.finally()` chain (which would
+    // crash SDK hosts and pop the bug-report console in the CLI).
+    try {
+      return await new Promise<DiffUpdateResult>((resolve, reject) => {
+        if (!this.client) {
+          // The promise will be rejected, and the finally block below will release the mutex.
+          return reject(new Error('IDE client is not connected.'));
+        }
+        this.diffResponses.set(filePath, resolve);
+        this.client
+          .request(
+            {
+              method: 'tools/call',
+              params: {
+                name: `openDiff`,
+                arguments: {
+                  filePath,
+                  newContent,
+                },
               },
             },
-          },
-          CallToolResultSchema,
-          { timeout: IDE_REQUEST_TIMEOUT_MS },
-        )
-        .then((parsedResultData) => {
-          if (parsedResultData.isError) {
-            const textPart = parsedResultData.content.find(
-              (part) => part.type === 'text',
-            );
-            const errorMessage =
-              textPart?.text ?? `Tool 'openDiff' reported an error.`;
-            logger.debug(
-              `Request for openDiff ${filePath} failed with isError:`,
-              errorMessage,
-            );
+            CallToolResultSchema,
+            { timeout: IDE_REQUEST_TIMEOUT_MS },
+          )
+          .then((parsedResultData) => {
+            if (parsedResultData.isError) {
+              const textPart = parsedResultData.content.find(
+                (part) => part.type === 'text',
+              );
+              const errorMessage =
+                textPart?.text ?? `Tool 'openDiff' reported an error.`;
+              logger.debug(
+                `Request for openDiff ${filePath} failed with isError:`,
+                errorMessage,
+              );
+              this.diffResponses.delete(filePath);
+              reject(new Error(errorMessage));
+            }
+          })
+          .catch((err) => {
+            logger.debug(`Request for openDiff ${filePath} failed:`, err);
             this.diffResponses.delete(filePath);
-            reject(new Error(errorMessage));
-          }
-        })
-        .catch((err) => {
-          logger.debug(`Request for openDiff ${filePath} failed:`, err);
-          this.diffResponses.delete(filePath);
-          reject(err);
-        });
-    });
-
-    // Ensure the mutex is released only after the diff interaction is complete.
-    promise.finally(release);
-
-    return promise;
+            reject(err);
+          });
+      });
+    } finally {
+      release();
+    }
   }
 
   /**
