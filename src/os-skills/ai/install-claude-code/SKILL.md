@@ -18,6 +18,16 @@ lifecycle: usage
 
 ## Installation Workflow
 
+To inspect the bundled installer's options before running it:
+
+```bash
+bash <skill-dir>/scripts/install-claude-code.sh --help
+```
+
+`-h`/`--help` exits 0 before installation or configuration. The supported install
+flags are `--config` and `--skip-tokenless`; unsupported arguments exit 2 with
+usage on stderr before installation begins, even when combined with help.
+
 Copy this checklist and track progress:
 
 ```

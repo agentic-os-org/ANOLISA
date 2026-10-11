@@ -49,6 +49,13 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## Claude Code Installer
+
+Inspect the installer's options with `bash SKILL_DIR/scripts/install-claude-code.sh --help`,
+where `SKILL_DIR` is the installed `install-claude-code` skill directory. Help and
+invalid arguments exit before installation begins. See the
+[installer reference](../../docs/user-guide/en/user-entrypoint/os-skills.md#claude-code-installer).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
