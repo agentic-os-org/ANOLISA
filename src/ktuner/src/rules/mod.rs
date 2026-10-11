@@ -5566,14 +5566,40 @@ fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 }
 
 fn eval_tcp_thin_linear_timeouts(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_thin_linear_timeouts";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_thin_linear_timeouts_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_thin_linear_timeouts",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_thin_linear_timeouts`] (the `eval_*_at`
+/// idiom).
+///
+/// Through v5.12 net/ipv4/sysctl_net_ipv4.c registered
+/// tcp_thin_linear_timeouts as a plain `proc_dointvec` int with no min/max, so
+/// -1 is a legal, persistent value there, and the only consumer is a bare
+/// truthiness test (net/ipv4/tcp_timer.c: `tp->thin_lto ||
+/// READ_ONCE(net->ipv4.sysctl_tcp_thin_linear_timeouts)` arms the linear
+/// timeouts). The unsigned reader parsed "-1" to Err and fell back to 0 - the
+/// *disabled* value - so the `!= 0` gate withheld the finding on a host that
+/// runs the mode. Since v5.13 the knob is u8 (`proc_dou8vec_minmax`, no
+/// extra1/extra2), where negatives are rejected at write time; the signed
+/// reader keeps the truthiness contract correct on both registrations.
+fn eval_tcp_thin_linear_timeouts_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_thin_linear_timeouts".to_string(),
@@ -6839,18 +6865,44 @@ fn eval_tcp_max_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 }
 
 fn eval_tcp_retrans_collapse(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_retrans_collapse";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_retrans_collapse_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_retrans_collapse",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_retrans_collapse`] (the `eval_*_at`
+/// idiom).
+///
+/// The knob is documented as a BOOLEAN (Documentation/networking/
+/// ip-sysctl.rst) and the kernel tests it as one: net/ipv4/tcp_output.c
+/// `if (!READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_retrans_collapse)) return;`
+/// only lets 0 mean disabled, so every non-zero value is on. Through v5.12 it
+/// was a plain `proc_dointvec` int with no min/max in
+/// net/ipv4/sysctl_net_ipv4.c (-1 legal); from v5.13 it is u8
+/// `proc_dou8vec_minmax` with no extra1/extra2, which still accepts 0..255.
+/// Both registrations therefore hold values the `== 1` comparison drops, so
+/// the signed read and the truthiness gate together ask for 0 whenever the
+/// feature is on, whatever the stored number is.
+fn eval_tcp_retrans_collapse_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_retrans_collapse".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "TCP 重传合并已启用，可能将多个小段合并为一个大段导致接收端解析异常，建议关闭"
                 .to_string(),
@@ -7408,18 +7460,42 @@ fn eval_tcp_autocorking(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_tcp_workaround_signed_windows(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_workaround_signed_windows";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_workaround_signed_windows_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_workaround_signed_windows",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_workaround_signed_windows`] (the
+/// `eval_*_at` idiom).
+///
+/// Same registration history and same kernel reading as
+/// [`eval_tcp_retrans_collapse_at`]: a documented BOOLEAN whose consumers in
+/// net/ipv4/tcp_output.c only test truthiness (`if (READ_ONCE(...))` caps the
+/// offered window at MAX_TCP_WINDOW, both on the initial window and on every
+/// window update), so any non-zero value means the workaround is on. Through
+/// v5.12 it was a plain `proc_dointvec` int (-1 legal), from v5.13 a u8
+/// `proc_dou8vec_minmax` with no bounds, so the `== 1` comparison used to drop
+/// both -1 and 2..255 and never asked the host to turn the workaround off.
+fn eval_tcp_workaround_signed_windows_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
-    if current == 1 {
+    let current = read_sysctl_i64(path);
+    if current != 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_workaround_signed_windows".to_string(),
-            current_value: "1".to_string(),
+            current_value: current.to_string(),
             recommended_value: "0".to_string(),
             reason: "此兼容选项限制 TCP 窗口大小，现代系统不需要，关闭可恢复大窗口传输".to_string(),
             confidence: Confidence::Medium,
@@ -14551,6 +14627,152 @@ mod tests {
                 assert_eq!(recs[0].recommended_value, "1");
             }
         }
+    }
+
+    #[test]
+    fn tcp_thin_linear_timeouts_reads_truthiness_signed() {
+        // The knob was a plain proc_dointvec int with no min/max through
+        // v5.12 (net/ipv4/sysctl_net_ipv4.c), so "-1" is a legal, persistent
+        // value, and tcp_timer.c consumes it as a bare truthiness test
+        // (`tp->thin_lto || READ_ONCE(...sysctl_tcp_thin_linear_timeouts)`).
+        // The unsigned reader parsed "-1" to Err and fell back to 0, the
+        // disabled value, so the `!= 0` gate withheld the finding on a host
+        // that runs the mode. From v5.13 the knob is a u8
+        // (proc_dou8vec_minmax, no bounds), where 2..255 stay legal.
+        let path = std::env::temp_dir().join(format!("ktuner-tcp-thin-lto-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_thin_linear_timeouts_at(&info, &mut recs, path_str, true);
+            assert_eq!(checked, 1);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_thin_linear_timeouts");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: every non-zero value enables the mode"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "-1").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_thin_linear_timeouts_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_thin_linear_timeouts"),
+            "a host without listeners is not recommended the linear timeouts"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_retrans_collapse_reads_truthiness_signed() {
+        // Same registration history as the other tcp option bools: a plain
+        // proc_dointvec int with no min/max through v5.12 (-1 legal), a u8
+        // proc_dou8vec_minmax with no bounds from v5.13 (0..255), and a
+        // truthiness test in tcp_output.c
+        // (`if (!READ_ONCE(...sysctl_tcp_retrans_collapse)) return;`) that
+        // makes every non-zero value "on". The `== 1` comparison dropped
+        // -1 and 2..255, so the host was never asked to turn the collapse
+        // off, and the finding that did fire hard-coded "1" as the current
+        // value.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner-tcp-retrans-collapse-{}",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_retrans_collapse_at(&info, &mut recs, path_str, true);
+            assert_eq!(checked, 1);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_retrans_collapse");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: only 0 disables the collapse"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "1").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_retrans_collapse_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_retrans_collapse"),
+            "a host without listeners is not recommended the collapse"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_workaround_signed_windows_reads_truthiness_signed() {
+        // The workaround is a documented BOOLEAN whose consumers in
+        // tcp_output.c only test truthiness (`if (READ_ONCE(...sysctl_tcp_
+        // workaround_signed_windows))` caps the offered window), so any
+        // non-zero value means it is on. The registration is the same as
+        // tcp_retrans_collapse's (plain int through v5.12, unbounded u8 from
+        // v5.13), and the `== 1` comparison dropped the same -1 and 2..255.
+        let path = std::env::temp_dir().join(format!(
+            "ktuner-tcp-workaround-signed-windows-{}",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", true), ("0", false), ("1", true), ("2", true)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_workaround_signed_windows_at(&info, &mut recs, path_str, true);
+            assert_eq!(checked, 1);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_workaround_signed_windows");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: only 0 disables the workaround"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "0");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "1").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_workaround_signed_windows_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_workaround_signed_windows"),
+            "a host without listeners is not recommended the workaround"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
