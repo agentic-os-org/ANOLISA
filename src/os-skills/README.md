@@ -48,6 +48,7 @@ A curated collection of operational skills for AI Agents, covering system admini
 
 ### Other
 - **cosh-guide** - Copilot Shell user guide
+- **xlsx** — Analyze spreadsheet exports; `xlsx_reader.py --delimiter ";"` reads custom CSV/TSV separators
 
 ## Skill Format
 

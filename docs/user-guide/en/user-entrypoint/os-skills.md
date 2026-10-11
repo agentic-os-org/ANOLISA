@@ -84,6 +84,25 @@ confirm_destructive = true
 
 ---
 
+## CSV and TSV separators
+
+Use the `xlsx` skill reader for delimited exports that use a separator other
+than the default comma (`.csv`) or tab (`.tsv`):
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py regional.csv --delimiter ';' --json
+```
+
+Replace `SKILL_DIR` with the installed `others/xlsx` directory. `--delimiter`
+accepts one literal character, including a tab or `|`, and overrides the file
+extension's default separator. CSV quoting still protects separators inside
+quoted cell text. Empty values, multiple characters, newline, carriage return,
+and NUL are rejected. The option applies only to CSV/TSV; Excel input rejects
+it. Encoding fallback, reports, data quality checks, and statistics continue to
+use the parsed columns. The reader does not modify the source file.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
