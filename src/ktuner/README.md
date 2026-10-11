@@ -10,12 +10,14 @@ Agent-facing kernel parameter tuning engine for ANOLISA. Evaluates 207 rules aga
 # Diagnose — output score + recommendations
 ktuner check
 ktuner check --category net
+ktuner check --category net --category mem   # repeatable: keep the union
 ktuner check --conservative    # high-confidence only
 
 # Apply recommendations (requires root)
 sudo ktuner tune --dry-run     # preview, no changes
 sudo ktuner tune               # apply all
 sudo ktuner tune --conservative
+sudo ktuner tune --category net --category mem   # apply only these categories
 sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
 
 # Fix a single parameter (requires root)
@@ -93,6 +95,13 @@ the tuned values on the next boot, and a ledger that survived keeps
   "workload": "mixed"
 }
 ```
+
+`--category` is repeatable: every value keeps its own category (the same
+names as before), and the entries shown are the union of the named
+categories, so `check --category net --category mem` is one run over both —
+and `tune --category net --category mem` plans the same union. Repeating the
+aliases of one category (`net`, `network`, `网络`) keeps each entry once, and
+a value that names no category is rejected (exit 2) instead of being ignored.
 
 ### tune output
 

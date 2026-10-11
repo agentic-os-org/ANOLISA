@@ -51,6 +51,7 @@ sudo install -o root -g root -m 755 target/release/ktuner /usr/local/bin/ktuner
 # 诊断 —— 只读，无需 root
 ktuner check                   # 分数 + 所有建议
 ktuner check --category net    # 仅某一类别
+ktuner check --category net --category mem   # 可重复，取并集
 ktuner check --conservative    # 仅高置信度建议
 
 # 预览改动但不应用（dry-run）

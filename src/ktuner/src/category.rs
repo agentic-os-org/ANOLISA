@@ -97,16 +97,15 @@ pub fn validate_category(cat: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Keep only the recommendations whose parameter belongs to `cat`. The
-/// mem/io/cpu retention predicates are derived from `param_subcategory` — the
-/// same classifier that labels every recommendation in `ktuner check` output
-/// and buckets `RecCounts::from_recs` — so `--category X` never drops a
-/// recommendation the engine itself labels `X`, nor keeps one it labels
+/// Whether `r` belongs to the category `cat_lower` names, already lowercased.
+/// The mem/io/cpu retention predicates are derived from `param_subcategory` —
+/// the same classifier that labels every recommendation in `ktuner check`
+/// output and buckets `RecCounts::from_recs` — so a category never drops a
+/// recommendation the engine itself labels with it, nor keeps one it labels
 /// differently. The `Category::Security` guard mirrors `RecCounts::from_recs`:
-/// a security recommendation only ever surfaces under `--category security`.
-pub fn filter_by_category(mut recs: Vec<Recommendation>, cat: &str) -> Vec<Recommendation> {
-    let cat_lower = cat.to_lowercase();
-    recs.retain(|r| match cat_lower.as_str() {
+/// a security recommendation only ever surfaces under `security`.
+fn category_matches(r: &Recommendation, cat_lower: &str) -> bool {
+    match cat_lower {
         "network" | "net" | "网络" => {
             r.category != Category::Security
                 && (r.param.starts_with("net.") || r.param.contains("conntrack"))
@@ -122,7 +121,29 @@ pub fn filter_by_category(mut recs: Vec<Recommendation>, cat: &str) -> Vec<Recom
         }
         "security" | "sec" | "安全" => r.category == Category::Security,
         _ => true,
-    });
+    }
+}
+
+/// Keep only the recommendations whose parameter belongs to `cat`. See
+/// `category_matches` for the per-category predicates.
+pub fn filter_by_category(mut recs: Vec<Recommendation>, cat: &str) -> Vec<Recommendation> {
+    let cat_lower = cat.to_lowercase();
+    recs.retain(|r| category_matches(r, &cat_lower));
+    recs
+}
+
+/// Keep only the recommendations belonging to any of `cats`: several
+/// `--category` values filter to the union, so an entry surfaces when at
+/// least one named category keeps it. An alias repeated across the values
+/// keeps nothing twice (the union has no duplicates), and an empty slice
+/// keeps every recommendation — a command without `--category` must not
+/// filter. Values are validated by `validate_category` before they get here.
+pub fn filter_by_categories(mut recs: Vec<Recommendation>, cats: &[String]) -> Vec<Recommendation> {
+    if cats.is_empty() {
+        return recs;
+    }
+    let lowered: Vec<String> = cats.iter().map(|cat| cat.to_lowercase()).collect();
+    recs.retain(|r| lowered.iter().any(|cat| category_matches(r, cat)));
     recs
 }
 
@@ -334,6 +355,83 @@ mod tests {
         );
         assert_eq!(
             filter_by_category(vec![rec("kernel.sched_latency_ns")], "cpu").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn filter_by_categories_keeps_the_union() {
+        // `--category net --category mem` must keep both categories' entries
+        // and nothing else: an agent that names two categories reads the
+        // union, not the last value and not the intersection.
+        let recs = vec![
+            rec("net.core.somaxconn"),
+            rec("vm.swappiness"),
+            rec("kernel.sched_latency_ns"),
+            rec("fs.file-max"),
+        ];
+        let filtered = filter_by_categories(recs, &["net".to_string(), "mem".to_string()]);
+        let params: Vec<&str> = filtered.iter().map(|r| r.param.as_str()).collect();
+        assert_eq!(params, ["net.core.somaxconn", "vm.swappiness"]);
+    }
+
+    #[test]
+    fn filter_by_categories_empty_slice_keeps_everything() {
+        // A command without --category passes no values; the filter must be a
+        // no-op rather than dropping every recommendation.
+        let recs = vec![rec("net.core.somaxconn"), rec("vm.swappiness")];
+        let unfiltered = filter_by_categories(recs, &[]);
+        assert_eq!(unfiltered.len(), 2);
+        assert_eq!(unfiltered[0].param, "net.core.somaxconn");
+        assert_eq!(unfiltered[1].param, "vm.swappiness");
+    }
+
+    #[test]
+    fn filter_by_categories_alias_repeats_count_once() {
+        // `net`, `network` and `网络` name the same category: repeating the
+        // aliases must keep exactly the single-value result, once.
+        let recs = vec![
+            rec("net.core.somaxconn"),
+            rec("vm.swappiness"),
+            rec("kernel.dmesg_restrict"),
+        ];
+        let single = filter_by_category(recs.clone(), "net");
+        let repeated = filter_by_categories(
+            recs,
+            &["net".to_string(), "network".to_string(), "网络".to_string()],
+        );
+        let single_params: Vec<&str> = single.iter().map(|r| r.param.as_str()).collect();
+        let repeated_params: Vec<&str> = repeated.iter().map(|r| r.param.as_str()).collect();
+        assert_eq!(repeated_params, single_params);
+    }
+
+    #[test]
+    fn filter_by_categories_security_only_under_security() {
+        // The Category::Security guard holds for the union too: a security
+        // recommendation never surfaces from a perf-only category value,
+        // whether that value stands alone or shares the union with another.
+        let mut security = rec("kernel.dmesg_restrict");
+        security.category = Category::Security;
+        assert!(filter_by_categories(vec![security.clone()], &["net".to_string()]).is_empty());
+        assert!(filter_by_categories(
+            vec![security.clone()],
+            &["net".to_string(), "mem".to_string()]
+        )
+        .is_empty());
+        assert_eq!(
+            filter_by_categories(vec![security.clone()], &["sec".to_string()]).len(),
+            1
+        );
+        assert_eq!(
+            filter_by_categories(
+                vec![security.clone()],
+                &["net".to_string(), "安全".to_string()]
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            filter_by_categories(vec![security], &["security".to_string()]).len(),
             1
         );
     }

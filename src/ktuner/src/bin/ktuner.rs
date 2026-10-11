@@ -16,8 +16,9 @@ struct Cli {
 enum Commands {
     /// Diagnose system and output tuning recommendations
     Check {
+        /// Keep only this category; may be repeated (the union is kept)
         #[arg(long)]
-        category: Option<String>,
+        category: Vec<String>,
         #[arg(long)]
         conservative: bool,
     },
@@ -27,8 +28,9 @@ enum Commands {
         dry_run: bool,
         #[arg(long)]
         conservative: bool,
+        /// Keep only this category; may be repeated (the union is kept)
         #[arg(long)]
-        category: Option<String>,
+        category: Vec<String>,
         /// Apply everything but this parameter; may be repeated
         #[arg(long)]
         exclude: Vec<String>,
@@ -83,15 +85,15 @@ fn main() {
     };
     let result = match cli.command {
         Commands::Check {
-            category: cat,
+            category: cats,
             conservative,
-        } => cmd_check(cat, conservative),
+        } => cmd_check(cats, conservative),
         Commands::Tune {
             dry_run,
             conservative,
-            category: cat,
+            category: cats,
             exclude,
-        } => cmd_tune(dry_run, conservative, cat, exclude),
+        } => cmd_tune(dry_run, conservative, cats, exclude),
         Commands::Fix { param, dry_run } => cmd_fix(&param, dry_run),
         Commands::Why { param } => cmd_why(&param),
         Commands::Rollback { params, list } => cmd_rollback(&params, list),
@@ -152,9 +154,9 @@ fn print_error_json(body: &serde_json::Value) {
     let _ = std::io::Write::write_fmt(&mut stderr, format_args!("{rendered}\n"));
 }
 
-fn cmd_check(cat: Option<String>, conservative: bool) -> Result<i32> {
-    if let Some(ref c) = cat {
-        category::validate_category(c)?;
+fn cmd_check(cats: Vec<String>, conservative: bool) -> Result<i32> {
+    for cat in &cats {
+        category::validate_category(cat)?;
     }
     let info = detect::gather_system_info()?;
     let eval = evaluate(&info)?;
@@ -163,8 +165,8 @@ fn cmd_check(cat: Option<String>, conservative: bool) -> Result<i32> {
     let detected_services = services::detect_services(&info);
 
     let mut recs = eval.recommendations.clone();
-    if let Some(ref c) = cat {
-        recs = category::filter_by_category(recs, c);
+    if !cats.is_empty() {
+        recs = category::filter_by_categories(recs, &cats);
     }
     if conservative {
         recs.retain(|r| r.confidence == rules::Confidence::High);
@@ -486,7 +488,7 @@ fn tune_output(
 fn cmd_tune(
     dry_run: bool,
     conservative: bool,
-    cat: Option<String>,
+    cats: Vec<String>,
     exclude: Vec<String>,
 ) -> Result<i32> {
     if !dry_run {
@@ -496,14 +498,14 @@ fn cmd_tune(
         }
     }
 
-    if let Some(ref c) = cat {
-        category::validate_category(c)?;
+    for cat in &cats {
+        category::validate_category(cat)?;
     }
     let (_info, eval) = gather()?;
     let score_before = eval.score();
     let mut recs = eval.recommendations;
-    if let Some(ref c) = cat {
-        recs = category::filter_by_category(recs, c);
+    if !cats.is_empty() {
+        recs = category::filter_by_categories(recs, &cats);
     }
     if conservative {
         recs.retain(|r| r.confidence == rules::Confidence::High);
@@ -1896,6 +1898,50 @@ mod tests {
         let (output, code) = tune_short_circuit(&[], 0, &[]).expect("short-circuits");
         assert_eq!(code, 0);
         assert_eq!(output["status"], json!("optimal"));
+    }
+
+    #[test]
+    fn tune_short_circuit_empty_after_multiple_categories_is_optimal() {
+        // Same rule for the union: when `--category net --category mem` keeps
+        // nothing (a host whose only recommendations are io/cpu), the run is
+        // genuinely optimal — not "blocked" — and keeps the same output.
+        let recs = vec![
+            rec("fs.file-max", true),
+            rec("kernel.sched_latency_ns", true),
+        ];
+        let in_scope =
+            ktuner_engine::category::filter_by_categories(recs, &["net".into(), "mem".into()]);
+        assert!(in_scope.is_empty());
+        let (output, code) = tune_short_circuit(&in_scope, 0, &[]).expect("short-circuits");
+        assert_eq!(code, 0);
+        assert_eq!(output, json!({ "status": "optimal", "applied": 0 }));
+    }
+
+    #[test]
+    fn tune_short_circuit_blocked_after_multiple_categories() {
+        // When the union keeps entries but every one is unwritable, the run
+        // must answer "blocked" with the counts of the union-filtered set —
+        // the same body a single --category would produce for these entries.
+        let recs = vec![
+            rec("net.core.somaxconn", false),
+            rec("vm.swappiness", false),
+            rec("fs.file-max", false),
+        ];
+        let in_scope =
+            ktuner_engine::category::filter_by_categories(recs, &["network".into(), "内存".into()]);
+        assert_eq!(in_scope.len(), 2);
+        let (output, code) = tune_short_circuit(&in_scope, 0, &[]).expect("short-circuits");
+        assert_eq!(code, 1);
+        assert_eq!(output["status"], json!("blocked"));
+        assert_eq!(output["recommendations"], json!(2));
+        assert_eq!(output["blocked_unwritable"], json!(2));
+        assert_eq!(
+            output["would_skip"],
+            json!([
+                {"param": "net.core.somaxconn", "reason": "unwritable"},
+                {"param": "vm.swappiness", "reason": "unwritable"}
+            ])
+        );
     }
 
     struct CurrentFile(PathBuf);

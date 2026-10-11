@@ -10,12 +10,14 @@
 # 诊断 — 输出评分和建议
 ktuner check
 ktuner check --category net
+ktuner check --category net --category mem   # 可重复：取并集
 ktuner check --conservative    # 仅高置信度
 
 # 应用建议（需要 root 权限）
 sudo ktuner tune --dry-run     # 预览，不做实际变更
 sudo ktuner tune               # 全部应用
 sudo ktuner tune --conservative
+sudo ktuner tune --category net --category mem   # 只应用这些分类
 sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一项
 
 # 修正单个参数（需要 root 权限）
@@ -90,6 +92,12 @@ sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，�
   "workload": "mixed"
 }
 ```
+
+`--category` 可重复：每个值各自保留其分类（名称与从前相同），展示的条目
+是所给分类的并集，因此 `check --category net --category mem` 一次覆盖两者
+——`tune --category net --category mem` 规划的是同一个并集。同一分类的别名
+（`net`、`network`、`网络`）重复给出时每个条目只保留一次；某个值不是已知
+分类时报错（exit 2）而不是被忽略。
 
 ### tune 输出
 

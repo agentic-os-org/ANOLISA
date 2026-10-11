@@ -53,6 +53,7 @@ The examples below assume `ktuner` is on your `PATH`.
 # Diagnose — read-only, no root required
 ktuner check                   # score + all recommendations
 ktuner check --category net    # limit to one category
+ktuner check --category net --category mem   # categories may be repeated; the union is kept
 ktuner check --conservative    # high-confidence recommendations only
 
 # Preview changes without applying (dry-run)
