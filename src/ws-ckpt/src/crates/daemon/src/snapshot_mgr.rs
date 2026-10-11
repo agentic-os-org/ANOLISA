@@ -931,6 +931,22 @@ fn snapshot_resolve_error_response(reference: &str, err: ResolveError) -> Respon
     }
 }
 
+/// Sort retention candidates oldest-first for keep-newest selection.
+///
+/// Ties on `created_at` are broken by snapshot id so equal-timestamp
+/// snapshots — the normal case for scripted agents checkpointing in the
+/// same instant — resolve deterministically: the greatest id survives,
+/// matching the `ListKey` direction the paginated listing uses. Sorting
+/// by timestamp alone left tie order to `HashMap` iteration, i.e. a
+/// per-process lottery over which snapshots a `keep = n` cleanup
+/// deletes. Shared by `cleanup_snapshots` and the scheduler's
+/// `auto_cleanup` so both selectors can never drift apart.
+pub(crate) fn sort_retention_candidates(
+    candidates: &mut [(String, chrono::DateTime<chrono::Utc>)],
+) {
+    candidates.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+}
+
 /// Cleanup old snapshots for a workspace, keeping the most recent `keep` unpinned ones.
 pub async fn cleanup_snapshots(
     state: &Arc<DaemonState>,
@@ -970,7 +986,7 @@ pub async fn cleanup_snapshots(
             .filter(|(_, meta)| !meta.pinned && !meta.missing)
             .map(|(id, meta)| (id.clone(), meta.created_at))
             .collect();
-        unpinned.sort_by_key(|(_, ts)| *ts);
+        sort_retention_candidates(&mut unpinned);
 
         let to_remove_ids: Vec<String> = if unpinned.len() > keep {
             unpinned[..unpinned.len() - keep]
@@ -2042,6 +2058,57 @@ mod tests {
         };
 
         assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn retention_ties_break_deterministically_by_id() {
+        // Equal created_at is the normal case for scripted agents
+        // checkpointing in the same instant. Two fresh collections over the
+        // same index must sort identically (no HashMap-seed lottery), and
+        // keep=1 must retain the greatest id — the snapshot the
+        // ListKey-ordered listing shows as newest.
+        let ts = Utc::now();
+        let mut index = SnapshotIndex::new(PathBuf::from("/ws"));
+        for i in 0..12 {
+            index
+                .snapshots
+                .insert(format!("snap-{i:03}"), make_snapshot_meta_at(false, ts));
+        }
+        let collect = || {
+            let mut unpinned: Vec<(String, chrono::DateTime<Utc>)> = index
+                .snapshots
+                .iter()
+                .filter(|(_, meta)| !meta.pinned && !meta.missing)
+                .map(|(id, meta)| (id.clone(), meta.created_at))
+                .collect();
+            sort_retention_candidates(&mut unpinned);
+            unpinned
+        };
+        let a = collect();
+        let b = collect();
+        assert_eq!(a, b, "tie order must be deterministic across runs");
+        assert_eq!(a[0].0, "snap-000", "oldest-first by id among ties");
+        let keep = 1usize;
+        let survivors = &a[a.len() - keep..];
+        assert_eq!(
+            survivors[0].0, "snap-011",
+            "keep-newest must retain the greatest id among ties"
+        );
+    }
+
+    #[test]
+    fn retention_distinct_timestamps_ignore_ids() {
+        // Non-tie behavior is unchanged: strict timestamp order, ids never
+        // consulted when created_at differs.
+        let now = Utc::now();
+        let mut candidates: Vec<(String, chrono::DateTime<Utc>)> = vec![
+            ("b".to_string(), now - Duration::seconds(20)),
+            ("a".to_string(), now - Duration::seconds(10)),
+            ("c".to_string(), now - Duration::seconds(30)),
+        ];
+        sort_retention_candidates(&mut candidates);
+        let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "b", "a"]);
     }
 
     #[test]

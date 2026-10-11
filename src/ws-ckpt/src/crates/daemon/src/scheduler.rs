@@ -126,7 +126,7 @@ async fn auto_cleanup(state: &DaemonState) {
                 .filter(|(_, meta)| !meta.pinned && !meta.missing)
                 .map(|(id, meta)| (id.clone(), meta.created_at))
                 .collect();
-            unpinned.sort_by_key(|(_, ts)| *ts);
+            crate::snapshot_mgr::sort_retention_candidates(&mut unpinned);
 
             let to_remove: Vec<String> = match &retention {
                 CleanupRetention::Count(n) => {
