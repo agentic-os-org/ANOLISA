@@ -274,9 +274,17 @@ fn update_export_state(root: &Path, error: Option<CoshError>) {
         code: format!("{:?}", error.code).to_ascii_lowercase(),
         occurred_at: Utc::now(),
     });
-    let _ = update_state(root, AuditSettings::default(), |state| {
+    // A failed persist leaves the health diagnostics showing a stale
+    // export error — one that was actually cleared, or a missing one —
+    // so surface it instead of dropping it silently.
+    if let Err(persist_error) = update_state(root, AuditSettings::default(), |state| {
         state.last_export_error = last_export_error;
-    });
+    }) {
+        tracing::warn!(
+            target: "cosh_audit",
+            "failed to persist export health state: {persist_error}"
+        );
+    }
 }
 
 fn collect_events(

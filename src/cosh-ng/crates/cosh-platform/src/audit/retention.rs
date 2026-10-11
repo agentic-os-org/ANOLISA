@@ -148,10 +148,18 @@ pub fn schedule_retention(root: PathBuf, settings: AuditSettings, component: Aud
                 });
             }
         }
-        let _ = update_state(&root, settings, |current| {
+        // A failed persist leaves the health diagnostics showing stale
+        // retention state — an old error that was actually cleared, or a
+        // missing one — so surface it instead of dropping it silently.
+        if let Err(error) = update_state(&root, settings, |current| {
             current.last_retention_error = state.last_retention_error;
             current.last_retention_success = state.last_retention_success;
-        });
+        }) {
+            tracing::warn!(
+                target: "cosh_audit",
+                "failed to persist retention health state: {error}"
+            );
+        }
     });
 }
 
