@@ -14,7 +14,7 @@ use super::{
     record_visible_personal_impressions, render_pending_recommendation_notice,
     run_bootstrap_path_probe, startup_suggestion_mode, visible_personal_candidates,
     write_startup_suggestion_card, BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind,
-    StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT, LOGIN_PROBE_IO,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -953,10 +953,15 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
 
 #[test]
 fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
+    // Login startup probes must run under the supervised helper (Pty) so a
+    // profile-started daemon cannot escape the probe as an unmanaged orphan;
+    // the non-login `-lic` Bash probe already established that contract.
+    // The supervisor is Linux-only, so other platforms keep the pipes probe
+    // instead of a supervised probe that can never succeed there.
     let (_, bash_login) = bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).unwrap();
     assert_eq!(bash_login.len(), 1);
     assert_eq!(bash_login[0].flags, "-lic");
-    assert_eq!(bash_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert_eq!(bash_login[0].io, LOGIN_PROBE_IO);
 
     let (_, zsh_non_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, false, true).unwrap();
     assert_eq!(zsh_non_login.len(), 1);
@@ -965,7 +970,7 @@ fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
     let (_, zsh_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, true, true).unwrap();
     assert_eq!(zsh_login.len(), 1);
     assert_eq!(zsh_login[0].flags, "-lic");
-    assert_eq!(zsh_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert_eq!(zsh_login[0].io, LOGIN_PROBE_IO);
 }
 
 #[test]
@@ -1018,6 +1023,27 @@ fn bash_login_probe_timeout_preserves_non_login_path() {
     let rc = format!("{}/rc-only", home.path().display());
     assert!(merged.split(':').any(|entry| entry == rc));
     assert!(merged.find(&rc).unwrap() < merged.find("/usr/bin").unwrap());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn login_probe_supplies_terminal_eof_to_interactive_profile_reads() {
+    let home = tempfile::tempdir().unwrap();
+    // A login profile that reads from the terminal (the `read` builtin, an
+    // `ssh-add` passphrase prompt, ...) must not stall the probe until
+    // BOOTSTRAP_PATH_PROBE_TIMEOUT: the PTY path queues terminal EOF the way
+    // the pipes path fed the probe /dev/null, so the read fails fast and the
+    // profile continues to its PATH.
+    std::fs::write(
+        home.path().join(".bash_profile"),
+        "read probe_answer\nprintf 'read-exit=%s\\n' \"$?\" >&2\n",
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let path = probe_bash_path(home.path(), "-lic", LOGIN_PROBE_IO).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(path.contains("/usr/bin"), "{path}");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -300,11 +300,21 @@ fn start_shell_session(
     })
 }
 
+/// Terminal EOF (Ctrl-D, `VEOF`) bytes queued on the probe master right after
+/// spawn. Login startup files sometimes read from the terminal (`read`,
+/// `ssh-add` passphrase prompts, ...); the pipes-based probe fed the child
+/// `/dev/null`, so those reads returned EOF immediately. Queueing EOF keeps
+/// that contract on the PTY instead of letting an interactive profile stall
+/// until `BOOTSTRAP_PATH_PROBE_TIMEOUT`. Several bytes are queued so a profile
+/// that prompts more than once still sees EOF on every read, matching an
+/// inexhaustible `/dev/null`; probes that never read are unaffected.
+const PROFILE_PROBE_EOF_BYTES: [u8; 8] = [0x04; 8];
+
 pub(crate) fn spawn_profile_probe_on_pty(
     mut command: Command,
     winsize: &Winsize,
 ) -> io::Result<(Child, File)> {
-    let (master, slave) = open_pty_pair(Some(winsize))?;
+    let (mut master, slave) = open_pty_pair(Some(winsize))?;
     set_close_on_exec(master.as_raw_fd())?;
     set_interactive_terminal_baseline(slave.as_raw_fd())?;
     command
@@ -329,6 +339,11 @@ pub(crate) fn spawn_profile_probe_on_pty(
     }
     let child = command.spawn()?;
     drop(command);
+    // The probe never needs interactive input, so hand it terminal EOF
+    // immediately: a login profile that reads must fail fast the way it did
+    // under the pipes probe's `/dev/null` stdin, not block until the timeout.
+    // Best effort — an unwritable master only degrades to the old stall.
+    let _ = master.write_all(&PROFILE_PROBE_EOF_BYTES);
     Ok((child, master))
 }
 

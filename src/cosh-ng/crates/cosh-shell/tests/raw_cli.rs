@@ -54,6 +54,9 @@ mod heavy;
 mod host_executed;
 #[path = "raw_cli/i18n.rs"]
 mod i18n;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/login_probe_containment.rs"]
+mod login_probe_containment;
 #[path = "raw_cli/memory_hook.rs"]
 mod memory_hook;
 #[path = "raw_cli/mode.rs"]
