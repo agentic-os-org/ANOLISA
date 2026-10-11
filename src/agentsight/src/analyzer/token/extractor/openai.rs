@@ -118,6 +118,29 @@ pub fn extract_response_content(
                         }
                     }
                 }
+
+                // SysOM's Copilot streams spell the same tool calls
+                // `message.tool_use` — an array of {index, id, type,
+                // function: {name, arguments}} — instead of `tool_calls`.
+                // Without this arm a SysOM tool call counted zero tool
+                // tokens in the manual counters and the drain estimate;
+                // the calls arrive whole on cumulative snapshots, whose
+                // repetition the merge layer already handles like the
+                // snapshot's text.
+                if let Some(calls) = msg.get("tool_use").and_then(|t| t.as_array()) {
+                    for tool_call in calls {
+                        if let Some(func) = tool_call.get("function") {
+                            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let arguments =
+                                func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                            let tool_content = format!("{name}: {arguments}");
+                            if !tool_content.is_empty() {
+                                tool_calls.push(tool_content);
+                                has_data = true;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -890,6 +913,62 @@ mod tests {
             tool_calls.is_empty(),
             "tool_call without function should be skipped"
         );
+    }
+
+    /// SysOM's Copilot streams spell the assistant's tool calls
+    /// `choices[].message.tool_use` — an array of
+    /// `{index, id, type, function: {name, arguments}}` — instead of the
+    /// OpenAI `tool_calls`. The extractor read only the OpenAI spelling, so
+    /// a SysOM tool call counted zero tool tokens in the manual counters and
+    /// the drain estimate.
+    #[test]
+    fn sysom_tool_use_snapshots_yield_tool_calls() {
+        let response = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"file_path\":\"/tmp/a.md\"}"}
+                    }]
+                }
+            }]
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("a SysOM tool call must count");
+        assert_eq!(
+            tool_calls,
+            vec!["read_file: {\"file_path\":\"/tmp/a.md\"}".to_string()]
+        );
+    }
+
+    /// A SysOM snapshot can carry text and tool calls together: both feed the
+    /// counters (the text as content, the call as its `name: arguments`
+    /// string), exactly like an OpenAI message carrying both.
+    #[test]
+    fn sysom_tool_use_alongside_content_is_extracted() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Reading the file first.",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"file_path\":\"/tmp/a.md\"}"}
+                    }]
+                }
+            }]
+        });
+        let (content, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("text and calls must both count");
+        assert_eq!(content, "Reading the file first.");
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].starts_with("read_file: "));
     }
 
     /// Anthropic streams deliver the answer as `content_block_delta` events and
