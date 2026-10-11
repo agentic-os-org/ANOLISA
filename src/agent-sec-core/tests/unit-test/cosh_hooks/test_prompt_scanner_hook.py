@@ -195,6 +195,20 @@ class TestCoshHookSubprocess:
         output = json.loads(proc.stdout)
         assert output["decision"] == "allow"
 
+    def test_non_object_payload_allows(self):
+        """Valid JSON that is not an object fails open with allow."""
+        proc = subprocess.run(
+            [sys.executable, _COSH_HOOK],
+            input='["not", "an", "object"]',
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+        )
+        assert proc.returncode == 0, f"Hook stderr: {proc.stderr}"
+        output = json.loads(proc.stdout)
+        assert output["decision"] == "allow"
+
     def test_missing_prompt_key_allows(self):
         output = self._run_hook({"session_id": "abc"})
         assert output["decision"] == "allow"
