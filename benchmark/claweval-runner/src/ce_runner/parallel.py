@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import resource
 import subprocess
 import time
@@ -29,6 +28,7 @@ import httpx
 from ._common import (_PYTHON, init_config_defaults, is_sandbox_task,
                        load_task_yaml, log)
 from .tool_injector import ToolInjector
+from .service_urls import offset_loopback_url
 
 PORT_STRIDE = 50  # port gap between adjacent worker slots
 
@@ -65,16 +65,8 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
     for svc in services:
         name = svc["name"]
         port = svc["port"] + port_offset
-        health_check = svc.get("health_check", "")
+        health_check = offset_loopback_url(svc.get("health_check", ""), port_offset)
         health_method = svc.get("health_check_method", "POST")
-
-        # Apply port offset to health_check URL
-        if health_check and port_offset:
-            health_check = re.sub(
-                r"localhost:(\d+)",
-                lambda m: f"localhost:{int(m.group(1)) + port_offset}",
-                health_check,
-            )
 
         # Check if already running
         try:
@@ -126,13 +118,7 @@ def reset_services_with_offset(task_yaml: str, port_offset: int):
     task = load_task_yaml(task_yaml)
     for svc in task.get("services", []):
         name = svc["name"]
-        reset_ep = svc.get("reset_endpoint", "")
-        if reset_ep and port_offset:
-            reset_ep = re.sub(
-                r"localhost:(\d+)",
-                lambda m: f"localhost:{int(m.group(1)) + port_offset}",
-                reset_ep,
-            )
+        reset_ep = offset_loopback_url(svc.get("reset_endpoint", ""), port_offset)
         if reset_ep:
             try:
                 r = httpx.post(reset_ep, json={}, timeout=5)

@@ -37,26 +37,18 @@ from pathlib import Path
 from typing import Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-import re
-
 import httpx
+
+if __package__:
+    from .service_urls import offset_loopback_url as _shift_url
+else:
+    from service_urls import offset_loopback_url as _shift_url
 
 try:
     import yaml
 except ImportError:
     print("pyyaml required: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
-
-
-def _shift_url(url: str, offset: int) -> str:
-    """Replace localhost:<port> with localhost:<port+offset>."""
-    if offset == 0:
-        return url
-    return re.sub(
-        r"localhost:(\d+)",
-        lambda m: f"localhost:{int(m.group(1)) + offset}",
-        url,
-    )
 
 
 class MockServiceManager:
