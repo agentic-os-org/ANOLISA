@@ -1,5 +1,6 @@
 import {readFile, stat} from 'node:fs/promises';
 import path from 'node:path';
+import {createHtmlStore} from './html-store.mjs';
 import {exists, walkFiles, websiteDir} from './lib.mjs';
 
 const buildDir = path.join(websiteDir, 'build');
@@ -7,6 +8,7 @@ const basePath = (process.env.BASE_URL ?? '/').replace(/^\/|\/$/g, '');
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
 const htmlFiles = await walkFiles(buildDir, (file) => file.endsWith('.html'));
 const errors = [];
+const loadHtml = createHtmlStore();
 
 async function targetFile(urlPath) {
   let decoded = decodeURIComponent(urlPath).replace(/^\//, '');
@@ -24,14 +26,13 @@ async function targetFile(urlPath) {
 }
 
 for (const htmlFile of htmlFiles) {
-  const html = await readFile(htmlFile, 'utf8');
+  const {html, ids} = await loadHtml(htmlFile);
   const relativeHtmlPath = path.relative(buildDir, htmlFile).split(path.sep).join('/');
   const currentPath = relativeHtmlPath.endsWith('/index.html')
     ? `/${relativeHtmlPath.slice(0, -'index.html'.length)}`
     : relativeHtmlPath === 'index.html'
       ? '/'
       : `/${relativeHtmlPath}`;
-  const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
   const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
   for (const id of new Set(duplicates)) {
     errors.push(`${path.relative(buildDir, htmlFile)}: duplicate DOM id "${id}"`);
@@ -56,7 +57,7 @@ for (const htmlFile of htmlFiles) {
       continue;
     }
     if (parsed.hash && target.endsWith('.html')) {
-      const targetHtml = target === htmlFile ? html : await readFile(target, 'utf8');
+      const targetHtml = (await loadHtml(target)).html;
       const id = decodeURIComponent(parsed.hash.slice(1));
       if (id && !targetHtml.includes(`id="${id}"`)) {
         errors.push(`${path.relative(buildDir, htmlFile)}: missing fragment ${href}`);
