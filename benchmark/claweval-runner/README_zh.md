@@ -147,6 +147,8 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
       "canvas", "nodes", "cron", "sessions_list", "sessions_history",
       "sessions_send", "sessions_spawn", "sessions_yield", "subagents",
       "web_fetch", "session_status", "memory_get", "memory_search",
+      "anolisa_memory_search", "anolisa_memory_get", "memory_observe",
+      "memory_get_context",
       "other-mcp-server__*"
     ],
     "exec": { "security": "full", "ask": "off" }
@@ -157,7 +159,7 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | 策略 | 作用 |
 |--------|------|
 | `tools.allow` | 显式白名单:`exec`(启用工具执行)+ `serverKey__toolName` 格式(双下划线)的任务 MCP 工具。只有列出的工具对模型可用。 |
-| `tools.deny` | 屏蔽所有内置 gateway 工具(宿主 exec/read/write/browser 等)以及其他 MCP 服务器的工具。防止访问宿主文件系统和跨任务泄漏。 |
+| `tools.deny` | 屏蔽所有内置 gateway 工具(宿主 exec/read/write/browser 等)、agent-memory 插件的持久记忆工具以及其他 MCP 服务器的工具。防止访问宿主文件系统、跨任务记忆召回和跨任务泄漏。 |
 | `tools.exec` | 设置 MCP 工具执行的安全策略(工具调用成功所必需)。 |
 
 ### 每个任务两个 MCP 服务器
@@ -173,12 +175,26 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 
 在批量模式下,每个任务的 deny 列表还会包含其他任务的 MCP 服务器名(`claw-eval-mock-<other_task>__*`),防止一个 agent 调用另一个任务的 mock 服务。
 
+### 宿主记忆隔离
+
+在已安装并启用 agent-memory OpenClaw 插件的宿主机上,插件把工具直接注册到 gateway 上,而不经过 MCP 服务器,因此上面的 `claw-eval-*__*` 通配永远匹配不到它们 —— 宿主 `memory-core` 插件的 `memory_get` / `memory_search` 也正是因此按裸名屏蔽。它的记忆库跨任务、跨运行、跨 gateway 重启持久存在:一个 agent 可以读到之前任务写下的内容,也可以给后续任务留下答案。所以每个任务都会屏蔽该插件的全部 4 个工具:
+
+| 被屏蔽的工具 | 来源 |
+|--------|-------------|
+| `anolisa_memory_search`、`anolisa_memory_get` | agent-memory ≥ 0.2.8(命名空间化后的名称) |
+| `memory_observe`、`memory_get_context` | agent-memory(所有版本) |
+| `memory_get`、`memory_search` | agent-memory ≤ 0.2.7 以及 OpenClaw 自带的 `memory-core` |
+
+最后一行也是两种拼写都要保留的原因:`memory_get` / `memory_search` 在 0.2.8 之前就是插件自己的读/检索工具名,同时也是宿主 `memory-core` 的内置工具名,屏蔽它们即可同时覆盖旧版插件和宿主后端。
+
 ### 实现
 
 核心逻辑:`src/ce_runner/tool_injector.py`
 - `_build_allowlist()` —— 根据 task.yaml 工具 + sandbox 工具构造 `alsoAllow`
-- `_build_deny_list()` —— 根据内置工具 + 其他 MCP 服务器构造 `deny`
+- `_build_deny_list()` —— 根据其他 MCP 服务器构造 *额外* 的 `deny` 条目
 - `_DENY_BUILTIN_TOOLS` —— 需屏蔽的 gateway 内置工具静态列表
+- `_DENY_MEMORY_PLUGIN_TOOLS` —— 需屏蔽的 agent-memory 插件工具静态列表
+- `_DENY_HOST_TOOLS` —— 内置工具 + 记忆插件工具,即 `build_agent_tools()` 的 deny 基线
 
 ## 脚本
 
