@@ -432,25 +432,48 @@ impl FrameworkDriver for HermesDriver {
                 });
             }
 
-            let disable_cmd = build_disable_cmd(&plugin_id);
-            let _ = ctx.ops.run_framework_cli(disable_cmd);
+            // Do not trust the exit code alone: "was not enabled" and
+            // "refused" both come back non-zero, so a CLI that changed
+            // nothing is indistinguishable from one that did its job. Verify
+            // the enabled state via `plugins list` and keep the directory and
+            // receipt for a retry only while the plugin is still enabled —
+            // deleting the plugin directory under a live registration is what
+            // leaves hermes resolving a dangling plugin.
+            let output = ctx.ops.run_framework_cli(build_disable_cmd(&plugin_id))?;
+            let deregistered = if output.success() {
+                messages.push(format!("disabled hermes plugin {plugin_id}"));
+                true
+            } else if !plugin_still_enabled(&plugin_id, ctx) {
+                messages.push(format!("hermes plugin {plugin_id} no longer enabled"));
+                true
+            } else {
+                cleanup_complete = false;
+                messages.push(format!(
+                    "hermes plugin disable failed and {plugin_id} is still enabled; \
+                     plugin directory and receipt kept so cleanup can be retried: {}",
+                    cli_failure_reason("plugins disable", &output)
+                ));
+                false
+            };
 
-            let plugin_dir = home.join("plugins").join(&plugin_id);
-            match ctx.ops.remove_tree(&plugin_dir) {
-                Ok(true) => messages.push(format!(
-                    "removed hermes plugin directory {}",
-                    plugin_dir.display()
-                )),
-                Ok(false) => messages.push(format!(
-                    "hermes plugin directory {} already absent",
-                    plugin_dir.display()
-                )),
-                Err(err) => {
-                    cleanup_complete = false;
-                    messages.push(format!(
-                        "failed to remove hermes plugin directory {}: {err}",
+            if deregistered {
+                let plugin_dir = home.join("plugins").join(&plugin_id);
+                match ctx.ops.remove_tree(&plugin_dir) {
+                    Ok(true) => messages.push(format!(
+                        "removed hermes plugin directory {}",
                         plugin_dir.display()
-                    ));
+                    )),
+                    Ok(false) => messages.push(format!(
+                        "hermes plugin directory {} already absent",
+                        plugin_dir.display()
+                    )),
+                    Err(err) => {
+                        cleanup_complete = false;
+                        messages.push(format!(
+                            "failed to remove hermes plugin directory {}: {err}",
+                            plugin_dir.display()
+                        ));
+                    }
                 }
             }
         } else {
@@ -704,6 +727,29 @@ fn list_contains_plugin(stdout: &str, plugin_id: &str) -> bool {
     stdout
         .lines()
         .any(|line| line.split_whitespace().any(|tok| tok == plugin_id))
+}
+
+/// Whether `plugins list` output still shows `plugin_id` as enabled.
+///
+/// Hermes disable is a state transition, not a removal: a successful
+/// `plugins disable` moves the name into the disabled set while the plugin
+/// stays installed and listed (the registration contract documented by the
+/// tokenless hermes uninstall script — a presence-only check there made a
+/// *successful* deregistration look failed forever). Only a line naming the
+/// plugin without a disabled marker is a live registration; unrecognised
+/// decorations around a listed id count as still-enabled (fail closed). A
+/// failing or unspawnable list is likewise treated as still-enabled: disable
+/// must not drop the plugin directory on an unverified state, and keeping
+/// the receipt leaves the retry available.
+fn plugin_still_enabled(plugin_id: &str, ctx: &DriverCtx) -> bool {
+    match ctx.ops.run_framework_cli(build_list_cmd()) {
+        Ok(output) if output.success() => output.stdout.lines().any(|line| {
+            line.split_whitespace().any(|tok| tok == plugin_id)
+                && !line.split_whitespace().any(|tok| tok == "disabled")
+                && !line.contains("not enabled")
+        }),
+        _ => true,
+    }
 }
 
 /// Extract the validated plugin id from a claim's resources, falling back

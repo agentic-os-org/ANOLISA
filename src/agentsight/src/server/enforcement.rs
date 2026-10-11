@@ -158,15 +158,7 @@ pub(super) async fn preview_agent_protection(
     };
     let root = query.directory.as_deref().unwrap_or(&workspace);
     let root = match root.canonicalize() {
-        Ok(root) if root.is_dir() && root != Path::new("/") => root,
-        Ok(_) => {
-            return error_response(
-                actix_web::http::StatusCode::BAD_REQUEST,
-                "unsafe_protection_directory",
-                "protection directory cannot be the filesystem root",
-                false,
-            );
-        }
+        Ok(root) if root.is_dir() => root,
         _ => {
             return error_response(
                 actix_web::http::StatusCode::BAD_REQUEST,
@@ -176,6 +168,14 @@ pub(super) async fn preview_agent_protection(
             );
         }
     };
+    if root == Path::new("/") {
+        return error_response(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "unsafe_protection_directory",
+            "protection directory cannot be the filesystem root",
+            false,
+        );
+    }
     // Run the recursive filesystem scan on the blocking pool so a large or slow
     // directory never ties up an async Actix worker. HOME is only a fallback for
     // an empty default-workspace scan; an explicit directory remains authoritative.
@@ -293,7 +293,14 @@ fn parse_home_from_environ(environ: &[u8]) -> Option<PathBuf> {
 #[cfg(unix)]
 fn validated_process_home(proc_root: &Path, pid: u32) -> Option<PathBuf> {
     let process_dir = proc_root.join(pid.to_string());
-    let process_uid = parse_process_uid(&fs::read_to_string(process_dir.join("status")).ok()?)?;
+    // `/proc/<pid>/status` embeds the process name, and the kernel allows
+    // non-UTF-8 bytes in a name; `read_to_string` rejected the whole file, so
+    // the `Uid:` line — ASCII — was lost and the caller silently dropped the
+    // HOME fallback from the scan. Decode lossily, as the cmdline/environ
+    // readers here already do.
+    let status_bytes = fs::read(process_dir.join("status")).ok()?;
+    let status = String::from_utf8_lossy(&status_bytes);
+    let process_uid = parse_process_uid(&status)?;
     let home = parse_home_from_environ(&fs::read(process_dir.join("environ")).ok()?)?;
     if !home.is_absolute() || home == Path::new("/") {
         return None;
@@ -1172,6 +1179,45 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// `/proc/<pid>/status` embeds the process name, and the kernel allows
+    /// non-UTF-8 bytes in a name; `read_to_string` rejected the whole file, so
+    /// the `Uid:` line — plain ASCII — was lost and the HOME fallback silently
+    /// dropped out of the privileged scan preview.
+    #[cfg(unix)]
+    #[test]
+    fn validates_process_home_despite_a_non_utf8_process_name() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = std::env::temp_dir().join(format!("agentsight-proc-nu-{}", Uuid::new_v4()));
+        let proc_root = root.join("proc");
+        let process_dir = proc_root.join("4242");
+        let home = root.join("home");
+        fs::create_dir_all(&process_dir).expect("process fixture dir");
+        fs::create_dir_all(&home).expect("home fixture dir");
+        let owner_uid = fs::metadata(&home).expect("home metadata").uid();
+        // The kernel allows raw bytes in comm, so the `Name:` line is not
+        // necessarily valid UTF-8 while `Uid:` stays ASCII.
+        let mut status = b"Name:\tnode".to_vec();
+        status.push(0xa0);
+        status.extend_from_slice(
+            format!("-22\nUid:\t{owner_uid}\t{owner_uid}\t{owner_uid}\t{owner_uid}\n").as_bytes(),
+        );
+        fs::write(process_dir.join("status"), status).expect("status fixture");
+        fs::write(
+            process_dir.join("environ"),
+            format!("PATH=/usr/bin\0HOME={}\0", home.display()).as_bytes(),
+        )
+        .expect("environ fixture");
+
+        assert_eq!(
+            validated_process_home(&proc_root, 4242),
+            Some(home.canonicalize().expect("canonical home")),
+            "a non-UTF-8 Name line must not hide the UID and the HOME fallback"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn sensitive_file_scan_uses_home_only_as_empty_default_fallback() {
         let root = std::env::temp_dir().join(format!("agentsight-fallback-{}", Uuid::new_v4()));
@@ -1385,6 +1431,55 @@ mod tests {
         assert_eq!(explicit.status(), StatusCode::OK);
         let explicit_body: serde_json::Value = awtest::read_body_json(explicit).await;
         assert_eq!(explicit_body["source_paths"], serde_json::json!([]));
+
+        // A path that exists but is not a directory is not the filesystem
+        // root: the preview must name the real failure.
+        let not_a_dir = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!(
+                    "/api/enforcement/agent-protection/{fallback_pid}?directory={}",
+                    canonical.join(".env").display()
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(not_a_dir.status(), StatusCode::BAD_REQUEST);
+        let not_a_dir_body: serde_json::Value = awtest::read_body_json(not_a_dir).await;
+        assert_eq!(
+            not_a_dir_body["error"]["code"], "invalid_protection_directory",
+            "an existing file is not the filesystem root: {not_a_dir_body}"
+        );
+
+        // The root guard keeps its own code, and a missing path stays invalid.
+        let root = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!(
+                    "/api/enforcement/agent-protection/{fallback_pid}?directory=/"
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(root.status(), StatusCode::BAD_REQUEST);
+        let root_body: serde_json::Value = awtest::read_body_json(root).await;
+        assert_eq!(root_body["error"]["code"], "unsafe_protection_directory");
+        let missing = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!(
+                    "/api/enforcement/agent-protection/{fallback_pid}?directory=/nonexistent-{}",
+                    Uuid::new_v4()
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        let missing_body: serde_json::Value = awtest::read_body_json(missing).await;
+        assert_eq!(
+            missing_body["error"]["code"],
+            "invalid_protection_directory"
+        );
 
         fallback_process
             .kill()

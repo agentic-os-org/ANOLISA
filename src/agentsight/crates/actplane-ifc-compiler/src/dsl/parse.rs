@@ -17,9 +17,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
     let mut i = 0;
     let mut out = Vec::new();
     while i < b.len() {
-        let c = b[i] as char;
+        // Decode by character, not by byte: `0x85` and `0xA0` are UTF-8
+        // continuation bytes for characters Unicode classifies as whitespace
+        // (`\u{85}`, `\u{a0}`), so byte-wise `is_whitespace` broke the word
+        // mid-character and the `src[start..i]` slice panicked.
+        let c = char_at(src, i);
         if c.is_whitespace() {
-            i += 1;
+            i += c.len_utf8();
         } else if c == '#' {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
@@ -28,6 +32,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             i += 1;
             let start = i;
             while i < b.len() && b[i] != b'"' {
+                if b[i] == 0 {
+                    return Err("string literals must not contain NUL bytes: the engine's \
+                         prefix/suffix/contains matchers compare only the leading \
+                         nonzero bytes of a literal, so a NUL silently truncates \
+                         the installed matcher"
+                        .into());
+                }
                 i += 1;
             }
             if i >= b.len() {
@@ -44,16 +55,24 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
         } else {
             let start = i;
             while i < b.len() {
-                let d = b[i] as char;
+                let d = char_at(src, i);
                 if d.is_whitespace() || d == '"' || d == ':' || d == '=' {
                     break;
                 }
-                i += 1;
+                i += d.len_utf8();
             }
             out.push(Tok::Word(src[start..i].to_string()));
         }
     }
     Ok(out)
+}
+
+/// The character starting at byte offset `i` of `src`.
+fn char_at(src: &str, i: usize) -> char {
+    src[i..]
+        .chars()
+        .next()
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
 struct P {
@@ -111,6 +130,46 @@ impl P {
             _ => Err(format!("unknown op '{}'", w)),
         }
     }
+    fn op_name(op: Op) -> &'static str {
+        match op {
+            Op::Exec => "exec",
+            Op::Read => "read",
+            Op::Write => "write",
+            Op::Unlink => "unlink",
+            Op::Connect => "connect",
+            Op::Recv => "recv",
+            Op::Open => "open",
+        }
+    }
+
+    /// Positional arguments are an exec-argv concept: the engine consults a
+    /// rule/update's arg field only on the exec path, so accepting one on any
+    /// other op would install a constraint that is silently ignored.
+    fn arg(&mut self, op: Op) -> Result<Option<String>, String> {
+        if !matches!(self.peek(), Some(Tok::Str(_))) {
+            return Ok(None);
+        }
+        let arg = self.string()?;
+        if op != Op::Exec {
+            return Err(format!(
+                "positional arguments are only valid on exec targets, not {}",
+                P::op_name(op)
+            ));
+        }
+        Ok(Some(arg))
+    }
+
+    /// Reads one pattern literal. An empty pattern lowers to a matcher that
+    /// can never fire (an exact literal no runtime path equals; the engine
+    /// rejects an empty contains literal), so a `block`/`kill` clause or a
+    /// taint source carrying one silently installs no enforcement at all.
+    fn pattern(&mut self) -> Result<String, String> {
+        let pattern = self.string()?;
+        if pattern.is_empty() {
+            return Err("pattern literals must not be empty".into());
+        }
+        Ok(pattern)
+    }
 
     fn target(&mut self, op: Op) -> Result<Target, String> {
         let kind = if let Some(Tok::Word(w)) = self.peek() {
@@ -125,7 +184,7 @@ impl P {
         } else {
             return Err("expected node kind in target".into());
         };
-        let mut pattern = self.string()?;
+        let mut pattern = self.pattern()?;
         // Implicit basename matching: if the pattern contains no '/', treat it
         // as a basename match by prepending "**/".
         if kind == Kind::Exec && !pattern.contains('/') {
@@ -133,11 +192,7 @@ impl P {
         }
         // Positional arguments: additional quoted strings after the target
         // pattern are treated as arguments (replaces the old `@arg` syntax).
-        let arg = if matches!(self.peek(), Some(Tok::Str(_))) {
-            Some(self.string()?)
-        } else {
-            None
-        };
+        let arg = self.arg(op)?;
         Ok(Target { kind, pattern, arg })
     }
 
@@ -177,18 +232,18 @@ impl P {
                 }
                 Ok(Cond::Target {
                     negate,
-                    pattern: self.string()?,
+                    pattern: self.pattern()?,
                 })
             }
             "lineage-includes" => {
                 self.eat("exec")?;
                 Ok(Cond::LineageIncludes {
-                    exec: self.string()?,
+                    exec: self.pattern()?,
                 })
             }
             "after" => {
                 let gate_op = P::op(&self.word()?)?;
-                let gate_pattern = self.string()?;
+                let gate_pattern = self.pattern()?;
                 let gate_exit = if self.is_word("exits") {
                     self.next();
                     if gate_op != Op::Exec {
@@ -207,12 +262,8 @@ impl P {
                     self.next();
                     loop {
                         let op = P::op(&self.word()?)?;
-                        let pat = self.string()?;
-                        let arg = if matches!(self.peek(), Some(Tok::Str(_))) {
-                            Some(self.string()?)
-                        } else {
-                            None
-                        };
+                        let pat = self.pattern()?;
+                        let arg = self.arg(op)?;
                         since.push((op, pat, arg));
                         if self.is_word("or") {
                             self.next();
@@ -288,7 +339,7 @@ pub fn parse(src: &str) -> Result<Policy, String> {
                     o => return Err(format!("expected '=' in source, got {:?}", o)),
                 }
                 let kind = P::kind(&p.word()?)?;
-                let pattern = p.string()?;
+                let pattern = p.pattern()?;
                 pol.sources.push(Source {
                     label,
                     kind,
@@ -301,7 +352,7 @@ pub fn parse(src: &str) -> Result<Policy, String> {
                 let label = p.word()?;
                 p.eat("by")?;
                 p.eat("exec")?;
-                let gate = p.string()?;
+                let gate = p.pattern()?;
                 pol.xforms.push(Xform {
                     endorse,
                     label,
@@ -342,4 +393,55 @@ pub fn parse(src: &str) -> Result<Policy, String> {
         }
     }
     Ok(pol)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Non-ASCII words must lex, not panic: `0x85` and `0xA0` are UTF-8
+    /// continuation bytes for characters Unicode classifies as whitespace, so
+    /// a byte-wise scan used to break the word mid-character and slice
+    /// `src[start..i]` across a character boundary.
+    #[test]
+    fn lexer_handles_non_ascii_words() {
+        assert_eq!(
+            lex("caf\u{e9}").unwrap(),
+            vec![Tok::Word("caf\u{e9}".into())]
+        );
+        assert_eq!(
+            lex("a\u{a0}b").unwrap(),
+            vec![Tok::Word("a".into()), Tok::Word("b".into())]
+        );
+        assert_eq!(
+            lex("rule \u{e0}:\n").unwrap(),
+            vec![
+                Tok::Word("rule".into()),
+                Tok::Word("\u{e0}".into()),
+                Tok::Colon
+            ]
+        );
+    }
+
+    /// The engine matchers compare only the leading nonzero bytes of a literal
+    /// (taint.h taint_prefix/taint_suffix/taint_contains), so a NUL inside a
+    /// path pattern silently truncates it: "/tmp/a\0b/**" installs a prefix
+    /// matcher on "/tmp/a" that matches every path under it — wider than the
+    /// authored policy. Reject NUL at lex time instead.
+    #[test]
+    fn lexer_rejects_nul_bytes_inside_string_literals() {
+        let error = match lex("source S = file \"/tmp/a\0b/**\"") {
+            Ok(_) => panic!("a NUL inside a string literal must be rejected at lex time"),
+            Err(error) => error,
+        };
+        assert!(error.contains("NUL"), "{error}");
+        let src = concat!(
+            "source S = file \"/tmp/a\0b/**\"\n",
+            "rule r:\n  block write file \"/x\" if S\n  because \"x\"\n"
+        );
+        assert!(
+            crate::dsl::compile_str(src).is_err(),
+            "a NUL inside a pattern literal must be rejected at compile time"
+        );
+    }
 }

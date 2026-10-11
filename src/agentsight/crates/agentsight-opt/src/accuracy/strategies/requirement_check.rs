@@ -62,8 +62,11 @@ impl RequirementCheckStrategy {
         }
     }
 
-    /// Aggregate files touched by Edit/Write tool calls.
+    /// Aggregate files touched by Edit/Write tool calls, deduplicated in
+    /// first-touch order. Reads the recorded `target` path - `cmd` is a JSON
+    /// blob truncated at 50 chars, which cuts deep paths mid-segment.
     fn aggregate_files_touched(ctx: &AnalysisCtx<'_>) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         ctx.inv
             .tool_calls
             .iter()
@@ -72,7 +75,8 @@ impl RequirementCheckStrategy {
                     .iter()
                     .any(|t| call.name.eq_ignore_ascii_case(t))
             })
-            .map(|call| call.cmd.clone())
+            .filter_map(|call| call.target.clone())
+            .filter(|path| seen.insert(path.clone()))
             .collect()
     }
 
@@ -130,8 +134,12 @@ impl Detector for RequirementCheckStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:requirement_check:coverage"))
             .await
         {
-            Ok(output) => output,
+            Ok(output) => {
+                ctx.judgments.record_ok();
+                output
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[requirement_check] Coverage comparison failed: {e}");
                 return vec![];
             }
@@ -177,6 +185,44 @@ impl Detector for RequirementCheckStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy::detector::JudgmentLog;
+
+    /// The "files touched" section of the coverage prompt must list file
+    /// paths. Before the recorded target existed it listed the command
+    /// summary - a JSON blob truncated at 50 chars, which cuts deep paths
+    /// mid-segment and buries them under old_string/content noise.
+    #[test]
+    fn files_touched_lists_paths_not_truncated_argument_json() {
+        let traj = crate::atif::AtifTrajectory::from_json(
+            r#"{"schema_version":"ATIF-v1.6","session_id":"s1",
+                "agent":{"name":"a","version":"1"},
+                "steps":[
+                  {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+                   "tool_calls":[{"tool_call_id":"c1","function_name":"Edit",
+                     "arguments":{"file_path":"src/agentsight/deep/path/mod.rs",
+                                  "old_string":"fn old()","new_string":"fn new()"}}],
+                   "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}}
+                ]}"#,
+        )
+        .unwrap();
+        let inv = crate::trace::build_inventory(&traj);
+        let client = crate::llm::LlmClient::with_config("http://localhost", "key", "m");
+        let extraction = crate::accuracy::extract::SharedExtraction::default();
+        let judgments = JudgmentLog::default();
+        let ctx = AnalysisCtx {
+            inv: &inv,
+            client: &client,
+            repo_root: None,
+            extraction: &extraction,
+            judgments: &judgments,
+        };
+        let files = RequirementCheckStrategy::aggregate_files_touched(&ctx);
+        assert_eq!(
+            files,
+            vec!["src/agentsight/deep/path/mod.rs".to_string()],
+            "the coverage judgment needs the real path, not a JSON fragment"
+        );
+    }
 
     #[test]
     fn kind_maps_to_defect_type() {

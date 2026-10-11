@@ -132,9 +132,19 @@ pub fn extract_usage_object(
 ) -> Option<TokenUsage> {
     let (input_tokens, output_tokens) = match provider {
         LLMProvider::OpenAI => {
-            let input = usage.get("prompt_tokens").and_then(|v| v.as_u64())?;
+            // Chat Completions names the counters prompt/completion, the
+            // Responses API calls them input/output. Both are OpenAI billing
+            // models (the cached prefix is already inside the input count), so
+            // accept either; requiring prompt_tokens dropped every
+            // `/v1/responses` usage object, because the `?` returned None
+            // before the cache and model fields were read.
+            let input = usage
+                .get("prompt_tokens")
+                .or_else(|| usage.get("input_tokens"))
+                .and_then(|v| v.as_u64())?;
             let output = usage
                 .get("completion_tokens")
+                .or_else(|| usage.get("output_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             (input, output)
@@ -152,9 +162,16 @@ pub fn extract_usage_object(
             (input.unwrap_or(0), output.unwrap_or(0))
         }
         LLMProvider::Gemini => {
-            let input = usage.get("prompt_token_count").and_then(|v| v.as_u64())?;
+            // The wire format is camelCase (`promptTokenCount` /
+            // `candidatesTokenCount` under `usageMetadata`); keep the
+            // snake_case spellings as a gateway fallback.
+            let input = usage
+                .get("promptTokenCount")
+                .or_else(|| usage.get("prompt_token_count"))
+                .and_then(|v| v.as_u64())?;
             let output = usage
-                .get("candidates_token_count")
+                .get("candidatesTokenCount")
+                .or_else(|| usage.get("candidates_token_count"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             (input, output)
@@ -199,10 +216,14 @@ pub fn extract_usage_object(
     // Anthropic reports two separate counters: `cache_creation_input_tokens`
     // (write) and `cache_read_input_tokens` (hit).
     //
-    // OpenAI nests cache hits under `prompt_tokens_details.cached_tokens`;
-    // DashScope may surface them at the top level as `cached_tokens`.
+    // OpenAI nests cache hits under `prompt_tokens_details.cached_tokens` and
+    // the Responses API under `input_tokens_details.cached_tokens`; DashScope
+    // may surface them at the top level as `cached_tokens`.
     // DashScope also nests `cache_creation_input_tokens` under
     // `prompt_tokens_details`, so we fall back there as well.
+    // Gemini reports hits as `cachedContentTokenCount`; like the OpenAI
+    // billing model the cached prefix is already inside `promptTokenCount`,
+    // so it is recorded but never added on top (TokenRecord::billed_input_tokens).
     let cache_creation_input_tokens = usage
         .get("cache_creation_input_tokens")
         .and_then(|v| v.as_u64())
@@ -221,12 +242,24 @@ pub fn extract_usage_object(
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(|v| v.as_u64())
         })
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .or_else(|| {
+            usage
+                .get("cachedContentTokenCount")
+                .and_then(|v| v.as_u64())
+        })
         .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()));
 
-    // Extract model name
+    // Extract model name. Gemini chunks carry it as `modelVersion`.
     let model = full_json
         .get("model")
         .and_then(|v| v.as_str())
+        .or_else(|| full_json.get("modelVersion").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
 
     Some(TokenUsage {
@@ -237,6 +270,46 @@ pub fn extract_usage_object(
         model,
         provider,
     })
+}
+
+/// Merge two token-usage snapshots from the same SSE stream.
+///
+/// All counters are cumulative within a stream, so the max resolves the
+/// split-across-events case (message_start input/cache vs message_delta
+/// output) and tolerates zero-placeholder events without ever regressing a
+/// larger value. Model and provider are taken from the first event that
+/// carries them.
+///
+/// Anthropic and Anthropic-compatible proxies split usage this way, so every
+/// consumer that folds SSE events must merge rather than let one event win.
+pub(crate) fn merge_usage(acc: Option<TokenUsage>, next: TokenUsage) -> Option<TokenUsage> {
+    let Some(mut cur) = acc else {
+        return Some(next);
+    };
+    cur.input_tokens = cur.input_tokens.max(next.input_tokens);
+    cur.output_tokens = cur.output_tokens.max(next.output_tokens);
+    cur.cache_creation_input_tokens = max_opt(
+        cur.cache_creation_input_tokens,
+        next.cache_creation_input_tokens,
+    );
+    cur.cache_read_input_tokens =
+        max_opt(cur.cache_read_input_tokens, next.cache_read_input_tokens);
+    if cur.model.is_none() {
+        cur.model = next.model;
+    }
+    if cur.provider == LLMProvider::Unknown {
+        cur.provider = next.provider;
+    }
+    Some(cur)
+}
+
+/// Max of two optional counters, preserving a value when only one is set.
+fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
 }
 
 /// Detect provider from usage object structure
@@ -266,6 +339,19 @@ pub fn detect_provider_from_usage(usage: &serde_json::Value) -> LLMProvider {
 
     // Anthropic uses input_tokens/output_tokens
     if usage.get("input_tokens").is_some() && usage.get("output_tokens").is_some() {
+        // ... but so does the Responses API (`/v1/responses`), which reuses those
+        // names while keeping OpenAI's billing rule that the cache-hit count is
+        // already part of `input_tokens`. Only the Responses shape nests
+        // `cached_tokens` (and `reasoning_tokens`) under a details object, so that
+        // is the discriminator: classifying it as Anthropic would make
+        // `billed_input_tokens` add the cached prefix a second time. Callers that
+        // know the endpoint resolve it themselves; this only stops usage alone
+        // from guessing wrong.
+        if usage.get("input_tokens_details").is_some()
+            || usage.get("output_tokens_details").is_some()
+        {
+            return LLMProvider::OpenAI;
+        }
         return LLMProvider::Anthropic;
     }
 
@@ -373,6 +459,34 @@ mod tests {
             "total_tokens": 15
         });
         assert_eq!(detect_provider_from_usage(&usage), LLMProvider::OpenAI);
+    }
+
+    /// The Responses API reuses `input_tokens`/`output_tokens` but keeps OpenAI's
+    /// billing rule: `input_tokens` already contains the cached prefix. Its
+    /// `*_tokens_details` objects are the only signal that separates it from
+    /// Anthropic, where the cache counters are billed on top of `input_tokens`.
+    /// Guessing Anthropic here doubles the cached prefix in
+    /// `TokenRecord::billed_input_tokens`.
+    #[test]
+    fn test_detect_provider_from_usage_responses_shape_is_not_anthropic() {
+        let with_cache = serde_json::json!({
+            "input_tokens": 57,
+            "output_tokens": 3,
+            "total_tokens": 60,
+            "input_tokens_details": {"cached_tokens": 2, "text_tokens": 55}
+        });
+        assert_eq!(detect_provider_from_usage(&with_cache), LLMProvider::OpenAI);
+
+        let reasoning = serde_json::json!({
+            "input_tokens": 57,
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 0}
+        });
+        assert_eq!(detect_provider_from_usage(&reasoning), LLMProvider::OpenAI);
+
+        // No details object means it can still be Anthropic.
+        let bare = serde_json::json!({"input_tokens": 57, "output_tokens": 3});
+        assert_eq!(detect_provider_from_usage(&bare), LLMProvider::Anthropic);
     }
 
     #[test]

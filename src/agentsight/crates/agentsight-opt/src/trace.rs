@@ -3,7 +3,7 @@
 //! Extracts structured data from ATIF trajectories that all analysis
 //! dimensions (accuracy, perf, cost) consume.
 
-use crate::atif::{observation_looks_like_error, AtifTrajectory};
+use crate::atif::{observation_result_is_error, AtifTrajectory};
 use crate::types::ToolCallRecord;
 
 // ── Public types ──
@@ -171,17 +171,26 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
             .map(|t| (t - origin).as_seconds_f64())
             .unwrap_or(0.0);
 
-        // Match observations to calls by id; positional fallback.
+        // Match observations to calls by id; positional fallback only for
+        // documents whose results carry no ids at all. Falling back whenever
+        // the id lookup misses would hand a sibling's observation to a call
+        // whose result never arrived (interrupted execution), reporting that
+        // call as failed and feeding the misattribution into the accuracy
+        // detectors and cost ledger.
         for (k, call) in step.calls().iter().enumerate() {
             let result = step
                 .results()
                 .iter()
                 .find(|r| r.source_call_id.as_deref() == Some(call.tool_call_id.as_str()))
-                .or_else(|| step.results().get(k));
-            let err = result
-                .and_then(|r| r.content.as_deref())
-                .map(observation_looks_like_error)
-                .unwrap_or(false);
+                .or_else(|| {
+                    step.results()
+                        .iter()
+                        .all(|r| r.source_call_id.is_none())
+                        .then(|| step.results().get(k))
+                        .flatten()
+                });
+            // Structured flag first, text heuristic only for flag-less documents.
+            let err = result.map(observation_result_is_error).unwrap_or(false);
             out.push(ToolCallRecord {
                 name: call.display_name(),
                 call_id: call.tool_call_id.clone(),
@@ -189,11 +198,23 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 dur: per_call.max(0.0),
                 cmd: call.command_summary(cmd_chars),
                 err,
+                target: file_target(call),
                 result_tokens: None,
             });
         }
     }
     out
+}
+
+/// The file/path argument a call acts on, when it takes one. The command
+/// summary is a JSON blob truncated at ~50 chars - too short for deep paths -
+/// so consumers that need the target (e.g. files-touched aggregation) must
+/// read the argument, not the summary.
+fn file_target(call: &crate::atif::AtifToolCall) -> Option<String> {
+    ["file_path", "path", "notebook_path", "filePath"]
+        .iter()
+        .find_map(|k| call.arguments.get(k).and_then(|v| v.as_str()))
+        .map(str::to_string)
 }
 
 /// Tool execution window of agent step `idx`: next agent step's start (or
@@ -395,6 +416,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_carry_file_target() {
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Edit",
+               "arguments":{"file_path":"src/agentsight/deep/path/mod.rs","old_string":"a","new_string":"b"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+            {"step_id":2,"source":"agent","timestamp":"2025-01-01T00:00:02Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"cargo test"}}]}
+        ]"#,
+        ));
+        assert_eq!(
+            inv.tool_calls[0].target.as_deref(),
+            Some("src/agentsight/deep/path/mod.rs")
+        );
+        assert_eq!(inv.tool_calls[1].target, None);
+    }
+
+    #[test]
     fn user_turns_skip_target_file_session() {
         let inv = build_inventory(&traj(
             r#"[
@@ -403,5 +443,48 @@ mod tests {
         ]"#,
         ));
         assert!(inv.user_turns.is_empty());
+    }
+
+    #[test]
+    fn a_call_without_an_observation_does_not_inherit_a_siblings_error() {
+        // c1's tool result never arrived (interrupted execution); c2's did and
+        // failed. The positional fallback must not hand c2's observation to c1:
+        // err then claims c1 failed, which feeds the accuracy detectors and the
+        // cost ledger's churn accounting as a misattributed failure.
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[
+                {"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"ls"}},
+                {"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"ls /nope"}}
+             ],
+             "observation":{"results":[
+                {"source_call_id":"c2","content":"ls: cannot access '/nope': No such file or directory"}]}}
+        ]"#,
+        ));
+        assert_eq!(inv.tool_calls.len(), 2);
+        assert!(
+            !inv.tool_calls[0].err,
+            "a call with no observation must not inherit its sibling's failure"
+        );
+        assert!(inv.tool_calls[1].err, "c2's own observation is an error");
+    }
+
+    #[test]
+    fn id_less_observation_sets_still_pair_positionally() {
+        let inv = build_inventory(&traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2025-01-01T00:00:01Z",
+             "tool_calls":[
+                {"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"ls"}},
+                {"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"ls /nope"}}
+             ],
+             "observation":{"results":[
+                {"content":"file1"},
+                {"content":"ls: cannot access '/nope': No such file or directory"}]}}
+        ]"#,
+        ));
+        assert!(!inv.tool_calls[0].err);
+        assert!(inv.tool_calls[1].err);
     }
 }

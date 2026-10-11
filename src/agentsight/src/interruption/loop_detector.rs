@@ -18,13 +18,15 @@ use super::types::{InterruptionEvent, InterruptionType};
 /// Configuration for the loop detector.
 #[derive(Debug, Clone)]
 pub struct LoopDetectorConfig {
-    /// Number of consecutive calls with the same tool sequence to trigger (default: 5)
+    /// Number of consecutive calls with the same tool sequence to trigger
+    /// (default: 5). `0` disables rule 1.
     pub tool_sequence_repeat_threshold: usize,
     /// Sliding window of recent calls to inspect (default: 10)
     pub window_size: usize,
     /// Jaccard similarity threshold for output text (0.0~1.0, default: 0.85)
     pub output_similarity_threshold: f64,
-    /// Number of consecutive similar outputs to trigger (default: 3)
+    /// Number of consecutive similar outputs to trigger (default: 3).
+    /// `0` disables rule 2 (output similarity) and rule 3 (token burn).
     pub similar_output_repeat_threshold: usize,
 }
 
@@ -102,6 +104,8 @@ impl LoopDetector {
     /// `recent_calls` should be ordered oldest-first (ascending by timestamp).
     /// The current call being processed should already be included as the last element.
     ///
+    /// A rule whose repeat threshold is `0` is disabled and never fires.
+    ///
     /// Returns `Some(InterruptionEvent)` if a loop is detected.
     pub fn detect(
         &self,
@@ -170,6 +174,11 @@ impl LoopDetector {
     /// is followed by a text summary call.
     fn detect_tool_sequence_loop(&self, calls: &[RecentCallSummary]) -> Option<serde_json::Value> {
         let threshold = self.config.tool_sequence_repeat_threshold;
+        // Zero disables the rule: `len.saturating_sub(0)` yields an empty tail
+        // and indexing it below would panic.
+        if threshold == 0 {
+            return None;
+        }
 
         // Filter to only calls that have tool calls (ignore pure-text responses)
         let tool_bearing: Vec<&RecentCallSummary> =
@@ -206,6 +215,10 @@ impl LoopDetector {
         calls: &[RecentCallSummary],
     ) -> Option<serde_json::Value> {
         let threshold = self.config.similar_output_repeat_threshold;
+        // Zero disables the rule; see `detect_tool_sequence_loop`.
+        if threshold == 0 {
+            return None;
+        }
 
         // Filter to only calls that have text output
         let text_bearing: Vec<&RecentCallSummary> = calls
@@ -250,6 +263,10 @@ impl LoopDetector {
     /// alternate — we check the text responses for repetitive content with growing context.
     fn detect_token_burn(&self, calls: &[RecentCallSummary]) -> Option<serde_json::Value> {
         let threshold = self.config.similar_output_repeat_threshold;
+        // Zero disables the rule; see `detect_tool_sequence_loop`.
+        if threshold == 0 {
+            return None;
+        }
 
         // Filter to only calls that have text output (ignore pure tool_call responses)
         let text_bearing: Vec<&RecentCallSummary> = calls
@@ -736,6 +753,38 @@ mod tests {
         let result = detector.detect("conv-1", None, None, None, 1000, &calls);
         // No text output → Rule 3 can't trigger, Rule 1 threshold raised → nothing fires
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn zero_threshold_does_not_panic() {
+        // Zero means "disabled", not "match anything": a zero threshold made
+        // the tail slice empty and `tail[0]` panicked with an index-out-of-bounds.
+        let calls = vec![
+            make_call(vec!["read_file"], "some output", 100),
+            make_call(vec!["read_file"], "some output", 200),
+        ];
+
+        let detector = LoopDetector::new(LoopDetectorConfig {
+            tool_sequence_repeat_threshold: 0,
+            ..Default::default()
+        });
+        assert!(
+            detector
+                .detect("conv-1", None, None, None, 1000, &calls)
+                .is_none(),
+            "zero tool-sequence threshold must disable rule 1"
+        );
+
+        let detector = LoopDetector::new(LoopDetectorConfig {
+            similar_output_repeat_threshold: 0,
+            ..Default::default()
+        });
+        assert!(
+            detector
+                .detect("conv-1", None, None, None, 1000, &calls)
+                .is_none(),
+            "zero output-repeat threshold must disable rules 2 and 3"
+        );
     }
 
     #[test]

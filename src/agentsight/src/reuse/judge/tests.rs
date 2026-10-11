@@ -47,6 +47,44 @@ fn a_cited_bad_stands() {
 }
 
 #[test]
+fn a_bad_citing_a_step_outside_the_round_is_downgraded() {
+    // A model can name any number. "step 99" in a two-step round is not
+    // evidence, and accepting it would display a fabricated citation as the
+    // support for a `bad` verdict. Out-of-range ids are treated like an empty
+    // citation.
+    let doc = trajectory(
+        r#"{"step_id": 1, "source": "user", "message": "一"},
+           {"step_id": 2, "source": "agent", "message": "二"},
+           {"step_id": 3, "source": "user", "message": "三"},
+           {"step_id": 4, "source": "agent", "message": "四"}"#,
+    );
+    let round = last_round(&doc).expect("fixture has a final round");
+
+    for out_of_range in [vec![99], vec![0], vec![1, 99]] {
+        let verdict = interpret_in_round(&response("bad", out_of_range), &doc, round.clone());
+        let verdict = verdict.unwrap();
+        assert_eq!(verdict.label, TrajectoryLabel::Unknown);
+        assert!(verdict.downgraded, "the reduction must be reported");
+        assert!(
+            verdict.cited_steps.is_empty(),
+            "a fabricated citation must not be kept"
+        );
+    }
+
+    // A citation that exists in the judged round, but only in an earlier one,
+    // is not something the model could see in the transcript it was given.
+    let verdict = interpret_in_round(&response("bad", vec![2]), &doc, round).unwrap();
+    assert_eq!(verdict.label, TrajectoryLabel::Unknown);
+    assert!(verdict.downgraded);
+
+    // A citation inside the round still stands.
+    let verdict = interpret_in_round(&response("bad", vec![4]), &doc, 0..doc.steps.len()).unwrap();
+    assert_eq!(verdict.label, TrajectoryLabel::Bad);
+    assert_eq!(verdict.cited_steps, vec![4]);
+    assert!(!verdict.downgraded);
+}
+
+#[test]
 fn good_needs_no_citation() {
     // Demanding evidence for `good` while accepting `bad` freely is precisely the
     // asymmetry this judge exists to avoid.

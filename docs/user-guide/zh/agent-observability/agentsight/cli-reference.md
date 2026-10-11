@@ -2,7 +2,7 @@
 
 [English](../../../en/agent-observability/agentsight/cli-reference.md)
 
-本页所有参数均取自 Linux 上的 `agentsight 0.11.x --help`。示例输出保留真实排版，但其中的 ID 全是占位
+本页所有参数均取自 Linux 上的 `agentsight 0.13.0 --help`。示例输出保留真实排版，但其中的 ID 全是占位
 值、数字全是整数，均非真实采集结果。
 
 ## 通用约定
@@ -12,8 +12,8 @@
 | 权限 | `trace` 需要 root（或 `CAP_BPF` + `CAP_PERFMON`）。查询类命令需要读取 `/var/log/sysak/.agentsight`，该目录归服务所有，请加 `sudo`。 |
 | 配置文件 | 需要读取规则的命令支持 `--config`，默认 `/etc/agentsight/config.json`。`discover` 读取与 `trace` 相同的文件，因此会反映你的自定义规则。 |
 | 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics` 支持用 `--db` 指定其他数据库文件。 |
-| 机器可读输出 | `token`、`audit`、`summary`、`interruption *`、`skill-metrics *` 都支持 `--json`。 |
-| 输出语言 | `summary`、`metrics`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`（`discover` 没有该参数）。 |
+| 机器可读输出 | `discover`、`token`、`audit`、`summary`、`interruption *`、`skill-metrics *` 都支持 `--json`。 |
+| 输出语言 | `summary`、`metrics`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`。 |
 | 平台 | macOS 上只有 `trace`（轨迹采集）和 `serve`。 |
 | 示例 ID | 示例里的会话、对话、调用、中断 ID 都是占位值，请替换成你自己输出里的实际 ID。 |
 
@@ -422,3 +422,7 @@ Dashboard 的 Skill 指标页展示的是同一批数字。
 - [配置](configuration.md)——配置文件控制哪些行为
 - [Dashboard 指南](dashboard.md)——这些查询在界面上的等价操作
 - [数据与存储](data-and-storage.md)——HTTP API 与数据库结构
+
+## 基准测试产物
+
+运行 `scripts/benchmark/campaign/aggregate_report.py --campaign <campaign.json> --results <results>` 时还会导出 UTF-8 `run-inventory.csv`。清单包含 `runs/**/run-result.json` 下发现的 smoke、capacity、matrix、soak、recovery 和 fault 正式运行，按相对证据路径排序。列包含运行参数、harness 退出码、结论、缺失及失败门槛的 JSON 数组和 `result_path`；未提供的可选值留空。归档的不完整运行不在此清单内。既有汇总报告和原始证据保持不变。

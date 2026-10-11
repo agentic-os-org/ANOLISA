@@ -151,7 +151,13 @@ impl ProcessEventAggregator {
             ProcEventType::Stdout => {
                 if let Some(aggregated) = self.aggregates.get_mut(&event.pid) {
                     if let Some(ref data) = event.stdout_data {
-                        aggregated.add_stdout(data.as_bytes(), event.timestamp_ns);
+                        // fd 2 is stderr; fd 1 (and any other descriptor)
+                        // keeps the legacy stdout behaviour.
+                        if event.fd == Some(2) {
+                            aggregated.add_stderr(data.as_bytes(), event.timestamp_ns);
+                        } else {
+                            aggregated.add_stdout(data.as_bytes(), event.timestamp_ns);
+                        }
                     }
                 }
                 None
@@ -215,6 +221,7 @@ mod tests {
             timestamp_ns: ts,
             args: Some(args.to_string()),
             stdout_data: None,
+            fd: None,
         }
     }
 
@@ -229,6 +236,7 @@ mod tests {
             timestamp_ns: ts,
             args: None,
             stdout_data: None,
+            fd: None,
         }
     }
 
@@ -297,6 +305,37 @@ mod tests {
         agg.process_parsed_event(&exec_event(200, 999, "ls", "ls -la", 3000));
         let recycled = agg.aggregates.get(&200).unwrap();
         assert_eq!(recycled.session_id, None);
+    }
+
+    /// fd 2 output must land in the stderr buffer. The parser carries the fd
+    /// and the aggregator branches on it; otherwise every stderr chunk is
+    /// appended to stdout, `stdout_size` is inflated and the chrome-trace
+    /// `stderr` arg stays `None`.
+    #[test]
+    fn test_parsed_stderr_event_lands_in_stderr_buffer() {
+        let mut agg = ProcessEventAggregator::new();
+        agg.process_parsed_event(&exec_event(200, 100, "bash", "bash -c 'boom'", 1000));
+
+        let stderr = ParsedProcEvent {
+            event_type: ProcEventType::Stdout,
+            pid: 200,
+            tid: 200,
+            ppid: 100,
+            ptid: 100,
+            comm: "bash".to_string(),
+            timestamp_ns: 2000,
+            args: None,
+            stdout_data: Some("boom\n".to_string()),
+            fd: Some(2),
+        };
+        agg.process_parsed_event(&stderr);
+
+        let proc = agg.aggregates.get(&200).expect("aggregate exists");
+        assert!(
+            proc.stderr_size() > 0,
+            "fd 2 output must be stored as stderr"
+        );
+        assert_eq!(proc.stdout_size(), 0, "stderr must not leak into stdout");
     }
 
     #[test]

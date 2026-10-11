@@ -104,6 +104,35 @@ fn detects_html_documents_but_not_fragments() {
 }
 
 #[test]
+fn detects_a_page_opened_by_a_byte_order_mark() {
+    // The tokenizer ignores one leading BOM, so the page behind it is the same
+    // document the renderer reads. U+FEFF is not whitespace, so trimming alone
+    // leaves the mark in front of the doctype and the page is never routed to
+    // the HTML domain.
+    for page in [
+        "\u{feff}<!DOCTYPE html>\n<html><body>hi</body></html>",
+        "\u{feff}<!doctype HTML>\n<html><body>hi</body></html>",
+        "\u{feff}<html><body>hi</body></html>",
+        "\u{feff}\n<!DOCTYPE html>\n<html><body>hi</body></html>",
+    ] {
+        assert_eq!(detect(page), ContentType::Html, "{page:?}");
+    }
+    // Only the first mark is a BOM: behind a second one, or behind any other
+    // content, the doctype no longer opens the document.
+    assert_ne!(
+        detect("\u{feff}\u{feff}<!DOCTYPE html>\n<html><body>hi</body></html>"),
+        ContentType::Html
+    );
+    assert_ne!(
+        detect("\n\u{feff}<!DOCTYPE html>\n<html><body>hi</body></html>"),
+        ContentType::Html
+    );
+    // The mark does not turn a fragment or prose into a page.
+    assert_ne!(detect("\u{feff}<div>partial</div>"), ContentType::Html);
+    assert_ne!(detect("\u{feff}plain words"), ContentType::Html);
+}
+
+#[test]
 fn html_fragments_inside_other_domains_do_not_make_them_html() {
     let page = "<!DOCTYPE html>\n<html lang=\"en\">\n<body><main><p>Widget reference</p></main></body>\n</html>";
     let prefixed_grep = page

@@ -215,6 +215,32 @@ fn probe_chain_of_only_probes_is_expected() {
 }
 
 #[test]
+fn multiline_command_with_a_real_segment_is_not_a_probe() {
+    // Newlines chain commands exactly like `;` and `&&` do. Splitting only on
+    // the ASCII separators judged the whole script by its first line's head,
+    // so a failing `cat` on line two was read as the expected answer of an
+    // `ls` probe.
+    let v = classify(
+        &bash_call("ls /tmp\ncat /etc/nonexistent"),
+        "cat: /etc/nonexistent: No such file or directory\nExit code 1",
+    );
+    assert_eq!(
+        v.status,
+        CallStatus::Failed,
+        "a real command on a later line means the non-zero exit may be real"
+    );
+}
+
+#[test]
+fn multiline_probe_script_is_still_expected() {
+    let v = classify(
+        &bash_call("ls /tmp\ntest -f /etc/hosts"),
+        "No such file or directory\nExit code 1",
+    );
+    assert_eq!(v.status, CallStatus::OkProbe);
+}
+
+#[test]
 fn absolute_probe_path_is_recognised() {
     let v = classify(&bash_call("/bin/ls /nope"), "No such file or directory");
     assert_eq!(v.status, CallStatus::OkProbe);

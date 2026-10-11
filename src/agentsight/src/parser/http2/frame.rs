@@ -261,8 +261,13 @@ impl ParsedHttp2Frame {
             }
             // Dynamic Table Size Update (001xxxxx)
             else if first_byte & 0xE0 == 0x20 {
-                // Skip this for stateless decoding
-                pos += 1;
+                // Skip this for stateless decoding. The 5-bit prefix is an
+                // HPACK integer (RFC 7541 §5.1): when it is all ones the new
+                // size continues in base-128 octets, the same encoding as
+                // the extended string length in `decode_literal_string`.
+                // Those octets belong to the update — skipping only the
+                // first one left the next field starting mid-integer.
+                pos += Self::hpack_integer_len(payload, pos);
             }
             // Literal Header Field without Indexing (0000xxxx) or Never Indexed (0001xxxx)
             else {
@@ -325,15 +330,22 @@ impl ParsedHttp2Frame {
         let mut length = (first_byte & 0x7F) as usize;
         pos += 1;
 
-        // Check if more length bytes follow (this is a simplification)
-        // In full HPACK, length can be multi-byte
+        // RFC 7541 §5.1: a full 7-bit prefix (0x7F) means the value continues
+        // in the following bytes, seven more bits per byte. The base computed
+        // above is part of the value, so the groups are added, not substituted.
+        // A truncated block — and a hostile chain of continuation bytes — is
+        // handled by stopping at the payload end and by dropping a shift that
+        // has already passed the width of usize, after which the value can only
+        // exceed any payload anyway.
         if length == 0x7F && pos < payload.len() {
-            // Extended length encoding (not common in practice)
-            length = 0;
+            let mut shift = 0u32;
             loop {
-                let b = payload[pos];
+                let Some(&b) = payload.get(pos) else { break };
                 pos += 1;
-                length += (b & 0x7F) as usize;
+                if shift < usize::BITS {
+                    length = length.saturating_add(((b & 0x7F) as usize) << shift);
+                }
+                shift += 7;
                 if b & 0x80 == 0 {
                     break;
                 }
@@ -354,6 +366,29 @@ impl ParsedHttp2Frame {
         };
 
         (result, pos + length - start)
+    }
+
+    /// Number of octets in the HPACK integer beginning at `start`.
+    ///
+    /// A dynamic-table size update is a single HPACK integer (RFC 7541
+    /// §6.3) with a 5-bit prefix: a value below 31 fits in the first octet,
+    /// while the all-ones prefix continues in base-128 octets — the same
+    /// encoding as the extended string length in
+    /// [`Self::decode_literal_string`]. Only the octet count is needed to
+    /// skip one statelessly; a chain that never terminates inside the
+    /// block stops at the payload end, like that walk.
+    fn hpack_integer_len(payload: &[u8], start: usize) -> usize {
+        let mut len = 1;
+        if payload[start] & 0x1F != 0x1F {
+            return len;
+        }
+        while let Some(&b) = payload.get(start + len) {
+            len += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        len
     }
 
     /// Decode an HPACK Huffman-encoded string (RFC 7541 Appendix B) using the
@@ -454,11 +489,7 @@ impl TraceArgs for ParsedHttp2Frame {
             } else {
                 let preview = self.body_str();
                 if !preview.is_empty() {
-                    let truncated = if preview.len() > 200 {
-                        &preview[..200]
-                    } else {
-                        preview
-                    };
+                    let truncated = truncate_on_char_boundary(preview, 200);
                     args.insert("body_preview".to_string(), json!(truncated));
                 }
             }
@@ -505,6 +536,19 @@ impl ToChromeTraceEvent for ParsedHttp2Frame {
     }
 }
 
+/// Shorten a body preview to at most `max_bytes`, cutting on a character
+/// boundary so multi-byte text is never split mid-character.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl fmt::Debug for ParsedHttp2Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("ParsedHttp2Frame");
@@ -525,9 +569,10 @@ impl fmt::Debug for ParsedHttp2Frame {
             } else if let Ok(text) = std::str::from_utf8(body) {
                 let text = text.trim();
                 if text.len() > 200 {
+                    let truncated = truncate_on_char_boundary(text, 200);
                     debug.field(
                         "body",
-                        &format!("(text, {} bytes)\n{}...", body.len(), &text[..200]),
+                        &format!("(text, {} bytes)\n{}...", body.len(), truncated),
                     );
                 } else {
                     debug.field("body", &format!("(text, {} bytes)\n{}", body.len(), text));
@@ -588,5 +633,169 @@ mod tests {
         // return the old "<huffman:N bytes>" placeholder.
         let out = ParsedHttp2Frame::huffman_decode(&[0x00]);
         assert!(!out.starts_with("<huffman:"));
+    }
+
+    fn data_frame(payload: Vec<u8>) -> ParsedHttp2Frame {
+        let len = payload.len();
+        ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: len,
+            source_event: Rc::new(SslEvent {
+                source: 0,
+                timestamp_ns: 0,
+                delta_ns: 0,
+                pid: 1,
+                tid: 1,
+                uid: 0,
+                len: len as u32,
+                rw: 0,
+                comm: "curl".to_string(),
+                buf: payload,
+                is_handshake: false,
+                ssl_ptr: 0,
+            }),
+        }
+    }
+
+    fn headers_frame(payload: Vec<u8>) -> ParsedHttp2Frame {
+        let mut frame = data_frame(payload);
+        frame.frame_type = Http2FrameType::Headers;
+        frame.flags = 0x04; // END_HEADERS
+        frame
+    }
+
+    #[test]
+    fn trace_args_cuts_multibyte_body_preview_on_char_boundary() {
+        // A non-JSON body of dense CJK text over 200 bytes: byte 200 falls
+        // inside a multi-byte character, so a raw &preview[..200] panicked
+        // and took the eBPF event-handling thread down with it.
+        let payload = "你".repeat(70); // 210 bytes of valid UTF-8, not JSON
+        let frame = data_frame(payload.into_bytes());
+
+        let args = frame.to_trace_args();
+        let preview = args["body_preview"].as_str().unwrap();
+        assert_eq!(preview, "你".repeat(66)); // 198 bytes = nearest boundary ≤ 200
+    }
+
+    #[test]
+    fn debug_fmt_survives_multibyte_body() {
+        let payload = "你".repeat(70);
+        let frame = data_frame(payload.into_bytes());
+        let rendered = format!("{frame:?}");
+        assert!(rendered.contains("你"));
+    }
+
+    /// The extended length is a little-endian base-128 integer, so each
+    /// continuation byte is shifted by seven more bits. Summing the groups
+    /// decoded a 1337-byte header value as 94 bytes and left the rest of the
+    /// block to be parsed from the middle of the value.
+    #[test]
+    fn test_decode_literal_string_extended_length_shifts_each_group() {
+        // 1337 with a 7-bit prefix is 0x7F, 0xBA, 0x09 (RFC 7541 §5.1 example
+        // shape): 127 + (58 << 0) + (9 << 7).
+        let mut payload = vec![0x7f, 0xba, 0x09];
+        payload.extend(std::iter::repeat_n(b'a', 1337));
+
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&payload, 0);
+
+        assert_eq!(value.len(), 1337, "the whole value must be decoded");
+        assert_eq!(consumed, 3 + 1337);
+    }
+
+    /// A literal string whose extended length never terminates must not read
+    /// past the payload. 0xFF = Huffman flag plus the 0x7F extended-length
+    /// prefix; 0x80 is a continuation byte, so the loop keeps looking for the
+    /// next byte after the payload ends. The helper's contract for
+    /// corrupt/truncated input is a lossy result, not a panic — this input is
+    /// reachable from captured bytes (HPACK header blocks are decoded from
+    /// observed traffic).
+    #[test]
+    fn test_decode_literal_string_truncated_extended_length_does_not_panic() {
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&[0xff, 0x80], 0);
+        assert_eq!(value, "");
+        assert_eq!(consumed, 2, "the whole payload is consumed");
+    }
+
+    /// A dynamic-table size update is one HPACK integer (RFC 7541 §6.3)
+    /// with a 5-bit prefix. When the prefix is all ones (0x3F first octet)
+    /// the new size continues in base-128 octets — the same integer
+    /// encoding as an extended literal length. The stateless skip
+    /// advanced one octet, so `pos` landed on the continuation bytes and
+    /// the following well-formed literal decoded as garbage (or was
+    /// dropped), putting wrong headers in traces and diagnostics.
+    #[test]
+    fn test_stateless_skips_extended_size_update_before_literal() {
+        // Table size 159 = 31 + (0 << 0) + (1 << 7), i.e. 0x3F 0x80 0x01:
+        // all-ones prefix plus two continuation octets, then a literal
+        // header field with incremental indexing.
+        let mut payload = vec![0x3F, 0x80, 0x01, 0x40, 0x0A];
+        payload.extend_from_slice(b"custom-key");
+        payload.push(0x0C);
+        payload.extend_from_slice(b"custom-value");
+
+        let headers = headers_frame(payload).decode_headers_stateless();
+
+        assert_eq!(
+            headers,
+            vec![("custom-key".to_string(), Some("custom-value".to_string()))],
+            "the literal after the update must decode exactly"
+        );
+    }
+
+    /// Single-continuation form: 0x3F 0x00 is a table size of 31. The
+    /// one-octet skip parsed the 0x00 continuation as a literal header
+    /// field with an empty name, swallowing the indexed field behind it.
+    #[test]
+    fn test_stateless_skips_extended_size_update_before_indexed_field() {
+        let headers = headers_frame(vec![0x3F, 0x00, 0x82]).decode_headers_stateless();
+
+        assert_eq!(
+            headers,
+            vec![(":method".to_string(), Some("GET".to_string()))],
+            "the indexed field after the update must decode exactly"
+        );
+    }
+
+    /// Control: a prefix below 31 fits the whole update in its first
+    /// octet, so the one-octet skip was already correct and must stay so.
+    #[test]
+    fn test_stateless_skips_simple_size_update() {
+        let mut payload = vec![0x21, 0x40, 0x0A];
+        payload.extend_from_slice(b"custom-key");
+        payload.push(0x0C);
+        payload.extend_from_slice(b"custom-value");
+
+        let headers = headers_frame(payload).decode_headers_stateless();
+
+        assert_eq!(
+            headers,
+            vec![("custom-key".to_string(), Some("custom-value".to_string()))]
+        );
+    }
+
+    /// Control: an update-only block (extended, terminating) decodes to
+    /// nothing, and a continuation chain that never terminates inside the
+    /// block stops at the payload end instead of panicking — the same
+    /// contract `decode_literal_string` keeps for truncated lengths.
+    #[test]
+    fn test_stateless_size_update_boundaries_do_not_panic() {
+        assert!(
+            headers_frame(vec![0x3F, 0x00])
+                .decode_headers_stateless()
+                .is_empty()
+        );
+        assert!(
+            headers_frame(vec![0x3F, 0x80])
+                .decode_headers_stateless()
+                .is_empty()
+        );
+        assert!(
+            headers_frame(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF])
+                .decode_headers_stateless()
+                .is_empty()
+        );
     }
 }

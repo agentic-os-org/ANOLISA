@@ -410,9 +410,18 @@ impl LedgerBackingRoot {
                         error = %e,
                         "make-private failed — unmounting and failing closed"
                     );
-                    let _ = Self::do_umount(&backing_canon);
+                    // Same hazard as cleanup: only remove the dir once the
+                    // live mount is confirmed released.
+                    let umount_ok = Self::do_umount(&backing_canon).is_ok();
                     if let Some(ref dir) = created_temp_dir {
-                        let _ = std::fs::remove_dir_all(dir);
+                        if umount_ok {
+                            let _ = std::fs::remove_dir(dir);
+                        } else {
+                            warn!(
+                                path = %dir.display(),
+                                "leaving backing root directory in place: unmount failed after make-private error"
+                            );
+                        }
                     }
                     return Err(BackingRootError::MakePrivateFailed {
                         target: backing_canon,
@@ -425,12 +434,28 @@ impl LedgerBackingRoot {
                     backing_root = %backing_canon.display(),
                     "backing root bind mount created (private, propagation isolated)"
                 );
-                // Verify identity after bind mount.
-                Self::verify_identity(source_canon, &backing_canon).inspect_err(|_| {
-                    if let Some(ref dir) = created_temp_dir {
-                        let _ = std::fs::remove_dir_all(dir);
+                // Verify identity after bind mount. The mount is live here:
+                // never remove the backing dir under it (that would recurse
+                // through the bind into the source tree). Release the mount
+                // first; if that fails, fail closed and leave both in place
+                // for operator cleanup.
+                if let Err(e) = Self::verify_identity(source_canon, &backing_canon) {
+                    match Self::do_umount(&backing_canon) {
+                        Ok(()) => {
+                            if let Some(ref dir) = created_temp_dir {
+                                let _ = std::fs::remove_dir(dir);
+                            }
+                        }
+                        Err(umount_err) => {
+                            warn!(
+                                backing_root = %backing_canon.display(),
+                                error = %umount_err,
+                                "identity check failed and unmount failed — leaving backing root mounted for operator cleanup"
+                            );
+                        }
                     }
-                })?;
+                    return Err(e);
+                }
                 Ok(Self {
                     path: backing_canon,
                     created_bind_mount: true,
@@ -507,10 +532,16 @@ impl LedgerBackingRoot {
     /// do not propagate — this runs on the shutdown path and should not
     /// block process exit.
     pub fn cleanup(&self) {
-        if self.created_bind_mount {
+        // The temp dir IS the bind mount point. Removing it while the mount
+        // is still live would make remove_dir_all recurse through the bind
+        // and unlink the source tree it aliases (the mount point itself
+        // survives with EBUSY, masking the damage). Remove only after the
+        // mount is confirmed released, and only the empty dir we created.
+        let mount_released = if self.created_bind_mount {
             match Self::do_umount(&self.path) {
                 Ok(()) => {
                     info!(backing_root = %self.path.display(), "backing root bind mount unmounted");
+                    true
                 }
                 Err(e) => {
                     warn!(
@@ -518,11 +549,21 @@ impl LedgerBackingRoot {
                         error = %e,
                         "failed to unmount backing root bind mount during cleanup"
                     );
+                    false
                 }
             }
-        }
+        } else {
+            true
+        };
         if let Some(ref dir) = self.created_temp_dir {
-            if let Err(e) = std::fs::remove_dir_all(dir) {
+            if !mount_released {
+                warn!(
+                    path = %dir.display(),
+                    "leaving backing root directory in place: bind mount still active"
+                );
+                return;
+            }
+            if let Err(e) = std::fs::remove_dir(dir) {
                 warn!(
                     path = %dir.display(),
                     error = %e,
@@ -743,6 +784,45 @@ mod tests {
     #[test]
     fn path_is_inside_sibling_not_inside() {
         assert!(!path_is_inside(Path::new("/a/bb"), Path::new("/a/b")));
+    }
+
+    // -----------------------------------------------------------------------
+    // cleanup removal gating
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cleanup_keeps_temp_dir_when_bind_mount_cannot_be_released() {
+        // umount on a path that is not a mount point fails under any
+        // privilege level (EPERM without CAP_SYS_ADMIN, EINVAL with it), so
+        // cleanup must fail closed and leave the directory alone — removing
+        // under a live mount would recurse through the bind into the source
+        // tree it aliases.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().to_path_buf();
+        let root = LedgerBackingRoot {
+            path: path.clone(),
+            created_bind_mount: true,
+            created_temp_dir: Some(path.clone()),
+        };
+        root.cleanup();
+        assert!(
+            path.is_dir(),
+            "directory must survive an unreleased bind mount"
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_empty_temp_dir_without_bind_mount() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let inner = temp.path().join("backing");
+        std::fs::create_dir(&inner).expect("create dir");
+        let root = LedgerBackingRoot {
+            path: inner.clone(),
+            created_bind_mount: false,
+            created_temp_dir: Some(inner.clone()),
+        };
+        root.cleanup();
+        assert!(!inner.exists(), "empty created dir must be removed");
     }
 
     // -----------------------------------------------------------------------
@@ -1049,8 +1129,20 @@ mod tests {
 
         let result = LedgerBackingRoot::setup(&source_canon, &backing_path, &mount_canon, false);
 
-        // Without root, bind mount fails, and the separate directory
-        // has different dev/ino -> IdentityMismatch.
+        // With mount privileges, `setup` bind-mounts the source onto the
+        // backing path itself, so the directory is no longer separate and the
+        // premise does not hold. Decide on the actual outcome, not the uid:
+        // root without CAP_SYS_ADMIN (as in many containers) still takes the
+        // identity-check fallback asserted below. Dropping `result` unmounts.
+        if let Ok(root) = &result {
+            if root.created_bind_mount() {
+                eprintln!("SKIP p1_1_identity_mismatch_rejected: setup created a bind mount");
+                return;
+            }
+        }
+
+        // Without mount privileges, bind mount fails, and the separate
+        // directory has different dev/ino -> IdentityMismatch.
         assert!(
             matches!(result, Err(BackingRootError::IdentityMismatch { .. })),
             "separate non-bind-mount directory should be rejected (identity mismatch): {result:?}"

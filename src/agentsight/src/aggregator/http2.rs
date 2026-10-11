@@ -17,10 +17,44 @@ use std::num::NonZeroUsize;
 
 const MAX_CONTINUATION_BUFFER: usize = 65536;
 
+/// Hard cap on the HPACK dynamic-table size this probe will retain.
+///
+/// `SETTINGS_HEADER_TABLE_SIZE` is peer-controlled and used to be forwarded
+/// to the decoder verbatim, so a hostile TLS peer of any monitored process
+/// could advertise `u32::MAX` (a 4 GiB table) and then retain ~1x of
+/// whatever literal-with-indexing bytes it sent, per connection, until the
+/// connection left the `hpack_states` LRU (which is bounded by connection
+/// count, not bytes). The default is 4096 octets (RFC 7541 §4.2) and major
+/// browsers and servers negotiate at most a 64 KiB table, so 64 KiB is the
+/// ceiling real traffic can ask for without already misbehaving. This
+/// mirrors the decompression-bomb cap in `utils::decompress.rs` (32 MiB):
+/// both bound hostile input that could otherwise OOM the one privileged
+/// observer every monitored process depends on.
+const HPACK_TABLE_SIZE_CAP: usize = 64 * 1024;
+
+/// Dynamic-table size a fresh decoder starts with (RFC 7541 §4.2 default
+/// for `SETTINGS_HEADER_TABLE_SIZE`); also the effective cap for a
+/// connection before it has seen any SETTINGS.
+const HPACK_DEFAULT_TABLE_SIZE: usize = 4096;
+
 /// Per-connection HPACK decoder state (one decoder per direction)
 struct HpackConnectionState {
     req_decoder: Decoder<'static>,
     resp_decoder: Decoder<'static>,
+    /// Effective (clamped) dynamic-table byte cap per direction, as last
+    /// set by SETTINGS. An in-block dynamic-table size update cannot raise
+    /// retention past this: the decoder is re-clamped after every block.
+    req_table_cap: usize,
+    resp_table_cap: usize,
+    /// Estimated dynamic-table bytes retained per direction. The hpack 0.3
+    /// decoder exposes no size accessor, so this is an upper-bound
+    /// estimate: a decoded block can retain at most the HPACK accounting
+    /// size of its headers (`name + value + 32` each), and the running sum
+    /// is clamped to the cap because the decoder evicts FIFO to stay under
+    /// it. Exact while nothing is evicted; converges to the cap under a
+    /// flood, which is the bound the cap guarantees.
+    req_table_bytes: usize,
+    resp_table_bytes: usize,
 }
 
 impl HpackConnectionState {
@@ -28,7 +62,16 @@ impl HpackConnectionState {
         HpackConnectionState {
             req_decoder: Decoder::new(),
             resp_decoder: Decoder::new(),
+            req_table_cap: HPACK_DEFAULT_TABLE_SIZE,
+            resp_table_cap: HPACK_DEFAULT_TABLE_SIZE,
+            req_table_bytes: 0,
+            resp_table_bytes: 0,
         }
+    }
+
+    /// Estimated dynamic-table bytes retained by both directions.
+    fn table_bytes(&self) -> usize {
+        self.req_table_bytes.saturating_add(self.resp_table_bytes)
     }
 }
 
@@ -37,6 +80,26 @@ impl std::fmt::Debug for HpackConnectionState {
         f.debug_struct("HpackConnectionState")
             .finish_non_exhaustive()
     }
+}
+
+/// Strip the PADDED framing from a DATA frame payload (RFC 7540 §6.1).
+///
+/// A padded DATA frame carries a one-byte pad length followed by the body and
+/// that many padding bytes; both belong to the framing, not to the body. The
+/// HEADERS side already strips its framing (`strip_headers_framing`), and DATA
+/// frames have no PRIORITY field, so only the padding applies here.
+fn strip_data_padding(payload: &[u8], flags: u8) -> &[u8] {
+    if flags & 0x08 == 0 {
+        return payload;
+    }
+    let Some((&pad_length, body)) = payload.split_first() else {
+        return &[];
+    };
+    let pad_length = pad_length as usize;
+    if pad_length >= body.len() {
+        return &[];
+    }
+    &body[..body.len() - pad_length]
 }
 
 /// Buffer for reassembling CONTINUATION frames
@@ -295,7 +358,11 @@ impl Http2Stream {
         match direction {
             StreamDirection::Request => {
                 if frame.is_headers() {
-                    self.request_headers = Some(frame.clone());
+                    // First HEADERS wins: a second one in this direction is
+                    // trailers, not the request head.
+                    if self.request_headers.is_none() {
+                        self.request_headers = Some(frame.clone());
+                    }
                     if frame.has_end_stream() {
                         self.request_complete = true;
                     }
@@ -308,7 +375,10 @@ impl Http2Stream {
             }
             StreamDirection::Response => {
                 if frame.is_headers() {
-                    self.response_headers = Some(frame.clone());
+                    // First HEADERS wins: a second one is trailers.
+                    if self.response_headers.is_none() {
+                        self.response_headers = Some(frame.clone());
+                    }
                     if frame.has_end_stream() {
                         self.response_complete = true;
                     }
@@ -329,7 +399,7 @@ impl Http2Stream {
     pub fn request_body(&self) -> Vec<u8> {
         let mut result = Vec::new();
         for frame in &self.request_data_frames {
-            result.extend_from_slice(frame.payload());
+            result.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
         }
         result
     }
@@ -339,31 +409,59 @@ impl Http2Stream {
     pub fn response_body(&self) -> Vec<u8> {
         let mut result = Vec::new();
         for frame in &self.response_data_frames {
-            result.extend_from_slice(frame.payload());
+            result.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
         }
         result
     }
 
+    /// One response header value, preferring the stateful HPACK decode.
+    ///
+    /// The stateless fallback resolves static-table entries only, so a header
+    /// the peer added to the dynamic table and referenced by index on a later
+    /// response of the same connection comes back valueless there.
+    fn response_header(&self, name: &str) -> Option<String> {
+        if let Some(ref headers) = self.decoded_response_headers {
+            if let Some((_, value)) = headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            {
+                return Some(value.clone());
+            }
+        }
+        self.response_headers.as_ref().and_then(|h| {
+            h.decode_headers_stateless()
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .and_then(|(_, value)| value)
+        })
+    }
+
+    /// One request header value, preferring the stateful HPACK decode.
+    fn request_header(&self, name: &str) -> Option<String> {
+        if let Some(ref headers) = self.decoded_request_headers {
+            if let Some((_, value)) = headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            {
+                return Some(value.clone());
+            }
+        }
+        self.request_headers.as_ref().and_then(|h| {
+            h.decode_headers_stateless()
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .and_then(|(_, value)| value)
+        })
+    }
+
     /// Content-Encoding header from response headers (e.g. "gzip", "deflate")
     pub fn content_encoding(&self) -> Option<String> {
-        self.response_headers.as_ref().and_then(|h| {
-            let headers = h.decode_headers_stateless();
-            headers
-                .iter()
-                .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
-                .and_then(|(_, value)| value.clone())
-        })
+        self.response_header("content-encoding")
     }
 
     /// Content-Encoding header from request headers
     pub fn request_content_encoding(&self) -> Option<String> {
-        self.request_headers.as_ref().and_then(|h| {
-            let headers = h.decode_headers_stateless();
-            headers
-                .iter()
-                .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
-                .and_then(|(_, value)| value.clone())
-        })
+        self.request_header("content-encoding")
     }
 
     /// Get request body as decompressed string (concatenates all data frames)
@@ -411,9 +509,18 @@ impl Http2Stream {
         // Re-parsing the accumulated body is O(frames^2) worst-case, but meaningful output
         // normally arrives early and returns; an algorithm redesign is out of scope here.
         for frame in &self.response_data_frames {
-            body.extend_from_slice(frame.payload());
-            let Ok(body_str) = std::str::from_utf8(&body) else {
-                continue;
+            body.extend_from_slice(strip_data_padding(frame.payload(), frame.flags));
+            // A frame boundary can split a multi-byte character, which makes the
+            // tail of the buffer undecodable. Decode the valid prefix instead of
+            // skipping the frame: an event that completed before the split
+            // produced its output in *this* frame, and attributing it to the next
+            // frame reports a later time to first output than really happened.
+            let body_str = match std::str::from_utf8(&body) {
+                Ok(text) => text,
+                Err(error) => match std::str::from_utf8(&body[..error.valid_up_to()]) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                },
             };
             let parsed = SSEParser::parse_stream(body_str);
 
@@ -487,12 +594,17 @@ impl Http2Stream {
 
     /// Check if response content-type indicates SSE stream
     pub fn is_response_sse(&self) -> bool {
+        // RFC 9110 media types are case-insensitive, so the value must be
+        // matched case-insensitively — in lockstep with the HTTP/1 parser's
+        // `ParsedResponse::is_sse`, which lowercases the value first. A
+        // server spelling the header `Content-Type: Text/Event-Stream` must
+        // be classified as SSE on both stacks.
         if let Some(headers) = self.decoded_response_headers.as_ref() {
             if let Some((_, value)) = headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
             {
-                return value.contains("text/event-stream");
+                return value.to_ascii_lowercase().contains("text/event-stream");
             }
         }
         self.response_headers
@@ -503,7 +615,7 @@ impl Http2Stream {
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                     .and_then(|(_, value)| value.clone())
-                    .map(|ct| ct.contains("text/event-stream"))
+                    .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -573,8 +685,19 @@ impl Http2Stream {
             .unwrap_or(0)
     }
 
-    /// Get request headers as JSON string
+    /// Get request headers as JSON string.
+    ///
+    /// Prefers the stateful HPACK decode (the stateless one resolves static
+    /// table entries only, dropping headers referenced through the dynamic
+    /// table).
     pub fn request_headers_json(&self) -> String {
+        if let Some(ref headers) = self.decoded_request_headers {
+            let decoded = headers
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>();
+            return serde_json::to_string(&decoded).unwrap_or_default();
+        }
         if let Some(ref headers) = self.request_headers {
             let decoded = headers
                 .decode_headers_stateless()
@@ -587,8 +710,17 @@ impl Http2Stream {
         }
     }
 
-    /// Get response headers as JSON string
+    /// Get response headers as JSON string.
+    ///
+    /// Prefers the stateful HPACK decode, like [`Self::request_headers_json`].
     pub fn response_headers_json(&self) -> String {
+        if let Some(ref headers) = self.decoded_response_headers {
+            let decoded = headers
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>();
+            return serde_json::to_string(&decoded).unwrap_or_default();
+        }
         if let Some(ref headers) = self.response_headers {
             let decoded = headers
                 .decode_headers_stateless()
@@ -838,19 +970,27 @@ impl Http2StreamAggregator {
             // Per RFC 7540 §6.5.2: SETTINGS from peer X constrains the OTHER
             // direction's encoder, so we resize the decoder for the opposite direction.
             if id == 0x01 {
+                // The advertised size is peer-controlled; clamp it so a
+                // hostile peer cannot make the probe retain an unbounded
+                // dynamic table (see `HPACK_TABLE_SIZE_CAP`).
+                let capped = (value as usize).min(HPACK_TABLE_SIZE_CAP);
                 let state = self
                     .hpack_states
                     .get_or_insert_mut(conn_id, HpackConnectionState::new);
                 match direction {
                     StreamDirection::Request => {
-                        state.resp_decoder.set_max_table_size(value as usize)
+                        state.resp_decoder.set_max_table_size(capped);
+                        state.resp_table_cap = capped;
+                        state.resp_table_bytes = state.resp_table_bytes.min(capped);
                     }
                     StreamDirection::Response => {
-                        state.req_decoder.set_max_table_size(value as usize)
+                        state.req_decoder.set_max_table_size(capped);
+                        state.req_table_cap = capped;
+                        state.req_table_bytes = state.req_table_bytes.min(capped);
                     }
                 }
                 log::debug!(
-                    "HPACK table size update: conn={conn_id:?} dir={direction:?} size={value}"
+                    "HPACK table size update: conn={conn_id:?} dir={direction:?} size={value} (capped to {capped})"
                 );
             }
         }
@@ -899,6 +1039,10 @@ impl Http2StreamAggregator {
         let state = self
             .hpack_states
             .get_or_insert_mut(conn_id, HpackConnectionState::new);
+        let cap = match direction {
+            StreamDirection::Request => state.req_table_cap,
+            StreamDirection::Response => state.resp_table_cap,
+        };
         let decoder = match direction {
             StreamDirection::Request => &mut state.req_decoder,
             StreamDirection::Response => &mut state.resp_decoder,
@@ -915,19 +1059,59 @@ impl Http2StreamAggregator {
                         )
                     })
                     .collect();
+                // A block may carry a dynamic-table size update, which the
+                // hpack 0.3 decoder applies verbatim with no ceiling of its
+                // own — re-assert the clamped cap after every block.
+                // `set_max_table_size` evicts FIFO down to the cap, so
+                // retention above it lives only for the duration of this
+                // call. (RFC 7541 §4.2 would allow treating an
+                // over-advertised update as a decode error; degrading to
+                // the clamp instead keeps the connection observable.)
+                decoder.set_max_table_size(cap);
+                let block_addition: usize = result
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len() + 32)
+                    .fold(0usize, usize::saturating_add);
+                let state = self
+                    .hpack_states
+                    .get_or_insert_mut(conn_id, HpackConnectionState::new);
+                match direction {
+                    StreamDirection::Request => {
+                        state.req_table_bytes = state
+                            .req_table_bytes
+                            .saturating_add(block_addition)
+                            .min(cap);
+                    }
+                    StreamDirection::Response => {
+                        state.resp_table_bytes = state
+                            .resp_table_bytes
+                            .saturating_add(block_addition)
+                            .min(cap);
+                    }
+                }
                 Some(result)
             }
             Err(e) => {
                 log::warn!(
                     "HPACK decode error for conn={conn_id:?} dir={direction:?}: {e:?}, resetting decoder"
                 );
-                // Reset decoder for this direction
+                // Reset decoder for this direction. The fresh table is
+                // empty and re-pinned to the connection's effective cap;
+                // the retained-bytes estimate starts over from zero.
                 let state = self
                     .hpack_states
                     .get_or_insert_mut(conn_id, HpackConnectionState::new);
                 match direction {
-                    StreamDirection::Request => state.req_decoder = Decoder::new(),
-                    StreamDirection::Response => state.resp_decoder = Decoder::new(),
+                    StreamDirection::Request => {
+                        state.req_decoder = Decoder::new();
+                        state.req_decoder.set_max_table_size(state.req_table_cap);
+                        state.req_table_bytes = 0;
+                    }
+                    StreamDirection::Response => {
+                        state.resp_decoder = Decoder::new();
+                        state.resp_decoder.set_max_table_size(state.resp_table_cap);
+                        state.resp_table_bytes = 0;
+                    }
                 }
                 None
             }
@@ -953,8 +1137,15 @@ impl Http2StreamAggregator {
         if let Some(hdrs) = decoded {
             let pair = self.decoded_headers_store.entry(stream_id).or_default();
             match direction {
-                StreamDirection::Request => pair.request = Some(hdrs),
-                StreamDirection::Response => pair.response = Some(hdrs),
+                // Keep the first decode per direction: a later HEADERS in the
+                // same direction is trailers, whose block must not shadow the
+                // initial response/request headers the body decode reads.
+                StreamDirection::Request => {
+                    pair.request.get_or_insert(hdrs);
+                }
+                StreamDirection::Response => {
+                    pair.response.get_or_insert(hdrs);
+                }
             }
         }
     }
@@ -991,7 +1182,12 @@ impl Http2StreamAggregator {
             } => {
                 if direction == StreamDirection::Request {
                     if frame.is_headers() {
-                        request_headers = Some(frame.clone());
+                        // A second request-direction HEADERS is trailers (RFC
+                        // 7540 §8.1): the initial request headers stay
+                        // authoritative.
+                        if request_headers.is_none() {
+                            request_headers = Some(frame.clone());
+                        }
                         if frame.has_end_stream() {
                             // Request is complete (no body)
                             return Http2StreamState::RequestComplete {
@@ -1051,7 +1247,10 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
-                        let sse_ended = response_sse_stream_ended(frame.payload());
+                        let sse_ended = response_sse_stream_ended(strip_data_padding(
+                            frame.payload(),
+                            frame.flags,
+                        ));
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() || sse_ended {
                             // Response is complete
@@ -1097,7 +1296,12 @@ impl Http2StreamAggregator {
             } => {
                 if direction == StreamDirection::Response {
                     if frame.is_headers() {
-                        response_headers = Some(frame.clone());
+                        // A second response HEADERS is trailers: the initial
+                        // response headers carry the content-* metadata the
+                        // body decode depends on, so they stay authoritative.
+                        if response_headers.is_none() {
+                            response_headers = Some(frame.clone());
+                        }
                         if frame.has_end_stream() {
                             // Response is complete
                             let mut stream = Http2Stream::new(
@@ -1117,7 +1321,10 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
-                        let sse_ended = response_sse_stream_ended(frame.payload());
+                        let sse_ended = response_sse_stream_ended(strip_data_padding(
+                            frame.payload(),
+                            frame.flags,
+                        ));
                         response_data_frames.push(frame.clone());
                         if frame.has_end_stream() || sse_ended {
                             // Response is complete
@@ -1182,11 +1389,17 @@ impl Http2StreamAggregator {
             .values()
             .map(DecodedHeadersPair::buffered_bytes)
             .fold(0usize, usize::saturating_add);
+        let hpack_table_bytes = self
+            .hpack_states
+            .iter()
+            .map(|(_, state)| state.table_bytes())
+            .fold(0usize, usize::saturating_add);
 
         ConnectionMetrics {
             connection_cache_bytes: pending_connection_bytes
                 .saturating_add(continuation_bytes)
-                .saturating_add(decoded_header_bytes),
+                .saturating_add(decoded_header_bytes)
+                .saturating_add(hpack_table_bytes),
             pending_connection_count: self.streams.len(),
             pending_connection_bytes,
             eviction_count: self.eviction_count,
@@ -1476,6 +1689,37 @@ mod tests {
         // Re-parsing the accumulated body after frame 2 must attribute the
         // first complete meaningful event to frame 2, not the metadata frame.
         assert_eq!(stream.first_output_timestamp_ns(), Some(400));
+    }
+
+    #[test]
+    fn first_output_timestamp_keeps_the_frame_that_completed_the_event() {
+        // The frame boundary splits a multi-byte character, which used to make
+        // the whole frame undecodable. The meaningful event was complete before
+        // the split, so this frame carries the time to first output.
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        let mut first_payload =
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n".to_vec();
+        // First byte of 'é' (0xC3 0xA9) arrives here, the second in frame 2.
+        first_payload.push(0xC3);
+        let second_payload = vec![0xA9, b'\n'];
+
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            first_payload,
+            create_test_event(1234, 0x1000, 0, 200),
+        ));
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            second_payload,
+            create_test_event(1234, 0x1000, 0, 400),
+        ));
+
+        assert_eq!(stream.first_output_timestamp_ns(), Some(200));
     }
 
     #[test]
@@ -1847,6 +2091,54 @@ mod tests {
     // --- HPACK stateful decode tests ---
 
     #[test]
+    fn data_frame_padding_is_not_part_of_the_body() {
+        // RFC 7540 §6.1 allows DATA frames to be padded: the pad-length byte
+        // and the padding bytes are framing, not body. They used to be
+        // concatenated into the body, so a padded response was unparseable.
+        let connection_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x1000,
+        };
+        let event = create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 1);
+        // flags 0x08 = PADDED, payload = pad_length(2) + "hi" + two pad bytes
+        let frame = create_test_frame(1, 0x00, 0x08, vec![2, b'h', b'i', 0, 0], event);
+
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        assert_eq!(stream.request_body(), Vec::<u8>::new());
+        stream.response_data_frames.push(frame);
+        assert_eq!(stream.response_body(), b"hi".to_vec());
+
+        // An unpadded DATA frame is unchanged.
+        let plain_event = create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2);
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0x00,
+            0x00,
+            b" there".to_vec(),
+            plain_event,
+        ));
+        assert_eq!(stream.response_body(), b"hi there".to_vec());
+
+        // The framing must stay out of the SSE scan too: the pad-length byte
+        // otherwise prefixes the body and the event is no longer recognised.
+        let sse = Http2Stream::new(StreamId::new(connection_id, 2), 0);
+        let mut padded_body = vec![1];
+        padded_body.extend_from_slice(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n",
+        );
+        padded_body.push(0);
+        let mut stream_with_sse = sse;
+        stream_with_sse.response_data_frames.push(create_test_frame(
+            2,
+            0x00,
+            0x08,
+            padded_body,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 33),
+        ));
+        assert_eq!(stream_with_sse.first_output_timestamp_ns(), Some(33));
+    }
+
+    #[test]
     fn test_strip_headers_framing_bare() {
         let payload = b"\x82\x86\x84";
         assert_eq!(strip_headers_framing(payload, 0x00), payload.as_slice());
@@ -1961,6 +2253,212 @@ mod tests {
         assert_eq!(
             hdrs.iter().find(|(n, _)| n == "authorization").unwrap().1,
             "Bearer sk-test123"
+        );
+    }
+
+    #[test]
+    fn trailers_do_not_replace_the_initial_headers() {
+        // A server may end the body with a trailers HEADERS frame (END_STREAM
+        // rides on the trailers, not on the last DATA). Both the frame slot
+        // and the decoded-headers store kept only the most recent HEADERS per
+        // direction, so the trailers replaced the initial response headers
+        // and `content-encoding: gzip` disappeared — the collected body could
+        // no longer be decompressed. The same overwrite exists on the request
+        // side for request trailers.
+        let connection_id = ConnectionId {
+            pid: 900,
+            ssl_ptr: 0x9000,
+        };
+
+        let mut resp_encoder = Encoder::new();
+        let initial_headers = [
+            (b":status".to_vec(), b"200".to_vec()),
+            (b"content-encoding".to_vec(), b"gzip".to_vec()),
+        ];
+        let initial = resp_encoder.encode(initial_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let trailers_headers = [(b"x-checksum".to_vec(), b"abc".to_vec())];
+        let trailers = resp_encoder.encode(trailers_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+
+        let mut req_encoder = Encoder::new();
+        let req_initial_headers = [
+            (b":method".to_vec(), b"POST".to_vec()),
+            (b"content-type".to_vec(), b"application/json".to_vec()),
+        ];
+        let req_initial =
+            req_encoder.encode(req_initial_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let req_trailers_headers = [(b"x-request-checksum".to_vec(), b"def".to_vec())];
+        let req_trailers =
+            req_encoder.encode(req_trailers_headers.iter().map(|(n, v)| (&n[..], &v[..])));
+
+        let mut aggregator = Http2StreamAggregator::new();
+        // Request: HEADERS (no END_STREAM) → DATA → trailers HEADERS+END_STREAM.
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x04,
+            req_initial,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1000),
+        )]);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x00,
+            0x00,
+            b"{}".to_vec(),
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1100),
+        )]);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x05,
+            req_trailers,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 1, 1200),
+        )]);
+        // Response: initial HEADERS → DATA (no END_STREAM) → trailers HEADERS.
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x04,
+            initial,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2000),
+        )]);
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x00,
+            0x00,
+            vec![0x1f, 0x8b, 0x08, 0x00],
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2100),
+        )]);
+        let completed = aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x01,
+            0x05,
+            trailers,
+            create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 2200),
+        )]);
+
+        assert_eq!(
+            completed.len(),
+            1,
+            "trailers END_STREAM completes the stream"
+        );
+        let stream = &completed[0];
+        assert_eq!(
+            stream.content_encoding().as_deref(),
+            Some("gzip"),
+            "the initial response headers must survive the trailers"
+        );
+        assert_eq!(
+            stream.request_header("content-type").as_deref(),
+            Some("application/json"),
+            "the initial request headers must survive the trailers"
+        );
+    }
+
+    #[test]
+    fn content_encoding_prefers_the_stateful_headers() {
+        // A keep-alive connection sends `content-encoding: gzip` literally on
+        // the first response and then references the HPACK dynamic entry: the
+        // stateful decoder resolves it, the stateless one (static table only)
+        // cannot. `content_encoding()` and the header-JSON accessors only
+        // looked at the stateless decode, unlike method/path/status_code.
+        //
+        // 0x5A = literal with incremental indexing, static name 26
+        // (content-encoding); 0xBE = indexed field, dynamic index 62, the entry
+        // that literal just inserted.
+        let first: &[u8] = &[0x5A, 0x04, b'g', b'z', b'i', b'p'];
+        let second: &[u8] = &[0xBE];
+
+        let connection_id = ConnectionId {
+            pid: 700,
+            ssl_ptr: 0x7000,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let decoded_first = aggregator
+            .decode_header_block(connection_id, StreamDirection::Response, first)
+            .expect("the literal adds the dynamic entry");
+        assert_eq!(
+            decoded_first,
+            vec![("content-encoding".to_string(), "gzip".to_string())]
+        );
+        let decoded = aggregator
+            .decode_header_block(connection_id, StreamDirection::Response, second)
+            .expect("the stateful decoder resolves the dynamic reference");
+        assert_eq!(
+            decoded
+                .iter()
+                .find(|(name, _)| name == "content-encoding")
+                .map(|(_, value)| value.as_str()),
+            Some("gzip")
+        );
+
+        let event = create_test_event(connection_id.pid, connection_id.ssl_ptr, 0, 1);
+        let frame = create_test_frame(1, 0x01, 0x04, second.to_vec(), event);
+        assert!(
+            frame
+                .decode_headers_stateless()
+                .iter()
+                .all(|(_, value)| value.is_none()),
+            "the stateless decoder cannot resolve the dynamic reference"
+        );
+
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.response_headers = Some(frame);
+        stream.decoded_response_headers = Some(decoded);
+
+        assert_eq!(stream.content_encoding().as_deref(), Some("gzip"));
+        assert!(
+            stream.response_headers_json().contains("content-encoding"),
+            "headers JSON must not drop the dynamic-table header: {}",
+            stream.response_headers_json()
+        );
+    }
+
+    #[test]
+    fn is_response_sse_matches_content_type_case_insensitively() {
+        // RFC 9110 media types are case-insensitive, and the HTTP/1 parser
+        // already lowercases the value before matching
+        // (`parser::http::response::ParsedResponse::is_sse`). The HTTP/2
+        // check must agree: a server spelling the header
+        // `Content-Type: Text/Event-Stream` on an HTTP/2 response must be
+        // classified as SSE exactly like the same bytes over HTTP/1.1.
+        let connection_id = ConnectionId { pid: 1, ssl_ptr: 1 };
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.decoded_response_headers = Some(vec![
+            (":status".to_string(), "200".to_string()),
+            ("content-type".to_string(), "Text/Event-Stream".to_string()),
+        ]);
+        assert!(
+            stream.is_response_sse(),
+            "a case-variant SSE media type must still mark the response as SSE"
+        );
+    }
+
+    #[test]
+    fn is_response_sse_matches_content_type_case_insensitively_stateless() {
+        // Same response, but only the raw HEADERS frame is available (no
+        // stateful decode): the stateless fallback branch of
+        // `is_response_sse` reads the literal value off the wire and must
+        // match it case-insensitively too.
+        //
+        // The header block is hand-encoded in the form real HTTP/2 servers
+        // emit for a content-type override: `:status: 200` as a static
+        // indexed field (0x88), then content-type (static name index 31)
+        // as a literal with incremental indexing (0x40 | 31 = 0x5f) whose
+        // value is a 32-byte plain literal.
+        let mut encoded = vec![0x88, 0x5f, 0x20];
+        encoded.extend_from_slice(b"Text/Event-Stream; charset=utf-8");
+        let event = create_test_event(1, 0x1000, 0, 1000);
+        let frame = create_test_frame(1, 0x01, 0x04, encoded, event);
+
+        let connection_id = ConnectionId {
+            pid: 1,
+            ssl_ptr: 0x1000,
+        };
+        let mut stream = Http2Stream::new(StreamId::new(connection_id, 1), 0);
+        stream.response_headers = Some(frame);
+        assert!(
+            stream.is_response_sse(),
+            "the stateless fallback must classify a case-variant SSE media type as SSE"
         );
     }
 
@@ -2176,5 +2674,188 @@ mod tests {
             resp_dec.unwrap()[0],
             (":status".to_string(), "404".to_string())
         );
+    }
+
+    // --- HPACK dynamic-table cap tests ---
+
+    #[test]
+    fn settings_header_table_size_is_capped_and_visible_in_metrics() {
+        // A hostile SETTINGS can advertise SETTINGS_HEADER_TABLE_SIZE =
+        // u32::MAX (a 4 GiB dynamic table); every literal-with-indexing
+        // entry decoded afterwards used to be retained until the
+        // connection left the LRU, and that retention was invisible to
+        // `metrics()`. Now the advertised size is clamped to
+        // `HPACK_TABLE_SIZE_CAP` and the retained bytes are estimated
+        // into `connection_cache_bytes`, so a flood shows up in the gauge
+        // but cannot push it past the cap.
+        let mut aggregator = Http2StreamAggregator::new();
+        let conn_id = ConnectionId {
+            pid: 4242,
+            ssl_ptr: 0x6000,
+        };
+
+        // SETTINGS seen on the request direction resizes the response
+        // decoder (RFC 7540 §6.5.2).
+        let mut settings = vec![0x00, 0x01];
+        settings.extend_from_slice(&u32::MAX.to_be_bytes());
+        aggregator.process_frames(vec![create_test_frame(
+            0,
+            0x04,
+            0x00,
+            settings,
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000),
+        )]);
+
+        // Flood the response direction with ~100 KiB of
+        // literal-with-incremental-indexing entries: far past the 64 KiB
+        // cap and past anything a legitimate peer negotiates.
+        let value = vec![b'F'; 4096];
+        for i in 0..24u32 {
+            let mut encoder = Encoder::new();
+            let name = format!("x-flood-{i}").into_bytes();
+            let headers = [(name, value.clone())];
+            let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
+            let decoded =
+                aggregator.decode_header_block(conn_id, StreamDirection::Response, &encoded);
+            assert!(decoded.is_some(), "a capped table must still decode");
+        }
+
+        let bytes = aggregator.metrics().connection_cache_bytes;
+        assert!(
+            bytes > 0,
+            "retained dynamic-table bytes must be visible in the gauge"
+        );
+        assert!(
+            bytes > (64 * 1024) * 3 / 4,
+            "a flood past the cap should fill the table to near the cap, got {bytes}"
+        );
+        assert!(
+            bytes <= 64 * 1024,
+            "retention must be bounded by the cap (HPACK_TABLE_SIZE_CAP), got {bytes}"
+        );
+    }
+
+    #[test]
+    fn in_block_size_update_growth_is_clamped_after_decode() {
+        // SETTINGS is not the only way to raise the table: a
+        // dynamic-table size update inside the header block itself is
+        // applied verbatim by the hpack 0.3 decoder, with no ceiling of
+        // its own. The decoder is re-clamped to the connection's
+        // effective cap after every block, so retention above the cap
+        // lives only for the duration of one decode call.
+        let mut aggregator = Http2StreamAggregator::new();
+        let conn_id = ConnectionId {
+            pid: 4243,
+            ssl_ptr: 0x6100,
+        };
+
+        // No SETTINGS on this connection: the effective cap is the HPACK
+        // default. Size update to 1 MiB (5-bit prefix 31 -> 0x3F, then
+        // continuation bytes 0xF1 0xFF 0x3F), followed by
+        // with-indexing literals.
+        let value = vec![b'U'; 4096];
+        let mut encoder = Encoder::new();
+        let headers = [(b"x-flood-inblock".to_vec(), value)];
+        let mut encoded = vec![0x3F, 0xF1, 0xFF, 0x3F];
+        encoded.extend_from_slice(&encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..]))));
+
+        for _ in 0..10 {
+            let decoded =
+                aggregator.decode_header_block(conn_id, StreamDirection::Request, &encoded);
+            assert!(
+                decoded.is_some(),
+                "an over-advertised size update must degrade, not fail"
+            );
+        }
+
+        let bytes = aggregator.metrics().connection_cache_bytes;
+        assert!(bytes > 0, "the gauge must see the retained table");
+        assert!(
+            bytes <= 4096,
+            "retention must fall back to the pre-SETTINGS cap (HPACK default), got {bytes}"
+        );
+    }
+
+    #[test]
+    fn legitimate_table_sizes_still_decode() {
+        // Regression for the clamp: a table-disabled 0, an explicit small
+        // size, and a size exactly at the cap must all keep decoding —
+        // including dynamic-table references on later blocks.
+        let conn_id = ConnectionId {
+            pid: 4244,
+            ssl_ptr: 0x6200,
+        };
+
+        // SETTINGS 0: with-indexing literals decode but nothing is
+        // retained.
+        let mut aggregator = Http2StreamAggregator::new();
+        aggregator.process_frames(vec![create_test_frame(
+            0,
+            0x04,
+            0x00,
+            vec![0x00, 0x01, 0, 0, 0, 0],
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 100),
+        )]);
+        let mut encoder = Encoder::new();
+        let headers = [(b":method".to_vec(), b"POST".to_vec())];
+        let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Response, &encoded);
+        assert_eq!(
+            decoded.unwrap()[0],
+            (":method".to_string(), "POST".to_string())
+        );
+        assert_eq!(aggregator.metrics().connection_cache_bytes, 0);
+
+        // SETTINGS 256: dynamic entries survive across blocks and the
+        // estimate stays within the negotiated cap.
+        let mut aggregator = Http2StreamAggregator::new();
+        aggregator.process_frames(vec![create_test_frame(
+            0,
+            0x04,
+            0x00,
+            vec![0x00, 0x01, 0, 0, 1, 0],
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 200),
+        )]);
+        let mut encoder = Encoder::new();
+        let first = [(b"x-session".to_vec(), b"abc123".to_vec())];
+        let enc1 = encoder.encode(first.iter().map(|(n, v)| (&n[..], &v[..])));
+        assert!(
+            aggregator
+                .decode_header_block(conn_id, StreamDirection::Response, &enc1)
+                .is_some()
+        );
+        // Second block references the dynamic entry.
+        let second = [(b"x-session".to_vec(), b"abc123".to_vec())];
+        let enc2 = encoder.encode(second.iter().map(|(n, v)| (&n[..], &v[..])));
+        let decoded2 = aggregator.decode_header_block(conn_id, StreamDirection::Response, &enc2);
+        assert_eq!(
+            decoded2.unwrap()[0],
+            ("x-session".to_string(), "abc123".to_string())
+        );
+        let bytes = aggregator.metrics().connection_cache_bytes;
+        assert!(bytes > 0, "a live dynamic entry must be gauged");
+        assert!(bytes <= 256, "the negotiated cap applies, got {bytes}");
+
+        // A table exactly at the cap is legitimate and not clipped.
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut settings = vec![0x00, 0x01];
+        settings.extend_from_slice(&((64 * 1024) as u32).to_be_bytes());
+        aggregator.process_frames(vec![create_test_frame(
+            0,
+            0x04,
+            0x00,
+            settings,
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 300),
+        )]);
+        let mut encoder = Encoder::new();
+        let headers = [(b"x-at-cap".to_vec(), b"present".to_vec())];
+        let encoded = encoder.encode(headers.iter().map(|(n, v)| (&n[..], &v[..])));
+        let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Response, &encoded);
+        assert_eq!(
+            decoded.unwrap()[0],
+            ("x-at-cap".to_string(), "present".to_string())
+        );
+        let bytes = aggregator.metrics().connection_cache_bytes;
+        assert!(bytes > 0 && bytes <= 64 * 1024);
     }
 }

@@ -896,6 +896,20 @@ fn stop_database_maintenance(manager: &DatabaseManager) {
     }
 }
 
+/// Mask a dashboard token for the startup log line: the first eight characters
+/// plus a fixed suffix, or `****` when the token is short enough that a preview
+/// would reveal all of it. Counts characters rather than bytes so a token set by
+/// hand with multi-byte characters cannot split a code point.
+fn mask_token(token: &str) -> String {
+    let mut chars = token.chars();
+    let head: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{head}****")
+    } else {
+        "****".to_string()
+    }
+}
+
 /// Start the API server
 ///
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
@@ -984,11 +998,7 @@ pub async fn run_server(
     let dashboard_auth = Arc::new(DashboardAuth::init(&auth_config, storage_base));
     if dashboard_auth.enabled {
         if let Some(token) = dashboard_auth.read_token_from_file() {
-            let masked = if token.len() > 8 {
-                format!("{}****", &token[..8])
-            } else {
-                "****".to_string()
-            };
+            let masked = mask_token(&token);
             eprintln!(
                 "Dashboard auth enabled. Token: {masked}  (use `agentsight dashboard` to view)"
             );
@@ -1217,6 +1227,7 @@ fn stop_enforcement_ingestion(
 
 #[cfg(test)]
 mod tests {
+    use super::mask_token;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
     use std::time::Instant;
@@ -1621,5 +1632,134 @@ mod tests {
             causal_store: None,
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
+    }
+
+    fn test_app_state_with_genai_store(
+        store: crate::storage::sqlite::GenAISqliteStore,
+    ) -> web::Data<AppState> {
+        let auth_config = ServerAuthConfig { enabled: false };
+        let auth = Arc::new(DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            genai_store: Some(Arc::new(store)),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Audit scenario for the turns endpoint (issue #4475): five complete
+    /// main-flow llm_call events one minute apart, `limit=3` — the response
+    /// must carry the newest three turns, newest first, per the endpoint's
+    /// documented contract. The pre-fix handler iterated the store's
+    /// chronological rows forward and answered with the oldest three.
+    #[actix_web::test]
+    async fn preference_turns_return_newest_unique_turns_first() {
+        let path =
+            std::env::temp_dir().join(format!("test_pref_turns_order_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+
+        // Seed the store through its file with a second connection: the
+        // server test cannot reach the store's private conn field, and raw
+        // SQL needs none of the batch machinery.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let minute = 60_000_000_000_i64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64;
+            for i in 0..5_i64 {
+                let ts = now - (4 - i) * minute;
+                conn.execute(
+                    "INSERT INTO genai_events (\
+                     call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+                     provider, model, input_tokens, output_tokens, total_tokens,\
+                     session_id, trace_id, conversation_id, agent_name, pid,\
+                     status, tool_call_ids, event_json, process_name, user_query, call_kind\
+                     ) VALUES (?1,'llm_call',?2,?3,?4,'openai','gpt-4',10,10,20,\
+                     'sess-t','trace-t','conv-t','agent-a',1,'complete','[]','[]','proc-a',?5,'main')",
+                    rusqlite::params![
+                        format!("pt-{i}"),
+                        ts,
+                        ts + 1_000,
+                        1_000,
+                        format!("turn {}", i + 1)
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_genai_store(store))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/preferences/turns?source=genai&limit=3&window_days=1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&awtest::read_body(response).await).unwrap();
+        let turns: Vec<&str> = body["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert_eq!(turns, vec!["turn 5", "turn 4", "turn 3"]);
+        assert_eq!(body["turns_count"].as_u64(), Some(3));
+        assert_eq!(body["source"].as_str(), Some("genai"));
+
+        // The shared selection used by both handler twins is exercised on
+        // its own in preferences::api tests (the macOS twin is cfg-gated
+        // off Linux); this end-to-end check pins the Linux wiring to it.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The dashboard token may be set by hand in `.dashboard_token`; slicing it
+    /// by bytes panicked on the startup log line whenever the token contained a
+    /// multi-byte character at byte 8.
+    #[test]
+    fn mask_token_keeps_multi_byte_tokens_masked() {
+        assert_eq!(
+            mask_token("密碼短語密碼短語密碼短語"),
+            "密碼短語密碼短語****"
+        );
+        assert_eq!(mask_token("123456789"), "12345678****");
+        assert_eq!(mask_token("12345678"), "****");
+        assert_eq!(mask_token("密碼"), "****");
     }
 }

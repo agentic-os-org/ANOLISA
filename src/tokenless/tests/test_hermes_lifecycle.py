@@ -306,22 +306,23 @@ class HermesLifecycleTest(unittest.TestCase):
                 self.assertEqual(request["input"]["content_origin"], origin)
                 self.assertEqual(request["input"]["status"], expected_status)
 
-    def test_post_tool_reports_plain_shell_file_reads_as_file_read(self):
+    def test_post_tool_passes_shell_commands_for_file_read_classification(self):
         self.response = {"output": "unchanged", "disposition": "passthrough"}
-        for command, origin in (
-            ("cat page.html", "file_read"),
-            ("cat page.html | head -c 100", "command_output"),
+        for tool_name, args, expected in (
+            ("terminal", {"command": "cat page.html"}, "cat page.html"),
+            ("terminal", {"command": 7}, None),
+            ("web_search", {"command": "cat page.html"}, None),
         ):
-            with self.subTest(command=command):
+            with self.subTest(tool_name=tool_name, args=args):
                 self.requests.clear()
                 self.plugin.on_transform_tool_result(
-                    tool_name="terminal",
-                    args={"command": command},
+                    tool_name=tool_name,
+                    args=args,
                     result="unchanged",
                     status="ok",
                 )
                 request = self.requests[0][1]
-                self.assertEqual(request["input"]["content_origin"], origin)
+                self.assertEqual(request["input"].get("command"), expected)
 
     def test_post_tool_infers_status_when_host_omits_it(self):
         self.response = {"output": "unchanged", "disposition": "passthrough"}

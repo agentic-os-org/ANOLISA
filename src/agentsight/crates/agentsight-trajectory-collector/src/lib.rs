@@ -132,8 +132,14 @@ fn process_session(
         }
     }
 
-    let content = std::fs::read_to_string(&session.path)
-        .with_context(|| format!("read {}", session.path.display()))?;
+    // Read bytes: an agent killed mid-write can leave a partial record whose
+    // last bytes cut a multi-byte character, and `read_to_string` would then
+    // reject the whole file, losing every complete record before the tail.
+    // Lossy decoding turns that tail into a malformed line, which
+    // `load_jsonl_events` skips like any other malformed line.
+    let content =
+        std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
+    let content = String::from_utf8_lossy(&content);
     let events = qoder::load_jsonl_events(&content);
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
@@ -258,6 +264,53 @@ mod tests {
     }
 
     #[test]
+    fn test_process_session_settles_when_one_session_has_two_paths() {
+        // One session id discovered under two roots (e.g. a Codex rollout
+        // under `.codex/sessions` and `.codex/archived_sessions`): the
+        // session_id primary key keeps a single row whose file_path is
+        // rewritten by whichever path ingests last. Both paths must still
+        // settle — before the fix neither path's state matched on the next
+        // round, so both files were fully re-read and re-upserted (churning
+        // collected_at_ns) on every scan round.
+        let base = tmp_dir("dual-path");
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let first = write_session(&projects);
+
+        let archive = base.join("archived-sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        let second = archive.join(format!("{UUID_A}.jsonl"));
+        std::fs::copy(&first, &second).unwrap();
+
+        let discovered = |path: PathBuf| DiscoveredSession {
+            path,
+            project: "data-myapp".into(),
+            session_id: UUID_A.into(),
+            is_subagent: false,
+            source: "qoder".into(),
+        };
+        let s1 = discovered(first);
+        let s2 = discovered(second);
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        // Round 1: both paths are new and get ingested.
+        assert!(process_session(&store, &s1, 0).unwrap());
+        assert!(process_session(&store, &s2, 0).unwrap());
+        assert_eq!(store.count().unwrap(), 1, "one row per session id");
+
+        // Round 2: unchanged files on both paths are skipped.
+        assert!(
+            !process_session(&store, &s1, 0).unwrap(),
+            "unchanged first path must not re-ingest"
+        );
+        assert!(
+            !process_session(&store, &s2, 0).unwrap(),
+            "unchanged second path must not re-ingest"
+        );
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
     fn test_scan_once_ingests_and_skips_unchanged() {
         let base = tmp_dir("scan");
         let projects = base.join("projects");
@@ -291,6 +344,41 @@ mod tests {
         // Second scan with unchanged file must not fail and keeps one row.
         scan_once(&store, &config);
         assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_scan_once_ingests_a_session_with_a_torn_utf8_tail() {
+        let base = tmp_dir("torn-tail");
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let path = write_session(&projects);
+
+        // An agent killed mid-write can leave a partial record whose last
+        // bytes cut a multi-byte character in half, so the file is no longer
+        // valid UTF-8.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(
+            b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"\xe4\xb8",
+        );
+        std::fs::write(&path, &bytes).unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![projects]),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+        };
+
+        scan_once(&store, &config);
+
+        // The truncated record is dropped, but the complete records before it
+        // still ingest: one bad tail must not discard the whole session.
+        assert_eq!(store.count().unwrap(), 1);
+        let rec = store.get(UUID_A).unwrap().unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(doc["agent"]["model_name"], "qwen-max");
+        assert_eq!(rec.total_prompt_tokens, Some(10));
+        assert_eq!(rec.end_time.as_deref(), Some("2026-07-25T10:00:02Z"));
     }
 
     #[test]

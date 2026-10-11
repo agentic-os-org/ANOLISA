@@ -16,7 +16,9 @@
 //!   `$channel` substitute into `base_url` only. Values come from host
 //!   detection and can be overridden in `[vars]`; an unknown or unset
 //!   variable is a hard error — a URL with a silently-preserved `$typo`
-//!   is the hardest failure to diagnose downstream.
+//!   is the hardest failure to diagnose downstream. Substituted values
+//!   are re-validated: a `[vars]` or host value cannot inject what the
+//!   template rules reject.
 //! * **Schemes**: `file://` and `https://` always allowed; `http://`
 //!   requires `insecure = true` on the entry; query strings and
 //!   fragments are rejected.
@@ -553,6 +555,11 @@ impl RepoConfig {
             ),
         ]);
         let substituted = substitute_vars(backend_name, &backend.base_url, &values)?;
+        // A variable value ([vars] override or host detection) can inject
+        // exactly the shapes the raw template was validated against, so the
+        // substituted URL is re-checked before any caller derives index,
+        // artifact, or dnf baseurls from it.
+        validate_base_url(backend_name, &substituted, backend.insecure)?;
         Ok(substituted.trim_end_matches('/').to_string())
     }
 
@@ -589,8 +596,14 @@ pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
     Ok(url.trim_end_matches('/').to_string())
 }
 
-/// Enforce the base_url shape rules (see module docs). Runs on the raw
-/// string before substitution — the scheme is always literal.
+/// Enforce the base_url shape rules (see module docs): scheme, non-empty
+/// authority/path, and no query string or fragment. Runs on the raw
+/// template at parse time — the scheme is always literal — and again on
+/// the substituted result in [`RepoConfig::resolved_base_url`], so a
+/// variable value cannot inject what the template rules reject. Path
+/// shape beyond that is untouched: the config author already controls
+/// the whole base_url, and local paths keep whatever characters the
+/// filesystem allows (a directory named `repo dir` works).
 fn validate_base_url(backend: &str, url: &str, insecure: bool) -> Result<(), RepoConfigError> {
     let invalid = |reason: &str| RepoConfigError::InvalidBaseUrl {
         backend: backend.to_string(),
@@ -860,18 +873,83 @@ fn fetch_repo_config_body(url: &str) -> Result<String, RepoConfigProvisionError>
     Ok(body)
 }
 
+/// Monotonic, process-wide counter mixed into [`repo_config_tmp_path_for`]
+/// so that concurrent writers on the same `path` don't pick the same tmp
+/// name.
+static REPO_CONFIG_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Generate a unique tmp sibling path for `path`.
+///
+/// Pattern: `.{file_name}.{pid}.{counter}.{nanos}.tmp`. Combined with
+/// `O_CREAT|O_EXCL` in [`open_repo_config_tmp`], a stale tmp (or a hostile
+/// plant) at the exact generated path is a hard error, not a silent
+/// overwrite. Mirrors the pattern in `anolisa_core::state::tmp_path_for`.
+fn repo_config_tmp_path_for(path: &Path) -> PathBuf {
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo.toml".to_string());
+    let pid = std::process::id();
+    let counter = REPO_CONFIG_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut tmp = path.to_path_buf();
+    tmp.set_file_name(format!(".{file_name}.{pid}.{counter}.{nanos}.tmp"));
+    tmp
+}
+
+/// Open `tmp` for writing with `O_CREAT|O_EXCL` (+ `O_NOFOLLOW` on Unix).
+/// Mirrors `anolisa_core::state::open_excl_nofollow`.
+fn open_repo_config_tmp(tmp: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    opts.open(tmp)
+}
+
 fn write_repo_config(dest: &Path, body: &str) -> Result<(), RepoConfigProvisionError> {
+    use std::io::Write;
+
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|source| RepoConfigProvisionError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let tmp = dest.with_extension("toml.tmp");
-    std::fs::write(&tmp, body).map_err(|source| RepoConfigProvisionError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
+    // Unique-name staging file opened O_EXCL (+O_NOFOLLOW): a fixed
+    // `repo.toml.tmp` name let concurrent first-runs clobber each other's
+    // staging bytes and wrote straight through a planted symlink.
+    let tmp = repo_config_tmp_path_for(dest);
+    let write_result = (|| {
+        let mut f = open_repo_config_tmp(&tmp).map_err(|source| RepoConfigProvisionError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        f.write_all(body.as_bytes())
+            .map_err(|source| RepoConfigProvisionError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
+        // Best-effort fsync, like `anolisa_core::state::write_atomic`: a
+        // filesystem that cannot fsync must not turn the first-run
+        // bootstrap into a hard error. The rename below still publishes the
+        // complete body.
+        let _ = f.sync_all();
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
     std::fs::rename(&tmp, dest).map_err(|source| {
         let _ = std::fs::remove_file(&tmp);
         RepoConfigProvisionError::Io {
@@ -891,6 +969,132 @@ mod tests {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
         }
+    }
+
+    #[test]
+    fn write_repo_config_ignores_planted_tmp_symlink() {
+        // The old fixed-name `repo.toml.tmp` staging file was written
+        // through any symlink planted at that path (no O_EXCL/O_NOFOLLOW),
+        // clobbering the target instead of writing the config.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("repo.toml");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "do not touch").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, dir.path().join("repo.toml.tmp")).unwrap();
+
+        write_repo_config(&dest, "default_backend = \"raw\"\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do not touch");
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "default_backend = \"raw\"\n"
+        );
+    }
+
+    #[test]
+    fn write_repo_config_concurrent_writers_converge() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = Arc::new(dir.path().join("repo.toml"));
+        let bodies: Vec<String> = (0..8)
+            .map(|i| format!("default_backend = \"raw{i}\"\n"))
+            .collect();
+        let mut handles = Vec::new();
+        for body in &bodies {
+            let dest = Arc::clone(&dest);
+            let body = body.clone();
+            handles.push(std::thread::spawn(move || {
+                write_repo_config(&dest, &body).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let final_content = std::fs::read_to_string(dest.as_path()).unwrap();
+        assert!(bodies.contains(&final_content));
+    }
+
+    /// Helper process for `write_repo_config_concurrent_processes_converge`:
+    /// when the parent sets `ANOLISA_REPO_CONFIG_HELPER_DEST`/`_BODY`, this
+    /// entry point performs the same write in its own process. Without the
+    /// env vars (a normal test run) it is a no-op pass.
+    #[test]
+    fn write_repo_config_process_helper() {
+        let Ok(dest) = std::env::var("ANOLISA_REPO_CONFIG_HELPER_DEST") else {
+            return;
+        };
+        let body = std::env::var("ANOLISA_REPO_CONFIG_HELPER_BODY").unwrap_or_default();
+        write_repo_config(Path::new(&dest), &body).unwrap();
+    }
+
+    #[test]
+    fn write_repo_config_concurrent_processes_converge() {
+        // Threads share the process-wide tmp counter and pid; separate
+        // processes share neither, so this is the contention the thread test
+        // cannot reach. Every writer must succeed and the destination must
+        // hold exactly one writer's complete body.
+        let exe = std::env::current_exe().expect("test binary path");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("repo.toml");
+        let bodies: Vec<String> = (0..8)
+            .map(|i| format!("default_backend = \"raw{i}\"\n"))
+            .collect();
+
+        let mut children = Vec::new();
+        for body in &bodies {
+            let child = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "repo_config::tests::write_repo_config_process_helper",
+                ])
+                .env("ANOLISA_REPO_CONFIG_HELPER_DEST", &dest)
+                .env("ANOLISA_REPO_CONFIG_HELPER_BODY", body)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn helper process");
+            children.push(child);
+        }
+        for mut child in children {
+            let status = child.wait().expect("wait helper process");
+            assert!(status.success(), "helper process failed: {status}");
+        }
+
+        let final_content = std::fs::read_to_string(&dest).unwrap();
+        assert!(
+            bodies.contains(&final_content),
+            "destination must hold one writer's complete body, got {final_content:?}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging file may be left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn write_repo_config_ignores_abandoned_staging_file() {
+        // A writer killed between creating its staging file and renaming it
+        // leaves that file behind; the unique name means the next run must
+        // ignore it instead of reusing or truncating it.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("repo.toml");
+        let abandoned = dir.path().join(".repo.toml.1234.0.9999.tmp");
+        std::fs::write(&abandoned, "partial").unwrap();
+
+        write_repo_config(&dest, "default_backend = \"raw\"\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "default_backend = \"raw\"\n"
+        );
+        assert_eq!(std::fs::read_to_string(&abandoned).unwrap(), "partial");
     }
 
     fn serve_once(body: String) -> String {
@@ -1251,6 +1455,96 @@ agentsight = "anolis-agentsight"
             err,
             RepoConfigError::UnsetVariable { name, .. } if name == "releasever"
         ));
+    }
+
+    /// A `[vars]` value must not smuggle characters the base_url shape
+    /// rules reject: substitution happens after the raw template passed
+    /// `validate_base_url`, so the resolved URL is re-checked before any
+    /// caller derives index or artifact URLs from it. The re-check
+    /// enforces the same pre-existing rules (scheme, non-empty
+    /// authority/path, no query string or fragment); path shape is not
+    /// further restricted — the config author already controls the whole
+    /// base_url, and dot segments in any form are pre-existing behavior
+    /// (`https://example.com/../other/v1/` resolved the same way before
+    /// this change).
+    #[test]
+    fn vars_value_cannot_bypass_base_url_shape_rules() {
+        for poison in ["stable?token=1", "stable#frag"] {
+            let cfg = RepoConfig::from_toml_str(&format!(
+                r#"schema_version = 1
+default_backend = "raw"
+[vars]
+channel = "{poison}"
+[backends.raw]
+base_url = "https://example.com/anolisa/$channel/v1/"
+"#,
+            ))
+            .expect("raw template passes shape rules");
+            let (name, backend) = cfg.select_backend(None).expect("raw backend");
+            let err = match cfg.resolved_base_url(name, backend, &host()) {
+                Ok(url) => panic!("poison {poison:?} must be rejected, got {url}"),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err, RepoConfigError::InvalidBaseUrl { .. }),
+                "poison {poison:?}: got {err:?}"
+            );
+        }
+    }
+
+    /// Host-detected values feed the same substitution, so they get the
+    /// same post-substitution re-check.
+    #[test]
+    fn host_detected_value_cannot_bypass_base_url_shape_rules() {
+        let cfg = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "raw"
+[backends.raw]
+base_url = "https://example.com/anolisa/$os/v1/"
+"#,
+        )
+        .expect("raw template passes shape rules");
+        let (name, backend) = cfg.select_backend(None).expect("raw backend");
+        let host = HostVars {
+            os: "linux?token=1".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let err = cfg
+            .resolved_base_url(name, backend, &host)
+            .expect_err("a query string in a host value must be rejected");
+        assert!(matches!(err, RepoConfigError::InvalidBaseUrl { .. }));
+    }
+
+    /// Local repositories keep whatever characters the filesystem allows:
+    /// the shape rules must not over-restrict paths that worked before
+    /// the post-substitution re-check existed. A `file://` base_url whose
+    /// path contains a space (and such a value substituted from `[vars]`)
+    /// still resolves, and a `--repo 'file:///tmp/repo dir'` override
+    /// still normalizes — `parse_file_url` builds a `PathBuf` verbatim,
+    /// with no percent-decoding, so percent-encoding would not be an
+    /// equivalent path.
+    #[test]
+    fn local_paths_with_spaces_still_resolve() {
+        let cfg = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "raw"
+[vars]
+channel = "sta ble"
+[backends.raw]
+base_url = "file:///tmp/repo $channel/v1/"
+"#,
+        )
+        .expect("file template with spaces passes shape rules");
+        let (name, backend) = cfg.select_backend(None).expect("raw backend");
+        let resolved = cfg
+            .resolved_base_url(name, backend, &host())
+            .expect("local path with spaces must keep resolving");
+        assert_eq!(resolved, "file:///tmp/repo sta ble/v1");
+
+        assert_eq!(
+            normalize_override_url("file:///tmp/repo dir").expect("override with space"),
+            "file:///tmp/repo dir"
+        );
     }
 
     #[test]

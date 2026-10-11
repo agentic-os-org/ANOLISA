@@ -243,11 +243,15 @@ result = await sdk.post_tool(
         output_optimization=call.output_optimization,
         capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
+        command=None,  # shell 工具填实际执行的命令行
     )
 )
 ```
 
-`content_origin` 必须来自工具注册契约，不得从结果文本推断。Core 统一路由 Retrieve 输出、
+`content_origin` 必须来自工具注册契约，不得从结果文本推断。Shell 工具应把实际执行的命令行
+（RTK 改写时为 PreTool 返回的那条）作为 `command` 传入：Core 会把只打印本地文件的结果报告为
+`file_read`，打印出的 HTML 页面保持原样，输出中的数据仍照常压缩；其他工具不要设置
+`command`。Core 统一路由 Retrieve 输出、
 错误、中断或拒绝、RTK 已优化输出和普通成功输出，并返回最终内容、Disposition、操作轨迹、
 可恢复性、Token 数量、Stash Key 与可选诊断上下文。Adapter 应透传中间 Streaming Chunk，
 只对最终模型可见文本调用 PostTool。

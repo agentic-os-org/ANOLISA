@@ -808,6 +808,7 @@ pub fn compress_response_with_store(
         content: input.into(),
         status: ToolResultStatus::Success,
         content_origin: ContentOrigin::ApiResponse,
+        command: None,
         output_optimization: OutputOptimization::None,
         capabilities: PostToolCapabilities {
             replace_output: true,
@@ -1550,6 +1551,7 @@ mod tests {
                     content,
                     status: ToolResultStatus::Success,
                     content_origin: ContentOrigin::ApiResponse,
+                    command: None,
                     output_optimization: OutputOptimization::None,
                     capabilities: PostToolCapabilities {
                         replace_output: true,
@@ -1597,6 +1599,7 @@ mod tests {
                     content,
                     status: ToolResultStatus::Success,
                     content_origin: ContentOrigin::CommandOutput,
+                    command: None,
                     output_optimization: OutputOptimization::None,
                     capabilities: PostToolCapabilities {
                         replace_output: true,

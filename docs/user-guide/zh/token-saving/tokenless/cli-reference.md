@@ -84,6 +84,7 @@ jq -n \
       content: $content,
       status: "success",
       content_origin: "command_output",
+      command: "cargo build",
       output_optimization: "none",
       capabilities: {
         replace_output: true,

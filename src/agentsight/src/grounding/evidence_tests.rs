@@ -328,6 +328,42 @@ fn scenario_echoed_command_line_is_not_evidence() {
 }
 
 #[test]
+fn scenario_echoed_command_line_is_stripped_when_the_result_lives_on_a_later_step() {
+    // `classify_calls` correlates a result with its call across steps (each
+    // invocation owns the window up to the next call reusing its id), so the
+    // echo guard must find the call there too. With a step-local lookup the
+    // invocation line stayed in the pool, and the agent's own command line
+    // grounded the very path it invented.
+    let mut calling = agent(2, "");
+    calling.tool_calls = Some(vec![call(
+        "c1",
+        "Bash",
+        serde_json::json!({"command": "cat /fabricated/report.txt"}),
+    )]);
+    let mut carrying = agent(3, "");
+    carrying.observation = Some(Observation {
+        results: vec![ok_result(
+            "c1",
+            "$ cat /fabricated/report.txt\nquarterly summary",
+        )],
+    });
+
+    let doc = traj(vec![
+        user(1, "看一下报告"),
+        calling,
+        carrying,
+        agent(4, "报告位于 /fabricated/report.txt 。内容是季度总结。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert_eq!(
+        grounding_for(&index, "/fabricated/report.txt"),
+        Grounding::Unresolved,
+        "the echoed command of a later-step result must not ground the claim"
+    );
+}
+
+#[test]
 fn scenario_system_prompt_is_not_evidence() {
     let doc = traj(vec![
         system(1, "示例接口：https://example.test/api/v1"),
@@ -446,10 +482,42 @@ fn scenario_probe_result_still_counts_as_evidence() {
     );
 }
 
+#[test]
+fn scenario_successful_listing_of_the_path_is_evidence() {
+    // A successful listing answers its own argument, so the first result line
+    // is a real observation, not a command echo. The guard used to drop any
+    // leading line the command *contains*, which deleted this one: the claim
+    // about the inspected path then read as Unresolved and could turn into an
+    // ungrounded-onset finding.
+    let doc = traj(vec![
+        user(1, "日志在吗"),
+        acting_agent(
+            2,
+            "检查",
+            vec![call(
+                "c1",
+                "Bash",
+                serde_json::json!({"command": "ls /var/log/app.log"}),
+            )],
+            vec![ok_result("c1", "/var/log/app.log")],
+        ),
+        agent(3, "/var/log/app.log 存在。"),
+    ]);
+    let index = index_of(&doc);
+
+    assert!(
+        matches!(
+            grounding_for(&index, "/var/log/app.log"),
+            Grounding::Grounded { .. }
+        ),
+        "a successful listing is its own observation: {:?}",
+        index.claims
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 13..14 — abstention input and blame scoping
 // ---------------------------------------------------------------------------
-
 #[test]
 fn scenario_unlinked_calls_drive_the_unknown_ratio() {
     let doc = traj(vec![

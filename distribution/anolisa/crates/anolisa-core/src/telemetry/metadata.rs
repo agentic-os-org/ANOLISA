@@ -14,27 +14,21 @@ use std::sync::{Arc, OnceLock};
 /// `query_metadata` calls short-circuit to `None` without spawning curl again,
 /// so a non-ECS host pays the timeout cost only once instead of once per key.
 ///
-/// Cheap to clone: the cloud-init cache is shared and the unreachable flag is
-/// copied so probes reuse the same short-circuit state across the uploader
-/// round.
+/// Cheap to clone: the cloud-init cache and the unreachable latch are both
+/// shared, so a transfer failure observed through *any* clone — the
+/// uploader's region probe receives a clone — short-circuits every other
+/// probe in the same uploader round, and the uploader's per-round
+/// `clear_unreachable` re-arms them all at once.
+#[derive(Clone)]
 pub struct MetadataClient {
     metadata_url_base: String,
     cloud_init_all: Arc<OnceLock<Option<serde_json::Value>>>,
     /// Set after a curl transfer failure, not an HTTP error or empty value.
-    /// All further `query_metadata` calls skip curl entirely.
-    metadata_unreachable: AtomicBool,
-}
-
-impl Clone for MetadataClient {
-    fn clone(&self) -> Self {
-        Self {
-            metadata_url_base: self.metadata_url_base.clone(),
-            cloud_init_all: self.cloud_init_all.clone(),
-            metadata_unreachable: AtomicBool::new(
-                self.metadata_unreachable.load(Ordering::Relaxed),
-            ),
-        }
-    }
+    /// All further `query_metadata` calls skip curl entirely. Shared by
+    /// every clone: probes that receive a cloned client must observe and
+    /// set the same latch as the caller's own probes, or each clone pays
+    /// its own bounded curl attempt per round.
+    metadata_unreachable: Arc<AtomicBool>,
 }
 
 impl MetadataClient {
@@ -44,7 +38,7 @@ impl MetadataClient {
         Self {
             metadata_url_base: metadata_url_base.trim_end_matches('/').to_string(),
             cloud_init_all: Arc::new(OnceLock::new()),
-            metadata_unreachable: AtomicBool::new(false),
+            metadata_unreachable: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -61,6 +55,23 @@ impl MetadataClient {
             .map(|(prefix, _)| prefix)
             .unwrap_or(url);
         Self::new(base)
+    }
+
+    /// Clear the unreachable latch so the next `query_metadata` probes the
+    /// endpoint again.
+    ///
+    /// The latch exists to collapse the several keys probed *within* one
+    /// uploader round (region-id, desktop-id, instance/instance-type) into
+    /// a single curl attempt after a transfer failure. It must not outlive
+    /// the round: the uploader documents "probe the region once per round",
+    /// and a transient failure (early-boot race, maintenance blip) on an
+    /// ECS host would otherwise pin every later round to the cn-hangzhou
+    /// public fallback and misattribute the region dimension for the
+    /// daemon's lifetime. Callers that start a new round — only the
+    /// uploader loop — clear it; one extra bounded curl attempt per round
+    /// is the intended cost.
+    pub fn clear_unreachable(&self) {
+        self.metadata_unreachable.store(false, Ordering::Relaxed);
     }
 
     /// Query a metadata API key via curl.
@@ -326,6 +337,30 @@ pub(crate) fn with_metadata_responses<T>(
     responses: &[(&str, u16, &str)],
     f: impl FnOnce(&str) -> T,
 ) -> T {
+    with_metadata_script(&[], responses, f)
+}
+
+/// Like [`with_metadata_responses`], but the FIRST connection is accepted
+/// and then dropped without an HTTP response — a genuine curl transfer
+/// failure, which is what sets the client's unreachable latch — after
+/// which the scripted responses are served in order.
+#[cfg(test)]
+pub(crate) fn with_metadata_dropping_first<T>(
+    responses: &[(&str, u16, &str)],
+    f: impl FnOnce(&str) -> T,
+) -> T {
+    with_metadata_script(&["region-id"], responses, f)
+}
+
+/// Scripted metadata server: the listed `drops` are accepted and closed
+/// without an HTTP response (curl transfer failures), then the scripted
+/// `(path, status, body)` responses are served in order.
+#[cfg(test)]
+pub(crate) fn with_metadata_script<T>(
+    drops: &[&str],
+    responses: &[(&str, u16, &str)],
+    f: impl FnOnce(&str) -> T,
+) -> T {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
@@ -336,23 +371,25 @@ pub(crate) fn with_metadata_responses<T>(
     std::thread::scope(|scope| {
         scope.spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
-            for (path, status, body) in responses {
-                let mut stream = loop {
+            let accept_conn = || {
+                loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(Instant::now() < deadline, "missing request for {path}");
+                            assert!(Instant::now() < deadline, "no connection arrived in time");
                             std::thread::sleep(Duration::from_millis(10));
                         }
                         Err(e) => panic!("metadata server accept failed: {e}"),
                     }
-                };
+                }
+            };
+            let read_request = |stream: &mut std::net::TcpStream, want_path: &str| {
                 stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
-                let mut reader = BufReader::new(&stream);
+                let mut reader = BufReader::new(stream);
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
-                assert_eq!(line, format!("GET /{path} HTTP/1.1\r\n"));
+                assert_eq!(line, format!("GET /{want_path} HTTP/1.1\r\n"));
                 loop {
                     assert!(Instant::now() < deadline, "metadata request headers timed out");
                     line.clear();
@@ -361,6 +398,20 @@ pub(crate) fn with_metadata_responses<T>(
                         break;
                     }
                 }
+            };
+
+            for drop_path in drops {
+                // Swallow the request, then close without a response — the
+                // server-died-mid-transfer shape that makes curl exit
+                // non-zero and the client latch.
+                let mut stream = accept_conn();
+                read_request(&mut stream, drop_path);
+                drop(stream);
+            }
+
+            for (path, status, body) in responses {
+                let mut stream = accept_conn();
+                read_request(&mut stream, path);
                 write!(
                     stream,
                     "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -409,6 +460,76 @@ mod tests {
         assert!(client.query_metadata("instance-id").is_none());
         assert!(client.metadata_unreachable.load(Ordering::Relaxed));
         assert!(client.query_metadata("image-id").is_none());
+    }
+
+    #[test]
+    fn cleared_latch_lets_the_next_query_probe_again() {
+        with_metadata_dropping_first(&[("region-id", 200, "cn-beijing\n")], |base| {
+            let client = MetadataClient::new(base);
+            assert!(client.query_metadata("region-id").is_none());
+            assert!(
+                client.metadata_unreachable.load(Ordering::Relaxed),
+                "a dropped transfer must latch"
+            );
+            client.clear_unreachable();
+            assert_eq!(
+                client.query_metadata("region-id").as_deref(),
+                Some("cn-beijing"),
+                "a cleared latch must probe the endpoint again"
+            );
+        });
+    }
+
+    #[test]
+    fn latch_still_collapses_keys_within_one_probe_series() {
+        with_metadata_dropping_first(&[("image-id", 200, "img-test\n")], |base| {
+            let client = MetadataClient::new(base);
+            assert!(client.query_metadata("region-id").is_none());
+            // Without clearing, the staged 200 is never fetched: a second
+            // key in the same probe series short-circuits to None.
+            assert!(client.query_metadata("image-id").is_none());
+            // Only after the round boundary (the clear) does it probe.
+            client.clear_unreachable();
+            assert_eq!(
+                client.query_metadata("image-id").as_deref(),
+                Some("img-test")
+            );
+        });
+    }
+
+    #[test]
+    fn clones_share_one_latch_in_both_directions() {
+        // The uploader hands a clone to the region probe and keeps the
+        // original for the product-type probes. A transfer failure seen
+        // through the clone must latch the caller's client too (one
+        // bounded curl attempt per round, not one per clone), and the
+        // per-round clear must re-arm the clone (a shared false), not
+        // leave it pinned to a stale copy of the flag.
+        with_metadata_dropping_first(&[("region-id", 200, "cn-beijing\n")], |base| {
+            let client = MetadataClient::new(base);
+            let probe = client.clone();
+
+            // Round 1: the probe's transfer failure latches the shared
+            // flag — visible on the caller's client.
+            assert!(probe.query_metadata("region-id").is_none());
+            assert!(
+                client.metadata_unreachable.load(Ordering::Relaxed),
+                "a failure through the clone must latch the caller's client"
+            );
+            // The caller's own next key short-circuits without another
+            // connection: the staged 200 stays unconsumed.
+            assert!(client.query_metadata("desktop-id").is_none());
+
+            // Round boundary: the caller clears, and the *clone* re-arms —
+            // its next query actually reaches the endpoint and consumes
+            // the staged 200.
+            client.clear_unreachable();
+            assert_eq!(
+                probe.query_metadata("region-id").as_deref(),
+                Some("cn-beijing"),
+                "the per-round clear must re-arm the clone, not only the clearing client"
+            );
+        });
     }
 
     #[test]

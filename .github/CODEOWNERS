@@ -52,3 +52,4 @@
 # SkillFS is listed after generic Markdown scope rules so all files under
 # src/skillfs request the default SkillFS reviewers.
 /src/skillfs/                           @kongche-jbw @yummypeng     # auto-label: component:skillfs
+/src/aw/                                @kongche-jbw                # auto-label: component:aw

@@ -240,20 +240,9 @@ async fn agent_process_health() -> impl Responder {
         Ok(summary) => {
             let mut rows = Vec::new();
             for agent in summary.agents {
-                for pid in agent.pids {
-                    rows.push(serde_json::json!({
-                        "pid": pid,
-                        "agent_name": agent.name,
-                        "category": agent.category,
-                        "exe_path": agent.cwd,
-                        "ports": [],
-                        "status": "no_port",
-                        "last_check_time": summary.scanned_at * 1000,
-                        "latency_ms": null,
-                        "error_message": "Local process discovered; HTTP health check is unavailable in local viewer mode",
-                        "role": "gateway",
-                        "has_crash": false
-                    }));
+                // One row per process, built from that process's own paths.
+                for process in &agent.processes {
+                    rows.push(agent_health_row(&agent, process, summary.scanned_at));
                 }
             }
             HttpResponse::Ok().json(serde_json::json!({
@@ -266,6 +255,39 @@ async fn agent_process_health() -> impl Responder {
             "error": format!("Process scan failed: {e}")
         })),
     }
+}
+
+/// One `/api/agent-process-health` row for a discovered agent process.
+///
+/// `exe_path` is the executable and `workspace_path` the working directory,
+/// matching the Linux endpoint and the dashboard's `AgentHealthStatus`: the
+/// cwd used to be reported as `exe_path`, so the page showed a directory
+/// where it expects a binary and had no default protection directory (it
+/// reads `workspace_path`).
+///
+/// The row is built from the specific `process`: two instances of one agent
+/// (two Cursor windows) have distinct workspaces, and the dashboard seeds its
+/// protection directory from `workspace_path`, so an aggregate first-seen path
+/// would point half the rows at the wrong project.
+fn agent_health_row(
+    agent: &agents::AgentInfo,
+    process: &agents::AgentProcess,
+    scanned_at: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pid": process.pid,
+        "agent_name": agent.name,
+        "category": agent.category,
+        "exe_path": process.exe_path,
+        "workspace_path": process.cwd,
+        "ports": [],
+        "status": "no_port",
+        "last_check_time": scanned_at * 1000,
+        "latency_ms": null,
+        "error_message": "Local process discovered; HTTP health check is unavailable in local viewer mode",
+        "role": "gateway",
+        "has_crash": false
+    })
 }
 
 /// GET /api/export/atif/* — eBPF export is unavailable in local mode.
@@ -800,9 +822,115 @@ mod tests {
             .service(skill_metrics)
             .service(agent_health)
             .service(agent_process_health)
+            // Reuse labels are mounted under /api/reuse, like every other API route.
+            .service(reuse::run_judgements)
+            .service(reuse::apply_label)
+            .service(reuse::confirm_labels)
+            .service(reuse::label_stats)
+            .service(reuse::list_sessions)
+            .service(reuse::run_triage)
             .service(export_atif_unavailable)
             .service(api_fallback)
             .service(serve_frontend)
+    }
+
+    #[test]
+    fn agent_health_rows_carry_exe_and_workspace_paths() {
+        // Two instances of one agent (e.g. two Cursor windows) share an agent
+        // id but not a workspace. Each health row must report the paths of the
+        // PID it describes; stamping the first-seen instance on every row made
+        // the dashboard seed the protection directory from an arbitrary
+        // instance whose "first" position depended on hash-map iteration order.
+        let agent = agents::AgentInfo {
+            id: "qoder".to_string(),
+            name: "Qoder".to_string(),
+            icon: "q".to_string(),
+            category: "coding".to_string(),
+            status: "running".to_string(),
+            pids: vec![42, 43],
+            process_count: 2,
+            cpu_percent: 1.0,
+            mem_mb: 2.0,
+            uptime_secs: 3,
+            cmdline_preview: "qoder --serve".to_string(),
+            cwd: "/Users/dev/project-a".to_string(),
+            exe_path: "/Applications/Qoder.app/Contents/MacOS/Qoder".to_string(),
+            processes: vec![
+                agents::AgentProcess {
+                    pid: 42,
+                    cwd: "/Users/dev/project-a".to_string(),
+                    exe_path: "/Applications/Qoder.app/Contents/MacOS/Qoder".to_string(),
+                    cmdline_preview: "qoder --serve".to_string(),
+                },
+                agents::AgentProcess {
+                    pid: 43,
+                    cwd: "/Users/dev/project-b".to_string(),
+                    exe_path: "/Applications/Qoder.app/Contents/MacOS/QoderHelper".to_string(),
+                    cmdline_preview: "qoder helper --serve".to_string(),
+                },
+            ],
+        };
+
+        let first = agent_health_row(&agent, &agent.processes[0], 1_700_000_000);
+        let second = agent_health_row(&agent, &agent.processes[1], 1_700_000_000);
+
+        assert_eq!(first["pid"], 42);
+        assert_eq!(
+            first["exe_path"],
+            "/Applications/Qoder.app/Contents/MacOS/Qoder"
+        );
+        assert_eq!(
+            first["workspace_path"], "/Users/dev/project-a",
+            "the working directory belongs in workspace_path, which is what the dashboard reads"
+        );
+
+        assert_eq!(second["pid"], 43);
+        assert_eq!(
+            second["exe_path"],
+            "/Applications/Qoder.app/Contents/MacOS/QoderHelper"
+        );
+        assert_eq!(
+            second["workspace_path"], "/Users/dev/project-b",
+            "each row must carry its own instance's workspace, not the first-seen one"
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_local_reuse_endpoints_are_mounted_under_api() {
+        let app = actix_web::test::init_service(build_stub_app()).await;
+
+        // The dashboard calls every reuse endpoint under /api. Mounted
+        // without the prefix the POSTs 404 and the GETs are swallowed by
+        // api_fallback, which answers 200 with an empty list.
+        for path in &[
+            "/api/reuse/triage",
+            "/api/reuse/judge",
+            "/api/reuse/sessions/abc/label",
+            "/api/reuse/sessions/labels:batch-confirm",
+        ] {
+            let req = actix_web::test::TestRequest::post()
+                .uri(path)
+                .set_json(serde_json::json!({}))
+                .to_request();
+            let resp = actix_web::test::call_service(&app, req).await;
+            assert_ne!(
+                resp.status(),
+                actix_web::http::StatusCode::NOT_FOUND,
+                "POST {path} is not mounted"
+            );
+        }
+
+        // Without a reuse store the handlers must answer "unavailable", not
+        // the api_fallback empty list that hides the miss.
+        for path in &["/api/reuse/label-stats", "/api/reuse/sessions"] {
+            let req = actix_web::test::TestRequest::get().uri(path).to_request();
+            let resp = actix_web::test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{path} did not reach the reuse handler"
+            );
+        }
     }
 
     #[actix_web::test]

@@ -1,5 +1,6 @@
 //! SkillFS CLI — AI agent skill management via virtual filesystem.
 
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,6 +12,17 @@ fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
             Err(e) => tracing::warn!(path = %p.display(), error = %e, "failed to remove PID file"),
         }
     }
+}
+
+/// Abort a mount startup whose PID file was already written.
+///
+/// Every failure after the PID file is written must remove it again: the
+/// file advertises `kill -TERM $(cat <pid>)` for this process, and a
+/// leftover file for an exited pid later aims that workflow at a dead —
+/// or once recycled, unrelated — process.
+fn abort_after_pid_file(pid_file: &Option<PathBuf>, message: String) -> Box<dyn std::error::Error> {
+    cleanup_pid_file(pid_file);
+    message.into()
 }
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -471,7 +483,8 @@ async fn main() {
     // Capture the raw arguments (excluding the program name) before clap
     // consumes them. Managed mode reconstructs the foreground worker
     // invocation from these so every mount flag is preserved verbatim.
-    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os` because `args` panics on any argument that is not UTF-8.
+    let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cli = Cli::parse();
 
     let pid = std::process::id();
@@ -551,7 +564,7 @@ async fn main() {
 
 async fn run(
     cli: Cli,
-    raw_args: Vec<String>,
+    raw_args: Vec<OsString>,
     guard: Option<SlsOpsGuard>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
@@ -594,7 +607,7 @@ async fn run(
                     .flatten();
                 if mount_file.is_some() {
                     let matches = Cli::command().try_get_matches_from(
-                        std::iter::once("skillfs".to_string()).chain(raw_args.iter().cloned()),
+                        std::iter::once(OsString::from("skillfs")).chain(raw_args.iter().cloned()),
                     )?;
                     let (_, args) = matches.subcommand().ok_or("missing mount command")?;
                     mount_file::validate_options(args)?;
@@ -653,7 +666,8 @@ async fn run(
                 // as a foreground worker using the preserved raw arguments.
                 // Log this public mount invocation too — the detached worker's
                 // own mount record is separate.
-                let result = managed::run_client(&raw_args, &source, &mountpoint);
+                let result = utf8_args(&raw_args)
+                    .and_then(|args| managed::run_client(&args, &source, &mountpoint));
                 finish_sls(guard, err_reason(&result));
                 return result;
             }
@@ -734,9 +748,53 @@ async fn run(
     }
 }
 
+/// Managed mode persists the worker invocation as UTF-8 state, so it needs the
+/// raw arguments as strings; report a non-UTF-8 one instead of mangling it.
+fn utf8_args(raw_args: &[OsString]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    raw_args
+        .iter()
+        .map(|arg| {
+            arg.clone().into_string().map_err(|arg| {
+                format!(
+                    "managed mount arguments must be valid UTF-8: {}",
+                    arg.to_string_lossy()
+                )
+                .into()
+            })
+        })
+        .collect()
+}
+
 /// Extract a concise error string from a command result for the SLS ops log.
 fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<String> {
     result.as_ref().err().map(|e| e.to_string())
+}
+
+/// Render untrusted source-tree text for one-line diagnostics.
+///
+/// Directory names and parser messages come from the source tree, so they
+/// can contain ESC (terminal control), newlines, or other control bytes.
+/// Printing them raw lets a name clear the screen, move the cursor, or forge
+/// additional diagnostic lines. Control characters become visible escapes
+/// (`\n`, `\u{1b}`, …) and a literal backslash is doubled so the rendering is
+/// unambiguous; ordinary text, including non-ASCII names, stays readable.
+fn escape_for_diagnostics(text: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(escaped, "\\u{{{:x}}}", ch as u32);
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Guarantees each CLI command emits exactly one SLS ops record on every exit
@@ -2234,10 +2292,13 @@ async fn cmd_mount(
         );
         if drift_enabled {
             eprintln!("   • Source drift observation is enabled (Package W1, best-effort):");
-            eprintln!("     out-of-band create/modify/delete of <source>/<skill>/SKILL.md and");
-            eprintln!("     immediate skill directories surface as `source_changed` audit lines.");
-            eprintln!("     Arbitrary files inside skills, '.skill-meta/**', and nested layouts");
-            eprintln!("     are NOT observed; SkillFS does not block in real time.");
+            eprintln!("     out-of-band create/modify/delete of SKILL.md manifests at any");
+            eprintln!("     depth under the source (flat <source>/<skill>/SKILL.md and");
+            eprintln!("     nested/categorized <source>/<category>/<skill>/SKILL.md) and");
+            eprintln!("     immediate skill directories surface as `source_changed` audit");
+            eprintln!("     lines. Arbitrary files inside skills, '.skill-meta/**', and");
+            eprintln!("     nested non-manifest paths are NOT observed; SkillFS does not");
+            eprintln!("     block in real time.");
         } else {
             eprintln!("   • Source drift observation is OFF (no --audit-log): out-of-band");
             eprintln!("     changes to the source path are not observed at all. Re-run with");
@@ -2410,8 +2471,15 @@ async fn cmd_mount(
             .and_then(|c| c.post_publish_write_patterns()),
     ) {
         (Some(ms), Some(patterns)) => {
-            let parsed = skillfs_fuse::security::validate_post_publish_patterns(patterns)
-                .map_err(|e| format!("invalid install.post_publish_write_patterns: {e}"))?;
+            let parsed = match skillfs_fuse::security::validate_post_publish_patterns(patterns) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return Err(abort_after_pid_file(
+                        &pid_file,
+                        format!("invalid install.post_publish_write_patterns: {e}"),
+                    ));
+                }
+            };
             info!(
                 post_publish_grace_ms = ms,
                 patterns = parsed.len(),
@@ -2457,10 +2525,15 @@ async fn cmd_mount(
             resolver: active_resolver.clone(),
             protocol_event_writer: Some(protocol_event_writer.clone()),
         };
-        let handle = server
-            .with_context(ctx)
-            .start()
-            .map_err(|e| format!("failed to start control socket server: {e}"))?;
+        let handle = match server.with_context(ctx).start() {
+            Ok(handle) => handle,
+            Err(e) => {
+                return Err(abort_after_pid_file(
+                    &pid_file,
+                    format!("failed to start control socket server: {e}"),
+                ));
+            }
+        };
         info!(
             socket = %handle.socket_path().display(),
             "control socket server started"
@@ -2699,9 +2772,17 @@ async fn cmd_mount(
     /// Trigger a clean FUSE unmount by calling fusermount3 -u.
     /// This causes fuser::mount2 event loop to exit, which unblocks the
     /// spawn_blocking thread and allows the process to exit cleanly.
+    ///
+    /// The mountpoint is passed as the raw OS string, like every other
+    /// unmount call site in this change: a lossy UTF-8 view of an
+    /// invalid-byte mountpoint names a different (U+FFFD-mangled,
+    /// nonexistent) path, so fusermount3 would unmount nothing, the
+    /// mount would stay live, and the blocking FUSE task would keep the
+    /// process from exiting after the handler returns.
     fn trigger_unmount(mountpoint: &std::path::Path) {
         let _ = std::process::Command::new("fusermount3")
-            .args(["-u", &mountpoint.to_string_lossy()])
+            .arg("-u")
+            .arg(mountpoint.as_os_str())
             .output();
     }
 
@@ -2798,6 +2879,31 @@ async fn cmd_mount(
 // Classify Command
 // ---------------------------------------------------------------------------
 
+/// Render diagnostic free text safe for terminal output.
+///
+/// `LoadError` paths and messages carry attacker-influenceable bytes from
+/// directory names and SKILL.md content. Printed raw, an embedded newline
+/// forges diagnostic lines and ESC/OSC sequences are live terminal
+/// commands — and the classify diagnostics print in the default
+/// configuration (the structured warn! fields and the stderr summary
+/// alike). Same escaping as the list/validate text-output fix (kept as a
+/// separate helper so the two audit fixes land independently).
+fn escape_ctl_stderr(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                escaped.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 async fn cmd_classify(
     source: PathBuf,
     primary_count: usize,
@@ -2814,7 +2920,49 @@ async fn cmd_classify(
 
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let _errors = store.load_from_directory(&source, &config);
+    let load_errors = store.load_from_directory(&source, &config);
+
+    // A skill whose SKILL.md cannot be loaded (unreadable, oversized, ...) is
+    // absent from the store, so it silently drops out of the generated
+    // skillfs-views.toml — and the views config then hides it from every
+    // mount. Surface every load error instead, mirroring cmd_mount. Warnings,
+    // not failure: classify still produces a valid config for the skills that
+    // did load (exit 0), matching mount's precedent.
+    if !load_errors.is_empty() {
+        // Attacker-influenceable bytes: skill names come verbatim from
+        // directory names, and the error text embeds those paths. Both the
+        // structured warn! fields and the human stderr summary print in the
+        // default configuration, so both get the same escaping — a raw
+        // newline in a name would forge diagnostic lines and an ESC/OSC
+        // sequence is a live terminal command.
+        warn!(
+            count = load_errors.len(),
+            "some skills failed to load and could not be classified"
+        );
+        for err in &load_errors {
+            warn!(
+                path = %escape_ctl_stderr(&err.path.display().to_string()),
+                error = %escape_ctl_stderr(&err.error),
+                "load error"
+            );
+        }
+        // Outcome-neutral wording: classify may not write anything at all
+        // (an existing skillfs-views.toml is only reported, `--dry-run`
+        // writes nothing), and a pre-existing views file may still list an
+        // unloadable skill. What holds in every flow is that these skills
+        // are not in the store, so this run could not classify them.
+        eprintln!(
+            "warning: {} skill(s) failed to load and could not be classified:",
+            load_errors.len()
+        );
+        for err in &load_errors {
+            eprintln!(
+                "  - {}: {}",
+                escape_ctl_stderr(&err.path.display().to_string()),
+                escape_ctl_stderr(&err.error)
+            );
+        }
+    }
 
     let mut all_names: Vec<String> = store.list().iter().map(|s| s.to_string()).collect();
     all_names.sort();
@@ -2852,6 +3000,19 @@ async fn cmd_classify(
             }
         }
         return Ok(());
+    }
+
+    // ViewsConfig::load reports a missing config the same way as one it could
+    // not read or parse. Only the missing case may be created from scratch:
+    // generating over an existing file that failed to load would silently
+    // discard the view assignments it still holds.
+    let views_path = source.join("skillfs-views.toml");
+    if views_path.symlink_metadata().is_ok() {
+        return Err(format!(
+            "{} exists but could not be read or parsed; fix or remove it before classifying",
+            views_path.display()
+        )
+        .into());
     }
 
     // Generate a fresh config: first N skills in "major" (default), rest in "other".
@@ -2892,7 +3053,21 @@ async fn cmd_classify(
             println!("  - {}", s);
         }
     } else {
-        cfg.save(&source)?;
+        // The absence check above is a point-in-time observation: another
+        // classify (or an editor save) can create the config in between.
+        // Publish with the create-only primitive so this run fails instead of
+        // replacing the file the other writer just produced.
+        if let Err(error) = cfg.save_new(&source) {
+            return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "{} was created by another writer while classifying; re-run to inspect it",
+                    views_path.display()
+                )
+                .into()
+            } else {
+                error.into()
+            });
+        }
         println!("Written skillfs-views.toml to {}", source.display());
         println!();
         println!("Primary view 'major' ({} skills):", primary.len());
@@ -3074,7 +3249,7 @@ async fn cmd_validate(
                             "name": name,
                             "description": entry.metadata.description,
                             "enabled": entry.metadata.enabled,
-                            "status": format!("{:?}", entry.parse_status).to_lowercase()
+                            "status": entry.parse_status.status_str()
                         })
                     } else {
                         serde_json::json!({})
@@ -3109,7 +3284,35 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
     // Load skills
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let _errors = store.load_from_directory(&source, &config);
+    let load_errors = store.load_from_directory(&source, &config);
+
+    // A skill whose SKILL.md cannot be loaded (unreadable, oversized past
+    // max_skill_size, non-UTF-8 name, ...) is absent from the store, so list
+    // silently omitted it — and a tree where every skill fails to load looked
+    // empty ("No skills found", exit 0). Surface every load error like
+    // `mount` does; list stays a non-fatal inspection for the skills that did
+    // load.
+    if !load_errors.is_empty() {
+        warn!(count = load_errors.len(), "some skills failed to load");
+        for err in &load_errors {
+            warn!(
+                path = %escape_for_diagnostics(&err.path.display().to_string()),
+                error = %escape_for_diagnostics(&err.error),
+                "load error"
+            );
+        }
+        eprintln!(
+            "warning: skipped {} unloadable skill(s):",
+            load_errors.len()
+        );
+        for err in &load_errors {
+            eprintln!(
+                "  - {}: {}",
+                escape_for_diagnostics(&err.path.display().to_string()),
+                escape_for_diagnostics(&err.error)
+            );
+        }
+    }
 
     let names = store.list();
 
@@ -3144,9 +3347,15 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
                     entry.metadata.tags.join(", ")
                 }
             );
+            let status = entry.parse_status.status_str();
+            let message = entry.parse_status.message();
+            let status_detail = if message.is_empty() {
+                status.to_string()
+            } else {
+                format!("{status} ({message})")
+            };
             println!(
-                "  Status: {} | {}",
-                format!("{:?}", entry.parse_status).to_lowercase(),
+                "  Status: {status_detail} | {}",
                 if entry.metadata.enabled {
                     "enabled"
                 } else {
@@ -3173,6 +3382,34 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn escape_ctl_stderr_neutralizes_terminal_control_bytes() {
+        // Newline/CR/tab become visible mnemonics, not line breaks.
+        assert_eq!(escape_ctl_stderr("evil\ninjected"), "evil\\ninjected");
+        assert_eq!(escape_ctl_stderr("a\rb"), "a\\rb");
+        assert_eq!(escape_ctl_stderr("a\tb"), "a\\tb");
+        // ESC (CSI/OSC introducer) and BEL become \xNN; DEL likewise.
+        assert_eq!(
+            escape_ctl_stderr("ansi\u{1b}]777;id\u{7}"),
+            "ansi\\x1b]777;id\\x07"
+        );
+        assert_eq!(escape_ctl_stderr("\u{7f}"), "\\x7f");
+        assert_eq!(escape_ctl_stderr("a\u{0}b"), "a\\x00b");
+        // No raw control byte survives.
+        assert!(
+            !escape_ctl_stderr("\u{1}\u{2}\n\u{1b}\u{7f}")
+                .chars()
+                .any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
+        );
+        // Visible text — including multi-byte characters — passes through.
+        assert_eq!(
+            escape_ctl_stderr("big-skill/SKILL.md"),
+            "big-skill/SKILL.md"
+        );
+        assert_eq!(escape_ctl_stderr("技能 v1.2"), "技能 v1.2");
+        assert_eq!(escape_ctl_stderr(""), "");
+    }
 
     #[derive(Debug, Clone)]
     struct CapturedNotify {
@@ -3245,6 +3482,16 @@ mod tests {
         )
         .expect("write snapshot skill");
         skill_dir.join(".skill-meta/activation.json")
+    }
+
+    #[test]
+    fn escape_for_diagnostics_renders_control_bytes_visibly() {
+        assert_eq!(
+            escape_for_diagnostics("evil\u{1b}[2J-name\nline2\t\\"),
+            "evil\\u{1b}[2J-name\\nline2\\t\\\\"
+        );
+        // Ordinary text, including non-ASCII names, stays readable.
+        assert_eq!(escape_for_diagnostics("技能/alpha"), "技能/alpha");
     }
 
     #[test]
@@ -3397,5 +3644,110 @@ mod tests {
         }
 
         ctrl.shutdown();
+    }
+
+    /// A scratch dir outside /tmp (which the security-mode daemon cannot
+    /// see under PrivateTmp) for mounts driven into late failures.
+    fn daemon_visible_base(tag: &str) -> PathBuf {
+        let root = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let dir = root.join(format!("skillfs-cli-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create base dir");
+        dir
+    }
+
+    #[test]
+    fn abort_after_pid_file_removes_the_pid_file() {
+        let base = tempfile::tempdir().expect("temp");
+        let pid_file = base.path().join("skillfs.pid");
+        std::fs::write(&pid_file, "123\n").expect("write pid file");
+
+        let err = abort_after_pid_file(&Some(pid_file.clone()), "boom".into());
+        assert_eq!(
+            err.to_string(),
+            "boom",
+            "the abort message must be preserved"
+        );
+        assert!(
+            !pid_file.exists(),
+            "an abort after the PID file was written must remove it"
+        );
+
+        // Mounts without --pid-file abort without panicking.
+        let err = abort_after_pid_file(&None, "no pid file".into());
+        assert_eq!(err.to_string(), "no pid file");
+    }
+
+    /// Drive a security-mode mount into the control-socket startup failure,
+    /// which happens after the PID file is written.
+    async fn mount_until_control_socket_abort(
+        base: &Path,
+        socket_path: PathBuf,
+        pid_file: PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = base.join("source");
+        std::fs::create_dir_all(&source).expect("create source");
+        cmd_mount(
+            source,
+            None,
+            base.join("mountpoint"),
+            false,
+            false,
+            None,
+            false,
+            Some(pid_file),
+            None,
+            1024,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some("file".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(socket_path),
+            Some(std::env::current_exe().expect("test binary")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn late_control_socket_abort_removes_the_pid_file() {
+        // The control socket server starts after the PID file is written.
+        // Failing to bind used to leave the PID file behind, so the
+        // documented `kill -TERM $(cat <pid>)` workflow targeted a dead
+        // (or once recycled, unrelated) pid.
+        let base = daemon_visible_base("ctrl-abort");
+        let socket_path = base.join("control.sock");
+        let _occupied =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("occupy socket path");
+        let pid_file = base.join("skillfs.pid");
+
+        let err = mount_until_control_socket_abort(&base, socket_path, pid_file.clone()).await;
+        let err = err.expect_err("occupied socket path must abort the mount");
+        let pid_file_left = pid_file.exists();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            err.to_string()
+                .contains("failed to start control socket server"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !pid_file_left,
+            "a post-PID-write abort must remove the PID file"
+        );
     }
 }

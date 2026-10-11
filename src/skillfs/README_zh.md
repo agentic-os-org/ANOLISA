@@ -224,7 +224,9 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 
 没有条件块时，SkillFS 也会执行少量启发式命令归一化，例如：
 
-- `pip install` -> `uv pip install`
+- 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的
+  `python -m pip` 调用。独立调用使用保守的命令位置启发式判断，
+  不是完整的 shell 语法解析。
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 

@@ -48,13 +48,11 @@ impl SkillFs {
             }
             PathType::SkillsDir => {
                 // In-place mode: root acts as skills dir — return root attrs.
-                let ino = if self.in_place {
-                    FUSE_ROOT_ID
-                } else {
-                    self.inodes
-                        .lookup_by_path(&path_str)
-                        .unwrap_or(FUSE_ROOT_ID)
-                };
+                // Single resolution point for the /skills inode (shared with
+                // root readdir and parent lookups): reallocates after a
+                // kernel FORGET instead of collapsing the view onto the root
+                // inode.
+                let ino = self.skills_dir_ino();
                 let mut attr = self.dir_attr();
                 attr.ino = ino;
                 self.inodes.remember(ino);
@@ -923,7 +921,11 @@ impl SkillFs {
     }
     pub(in crate::fs) fn statfs_impl(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
         let source = self.source_base();
-        let c_path = match std::ffi::CString::new(source.to_string_lossy().into_owned()) {
+        // Build the syscall path from the raw OS bytes: a lossy UTF-8
+        // conversion would make `statvfs` address a different (usually
+        // nonexistent) path whenever the source root contains a byte that is
+        // not valid UTF-8.
+        let c_path = match crate::sys::cstring_from_os_str(source.as_os_str()) {
             Ok(p) => p,
             Err(_) => return reply.error(libc::EINVAL),
         };
@@ -974,7 +976,12 @@ impl SkillFs {
         0
     }
 
-    fn flat_access_read_path(
+    /// Physical directory a **read** of `skill_name` must be served from:
+    /// staging/pending candidates and post-publish grace paths read the
+    /// live source; every other path follows the D1.1 resolver (live
+    /// source, trusted snapshot, or hidden). Shared by `access` and
+    /// `readlink` so both agree on what a read observes.
+    pub(in crate::fs) fn flat_access_read_path(
         &self,
         skill_name: &str,
         relative_path: Option<&Path>,
@@ -1003,7 +1010,10 @@ impl SkillFs {
             })
     }
 
-    fn nested_access_read_path(
+    /// Hermes counterpart of [`Self::flat_access_read_path`]: staging,
+    /// pending, and grace paths read the live nested skill directory,
+    /// everything else follows the D1.1 resolver.
+    pub(in crate::fs) fn nested_access_read_path(
         &self,
         category: &str,
         skill_name: &str,

@@ -29,13 +29,25 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
-use skillfs_fuse::security::{ActiveSkillResolver, LedgerError, LedgerResolveResult};
+use skillfs_fuse::SkillLayout;
+use skillfs_fuse::security::{
+    ActiveSkillResolver, LedgerError, LedgerResolveResult, TrustedWriterConfig,
+    bootstrap_activation,
+};
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 #[path = "common/mod.rs"]
 mod common;
 
 use crate::common::{create_skill_dir, fuse_available};
+
+/// Trusted-writer config matching the test process itself, so FUSE
+/// requests issued by this test count as trusted `.skill-meta` callers.
+fn trusted_writer_config() -> TrustedWriterConfig {
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", std::process::id()))
+        .expect("/proc/<self>/comm");
+    TrustedWriterConfig::with_process_name(comm.trim_end())
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Local fixture
@@ -57,6 +69,43 @@ impl LedgerMount {
         S: FnOnce(&Path),
         R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
     {
+        Self::new_with_options(seed, resolver_builder, None, None)
+    }
+
+    /// Mount where the test process is a trusted `.skill-meta` caller.
+    fn new_trusted<S, R>(seed: S, resolver_builder: R) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
+        Self::new_with_options(seed, resolver_builder, Some(trusted_writer_config()), None)
+    }
+
+    /// Mount with a Hermes (nested) layout and the test process as a
+    /// trusted `.skill-meta` caller.
+    fn new_trusted_hermes<S, R>(seed: S, resolver_builder: R) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
+        Self::new_with_options(
+            seed,
+            resolver_builder,
+            Some(trusted_writer_config()),
+            Some(SkillLayout::Hermes),
+        )
+    }
+
+    fn new_with_options<S, R>(
+        seed: S,
+        resolver_builder: R,
+        trusted_writer: Option<TrustedWriterConfig>,
+        skill_layout: Option<SkillLayout>,
+    ) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
         let source = tempfile::tempdir().expect("source tempdir");
         seed(source.path());
         let resolver = resolver_builder(source.path());
@@ -74,6 +123,8 @@ impl LedgerMount {
             false, // normal mode
             MountConfig {
                 active_resolver: resolver,
+                trusted_writer,
+                skill_layout,
                 ..MountConfig::default()
             },
         )
@@ -683,4 +734,284 @@ fn declared_name_mismatch_with_hidden_decision_hides_canonical_skill() {
     // ENOENT too.
     let err = std::fs::metadata(mount.skill_dir("calculator")).unwrap_err();
     assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fallback read callbacks: readlink and xattr
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The fixture's fixed startup sleep is not a readiness guarantee under
+/// load; wait until the mounted view actually serves `path`.
+fn wait_for_mount_path(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::symlink_metadata(path).is_err() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        std::fs::symlink_metadata(path).is_ok(),
+        "mounted view never served {}",
+        path.display()
+    );
+}
+
+/// `readlink` on a ledger-fallback skill must return the **snapshot's**
+/// symlink target, matching the snapshot's `lstat` type and every other read
+/// of the same skill. Reading the live source unconditionally mixed a live
+/// target with the snapshot's symlink identity.
+#[test]
+fn fallback_passthrough_readlink_serves_snapshot_target() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new(
+        |src| {
+            create_skill_dir(src, "demo");
+            std::os::unix::fs::symlink("live-target", src.join("demo/link")).expect("live symlink");
+            let snap = write_snapshot(
+                src,
+                "demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: trusted snapshot\n---\n",
+                &[],
+            );
+            std::os::unix::fs::symlink("snapshot-target", snap.join("link"))
+                .expect("snapshot symlink");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&fallback_result("demo", "v000001.snapshot"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    let link = mount.skill_dir("demo").join("link");
+    wait_for_mount_path(&link);
+    let meta = std::fs::symlink_metadata(&link).expect("lstat snapshot symlink via mount");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the snapshot entry is a symlink, got {:?}",
+        meta.file_type()
+    );
+    assert_eq!(
+        std::fs::read_link(&link).expect("readlink via mount"),
+        PathBuf::from("snapshot-target"),
+        "readlink must serve the snapshot's target, not the live source's"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trusted `.skill-meta` readlink: the live-source management view
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A trusted caller's `.skill-meta/**` readlink must keep reading the live
+/// physical source, exactly like lookup/getattr/open/access, even when the
+/// regular skill view is a ledger fallback snapshot. Applying the active
+/// mapping to the metadata namespace would join the relative path under the
+/// snapshot root and return ENOENT.
+#[test]
+fn fallback_trusted_skill_meta_readlink_reads_live_source() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new_trusted(
+        |src| {
+            create_skill_dir(src, "demo");
+            let snap = write_snapshot(
+                src,
+                "demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: trusted snapshot\n---\n",
+                &[],
+            );
+            // The snapshot directory lives under the live tree's
+            // `.skill-meta/versions/`, so a trusted caller reaches it via the
+            // live physical path.
+            std::os::unix::fs::symlink("meta-target", snap.join("meta-link"))
+                .expect("live metadata symlink");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&fallback_result("demo", "v000001.snapshot"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    let link = mount
+        .skill_dir("demo")
+        .join(".skill-meta/versions/v000001.snapshot/meta-link");
+    wait_for_mount_path(&link);
+    assert_eq!(
+        std::fs::read_link(&link).expect("trusted metadata readlink via mount"),
+        PathBuf::from("meta-target"),
+        "trusted `.skill-meta` readlink must serve the live source for a fallback skill"
+    );
+}
+
+/// A trusted caller must also keep the live `.skill-meta` view for a skill the
+/// ledger has hidden: lookup/getattr/open already allow exact-path traversal,
+/// so readlink must not turn the same path into ENOENT.
+#[test]
+fn hidden_trusted_skill_meta_readlink_reads_live_source() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new_trusted(
+        |src| {
+            create_skill_dir(src, "demo");
+            let meta = src.join("demo/.skill-meta");
+            std::fs::create_dir_all(&meta).expect("create .skill-meta dir");
+            std::os::unix::fs::symlink("hidden-meta-target", meta.join("meta-link"))
+                .expect("live metadata symlink");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&hidden_result("demo")).unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    let link = mount.skill_dir("demo").join(".skill-meta/meta-link");
+    wait_for_mount_path(&link);
+    assert_eq!(
+        std::fs::read_link(&link).expect("trusted metadata readlink via mount"),
+        PathBuf::from("hidden-meta-target"),
+        "trusted `.skill-meta` readlink must serve the live source for a hidden skill"
+    );
+}
+
+/// Untrusted callers must not gain access through readlink: the
+/// `.skill-meta` namespace stays hidden (ENOENT), matching
+/// lookup/getattr/open.
+#[test]
+fn untrusted_skill_meta_readlink_stays_hidden() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new(
+        |src| {
+            create_skill_dir(src, "demo");
+            let snap = write_snapshot(
+                src,
+                "demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: trusted snapshot\n---\n",
+                &[],
+            );
+            std::os::unix::fs::symlink("meta-target", snap.join("meta-link"))
+                .expect("live metadata symlink");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&fallback_result("demo", "v000001.snapshot"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    let link = mount
+        .skill_dir("demo")
+        .join(".skill-meta/versions/v000001.snapshot/meta-link");
+    let err =
+        std::fs::read_link(&link).expect_err("untrusted `.skill-meta` readlink must stay hidden");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "untrusted metadata readlink must surface ENOENT, got {err:?}"
+    );
+}
+
+/// Hermes/nested twin of the fallback case: the nested readlink branch must
+/// apply the same trusted `.skill-meta` live-source exception.
+#[test]
+fn snapshot_trusted_nested_skill_meta_readlink_reads_live_source() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new_trusted_hermes(
+        |src| {
+            create_skill_dir(src, "category/demo");
+            let snap = write_snapshot(
+                src,
+                "category/demo",
+                "v000001.snapshot",
+                "---\nname: demo\ndescription: nested snapshot\n---\n",
+                &[],
+            );
+            std::os::unix::fs::symlink("nested-meta-target", snap.join("meta-link"))
+                .expect("nested live metadata symlink");
+            std::fs::write(
+                src.join("category/demo/.skill-meta/activation.json"),
+                r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+            )
+            .expect("write nested activation record");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            bootstrap_activation(src_root, &["category/demo".to_string()], &r);
+            Some(Arc::new(r))
+        },
+    );
+
+    let link = mount
+        .skill_dir("category/demo")
+        .join(".skill-meta/versions/v000001.snapshot/meta-link");
+    wait_for_mount_path(&link);
+    assert_eq!(
+        std::fs::read_link(&link).expect("trusted nested metadata readlink via mount"),
+        PathBuf::from("nested-meta-target"),
+        "trusted nested `.skill-meta` readlink must serve the live source for a snapshot skill"
+    );
+}
+
+/// Hermes/nested twin of the hidden case.
+#[test]
+fn hidden_trusted_nested_skill_meta_readlink_reads_live_source() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new_trusted_hermes(
+        |src| {
+            create_skill_dir(src, "category/demo");
+            let meta = src.join("category/demo/.skill-meta");
+            std::fs::create_dir_all(&meta).expect("create nested .skill-meta dir");
+            std::os::unix::fs::symlink("nested-hidden-meta-target", meta.join("meta-link"))
+                .expect("nested live metadata symlink");
+            // `target: null` is the activation contract's fail-safe hidden
+            // record.
+            std::fs::write(
+                meta.join("activation.json"),
+                r#"{"schemaVersion": 1, "target": null}"#,
+            )
+            .expect("write nested activation record");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            bootstrap_activation(src_root, &["category/demo".to_string()], &r);
+            Some(Arc::new(r))
+        },
+    );
+
+    let link = mount
+        .skill_dir("category/demo")
+        .join(".skill-meta/meta-link");
+    wait_for_mount_path(&link);
+    assert_eq!(
+        std::fs::read_link(&link).expect("trusted nested metadata readlink via mount"),
+        PathBuf::from("nested-hidden-meta-target"),
+        "trusted nested `.skill-meta` readlink must serve the live source for a hidden skill"
+    );
 }

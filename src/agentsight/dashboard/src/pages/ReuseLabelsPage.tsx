@@ -11,7 +11,7 @@
  * seeing what the rules said next to what a person decided is how a misfiring
  * rule gets noticed.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useI18n } from '../i18n';
 import {
@@ -98,8 +98,14 @@ export const ReuseLabelsPage: React.FC = () => {
    * edits make the selection no longer match any criterion, in which case it
    * falls back to the placeholder. */
   const [selectMode, setSelectMode] = useState<string>('');
+  // Filter changes re-issue `load`; only the newest request may touch the
+  // state, or a slow older response lands last and the table shows rows that
+  // violate the active label/confirm-state filter — and its selection reset
+  // discards rows the user already ticked under the new filter.
+  const loadRequestIdRef = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -108,14 +114,19 @@ export const ReuseLabelsPage: React.FC = () => {
         confirmState: stateFilter || undefined,
         limit: PAGE_LIMIT,
       });
+      if (requestId !== loadRequestIdRef.current) return;
       setRows(response.sessions);
       // Selections that are no longer on screen would be confirmed invisibly.
       setSelected(new Set());
       setSelectMode('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestId === loadRequestIdRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [labelFilter, stateFilter]);
 

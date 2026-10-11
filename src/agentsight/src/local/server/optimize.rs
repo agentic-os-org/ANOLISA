@@ -41,6 +41,7 @@ impl OptLlmConfig {
     }
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
+        preserve_unparseable_config(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -98,6 +99,40 @@ impl OptLlmConfig {
             }
         })
     }
+}
+
+/// Back up a config file this process could not parse before `save` replaces it.
+///
+/// [`OptLlmConfig::load`] treats a file that does not deserialize into the
+/// typed config — truncated JSON *or* valid JSON with a wrong field type — as
+/// an empty configuration, so its settings — including the stored API key —
+/// never enter memory: the next save would overwrite them without a trace.
+/// Keep a copy first, mirroring the Linux server's settings path
+/// (`server::optimize::preserve_unparseable_config`, which follows the same
+/// backup discipline as `config.rs::ensure_default_agents_config`, issue
+/// #1502).
+fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        // Absent or unreadable: there is nothing this process is about to lose.
+        return Ok(());
+    };
+    // Validating against the typed struct, not just `serde_json::Value`, is
+    // what makes a file like `{"search_timeout_secs": "60"}` unparseable here
+    // too: `load` drops it to the default config, so its contents are just as
+    // lost as truncated JSON if `save` overwrites it unpreserved.
+    if serde_json::from_str::<OptLlmConfig>(&content).is_ok() {
+        return Ok(());
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.bak.{ts}"));
+    std::fs::copy(path, &backup)?;
+    log::warn!(
+        "Kept the unparseable optimization config at {backup:?} before overwriting {path:?}"
+    );
+    Ok(())
 }
 
 pub struct OptimizeState {
@@ -341,12 +376,33 @@ fn now_ns() -> i64 {
 const HISTORY_MAX_LIMIT: usize = 200;
 const HISTORY_DEFAULT_WINDOW_NS: i64 = 30 * 86_400_000_000_000;
 
+/// Reject an explicitly inverted time window (`start_ns > end_ns`).
+///
+/// Mirrors the Linux server's `reject_inverted_window` family: the store's
+/// `updated_at_ns >= start AND <= end` predicate matches nothing for an
+/// inverted window, so the endpoint used to answer an empty 200 that a
+/// caller cannot tell apart from "no results in this range". The guard runs
+/// before the store is consulted, so an unconfigured instance answers the
+/// family's 400 too, like its Linux sibling.
+fn reject_inverted_window(start_ns: Option<i64>, end_ns: Option<i64>) -> Option<HttpResponse> {
+    if matches!((start_ns, end_ns), (Some(start), Some(end)) if start > end) {
+        return Some(
+            HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "start_ns must not exceed end_ns"})),
+        );
+    }
+    None
+}
+
 /// GET /api/optimize/results
 #[get("/api/optimize/results")]
 pub async fn list_optimization_history(
     data: web::Data<OptimizeAppState>,
     query: web::Query<HistoryQuery>,
 ) -> impl Responder {
+    if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let Some(ref store) = data.optimize.store else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
@@ -621,6 +677,123 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    fn config_backups(dir: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(".bak."))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_opt_llm_config_save_keeps_a_typed_invalid_config() {
+        // Valid JSON that does not deserialize into `OptLlmConfig` (here
+        // `search_timeout_secs` is a string) is folded into the default config
+        // by `load` exactly like truncated JSON, dropping the stored API key
+        // and every other setting. `save` must keep a copy before overwriting
+        // it — the same guard the Linux server's settings path applies.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_typed_invalid_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+        let typed_invalid = r#"{"api_key":"sk-live","model":"qwen","search_timeout_secs":"60"}"#;
+        std::fs::write(&path, typed_invalid).unwrap();
+
+        let config = OptLlmConfig {
+            model: Some("gpt-4o".to_string()),
+            ..OptLlmConfig::default()
+        };
+        config.save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(
+            backups.len(),
+            1,
+            "a config that fails OptLlmConfig deserialization must be kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&backups[0]).unwrap(),
+            typed_invalid,
+            "the backup must hold the file exactly as it was"
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the new config is written: {stored}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opt_llm_config_save_keeps_a_truncated_config() {
+        // Truncated JSON is the other shape `load` folds into the default:
+        // the file holds a sealed-looking key and no closing brace. Losing it
+        // to an overwrite would destroy the only copy of the key.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_truncated_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+        let truncated = r#"{"api_key":"sk-live","model":"qwen""#;
+        std::fs::write(&path, truncated).unwrap();
+
+        OptLlmConfig::default().save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(backups.len(), 1, "a truncated config must be kept");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), truncated);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_opt_llm_config_save_keeps_no_backup_when_parseable() {
+        // Control: a config that parses round-trips through `load`, so its
+        // values are not about to be lost — `save` must not litter the
+        // settings directory with copies.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_parseable_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE_NAME);
+
+        OptLlmConfig {
+            api_key: Some("sk-first".to_string()),
+            ..OptLlmConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+        OptLlmConfig {
+            model: Some("gpt-4o".to_string()),
+            ..OptLlmConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        assert!(
+            config_backups(&dir).is_empty(),
+            "a parseable config needs no backup"
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the latest config is written: {stored}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_opt_llm_config_load_missing_file() {
         let config = OptLlmConfig::load(std::path::Path::new("/nonexistent/path/config.json"));
@@ -708,5 +881,93 @@ mod tests {
         assert_eq!(config.search_timeout(), std::time::Duration::from_secs(30));
         let serialized = serde_json::to_string(&OptLlmConfig::default()).expect("serialize");
         assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
+    }
+
+    #[actix_web::test]
+    async fn optimization_history_rejects_an_inverted_window() {
+        // The Linux sibling rejects `start_ns > end_ns` with the window-guard
+        // family's 400 before consulting the optimizer's state; this endpoint
+        // handed the inverted range to the store, whose
+        // `updated_at_ns >= start AND <= end` predicate matches nothing, and
+        // answered an empty 200 that reads as "no results in this range".
+        use crate::config::StorageConfig;
+        use crate::database::{
+            DatabaseAccess, DatabaseCoverage, DatabaseId, DatabaseManager, DatabaseRole,
+            DatabaseSpec,
+        };
+        use actix_web::{App, test as awtest};
+
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-local-opt-inverted-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        let db_path = dir.join("trajectories.db");
+        let database_manager = Arc::new(
+            DatabaseManager::new(
+                DatabaseRole::LocalServer,
+                [DatabaseSpec::new(
+                    DatabaseId::Trajectories,
+                    &db_path,
+                    DatabaseAccess::ReadOnly,
+                    DatabaseCoverage::Partial,
+                )],
+            )
+            .expect("build the local database manager"),
+        );
+        let local_state = web::Data::new(super::super::LocalState {
+            trajectory_store: Arc::new(RwLock::new(None)),
+            db_path,
+            storage_config: StorageConfig::default(),
+            database_manager,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+        });
+        // `store: None` is the unconfigured instance: the guard must answer
+        // before that state is consulted, like the Linux sibling.
+        let state = web::Data::new(OptimizeAppState {
+            optimize: OptimizeState::init(&dir, None),
+            local_state,
+        });
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(state)
+                .service(list_optimization_history),
+        )
+        .await;
+
+        let request = awtest::TestRequest::get()
+            .uri("/api/optimize/results?start_ns=2000&end_ns=1000")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected, not answered with an empty 200"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+
+        // Controls: an ascending window and one-sided windows stay 200.
+        for uri in [
+            "/api/optimize/results?start_ns=1000&end_ns=2000",
+            "/api/optimize/results?start_ns=2000",
+            "/api/optimize/results?end_ns=1000",
+            "/api/optimize/results",
+        ] {
+            let request = awtest::TestRequest::get().uri(uri).to_request();
+            let response = awtest::call_service(&app, request).await;
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::OK,
+                "a well-formed window must pass: {uri}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

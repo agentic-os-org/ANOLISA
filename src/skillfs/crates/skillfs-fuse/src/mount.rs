@@ -194,16 +194,19 @@ fn mount_inner(
 
     #[cfg(target_os = "linux")]
     {
-        let mountinfo = std::fs::read_to_string("/proc/mounts").ok();
-        if let Some(info) = mountinfo {
-            let mount_str = mountpoint.to_string_lossy();
-            if info
-                .lines()
-                .any(|line| line.split_whitespace().nth(1) == Some(&*mount_str))
+        let mountinfo = std::fs::read("/proc/mounts").ok();
+        if let Some(bytes) = mountinfo {
+            use std::os::unix::ffi::OsStrExt;
+            if crate::proc_mounts::mounts_contain_target(&bytes, mountpoint.as_os_str().as_bytes())
             {
                 warn!(mountpoint = %mountpoint.display(), "mount point already mounted, attempting cleanup");
+                // Raw OS-string argument: the byte-exact mount check above
+                // matched this path, so the unmount must address the same
+                // bytes — a lossy UTF-8 view of an invalid-byte mountpoint
+                // names a different path and the cleanup silently fails.
                 let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", &mountpoint.to_string_lossy()])
+                    .arg("-u")
+                    .arg(mountpoint.as_os_str())
                     .output();
                 // Give the kernel time to process the unmount
                 std::thread::sleep(std::time::Duration::from_millis(300));

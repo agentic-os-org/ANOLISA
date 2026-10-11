@@ -72,8 +72,11 @@
 //!   [`drift::DriftEvent`] records and emits them through an injected
 //!   [`drift::SourceDriftObserver`]. Coverage is intentionally narrow:
 //!   the producer in `skillfs-core::watcher::classify_event` only surfaces
-//!   `<source>/<skill>/SKILL.md` create/modify/delete and immediate
-//!   skill-directory create/delete, so W1 only observes that subset.
+//!   `SKILL.md` manifests at any depth under the source (flat
+//!   `<source>/<skill>/SKILL.md` and nested/categorized
+//!   `<source>/<category>/<skill>/SKILL.md`) create/modify/delete and
+//!   immediate skill-directory create/delete, so W1 only observes that
+//!   subset.
 //!   Default behavior is still no-op; nothing wires the watcher into the
 //!   FUSE runtime unless an operator explicitly turns audit logging on
 //!   (see the CLI `--audit-log` flag).

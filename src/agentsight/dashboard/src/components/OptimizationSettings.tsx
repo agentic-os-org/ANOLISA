@@ -147,6 +147,7 @@ export const LlmConfigForm: React.FC = () => {
 
   const activeProvider = PROVIDERS.find((p) => p.id === provider) ?? PROVIDERS[PROVIDERS.length - 1];
   const availableModels = activeProvider.models;
+  const effectiveModel = provider === 'custom' || isKnownModel ? model : customModel;
 
   useEffect(() => {
     (async () => {
@@ -177,6 +178,8 @@ export const LlmConfigForm: React.FC = () => {
 
   // When provider changes, update base URL
   function handleProviderChange(id: string) {
+    // Carry the visible edit into the next provider's model control.
+    setModel(effectiveModel);
     setProvider(id);
     const p = PROVIDERS.find((x) => x.id === id);
     if (p && p.id !== 'custom') {
@@ -205,7 +208,6 @@ export const LlmConfigForm: React.FC = () => {
     setSaved(false);
     setError(null);
 
-    const effectiveModel = isKnownModel ? model : customModel;
     const timeoutSecs = Number(semanticSearchTimeoutSecs);
     if (!Number.isInteger(timeoutSecs) || timeoutSecs <= 0) {
       setError(t('opt.llm.semanticSearchTimeout.invalid'));

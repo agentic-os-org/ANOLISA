@@ -129,7 +129,14 @@ fn shorten_contains_literal(lit: &str) -> String {
     if !last.is_empty() && last.len() <= MAX_CONTAINS_LITERAL {
         return last.to_string();
     }
-    let start = trimmed.len().saturating_sub(MAX_CONTAINS_LITERAL);
+    // Cut at a character boundary: the literal comes from a parsed policy
+    // string and may contain multi-byte UTF-8, so a raw byte index can land
+    // inside a character and panic. Moving forward only shortens the
+    // returned suffix, keeping it within the byte budget.
+    let mut start = trimmed.len() - MAX_CONTAINS_LITERAL;
+    while !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
     trimmed[start..].to_string()
 }
 
@@ -224,9 +231,39 @@ fn lower_path(pat: &str) -> (u8, String) {
     (M_EXACT, pat.to_string())
 }
 
+/// True when `pat` is absolute and its lowering discards the path segments
+/// after the first `*`: only the part before the star survives in the lowered
+/// prefix literal (`/tmp/*/secret` -> prefix `/tmp/`), so the installed
+/// matcher is wider than the pattern.
+fn absolute_path_discards_after_star(pat: &str, lowered: &(u8, String)) -> bool {
+    if !pat.starts_with('/') {
+        return false;
+    }
+    let Some(idx) = pat.find('*') else {
+        return false;
+    };
+    pat[idx + 1..].contains('/') && lowered.0 == M_PREFIX && lowered.1 == pat[..idx]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contains_literal_truncation_is_char_boundary_safe() {
+        // 6 CJK chars = 18 bytes, no '/', so the last-16-byte cut (start = 2)
+        // landed inside the first character and panicked.
+        let lowered = lower_path("数据数据数据数据数据数据");
+        assert_eq!(lowered.0, M_CONTAINS);
+        assert!(lowered.1.len() <= MAX_CONTAINS_LITERAL);
+        assert!(lowered.1.is_char_boundary(0));
+
+        // The same through the public compiler entry point.
+        let src =
+            "rule r:\n  block write file \"数据数据数据数据数据数据\" if true\n  because \"x\"\n";
+        let compiled = crate::dsl::compile_str(src).expect("policy must compile");
+        assert!(!compiled.bytes.is_empty());
+    }
 
     #[test]
     fn repo_relative_paths_match_absolute_runtime_paths() {
@@ -272,6 +309,82 @@ mod tests {
         assert_eq!(
             lower_path("/tmp/guarded/file.txt"),
             (M_EXACT, "/tmp/guarded/file.txt".into())
+        );
+    }
+
+    #[test]
+    fn absolute_mid_star_lowering_pins_prefix_and_detects_widening() {
+        // Current (pinned) lowering: everything after the first '*' is
+        // discarded and the matcher becomes a plain prefix.
+        assert_eq!(lower_path("/tmp/*/secret"), (M_PREFIX, "/tmp/".into()));
+        assert_eq!(lower_path("/tmp/*"), (M_PREFIX, "/tmp/".into()));
+        // A trailing star keeps everything before it; no segments after the
+        // star are discarded.
+        assert_eq!(
+            lower_path("/tmp/guarded/**"),
+            (M_PREFIX, "/tmp/guarded/".into())
+        );
+
+        let widened = lower_path("/tmp/*/secret");
+        assert!(absolute_path_discards_after_star("/tmp/*/secret", &widened));
+        assert!(!absolute_path_discards_after_star(
+            "/tmp/*",
+            &lower_path("/tmp/*")
+        ));
+        assert!(!absolute_path_discards_after_star(
+            "/tmp/guarded/**",
+            &lower_path("/tmp/guarded/**")
+        ));
+        // Repo-relative mid-star degradation stays warning-free.
+        assert!(!absolute_path_discards_after_star(
+            "src/*/secret",
+            &lower_path("src/*/secret")
+        ));
+    }
+
+    #[test]
+    fn absolute_mid_star_glob_widens_with_warning() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block write file "/tmp/*/secret" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("/tmp/*/secret") && w.contains("wider")),
+            "absolute mid-star pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+        // Pin the matcher: still a PREFIX on the part before the star.
+        let cfg: CConfig = unsafe { std::ptr::read_unaligned(c.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        assert_eq!(cfg.rules[0].m, M_PREFIX);
+        let target = cfg.rules[0].target;
+        let lit = target.split(|b| *b == 0).next().unwrap_or(&[]);
+        assert_eq!(lit, b"/tmp/");
+    }
+
+    #[test]
+    fn absolute_trailing_star_and_relative_mid_star_do_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block write file "/tmp/guarded/**" if true
+              because "x"
+            rule r2:
+              block write file "src/*/secret" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "trailing-star and repo-relative mid-star patterns must not warn: {:?}",
+            c.warnings
         );
     }
 
@@ -341,6 +454,134 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_endpoint_pattern_is_recorded_and_warned() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "*.internal"
+            rule r:
+              block connect endpoint "*" if NET unless target "*.internal"
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert_eq!(
+            c.endpoint_resolutions.get("*.internal"),
+            Some(&Vec::new()),
+            "wildcard pattern must be recorded in endpoint_resolutions"
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("*.internal") && w.contains("match-nothing")),
+            "wildcard pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn unresolvable_endpoint_hostname_is_recorded_and_warned() {
+        // A 100-byte label exceeds the 63-byte DNS label limit, so resolution
+        // fails deterministically regardless of the resolver environment.
+        let host = format!("{}.invalid", "x".repeat(100));
+        let pol = crate::dsl::parse::parse(&format!(
+            r#"source NET = endpoint "{host}"
+            rule r:
+              block connect endpoint "*" if NET
+              because "x""#
+        ))
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert_eq!(
+            c.endpoint_resolutions.get(&host),
+            Some(&Vec::new()),
+            "unresolvable hostname must be recorded in endpoint_resolutions"
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains(&host) && w.contains("match-nothing")),
+            "unresolvable hostname must produce a compile warning: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn representable_endpoint_patterns_do_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "10.0."
+            rule r:
+              block connect endpoint "*" if NET unless target "127.0.0.1"
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "numeric patterns must not warn: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn resolved_endpoint_hostname_does_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "localhost"
+            rule r:
+              block connect endpoint "*" if NET
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "a hostname that resolves must not warn: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn five_octet_endpoint_pattern_must_be_rejected_or_warned() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "1.2.3.4.5"
+            rule r:
+              block connect endpoint "*" if NET
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert_eq!(
+            c.endpoint_resolutions.get("1.2.3.4.5"),
+            Some(&Vec::new()),
+            "five-octet pattern must be recorded in endpoint_resolutions"
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("1.2.3.4.5") && w.contains("match-nothing")),
+            "five-octet pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn numeric_ipv4_patterns_keep_exact_semantics() {
+        assert_eq!(
+            lower_numeric_ipv4("10.0.0.5"),
+            Some((ipv4_to_kernel(Ipv4Addr::new(10, 0, 0, 5)), u32::MAX))
+        );
+        assert_eq!(
+            lower_numeric_ipv4("10.0.0."),
+            Some((ipv4_to_kernel(Ipv4Addr::new(10, 0, 0, 0)), 0x00ff_ffff))
+        );
+        assert_eq!(lower_numeric_ipv4("10.0.0.256"), None);
+        assert_eq!(
+            lower_numeric_ipv4("1.2.3.4."),
+            Some((ipv4_to_kernel(Ipv4Addr::new(1, 2, 3, 4)), u32::MAX))
+        );
+        assert_eq!(lower_numeric_ipv4("1.2.3.4.5"), None);
+        assert_eq!(lower_numeric_ipv4("1.2.3.4.5."), None);
+    }
+
+    #[test]
     fn file_path_at_abi_limit_compiles() {
         // 63 bytes: exactly PAT - 1, fits with NUL terminator in [u8; 64]
         let path = format!("/{}", "a".repeat(62)); // "/" + 62 × 'a' = 63 bytes
@@ -366,6 +607,126 @@ mod tests {
         );
         let err = match crate::dsl::compile_str(&dsl) {
             Ok(_) => panic!("64-byte path must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_arg_at_abi_limit_compiles() {
+        // 23 bytes: exactly ARG - 1, fits with NUL terminator in [u8; 24]
+        let arg = "a".repeat(23);
+        let dsl = format!("rule r:\n  block exec \"git\" \"{arg}\" if A\n  because \"test\"\n");
+        assert!(
+            crate::dsl::compile_str(&dsl).is_ok(),
+            "23-byte exec arg should compile successfully"
+        );
+    }
+
+    #[test]
+    fn exec_arg_exceeding_abi_limit_rejected() {
+        // 24 bytes: exactly ARG; set_pat would truncate to a 23-byte prefix
+        // that the engine's full-slot compare silently matches as a prefix.
+        let arg = "a".repeat(24);
+        let dsl = format!("rule r:\n  block exec \"git\" \"{arg}\" if A\n  because \"test\"\n");
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("24-byte exec arg must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn since_arg_exceeding_abi_limit_rejected() {
+        let arg = "a".repeat(24);
+        let dsl = format!(
+            "rule r:\n  block exec \"git\" if A unless after exec \"**/confirm\" since exec \"git\" \"{arg}\"\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("24-byte since arg must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_target_at_abi_limit_compiles() {
+        // 63-byte basename: exactly PAT - 1, fits with NUL terminator
+        let name = "b".repeat(63);
+        let dsl = format!("rule r:\n  block exec \"{name}\" if A\n  because \"test\"\n");
+        assert!(
+            crate::dsl::compile_str(&dsl).is_ok(),
+            "63-byte exec target should compile successfully"
+        );
+    }
+
+    #[test]
+    fn exec_target_exceeding_abi_limit_rejected() {
+        // 64-byte basename: set_pat would truncate to 63 bytes + NUL, an
+        // exact-match literal no runtime comm can ever equal.
+        let name = "b".repeat(64);
+        let dsl = format!("rule r:\n  block exec \"{name}\" if A\n  because \"test\"\n");
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte exec target must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_condition_target_exceeding_abi_limit_rejected() {
+        let name = "b".repeat(64);
+        let dsl = format!(
+            "rule r:\n  block exec \"git\" if A unless target \"{name}\"\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte condition target must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn gate_pattern_exceeding_abi_limit_rejected() {
+        // An `after` gate literal longer than the ABI would be truncated and
+        // could then never match, voiding the clause's carve-out silently.
+        let name = "c".repeat(64);
+        let dsl = format!(
+            "rule r:\n  block exec \"git\" if A unless after exec \"**/{name}\"\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte gate pattern must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_source_exceeding_abi_limit_rejected() {
+        let name = "d".repeat(64);
+        let dsl = format!(
+            "source AGENT = exec \"{name}\"\nrule r:\n  block exec \"git\" if AGENT\n  because \"test\"\n"
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte exec source must be rejected at compile time"),
             Err(err) => err,
         };
         assert!(
@@ -417,7 +778,10 @@ fn lower_numeric_ipv4(pat: &str) -> Option<(u32, u32)> {
     let mut k = 0u32;
     for tok in body.split('.') {
         if k >= 4 {
-            break;
+            // A fifth numeric token means this is not an IPv4 literal; the
+            // (net, mask) ABI cannot express it without silently dropping
+            // octets, so reject it and let the caller warn.
+            return None;
         }
         match tok.parse::<u8>() {
             Ok(o) => {
@@ -484,6 +848,9 @@ struct Ctx {
     next_inval: u32,
     endpoint_cache: HashMap<String, Vec<(u32, u32)>>,
     endpoint_resolutions: HashMap<String, Vec<String>>,
+    endpoint_cond_warned: std::collections::HashSet<String>,
+    path_warned: std::collections::HashSet<String>,
+    warnings: Vec<String>,
 }
 impl Ctx {
     fn endpoint_matches(&mut self, pat: &str) -> Vec<(u32, u32)> {
@@ -502,11 +869,25 @@ impl Ctx {
                     .collect(),
             );
             if addrs.is_empty() {
+                self.warnings.push(format!(
+                    "endpoint pattern '{pat}' resolved to no IPv4 addresses at compile time; \
+                     it lowers to a match-nothing matcher, so connect/recv to it never matches"
+                ));
                 vec![(0, u32::MAX)]
             } else {
                 addrs.into_iter().map(|addr| (addr, u32::MAX)).collect()
             }
         } else {
+            // Wildcards ("*.internal"), IPv6 or CIDR literals, and anything
+            // else the kernel-side (ipv4, mask) ABI cannot express. Record the
+            // pattern and warn instead of degrading to match-nothing silently.
+            self.endpoint_resolutions
+                .insert(pat.to_string(), Vec::new());
+            self.warnings.push(format!(
+                "endpoint pattern '{pat}' cannot be lowered to an IPv4 matcher \
+                 (wildcard or non-IPv4 literal); it lowers to a match-nothing matcher, \
+                 so connect/recv to it never matches"
+            ));
             vec![(0, u32::MAX)]
         };
         self.endpoint_cache.insert(pat.to_string(), matches.clone());
@@ -522,10 +903,40 @@ impl Ctx {
         // several A records but the current ABI can store only one condition
         // address. For `target not PAT`, use match-any before negation so the
         // condition is false for every endpoint, and the rule still applies.
+        if !negate && self.endpoint_cond_warned.insert(pat.to_string()) {
+            self.warnings.push(format!(
+                "endpoint pattern '{pat}' expands to multiple IPv4 addresses; the condition \
+                 ABI stores one address, so an `unless target` on it matches nothing and the \
+                 exception is void"
+            ));
+        }
         if negate { (0, 0) } else { (0, u32::MAX) }
     }
 
     fn add_update(&mut self, spec: UpdateSpec<'_>) -> Result<(), String> {
+        // Every literal stored by this path (exec/file sources, declassify and
+        // endorse gates, `after` gate patterns, `since` invalidator patterns
+        // and their args) is matched byte-exact by the engine, so a silently
+        // truncated literal either never matches or matches a prefix. Reject
+        // at the ABI limit like the file-path checks in compile_with_labels.
+        if spec.target.len() >= PAT {
+            return Err(format!(
+                "pattern '{}' is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                spec.target,
+                spec.target.len(),
+                PAT - 1,
+                PAT
+            ));
+        }
+        if spec.arg.len() >= ARG {
+            return Err(format!(
+                "argument '{}' is {} bytes, exceeds the {} byte ABI limit (ARG={})",
+                spec.arg,
+                spec.arg.len(),
+                ARG - 1,
+                ARG
+            ));
+        }
         for u in &mut self.updates {
             if u.op == spec.op
                 && u.m == spec.m
@@ -583,6 +994,39 @@ impl Ctx {
         self.labels.insert(name.to_string(), b);
         Ok(b)
     }
+
+    /// Lower a path pattern for a file source/gate, warning once per pattern
+    /// when an absolute pattern's lowering discards the segments after its
+    /// first `*` (a widening to a prefix matcher).
+    fn lower_path_warned(&mut self, pat: &str) -> (u8, String) {
+        let lowered = lower_path(pat);
+        self.warn_absolute_mid_star(pat, &lowered);
+        lowered
+    }
+
+    /// Path-target lowering with the same widening warning as
+    /// `lower_path_warned`; exec/connect/recv targets use other matchers and
+    /// never warn here.
+    fn lower_target_warned(&mut self, op: u8, kind: Kind, pat: &str) -> (u8, String) {
+        let lowered = lower_target(op, kind, pat);
+        if op != OP_EXEC && op != OP_CONNECT && op != OP_RECV {
+            self.warn_absolute_mid_star(pat, &lowered);
+        }
+        lowered
+    }
+
+    fn warn_absolute_mid_star(&mut self, pat: &str, lowered: &(u8, String)) {
+        if absolute_path_discards_after_star(pat, lowered)
+            && self.path_warned.insert(pat.to_string())
+        {
+            self.warnings.push(format!(
+                "absolute path pattern '{pat}' lowers to a prefix matcher on '{}' \
+                 (the segments after its first '*' are discarded), so the matcher is \
+                 wider than the pattern and every path under the prefix matches",
+                lowered.1
+            ));
+        }
+    }
     /// Returns (gate bit, gate slot index). The index is what the engine uses to
     /// look up the gate's epoch for staleness; the bit is the v1 latching mask.
     fn gate_bit(
@@ -597,11 +1041,11 @@ impl Ctx {
                 (OP_EXEC, m, l)
             }
             Op::Read | Op::Open => {
-                let (m, l) = lower_path(pat);
+                let (m, l) = self.lower_path_warned(pat);
                 (OP_OPEN, m, l)
             }
             Op::Write | Op::Unlink => {
-                let (m, l) = lower_path(pat);
+                let (m, l) = self.lower_path_warned(pat);
                 (OP_WRITE, m, l)
             }
             other => {
@@ -653,7 +1097,7 @@ impl Ctx {
         let (m, lit) = if op == OP_EXEC {
             lower_exec(pat)
         } else {
-            lower_target(op, kind, pat)
+            self.lower_target_warned(op, kind, pat)
         };
         let arg_s = arg.unwrap_or("");
         let key = (op, m, lit.clone(), arg_s.to_string());
@@ -827,10 +1271,17 @@ pub struct Compiled {
     pub reasons: Vec<String>, // indexed by lowered rule_id
     pub meta: Vec<RuleMeta>,  // indexed by lowered rule_id
     pub labels: HashMap<String, u64>,
-    /// Exact hostname endpoint patterns that were resolved at compile time.
+    /// Endpoint patterns that were resolved (or rejected) at compile time.
     /// Non-empty values are the IPv4 A records expanded into kernel matchers;
-    /// an empty value means resolution was attempted but yielded no IPv4.
+    /// an empty value means the pattern lowers to a match-nothing matcher —
+    /// either a hostname whose resolution yielded no IPv4, or a pattern the
+    /// IPv4 matcher ABI cannot express (wildcard, IPv6, or CIDR literal).
     pub endpoint_resolutions: HashMap<String, Vec<String>>,
+    /// Non-fatal compile-time diagnostics for patterns whose meaning silently
+    /// degrades under the current ABI (see `endpoint_resolutions`). Compilation
+    /// still succeeds; callers should surface these warnings so the
+    /// match-nothing degradation is visible instead of silent.
+    pub warnings: Vec<String>,
 }
 
 fn collect_label_names(pol: &Policy) -> Vec<String> {
@@ -901,6 +1352,9 @@ pub fn compile_with_labels(
         next_inval: 0,
         endpoint_cache: HashMap::new(),
         endpoint_resolutions: HashMap::new(),
+        endpoint_cond_warned: std::collections::HashSet::new(),
+        path_warned: std::collections::HashSet::new(),
+        warnings: Vec::new(),
     };
     for name in &sorted_labels {
         ctx.label_bit(name)?;
@@ -917,7 +1371,7 @@ pub fn compile_with_labels(
                 (OP_EXEC, m, lit, 0, 0)
             }
             Kind::File => {
-                let (m, lit) = lower_path(&s.pattern);
+                let (m, lit) = ctx.lower_path_warned(&s.pattern);
                 if lit.len() >= PAT {
                     return Err(format!(
                         "source '{}': file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
@@ -984,6 +1438,17 @@ pub fn compile_with_labels(
     }
     for rule in &pol.rules {
         for cl in &rule.clauses {
+            if let Some(arg) = &cl.target.arg {
+                if arg.len() >= ARG {
+                    return Err(format!(
+                        "rule '{}': exec argument is {} bytes, exceeds the {} byte ABI limit (ARG={})",
+                        rule.name,
+                        arg.len(),
+                        ARG - 1,
+                        ARG
+                    ));
+                }
+            }
             for op in op_lowers(cl.op)? {
                 let op = *op;
                 let target_matches = if op == OP_CONNECT || op == OP_RECV {
@@ -992,10 +1457,20 @@ pub fn compile_with_labels(
                         .map(|(ipv4, ipv4_mask)| (M_ANY, String::new(), ipv4, ipv4_mask))
                         .collect::<Vec<_>>()
                 } else {
-                    let (tm, tlit) = lower_target(op, cl.target.kind, &cl.target.pattern);
+                    let (tm, tlit) =
+                        ctx.lower_target_warned(op, cl.target.kind, &cl.target.pattern);
                     if (op == OP_OPEN || op == OP_WRITE) && tlit.len() >= PAT {
                         return Err(format!(
                             "rule '{}': target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                            rule.name,
+                            tlit.len(),
+                            PAT - 1,
+                            PAT
+                        ));
+                    }
+                    if op == OP_EXEC && tlit.len() >= PAT {
+                        return Err(format!(
+                            "rule '{}': exec target pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
                             rule.name,
                             tlit.len(),
                             PAT - 1,
@@ -1021,10 +1496,19 @@ pub fn compile_with_labels(
                                 cipv4 = n;
                                 cipv4_mask = mk;
                             } else {
-                                let (m, l) = lower_target(op, cl.target.kind, pattern);
+                                let (m, l) = ctx.lower_target_warned(op, cl.target.kind, pattern);
                                 if (op == OP_OPEN || op == OP_WRITE) && l.len() >= PAT {
                                     return Err(format!(
                                         "rule '{}': condition target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                                        rule.name,
+                                        l.len(),
+                                        PAT - 1,
+                                        PAT
+                                    ));
+                                }
+                                if op == OP_EXEC && l.len() >= PAT {
+                                    return Err(format!(
+                                        "rule '{}': condition target pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
                                         rule.name,
                                         l.len(),
                                         PAT - 1,
@@ -1139,6 +1623,7 @@ pub fn compile_with_labels(
         meta,
         labels: ctx.labels,
         endpoint_resolutions: ctx.endpoint_resolutions,
+        warnings: ctx.warnings,
     })
 }
 

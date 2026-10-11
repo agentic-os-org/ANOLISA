@@ -79,20 +79,37 @@ fn run_skillfs(args: &[&str], ops_log: &Path) -> std::process::Output {
         .expect("invoke skillfs")
 }
 
-/// Spawn `skillfs` and close the read end of the child's stdout pipe before it
-/// prints, so the first `println!` fails with EPIPE and the process panics —
-/// the broken-pipe scenario from issue #1506 (`skillfs list | head -5`).
-/// Dropping `ChildStdout` closes the fd; stderr is discarded so tracing and the
-/// panic message never block.
+/// Create a pipe and close its read end, returning the write end. A child that
+/// inherits it gets EPIPE on its first write regardless of timing.
+/// Close-on-exec prevents subprocesses spawned by parallel tests from
+/// accidentally inheriting either endpoint during setup.
+fn readerless_pipe() -> OwnedFd {
+    let mut fds = [0_i32; 2];
+    // SAFETY: `pipe2` writes two fresh, close-on-exec fds into `fds` on success.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2() failed: {}", std::io::Error::last_os_error());
+    // SAFETY: a successful `pipe2` returned two fresh fds owned by this test.
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    // SAFETY: as above.
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    drop(read_fd);
+    write_fd
+}
+
+/// Spawn `skillfs` with a reader-less stdout pipe, so the first `println!`
+/// fails with EPIPE and the process panics — the broken-pipe scenario from
+/// issue #1506 (`skillfs list | head -5`). The read end is closed before the
+/// spawn: closing it afterwards races the child, which can write its whole
+/// output into the pipe buffer and exit 0 first. stderr is discarded so
+/// tracing and the panic message never block.
 fn run_with_broken_stdout(args: &[&str], ops_log: &Path) -> std::process::ExitStatus {
     let mut child = Command::new(bin_path())
         .args(args)
         .env("SKILLFS_SLS_OPS_PATH", ops_log)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(readerless_pipe()))
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn skillfs");
-    drop(child.stdout.take());
     child.wait().expect("wait for skillfs")
 }
 
@@ -103,21 +120,10 @@ fn run_with_broken_stdout(args: &[&str], ops_log: &Path) -> std::process::ExitSt
 /// internal error report then writes to the closed stderr and panics before
 /// the command body runs. This has no dependence on scheduling or output size
 /// and covers both the earliest possible close and the guard armed before
-/// logging. Close-on-exec prevents subprocesses spawned by parallel tests
-/// from accidentally inheriting either endpoint during setup.
+/// logging.
 fn run_with_merged_output_closed(args: &[&str], ops_log: &Path) -> std::process::ExitStatus {
-    let mut fds = [0_i32; 2];
-    // SAFETY: `pipe2` writes two fresh, close-on-exec fds into `fds` on success.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    assert_eq!(rc, 0, "pipe2() failed: {}", std::io::Error::last_os_error());
-    // SAFETY: a successful `pipe2` returned two fresh fds owned by this test.
-    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let write_fd = readerless_pipe();
     let write_dup = write_fd.try_clone().expect("clone pipe write fd");
-
-    // Close the read end now: the child inherits a reader-less pipe, so its
-    // first write is guaranteed to hit EPIPE regardless of timing.
-    drop(read_fd);
 
     let mut child = Command::new(bin_path())
         .args(args)

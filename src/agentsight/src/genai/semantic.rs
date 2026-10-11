@@ -188,6 +188,29 @@ pub struct OutputMessage {
     pub finish_reason: Option<String>,
 }
 
+/// The ids of the tool calls these output messages emit, as the JSON array
+/// the `tool_call_ids` column stores. `None` when no call carries an id.
+///
+/// Three paths write that column — the pending completion, the direct insert
+/// and the SSE enrichment of a drained call — and the readers (session turn
+/// indices, token-savings attribution, the session resource timeline) pair
+/// their data by it, so the extraction lives here once.
+pub fn tool_call_ids_json(messages: &[OutputMessage]) -> Option<String> {
+    let ids: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match part {
+            MessagePart::ToolCall { id: Some(id), .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&ids).ok()
+    }
+}
+
 /// Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -334,6 +357,31 @@ impl LLMCall {
     pub fn set_error(&mut self, error: String) {
         self.error = Some(error);
     }
+}
+
+/// Parse an `input_messages` / `system_instructions` column into parts-based
+/// messages.
+///
+/// The completed path writes `Vec<InputMessage>`, but a row that never
+/// completed — the crash drain in `GenAIBuilder::build_pending_from_request` —
+/// still holds the raw protocol messages it copied from the request body.
+/// Readers parsed the column strictly, so an interrupted call lost its system
+/// prompt and every tool result when its ATIF document was built.
+pub fn input_messages_from_column(json: &str) -> Option<Vec<InputMessage>> {
+    if let Ok(messages) = serde_json::from_str::<Vec<InputMessage>>(json) {
+        return Some(messages);
+    }
+
+    // Raw protocol messages. Reuse the request-body conversion so a raw row
+    // becomes the same parts the completed path stores: it understands
+    // role-carrying messages (including tool results and tool calls) and the
+    // role-less Responses items.
+    let raw: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let wrapped = serde_json::json!({ "input": raw }).to_string();
+    super::GenAIBuilder::parse_request_body(&wrapped).map(|request| request.messages)
 }
 
 #[cfg(test)]
@@ -755,5 +803,59 @@ mod tests {
         assert!(parsed.response.streamed);
         assert_eq!(parsed.token_usage.unwrap().total_tokens, 15);
         assert_eq!(parsed.metadata["key"], "value");
+    }
+
+    #[test]
+    fn parts_shaped_columns_parse_unchanged() {
+        let messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "hi".to_string(),
+            }],
+            name: None,
+        }];
+        let json = serde_json::to_string(&messages).unwrap();
+        let parsed = input_messages_from_column(&json).expect("parts shape parses");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].role, "user");
+    }
+
+    #[test]
+    fn raw_protocol_columns_are_converted() {
+        // The crash-drain path copies the request body's messages verbatim, so
+        // an interrupted call's columns hold this shape.
+        let openai = r#"[
+            {"role":"system","content":"be terse"},
+            {"role":"user","content":"list /tmp"},
+            {"role":"tool","tool_call_id":"c1","content":"a.txt"}
+        ]"#;
+        let messages = input_messages_from_column(openai).expect("raw shape converts");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert!(matches!(messages[0].parts[0], MessagePart::Text { .. }));
+        assert!(matches!(
+            messages[2].parts[0],
+            MessagePart::ToolCallResponse { ref id, .. } if id.as_deref() == Some("c1")
+        ));
+
+        // Tool calls the assistant issued are part of the same shape.
+        let with_calls = r#"[
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"c2","type":"function","function":{"name":"list_dir","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"c2","content":"b.txt"}
+        ]"#;
+        let messages = input_messages_from_column(with_calls).expect("tool call shape converts");
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0].parts[0], MessagePart::ToolCall { .. }));
+        assert!(matches!(
+            messages[1].parts[0],
+            MessagePart::ToolCallResponse { ref id, .. } if id.as_deref() == Some("c2")
+        ));
+
+        // A JSON string (what an Anthropic system prompt can look like) is not
+        // a message array and keeps returning None for the caller's fallback.
+        assert!(input_messages_from_column(r#""be terse""#).is_none());
+        // An empty array parses as an empty message list, exactly as before.
+        assert_eq!(input_messages_from_column("[]").map(|m| m.len()), Some(0));
     }
 }

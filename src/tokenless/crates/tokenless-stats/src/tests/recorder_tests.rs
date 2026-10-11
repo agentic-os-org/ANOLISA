@@ -463,6 +463,207 @@ fn schema_migration_adds_missing_columns() {
     assert_eq!(indexed_columns, ["session_id", "tool_use_id"]);
 }
 
+fn create_legacy_stats_database(path: &Path, extra_retrieve_columns: usize) -> Connection {
+    let conn = Connection::open(path).unwrap();
+    let extra_columns = (0..extra_retrieve_columns)
+        .map(|index| format!(", extra_{index} TEXT"))
+        .collect::<String>();
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE stats (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             timestamp TEXT NOT NULL,
+             operation TEXT NOT NULL,
+             agent_id TEXT NOT NULL,
+             source_pid INTEGER,
+             session_id TEXT,
+             tool_use_id TEXT,
+             before_chars INTEGER NOT NULL,
+             before_tokens INTEGER NOT NULL,
+             after_chars INTEGER NOT NULL,
+             after_tokens INTEGER NOT NULL,
+             before_text TEXT,
+             after_text TEXT
+         );
+         INSERT INTO stats (
+             timestamp, operation, agent_id, before_chars, before_tokens,
+             after_chars, after_tokens
+         ) VALUES ('2024-01-01T00:00:00+00:00', 'compress-response', 'old', 10, 4, 5, 2);
+         CREATE TABLE retrieve_events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             timestamp TEXT NOT NULL,
+             hash TEXT NOT NULL,
+             outcome TEXT NOT NULL,
+             source TEXT NOT NULL,
+             payload_tokens INTEGER,
+             tokenizer_id TEXT{extra_columns}
+         );
+         INSERT INTO retrieve_events (
+             timestamp, hash, outcome, source, payload_tokens
+         ) VALUES ('2024-01-01T00:00:00+00:00', 'old-hash', 'hit', 'cli', 120);",
+    ))
+    .unwrap();
+    conn
+}
+
+fn record_concurrently(path: &Path, workers: usize) {
+    let barrier = std::sync::Barrier::new(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let barrier = &barrier;
+                scope.spawn(move || -> StatsResult<()> {
+                    barrier.wait();
+                    let recorder = StatsRecorder::new(path)?;
+                    recorder.record(&sample(
+                        OperationType::CompressResponse,
+                        CompressionMode::Active,
+                        "concurrent",
+                    ))?;
+                    recorder.record_retrieve_event(
+                        "new-hash",
+                        "hit",
+                        "cli",
+                        Some(10),
+                        None,
+                        Some("new-agent"),
+                        Some("concurrent"),
+                        Some("tool"),
+                    )?;
+                    Ok(())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+    });
+}
+
+#[test]
+fn concurrent_legacy_migrations_preserve_historical_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..4 {
+        let path = dir.path().join(format!("legacy-{round}.db"));
+        drop(create_legacy_stats_database(&path, 0));
+        record_concurrently(&path, 8);
+
+        let recorder = StatsRecorder::new(&path).unwrap();
+        let legacy = recorder.record_by_id(1).unwrap().unwrap();
+        assert_eq!(legacy.agent_id, "old");
+        assert_eq!(legacy.before_tokens, 4);
+        assert_eq!(legacy.after_tokens, 2);
+        assert_eq!(legacy.applied_operations, None);
+        assert_eq!(recorder.count().unwrap(), 9);
+        assert_eq!(
+            recorder.retrieve_totals().unwrap(),
+            RetrieveTotals {
+                hits: 9,
+                retrieved_tokens: 200,
+                ..RetrieveTotals::default()
+            }
+        );
+    }
+}
+
+#[test]
+fn concurrent_fresh_openers_keep_all_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh.db");
+    record_concurrently(&path, 8);
+
+    let recorder = StatsRecorder::new(&path).unwrap();
+    assert_eq!(recorder.count().unwrap(), 8);
+    assert_eq!(recorder.retrieve_totals().unwrap().hits, 8);
+    assert_eq!(recorder.retrieve_totals().unwrap().retrieved_tokens, 80);
+}
+
+#[test]
+fn wal_contention_obeys_one_wait_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("busy.db");
+    let reader = Connection::open(&path).unwrap();
+    reader
+        .execute_batch("CREATE TABLE existing (value TEXT); BEGIN; SELECT * FROM existing;")
+        .unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let connection = Connection::open(path).unwrap();
+        let started = Instant::now();
+        let result = StatsRecorder::enable_wal(&connection, Duration::from_millis(100));
+        sender.send((result, started.elapsed())).unwrap();
+    });
+    let outcome = receiver.recv_timeout(Duration::from_secs(2));
+    // Release the lock before asserting, so an unbounded retry still has a
+    // way to finish and cannot strand a test thread on the failure path.
+    drop(reader);
+    worker.join().unwrap();
+    let (result, elapsed) = outcome.expect("WAL initialization exceeded its wait budget");
+    assert!(matches!(
+        result,
+        Err(StatsError::Database(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::DatabaseBusy
+    ));
+    assert!(elapsed >= Duration::from_millis(70));
+}
+
+#[test]
+fn wal_initialization_preserves_non_busy_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("readonly.db");
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE existing (value TEXT);").unwrap();
+    drop(connection);
+    let readonly = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    assert!(matches!(
+        StatsRecorder::enable_wal(&readonly, Duration::from_millis(100)),
+        Err(StatsError::Database(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::ReadOnly
+    ));
+}
+
+#[test]
+fn failed_retrieve_migration_rolls_back_stats_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollback.db");
+    let conn = Connection::open(&path).unwrap();
+    let max_column: String = conn
+        .query_row(
+            "SELECT compile_options FROM pragma_compile_options
+             WHERE compile_options LIKE 'MAX_COLUMN=%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let max_column: usize = max_column.strip_prefix("MAX_COLUMN=").unwrap().parse().unwrap();
+    drop(conn);
+    // Exhaust the second table's column limit so its migration fails after
+    // stats has already added columns. Both tables must roll back together.
+    let conn = create_legacy_stats_database(&path, max_column - 7);
+    assert!(matches!(StatsRecorder::new(&path), Err(StatsError::Database(_))));
+    let added: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = 'before_output'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(added, 0, "failed migration left stats partially upgraded");
+
+    for index in 0..3 {
+        conn.execute(
+            &format!("ALTER TABLE retrieve_events DROP COLUMN extra_{index}"),
+            [],
+        )
+        .unwrap();
+    }
+    let recorder = StatsRecorder::new(&path).unwrap();
+    assert_eq!(recorder.record_by_id(1).unwrap().unwrap().agent_id, "old");
+    assert_eq!(recorder.count().unwrap(), 1);
+    assert_eq!(recorder.retrieve_totals().unwrap().retrieved_tokens, 120);
+}
+
 #[test]
 fn all_records_handles_corrupt_row() {
     let dir = tempfile::tempdir().unwrap();

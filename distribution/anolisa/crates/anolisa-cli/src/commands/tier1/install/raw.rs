@@ -18,6 +18,7 @@ use anolisa_core::{
 use anolisa_platform::fs_layout::FsLayout;
 use sha2::{Digest, Sha256};
 
+use crate::commands::common;
 use crate::context::CliContext;
 use crate::repo_config::{
     HostVars, RepoConfig, raw_artifact_url, raw_index_url, raw_index_v2_url, raw_relative_root,
@@ -62,7 +63,11 @@ pub(super) fn index_fetch_error(
         }
         err => CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!("failed to fetch distribution index {index_url}: {err}"),
+            reason: format!(
+                "failed to fetch distribution index {}: {}",
+                common::repository_url_label(index_url),
+                common::redact_known_urls(&err.to_string(), &[index_url.to_string()]),
+            ),
         },
     }
 }
@@ -126,6 +131,9 @@ pub(crate) fn resolve_raw(
     let cache = DownloadCache::new(layout.cache_dir.clone());
     let (index_url, cached_index_path) =
         fetch_raw_index(&cache, &base_url, repository_origin.as_ref())?;
+    // Every message below names the repository the user configured; name it by
+    // origin so a credential or secret path segment in `base_url` is not echoed.
+    let index_label = common::repository_url_label(&index_url);
     // Entry-tolerant parse: a row shaped for a future CLI fails closed for
     // its own component (skipped, surfaced as a warning) instead of taking
     // the whole shared index — and every unrelated component — down with it.
@@ -135,7 +143,7 @@ pub(crate) fn resolve_raw(
     let (full_index, skipped_entries) = DistributionIndex::load_lenient(&cached_index_path)
         .map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!("failed to parse distribution index {index_url}: {err}"),
+            reason: format!("failed to parse distribution index {index_label}: {err}"),
         })?;
     let index = installable_raw_index(full_index.clone());
 
@@ -161,7 +169,7 @@ pub(crate) fn resolve_raw(
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
-                "distribution index {index_url} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa self-update' and retry",
+                "distribution index {index_label} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa self-update' and retry",
                 blocking.reason
             ),
         });
@@ -169,7 +177,7 @@ pub(crate) fn resolve_raw(
     warnings.extend(
         skipped_entries
             .into_iter()
-            .map(|s| format!("distribution index {index_url}: {}", s.reason)),
+            .map(|s| format!("distribution index {index_label}: {}", s.reason)),
     );
     let entry = index.resolve(&query).map_err(|err| {
         // A pinned version the installable index cannot satisfy gets a
@@ -197,7 +205,7 @@ pub(crate) fn resolve_raw(
                 return CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!(
-                        "version '{pinned}' of component '{component}' (package '{package}') is published in the raw repository {index_url} but only with artifact types the raw backend cannot install (supported: {}); nothing was changed{installable_note}",
+                        "version '{pinned}' of component '{component}' (package '{package}') is published in the raw repository {index_label} but only with artifact types the raw backend cannot install (supported: {}); nothing was changed{installable_note}",
                         SUPPORTED_ARTIFACT_TYPES.join(", "),
                     ),
                 };
@@ -206,7 +214,7 @@ pub(crate) fn resolve_raw(
                 return CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!(
-                        "version '{pinned}' of component '{component}' (package '{package}') is not published in the raw repository {index_url} for {}/{} ({} mode); nothing was changed{installable_note}",
+                        "version '{pinned}' of component '{component}' (package '{package}') is not published in the raw repository {index_label} for {}/{} ({} mode); nothing was changed{installable_note}",
                         env.os,
                         env.arch,
                         ctx.install_mode.as_str(),
@@ -239,7 +247,7 @@ pub(crate) fn resolve_raw(
                 return CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!(
-                        "component '{component}' (package '{package}') is not available for {}/{} from {index_url}; nothing was changed\n\navailable platforms:\n{available}",
+                        "component '{component}' (package '{package}') is not available for {}/{} from {index_label}; nothing was changed\n\navailable platforms:\n{available}",
                         query.os,
                         query.arch,
                     ),
@@ -249,7 +257,7 @@ pub(crate) fn resolve_raw(
         CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: format!(
-                "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
+                "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_label}: {err}",
                 version.unwrap_or("latest"),
                 env.os,
                 env.arch,
@@ -417,7 +425,11 @@ pub(crate) fn load_dry_run_install_contract(
             Err(err) => {
                 return Err(CliError::Runtime {
                     command: COMMAND.to_string(),
-                    reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
+                    reason: format!(
+                        "failed to fetch sidecar metadata {}: {}",
+                        common::repository_url_label(&meta_url),
+                        common::redact_known_urls(&err.to_string(), &[meta_url.to_string()]),
+                    ),
                 });
             }
         };
@@ -432,7 +444,10 @@ pub(crate) fn load_dry_run_install_contract(
         let manifest =
             ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
                 command: COMMAND.to_string(),
-                reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+                reason: format!(
+                    "failed to parse sidecar metadata {}: {err}",
+                    common::repository_url_label(&meta_url),
+                ),
             })?;
         validate_manifest_contract_header(
             &manifest,
@@ -529,8 +544,12 @@ pub(crate) fn prepare_raw_execution(
         .map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
-                "failed to download artifact {}: {err}",
-                resolution.artifact_url
+                "failed to download artifact {}: {}",
+                common::repository_url_label(&resolution.artifact_url),
+                common::redact_known_urls(
+                    &err.to_string(),
+                    std::slice::from_ref(&resolution.artifact_url)
+                ),
             ),
         })?;
 
@@ -564,7 +583,7 @@ fn load_execution_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to read embedded component manifest from {}: {err}",
-                        resolution.artifact_url
+                        common::repository_url_label(&resolution.artifact_url)
                     ),
                 })?
                 .ok_or_else(|| CliError::Runtime {
@@ -579,7 +598,7 @@ fn load_execution_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to parse embedded component manifest from {}: {err}",
-                        resolution.artifact_url
+                        common::repository_url_label(&resolution.artifact_url)
                     ),
                 })?;
             validate_manifest_digest(&toml, resolution)?;
@@ -1224,6 +1243,50 @@ mod tests {
             url: "https://example.invalid/index-v2.toml".to_string(),
             reason: "timed out".to_string(),
         }));
+    }
+
+    /// A repository URL may carry credentials or a secret path segment
+    /// (`validate_base_url` accepts `user:pass@host`, and `[vars]` can inject a
+    /// token). Failure text is what users paste into reports, so it must name
+    /// the repository without echoing those parts.
+    #[test]
+    fn index_fetch_error_does_not_echo_repository_credentials() {
+        let url = "https://user:secret@repo.example.internal/private/v1/index.toml";
+        let err = DownloadError::HttpStatus {
+            url: url.to_string(),
+            status: 404,
+        };
+        let CliError::Runtime { reason, .. } = index_fetch_error(url, err, None) else {
+            panic!("expected runtime error");
+        };
+        assert!(!reason.contains("secret"), "got: {reason}");
+        assert!(!reason.contains("user:"), "got: {reason}");
+        assert!(!reason.contains("/private/"), "got: {reason}");
+        assert_eq!(
+            reason,
+            "failed to fetch distribution index https://repo.example.internal: \
+             http status 404 while fetching <redacted>"
+        );
+    }
+
+    /// A repository URL without credentials still identifies its host — only
+    /// the path (and any userinfo) is dropped, so the message stays actionable
+    /// for the ordinary case.
+    #[test]
+    fn index_fetch_error_keeps_the_origin_of_a_plain_url() {
+        let url = "https://repo.example/anolisa/v1/index.toml";
+        let err = DownloadError::HttpStatus {
+            url: url.to_string(),
+            status: 500,
+        };
+        let CliError::Runtime { reason, .. } = index_fetch_error(url, err, None) else {
+            panic!("expected runtime error");
+        };
+        assert_eq!(
+            reason,
+            "failed to fetch distribution index https://repo.example: \
+             http status 500 while fetching <redacted>"
+        );
     }
 
     /// Target-specific metadata is the point of the sibling-first order: the

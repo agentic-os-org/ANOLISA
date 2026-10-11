@@ -13,17 +13,20 @@
 //! `skillfs-core::watcher::classify_event` only emits two shapes of
 //! events:
 //!
-//! * `<source>/<skill>/SKILL.md` create / modify / delete; and
+//! * `SKILL.md` manifest create / modify / delete at any depth under
+//!   the source — flat `<source>/<skill>/SKILL.md` and nested /
+//!   categorized `<source>/<category>/<skill>/SKILL.md`; and
 //! * `<source>/<skill>` immediate skill-directory create / delete.
 //!
-//! Everything else — arbitrary files inside a skill (`scripts/run.sh`,
-//! `notes.txt`), `.skill-meta/**`, deeper nested layouts, top-level
-//! files at the source root — does **not** flow through W1. The W1
-//! adapter therefore only surfaces drift for the SKILL.md manifest and
-//! the immediate skill-directory shape. Broader watcher coverage is a
-//! deliberate non-goal of this package; future work that widens the
-//! producer in `skillfs-core::watcher` will automatically widen what W1
-//! observes without changing the adapter.
+//! Everything else — arbitrary non-manifest files inside a skill
+//! (`scripts/run.sh`, `notes.txt`), `.skill-meta/**`, non-manifest
+//! paths of nested layouts, top-level files at the source root —
+//! does **not** flow through W1. The W1 adapter therefore only
+//! surfaces drift for SKILL.md manifests and the immediate
+//! skill-directory shape. Broader watcher coverage is a deliberate
+//! non-goal of this package; future work that widens the producer in
+//! `skillfs-core::watcher` will automatically widen what W1 observes
+//! without changing the adapter.
 //!
 //! Visibility-only contract. Nothing in this module blocks operations,
 //! refreshes the [`skillfs_core::store::SkillStore`], quarantines content,

@@ -26,6 +26,12 @@ impl GenAISqliteStore {
     /// Initialize database tables
     pub(super) fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // This migration must run before any index that references the added
+        // column: on databases created before conversation_id existed,
+        // creating the index first aborts the batch and the `?` below returns
+        // before the later ALTER runs (same defect as issue #3314 in the
+        // interruption store).
+        let _ = conn.execute_batch("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT;");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS genai_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,11 +186,8 @@ impl GenAISqliteStore {
         // v4: per-call interruption type
         ensure_col!("interruption_type", "TEXT", "idx_genai_interruption_type");
 
-        // Migration: add conversation_id column for existing databases
-        let _ = conn.execute(
-            "ALTER TABLE genai_events ADD COLUMN conversation_id TEXT",
-            [],
-        );
+        // conversation_id is migrated at the top of this function, before the
+        // index batch that references it.
 
         // v5: tool_call_ids JSON array for output tool calls
         ensure_col!("tool_call_ids", "TEXT");

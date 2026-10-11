@@ -112,6 +112,7 @@ anolisa install <component>
 | `agent-memory` | 基于 MCP 的持久化记忆 | user、system |
 | `agentsight` | eBPF 追踪与 Dashboard | **system** |
 | `sec-core` | 本地安全运行时、scanner 和 adapter | **system** |
+| `ktuner` | 面向 Agent 的确定性内核调优引擎 | **system**（RPM，Linux x86_64） |
 
 > **注意** 仅支持 system 模式的组件需要 `sudo`，并且必须显式选择 system 范围。
 > ```bash

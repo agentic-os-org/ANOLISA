@@ -51,7 +51,7 @@ impl GenAIBuilder {
         );
 
         // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
-        let path_match = self.is_llm_api_path(&http.path);
+        let path_match = crate::parser::llm::is_llm_api_path(&http.path);
         let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
         let is_llm = path_match || body_match;
         if !is_llm && !http.is_sse {
@@ -289,16 +289,24 @@ impl GenAIBuilder {
                     "sse_event_count".to_string(),
                     http.sse_event_count.to_string(),
                 );
-                // Extract server.address and server.port from Host header
+                // Extract server.address and server.port from the Host header.
+                // HTTP/2 has no Host header: the authority travels in the
+                // `:authority` pseudo-header (`request_headers_json` emits the
+                // decoded HPACK list verbatim), and pure-h2 clients — Go,
+                // undici, nghttp2 — send it with no legacy Host copy, so an
+                // LLM call captured over h2 recorded no server address at all.
                 if let Ok(headers) =
                     serde_json::from_str::<HashMap<String, String>>(&http.request_headers)
                 {
-                    if let Some(host) = headers.get("host").or_else(|| headers.get("Host")) {
-                        if let Some((addr, port)) = host.rsplit_once(':') {
-                            meta.insert("server.address".to_string(), addr.to_string());
-                            meta.insert("server.port".to_string(), port.to_string());
-                        } else {
-                            meta.insert("server.address".to_string(), host.clone());
+                    let host = headers
+                        .get("host")
+                        .or_else(|| headers.get("Host"))
+                        .or_else(|| headers.get(":authority"));
+                    if let Some(host) = host {
+                        let (addr, port) = split_host_port(host);
+                        meta.insert("server.address".to_string(), addr);
+                        if let Some(port) = port {
+                            meta.insert("server.port".to_string(), port);
                         }
                     }
                 }
@@ -859,7 +867,7 @@ impl GenAIBuilder {
                 }
             }
             msgs
-        } else if messages.is_empty() && Self::is_dashscope_native_path(&http.path) {
+        } else if messages.is_empty() && crate::parser::llm::is_dashscope_native_path(&http.path) {
             // Non-streaming DashScope/Bailian native protocol: no typed parser
             // claims `/aigc/*-generation/generation`, so the `output` envelope
             // has to be reconstructed from the raw response body.
@@ -876,6 +884,31 @@ impl GenAIBuilder {
             streamed: http.is_sse,
             raw_body: http.response_body.clone(),
         }
+    }
+}
+
+/// Split a Host / `:authority` value into the address and an optional port.
+///
+/// An IPv6 literal is bracketed (`[::1]:8443`): splitting at the last colon
+/// alone would shred a bracketed, port-less literal into garbage
+/// (`[2001:db8:` / `1]`), so the bracketed form is decoded first and the
+/// brackets stay out of the recorded `server.address` — the OTel field is the
+/// address itself, not its URI spelling. The bare `host:port` form — and a
+/// bare unbracketed IPv6 literal, which carries several colons and no port —
+/// is handled by requiring exactly one separating colon with a non-empty
+/// port on each side.
+fn split_host_port(host: &str) -> (String, Option<String>) {
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some((addr, tail)) = rest.split_once(']') {
+            let port = tail.strip_prefix(':').filter(|p| !p.is_empty());
+            return (addr.to_string(), port.map(str::to_string));
+        }
+    }
+    match host.rsplit_once(':') {
+        Some((addr, port)) if !addr.is_empty() && !addr.contains(':') && !port.is_empty() => {
+            (addr.to_string(), Some(port.to_string()))
+        }
+        _ => (host.to_string(), None),
     }
 }
 
@@ -945,6 +978,74 @@ mod tests {
         let builder = GenAIBuilder::new();
         let http = make_http("/api/health", None, None);
         assert!(build_call(&builder, &[AnalysisResult::Http(http)]).is_none());
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_count_tokens() {
+        // A real count-tokens request: the same conversation the real
+        // /v1/messages call will send, but no max_tokens (the typed Anthropic
+        // parser refuses it) and a bare {"input_tokens": N} response with no
+        // usage object. Before the gate narrowing this built a phantom
+        // llm_call row per count — same conversation_id as the real turn,
+        // zero tokens, no output — doubling call counts and consuming
+        // preference-window slots.
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/messages/count_tokens",
+            Some(
+                r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Summarize this long document"}],"system":"You are helpful"}"#
+                    .to_string(),
+            ),
+            Some(r#"{"input_tokens":1256}"#.to_string()),
+        );
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "count_tokens is not an inference call and must not build an llm_call"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_responses_retrieval() {
+        // A retrieval poll (GET /v1/responses/{id}) answers with the STORED
+        // response object — the same object=="response" + output[] + usage
+        // shape the create call answered with — so the deep-parse path
+        // would turn the poll into a full phantom llm_call on top of the
+        // row the real create already produced: re-recorded output text,
+        // re-counted usage tokens, and a fast round-trip dragging e2e
+        // latency percentiles down.
+        let builder = GenAIBuilder::new();
+        let mut http = make_http(
+            "/v1/responses/resp_abc123",
+            None,
+            Some(
+                r#"{"id":"resp_abc123","object":"response","status":"completed","model":"gpt-5","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello!","annotations":[]}]}],"usage":{"input_tokens":12,"output_tokens":5,"total_tokens":17}}"#
+                    .to_string(),
+            ),
+        );
+        http.method = "GET".to_string();
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "a retrieval poll is not an inference call and must not build an llm_call"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_returns_none_for_responses_cancel() {
+        // POST /v1/responses/{id}/cancel shares the /v1/responses prefix
+        // too; cancelling a background response creates no new inference.
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/responses/resp_abc123/cancel",
+            Some("{}".to_string()),
+            Some(
+                r#"{"id":"resp_abc123","object":"response","status":"cancelled","model":"gpt-5","output":[]}"#
+                    .to_string(),
+            ),
+        );
+        assert!(
+            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            "cancel is not an inference call and must not build an llm_call"
+        );
     }
 
     // ── Verification: HTTPS-fallback trigger for unparsable LLM traffic ──
@@ -1124,6 +1225,54 @@ mod tests {
         assert_eq!(call.metadata.get("server.address").unwrap(), "example.com");
         assert!(!call.metadata.contains_key("server.port"));
         assert_eq!(call.metadata.get("http.domain").unwrap(), "example.com");
+    }
+
+    /// An HTTP/2 call has no Host header: the authority rides in the
+    /// `:authority` pseudo-header, exactly as `request_headers_json` emits the
+    /// decoded HPACK list. Pure-h2 clients send no legacy Host copy, so
+    /// without the pseudo-header lookup every h2 call recorded an empty
+    /// server.address — and the FFI request_url degenerated to "https:///path".
+    #[test]
+    fn test_build_llm_call_reads_http2_authority_pseudo_header() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{":method":"POST",":path":"/v1/chat/completions",":authority":"api.openai.com:443","content-type":"application/json"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("server.address").unwrap(),
+            "api.openai.com",
+            "the h2 :authority must name the server"
+        );
+        assert_eq!(call.metadata.get("server.port").unwrap(), "443");
+        assert_eq!(call.metadata.get("http.domain").unwrap(), "api.openai.com");
+    }
+
+    /// An IPv6 authority is bracketed (`[::1]:11434`); the recorded
+    /// `server.address` is the address itself, without the URI brackets.
+    #[test]
+    fn test_build_llm_call_unbrackets_ipv6_host_with_port() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{"host":"[::1]:11434"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(call.metadata.get("server.address").unwrap(), "::1");
+        assert_eq!(call.metadata.get("server.port").unwrap(), "11434");
+        assert_eq!(call.metadata.get("http.domain").unwrap(), "::1");
+    }
+
+    /// A bracketed IPv6 literal without a port used to split into garbage at
+    /// the last colon (`[2001:db8:` / `1]`); it is a plain address, no port.
+    #[test]
+    fn test_build_llm_call_keeps_portless_ipv6_host_intact() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
+        let mut http = make_http("/v1/chat/completions", Some(body), None);
+        http.request_headers = r#"{"host":"[2001:db8::1]"}"#.to_string();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(call.metadata.get("server.address").unwrap(), "2001:db8::1");
+        assert!(!call.metadata.contains_key("server.port"));
     }
 
     #[test]

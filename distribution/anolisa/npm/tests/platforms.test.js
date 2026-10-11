@@ -108,3 +108,8 @@ assert.deepEqual(
   ),
   { tool: 'cargo', passTarget: true },
 );
+
+// Run native launcher fixtures on the package's supported operating systems.
+if (process.platform === 'linux' || process.platform === 'darwin') {
+  await import('./postinstall.test.js');
+}

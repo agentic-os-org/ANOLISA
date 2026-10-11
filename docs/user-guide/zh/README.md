@@ -39,8 +39,10 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | 统一 CLI 组件管理 |
+| [AW](user-entrypoint/aw.md) | aw | 跨 Agent 的统一策略配置；当前支持离线校验，运行时集成开发中 |
 | [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | 集成 Agent runtime 的 AI 原生 Linux 终端 |
 | [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI 终端助手与命令网关 |
+| [ktuner](user-entrypoint/ktuner.md) | ktuner | 确定性内核调优引擎，提供 JSON 建议与安全回滚 |
 | [OS 技能库](user-entrypoint/os-skills.md) | os-skills | 系统管理与 DevOps 技能 |
 
 ### 可观测性 `agent-observability/`

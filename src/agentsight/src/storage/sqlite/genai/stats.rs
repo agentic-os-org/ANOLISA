@@ -162,6 +162,12 @@ mod latency_tests {
             assert!((ttft_p50 - 0.000015).abs() < 1e-12);
         }
 
+        // The unfiltered view must agree: one agent, one summary.
+        let all = store.get_latency_metrics(50, 250, None).unwrap();
+        assert_eq!(all.len(), 1, "case variants split into {} rows", all.len());
+        assert_eq!(all[0].call_count, 2);
+        assert_eq!(all[0].streaming_call_count, 1);
+
         drop(store);
         let _ = std::fs::remove_file(path);
     }
@@ -353,16 +359,22 @@ impl GenAISqliteStore {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let mut grouped = std::collections::BTreeMap::<Option<String>, Vec<CallMetrics>>::new();
+        // Group case-insensitively, like the filtered query (COLLATE NOCASE)
+        // and every other agent-attributed view: "Qoder" and "qoder" are one
+        // agent, not two. The first name seen labels the group.
+        let mut grouped =
+            std::collections::BTreeMap::<Option<String>, (Option<String>, Vec<CallMetrics>)>::new();
         for call in calls {
+            let key = call.agent_name.as_deref().map(|name| name.to_lowercase());
             grouped
-                .entry(call.agent_name.clone())
-                .or_default()
+                .entry(key)
+                .or_insert_with(|| (call.agent_name.clone(), Vec::new()))
+                .1
                 .push(call);
         }
         Ok(grouped
             .into_iter()
-            .map(|(agent_name, calls)| LatencyMetricsSummary {
+            .map(|(_, (agent_name, calls))| LatencyMetricsSummary {
                 agent_name,
                 call_count: calls.len(),
                 streaming_call_count: calls.iter().filter(|call| call.is_sse).count(),
@@ -398,8 +410,19 @@ impl GenAISqliteStore {
         bucket_count: u32,
     ) -> Result<Vec<TimeseriesBucket>, Box<dyn std::error::Error>> {
         let bucket_count = bucket_count.max(1);
-        let range_ns = (end_ns - start_ns).max(1);
-        let bucket_ns = range_ns / bucket_count as i64;
+        let range_ns = end_ns.saturating_sub(start_ns).max(1);
+        // SQLite evaluates x/0 as NULL, which would collapse every row into
+        // one NULL bucket and make bucket_start_ns unreadable as an integer.
+        // Round the width UP: floor division lets the last bucket index reach
+        // range_ns / bucket_ns >= bucket_count (up to ~2x when the span is
+        // just under twice the requested count), so callers got more buckets
+        // than they asked for. With ceil, every index stays < bucket_count —
+        // except when the range is an exact multiple of the count: the width
+        // is then exact, and the inclusive BETWEEN puts a row at end_ns in
+        // index == bucket_count, a phantom bucket starting at end_ns itself.
+        // Clamp the index in SQL so that row merges into the last bucket.
+        let bucket_ns = range_ns.saturating_add(bucket_count as i64 - 1) / bucket_count as i64;
+        let bucket_ns = bucket_ns.max(1);
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -407,8 +430,8 @@ impl GenAISqliteStore {
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)                AS input_tokens,
@@ -419,15 +442,15 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND agent_name = ?4
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
              GROUP BY bucket_idx
              ORDER BY bucket_idx ASC"
             )
         } else {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)                AS input_tokens,
@@ -445,25 +468,31 @@ impl GenAISqliteStore {
 
         let rows: Vec<TimeseriesBucket> = if let Some(name) = agent_name {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns, name], |row| {
-                Ok(TimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
-                    total_tokens: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, name, bucket_count as i64],
+                |row| {
+                    Ok(TimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        input_tokens: row.get(2)?,
+                        output_tokens: row.get(3)?,
+                        total_tokens: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns], |row| {
-                Ok(TimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
-                    total_tokens: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, bucket_count as i64],
+                |row| {
+                    Ok(TimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        input_tokens: row.get(2)?,
+                        output_tokens: row.get(3)?,
+                        total_tokens: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -479,16 +508,27 @@ impl GenAISqliteStore {
         bucket_count: u32,
     ) -> Result<Vec<ModelTimeseriesBucket>, Box<dyn std::error::Error>> {
         let bucket_count = bucket_count.max(1);
-        let range_ns = (end_ns - start_ns).max(1);
-        let bucket_ns = range_ns / bucket_count as i64;
+        let range_ns = end_ns.saturating_sub(start_ns).max(1);
+        // SQLite evaluates x/0 as NULL, which would collapse every row into
+        // one NULL bucket and make bucket_start_ns unreadable as an integer.
+        // Round the width UP: floor division lets the last bucket index reach
+        // range_ns / bucket_ns >= bucket_count (up to ~2x when the span is
+        // just under twice the requested count), so callers got more buckets
+        // than they asked for. With ceil, every index stays < bucket_count —
+        // except when the range is an exact multiple of the count: the width
+        // is then exact, and the inclusive BETWEEN puts a row at end_ns in
+        // index == bucket_count, a phantom bucket starting at end_ns itself.
+        // Clamp the index in SQL so that row merges into the last bucket.
+        let bucket_ns = range_ns.saturating_add(bucket_count as i64 - 1) / bucket_count as i64;
+        let bucket_ns = bucket_ns.max(1);
 
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
                 COALESCE(SUM((",
                 billed_input_col!(),
@@ -496,15 +536,15 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND agent_name = ?4
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
              GROUP BY bucket_idx, model
              ORDER BY bucket_idx ASC"
             )
         } else {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
                 COALESCE(SUM((",
                 billed_input_col!(),
@@ -519,23 +559,29 @@ impl GenAISqliteStore {
 
         let rows: Vec<ModelTimeseriesBucket> = if let Some(name) = agent_name {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns, name], |row| {
-                Ok(ModelTimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    model: row.get(2)?,
-                    total_tokens: row.get(3)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, name, bucket_count as i64],
+                |row| {
+                    Ok(ModelTimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        model: row.get(2)?,
+                        total_tokens: row.get(3)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns], |row| {
-                Ok(ModelTimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    model: row.get(2)?,
-                    total_tokens: row.get(3)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, bucket_count as i64],
+                |row| {
+                    Ok(ModelTimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        model: row.get(2)?,
+                        total_tokens: row.get(3)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -578,14 +624,17 @@ impl GenAISqliteStore {
 
     /// Return per-agent token usage aggregated over all recorded history.
     ///
-    /// Groups by `COALESCE(agent_name, process_name, 'unknown')` so that every
-    /// LLM call is attributed to some label even when agent_name is NULL.
+    /// Groups by `COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE`
+    /// so that every LLM call is attributed to some label even when agent_name
+    /// is NULL, and case variants of one agent stay a single series — the same
+    /// rule `list_agent_activity_summaries` and the latency metrics use. The
+    /// reported label is the group's `MIN` for a stable spelling.
     pub fn get_agent_token_summary(
         &self,
     ) -> Result<Vec<AgentTokenSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(concat!(
-            "SELECT COALESCE(agent_name, process_name, 'unknown') AS agent,
+            "SELECT MIN(COALESCE(agent_name, process_name, 'unknown')) AS agent,
                     COALESCE(SUM(",
             billed_input_col!(),
             "), 0)      AS input_tokens,
@@ -596,7 +645,7 @@ impl GenAISqliteStore {
                     COUNT(*)                        AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'
-             GROUP BY agent
+             GROUP BY COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE
              ORDER BY total_tokens DESC"
         ))?;
         let rows = stmt.query_map([], |row| {

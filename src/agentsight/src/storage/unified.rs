@@ -146,7 +146,10 @@ impl Storage {
                 Self::with_sqlite_config(&config)
             }
             StorageBackend::Sls { .. } => {
-                // TODO: Implement SLS storage
+                // TODO(sight-storage): implement the SLS backend — the
+                // StorageBackend::Sls enum variant exists so callers can
+                // parse config that selects it, but every store here is
+                // SQLite-shaped and there is no SLS writer yet.
                 anyhow::bail!("SLS storage backend is not yet implemented");
             }
             StorageBackend::Noop => Self::noop(),

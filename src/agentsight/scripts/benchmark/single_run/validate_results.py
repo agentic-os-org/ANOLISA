@@ -28,6 +28,19 @@ def json_lines(path: Path) -> Iterable[dict[str, Any]]:
                 yield item
 
 
+def _coerce_optional_status(status: Any) -> int | None:
+    """Coerce an optional k6 ``data.status`` value to an integer code.
+
+    The status field is optional load-generator metadata: a list, object,
+    non-numeric string or non-finite number contributes no success evidence
+    instead of aborting the read of the remaining records.
+    """
+    try:
+        return int(status)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def load_expected(path: Path) -> tuple[set[str], set[str]]:
     """Return request IDs from legacy k6 output containing per-request tags."""
     expected: set[str] = set()
@@ -44,7 +57,8 @@ def load_expected(path: Path) -> tuple[set[str], set[str]]:
         status = item.get("data", {}).get("status")
         if metric == "benchmark_http_success" and value:
             successful.add(request_id)
-        if status is not None and 200 <= int(status) < 300:
+        status_code = _coerce_optional_status(status)
+        if status_code is not None and 200 <= status_code < 300:
             successful.add(request_id)
     return expected, successful
 

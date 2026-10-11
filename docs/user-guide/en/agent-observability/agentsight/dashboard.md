@@ -41,6 +41,10 @@ sudo agentsight dashboard --no-open
 A successful login exchanges the token for an httpOnly session cookie, so you do not have to keep
 the token in the URL.
 
+An invalid-token message means the server rejected the token; check it with the command above.
+A connection-error message can also mean the server or a reverse proxy returned an HTTP error.
+Check that AgentSight is running and reachable, then retry the login.
+
 To turn authentication off — only sensible on a trusted internal network:
 
 ```json
@@ -134,6 +138,21 @@ optimization type, plus a savings ranking and concrete tips.
 
 Press **Query** after choosing a range; the page starts empty on purpose. Setup:
 [Integrations](integrations.md#tokenless-token-savings).
+
+**Export CSV** downloads the displayed sessions from the last successful query as
+`token-savings.csv`, in their displayed order. It includes session IDs, Agent names,
+request counts and Token metrics; rates use fractions (for example, `0.4` means 40%).
+The export omits tool content and uses UTF-8 with a BOM for spreadsheet compatibility.
+Text beginning with a spreadsheet formula prefix is prefixed with an apostrophe.
+Export is disabled while querying, after a query error, or when there are no sessions.
+
+To compare a subset, check the box on each session row (or the box in the table header
+to select or clear every session) and press **Export Selected (N)**. The download uses
+the same columns, escaping, units and file lifecycle as the full export, keeps the
+displayed row order, and reads only the already loaded results — it never issues another
+request. Checking a box does not expand or collapse the row; the selection is keyed by
+session ID, and it is cleared whenever a new successful query replaces the snapshot.
+The button stays disabled while querying, after a query error, or while nothing is selected.
 
 ## Optimization
 

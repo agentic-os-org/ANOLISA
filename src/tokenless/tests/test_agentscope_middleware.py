@@ -291,6 +291,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output[1].content[0].text, "short")
         self.assertEqual(response.content[0].text, "long " * 100)
         self.assertEqual(observed[0].content_origin, core.ContentOrigin.API_RESPONSE)
+        self.assertIsNone(observed[0].command)
         self.assertEqual(observed[0].attribution.tool_use_id, "call-1")
 
     async def test_rtk_state_reaches_the_final_response(self) -> None:
@@ -342,6 +343,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(output[0], chunk)
         self.assertIs(output[1], response)
         self.assertEqual(observed[0].output_optimization, core.OutputOptimization.RTK)
+        self.assertEqual(observed[0].command, "rtk grep needle file.txt")
 
     async def test_error_context_is_owned_by_core(self) -> None:
         async def post_tool(request):

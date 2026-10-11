@@ -240,6 +240,22 @@ test("resumed non-exec tools retain UUID attribution when RTK is disabled", () =
   const request = requests()[0].request;
   assert.equal(request.attribution.session_id, "session-actual");
   assert.equal(request.input.output_optimization, "none");
+  assert.equal(request.input.command, undefined);
+
+  // Core classifies plain file prints as file_read from the shell command line,
+  // so the line is recorded before the call even when RTK is off.
+  beforeHandlers[0](
+    { toolName: "exec", toolCallId: "call-cat", params: { command: "cat page.html" } },
+    { toolName: "exec", toolCallId: "call-cat", sessionId: "session-actual" },
+  );
+  persistHandlers[0](
+    { toolName: "exec", toolCallId: "call-cat", message: "<html></html>" },
+    { toolName: "exec", toolCallId: "call-cat", sessionId: "session-actual" },
+  );
+  const fileRead = requests()[1].request.input;
+  assert.equal(fileRead.content_origin, "command_output");
+  assert.equal(fileRead.command, "cat page.html");
+  assert.equal(fileRead.output_optimization, "none");
 });
 
 test("PreTool sends one Protocol v2 operation and applies all returned arguments", () => {
@@ -356,6 +372,8 @@ test("resumed sessions retain PreTool identity when PostTool only has a session 
   const request = requests()[0].request;
   assert.equal(request.attribution.session_id, "session-existing");
   assert.equal(request.input.output_optimization, "rtk");
+  // The recorded line is the one that ran, not the one the model wrote.
+  assert.equal(request.input.command, "/mock/rtk resumed");
 });
 
 test("PostTool restores structured output and maps content origins", () => {

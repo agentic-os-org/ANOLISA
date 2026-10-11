@@ -5,16 +5,37 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fuser::{FileType, ReplyEmpty, ReplyEntry, Request};
-use skillfs_core::parser;
+use skillfs_core::{parser, store::adopt_directory_name};
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::PathType;
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{
     errno, mkdirat_leaf, open_dir_path, rename_noreplace, renameat2_leaf, unlinkat_leaf,
 };
+
+/// Which source directory a skill-dir rename addresses, and therefore
+/// how strictly the backing store entry must be identified below the
+/// source root. See [`SkillFs::rename_source_backs_store_entry`].
+enum RenameSourceIdentity<'a> {
+    /// A flat `/skills/<name>` slot. The virtual path resolves THROUGH
+    /// the store entry (`skill_physical_dir` reads the recorded
+    /// `source_path`), so the entry itself defines the backing
+    /// directory: a categorized source viewed through a flat mount
+    /// records a deeper origin (`catalog/demo`), and renaming the slot
+    /// legitimately migrates that entry. Any depth below the source
+    /// root is accepted.
+    FlatSlot,
+    /// The exact component chain below the source root. An inbox
+    /// candidate is always `source/<name>` (bare leaf); a Hermes
+    /// nested skill is `<category>/<leaf>`. A same-leaf entry with a
+    /// different chain — a real `beta/docs` skill while a plain
+    /// `source/docs` candidate is renamed through the inbox — does not
+    /// back the renamed directory and must be left alone.
+    ExactChain(&'a [String]),
+}
 
 impl SkillFs {
     pub(in crate::fs) fn mkdir_impl(
@@ -56,6 +77,15 @@ impl SkillFs {
             }
         }
 
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) so `mkdir`
+        // cannot create (or inject a store placeholder for) the reserved
+        // virtual name or mutate its physical backing tree.
+        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+            reply.error(errno);
+            return;
+        }
+
         // S3: refuse to mkdir on a reserved lifecycle namespace name. The
         // gate runs before `.skill-meta` enforcement so the lifecycle
         // boundary cannot be sidestepped by also matching `.skill-meta`.
@@ -95,6 +125,15 @@ impl SkillFs {
                 _ => false,
             };
             if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -279,6 +318,15 @@ impl SkillFs {
             _ => (None, None),
         };
 
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) so `unlink`
+        // cannot delete the physical backing tree through the virtual
+        // view.
+        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+            reply.error(errno);
+            return;
+        }
+
         // S3: refuse to unlink under a reserved lifecycle namespace.
         if let Some(errno) =
             self.enforce_lifecycle_reservation(&path_type, SkillEventKind::Delete, req, None)
@@ -301,6 +349,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,
@@ -321,6 +372,15 @@ impl SkillFs {
                 _ => false,
             };
             if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Delete,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -462,6 +522,15 @@ impl SkillFs {
         };
         let path_type = self.parse_fuse_path(Path::new(&path_str));
 
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) so `rmdir`
+        // cannot delete the physical backing tree through the virtual
+        // view.
+        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+            reply.error(errno);
+            return;
+        }
+
         // S3: refuse to rmdir a reserved lifecycle namespace or any
         // directory beneath one. The gate fires before any physical
         // resolution so the source tree is untouched.
@@ -486,6 +555,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillDir { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, None)
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,
@@ -495,9 +567,22 @@ impl SkillFs {
                     skill_name,
                     Some(relative_path),
                 ),
+                PathType::NestedSkillDir {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(category, skill_name, None),
                 _ => false,
             };
             if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Delete,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -665,6 +750,25 @@ impl SkillFs {
             _ => (None, None),
         };
 
+        // The skill-discover namespace is always read-only — mirror the
+        // write/open/setattr/symlink/link guards (write.rs) for both
+        // sides of the rename so the physical backing tree can neither
+        // be moved out from under the virtual view nor be replaced by a
+        // rename onto the reserved name. This gate must fire before the
+        // cross-namespace EXDEV short-circuit below: a skill-discover
+        // path renamed to or from the inbox is still a mutation of the
+        // read-only namespace, and answering it with EXDEV would make
+        // `mv` fall back to copy+unlink against the read-only side,
+        // leaving a partial target behind.
+        if let Some(errno) = enforce_skill_discover_readonly(&old_path_type) {
+            reply.error(errno);
+            return;
+        }
+        if let Some(errno) = enforce_skill_discover_readonly(&new_path_type) {
+            reply.error(errno);
+            return;
+        }
+
         // L1: cross-namespace renames between `/skills` and the
         // inbox would either silently rebind the same physical inode
         // under both namespaces or break the symmetry the inbox is
@@ -776,7 +880,37 @@ impl SkillFs {
 
         // I4/H3: reject renames on hidden skills unless both sides
         // match the post-publish grace whitelist.
-        for pt in [&old_path_type, &new_path_type] {
+        //
+        // I2 carve-out: a staging-root → skill-dir rename is the
+        // install-completion mechanism. The destination name is
+        // usually still ledger-hidden at rename time (the resolver has
+        // not seen the new skill yet), so the hidden gate must not
+        // fire on either side of that rename — the post-publish grace
+        // session started right after the rename is what gates
+        // follow-up mutations. (The staging validation block below
+        // re-derives the same shape for its own checks.)
+        let staging_install_rename = matches!(
+            (&old_path_type, &new_path_type),
+            (
+                PathType::SkillDir { skill_name: old_name },
+                PathType::SkillDir { .. },
+            ) if self.is_staging_skill_root(old_name)
+        ) || matches!(
+            (&old_path_type, &new_path_type),
+            (
+                PathType::NestedSkillDir { skill_name: old_skill, .. },
+                PathType::NestedSkillDir { .. },
+            ) if self.is_staging_skill_root(old_skill)
+        );
+        // Hidden *sources* are always rejected, and so are hidden
+        // *targets that already exist on disk*. A target side that
+        // does not physically exist is the whole-skill rename /
+        // store-sync flow: the new name has no resolver entry yet,
+        // which `should_reject_hidden_write` would misread as
+        // `Hidden` (a missing entry resolves hidden), so the free
+        // target is only rejected when a physical skill directory is
+        // actually being renamed onto.
+        for (is_target_side, pt) in [(false, &old_path_type), (true, &new_path_type)] {
             let reject = match pt {
                 PathType::Passthrough {
                     skill_name,
@@ -784,6 +918,13 @@ impl SkillFs {
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
                 PathType::SkillMd { skill_name } => {
                     self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::SkillDir { skill_name } => {
+                    !staging_install_rename
+                        && self.should_reject_hidden_write(skill_name, None)
+                        && (!is_target_side
+                            || std::fs::symlink_metadata(self.skill_physical_dir(skill_name))
+                                .is_ok())
                 }
                 PathType::NestedPassthrough {
                     category,
@@ -802,9 +943,25 @@ impl SkillFs {
                     skill_name,
                     Some(Path::new("SKILL.md")),
                 ),
+                PathType::NestedSkillDir {
+                    category,
+                    skill_name,
+                } => {
+                    !staging_install_rename
+                        && self.should_reject_hermes_nested_hidden_write(category, skill_name, None)
+                }
                 _ => false,
             };
             if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    pt,
+                    SkillEventKind::Rename,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -814,7 +971,9 @@ impl SkillFs {
         // is renamed to a skill directory, validate the target name
         // against sensitive namespaces and invalid skill name shapes.
         // Flat layout: SkillDir → SkillDir.
-        // Hermes layout: NestedSkillDir → NestedSkillDir (same category).
+        // Hermes layout: NestedSkillDir → NestedSkillDir (same category),
+        // and top-level staging roots classified by NAME (see the H3 arm
+        // below for why the type pairs alone cannot enumerate them).
         let is_staging_rename = if let Some(ref matcher) = self.staging_matcher {
             match (&old_path_type, &new_path_type) {
                 (
@@ -866,6 +1025,59 @@ impl SkillFs {
                             old = %old_path,
                             new = %new_path,
                             "rename: rejecting Hermes staging rename to invalid target"
+                        );
+                        self.emit_event(
+                            SkillEvent::new(SkillEventKind::Rename)
+                                .with_optional_skill_name(event_skill.clone())
+                                .with_optional_relative_path(event_relative.clone())
+                                .with_action(SkillEventAction::Rejected)
+                                .with_errno(libc::EACCES)
+                                .with_caller(req.uid(), req.gid())
+                                .with_detail(format!(
+                                    "class=invalid_staging_rename_target old={} new={}",
+                                    old_path, new_path
+                                )),
+                        );
+                        reply.error(libc::EACCES);
+                        return;
+                    }
+                    true
+                }
+                // H3: Hermes top-level staging rename, classified by NAME
+                // rather than by type pair. While a top-level staging root
+                // is being populated it parses as a CategoryDir (no
+                // SKILL.md yet — an interrupted install) and as a SkillDir
+                // once the manifest has been written. The rename target
+                // parses as a CategoryDir (non-in-place mount, or a name
+                // that already exists as a directory) or as a HermesMeta
+                // (in-place mount, fresh name: the depth-1 in-place
+                // rewrite classifies not-yet-existing entries as
+                // top-level files). A (SkillDir, SkillDir) pair is already
+                // validated by the flat arm above, so this arm observes
+                // every other combination. Without it the validation — and
+                // the install-completion notify below — could be bypassed
+                // by choosing the mount mode or the manifest timing: a
+                // top-level staging rename onto `.skill-meta` silently
+                // succeeded, and a completed install never notified.
+                (
+                    PathType::SkillDir {
+                        skill_name: old_name,
+                    }
+                    | PathType::CategoryDir { category: old_name },
+                    PathType::SkillDir {
+                        skill_name: new_name,
+                    }
+                    | PathType::CategoryDir { category: new_name }
+                    | PathType::HermesMeta { name: new_name },
+                ) if self.skill_layout == crate::path::SkillLayout::Hermes
+                    && matcher.is_staging_root(old_name) =>
+                {
+                    if !crate::security::install::is_valid_staging_rename_target(new_name, matcher)
+                    {
+                        warn!(
+                            old = %old_path,
+                            new = %new_path,
+                            "rename: rejecting Hermes top-level staging rename to invalid target"
                         );
                         self.emit_event(
                             SkillEvent::new(SkillEventKind::Rename)
@@ -990,55 +1202,90 @@ impl SkillFs {
                 // Update inode mappings.
                 self.inodes.rename_path(&old_path, &new_path);
 
-                // Store sync for skill-level renames.
+                // Store sync for skill-level renames. SkillDir is a flat
+                // `/skills/<name>` rename; InboxSkillDir is an inbox-internal
+                // rename of the physical `source/<name>` candidate (mkdir /
+                // rmdir already sync inbox entries, so rename must too);
+                // NestedSkillDir is the Hermes-layout equivalent, whose store
+                // key is likewise the directory leaf name. Cross-namespace
+                // (inbox <-> /skills) renames were rejected with EXDEV above,
+                // so old and new are both in or both out of the inbox here.
                 let old_type = old_path_type.clone();
                 let new_type = new_path_type.clone();
                 match (&old_type, &new_type) {
                     (
                         PathType::SkillDir {
                             skill_name: old_name,
+                        }
+                        | PathType::InboxSkillDir {
+                            skill_name: old_name,
+                        }
+                        | PathType::NestedSkillDir {
+                            skill_name: old_name,
+                            ..
                         },
                         PathType::SkillDir {
                             skill_name: new_name,
+                        }
+                        | PathType::InboxSkillDir {
+                            skill_name: new_name,
+                        }
+                        | PathType::NestedSkillDir {
+                            skill_name: new_name,
+                            ..
                         },
                     ) => {
-                        self.store.write().remove(old_name);
-                        // Synchronously update the store under the new directory name.
-                        // We must use the *directory* name as the store key regardless
-                        // of what SKILL.md frontmatter says (the user may not have
-                        // updated the `name:` field yet).
-                        let md_path = new_physical.join("SKILL.md");
-                        let new_entry = match parser::parse_skill_file(&md_path) {
-                            Ok(mut entry) => {
-                                // Ensure the store key matches the directory name.
-                                entry.metadata.name = new_name.clone();
-                                entry
-                            }
-                            Err(_) => {
-                                // SKILL.md not readable yet — insert a placeholder so
-                                // the directory appears in readdir immediately.
-                                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
-                                SkillEntry {
-                                    metadata: SkillMetadata {
-                                        name: new_name.clone(),
-                                        ..SkillMetadata::default()
-                                    },
-                                    parameters: vec![],
-                                    returns: vec![],
-                                    body: String::new(),
-                                    parse_status: ParseStatus::Degraded(
-                                        "renamed, awaiting SKILL.md update".to_string(),
-                                    ),
-                                    source_path: md_path,
-                                    last_modified: std::time::SystemTime::now(),
-                                }
-                            }
+                        // Identity migration needs proof that the source
+                        // directory actually backs the managed skill keyed
+                        // by `old_name`. Lexical path classification is not
+                        // identity: path.rs deliberately classifies a plain
+                        // category child with no SKILL.md (e.g. `apple/docs`)
+                        // as NestedSkillDir for traversal, and the store keys
+                        // skills by bare leaf name, so a different category
+                        // may already own a real skill with the same leaf —
+                        // and the inbox chain is a single component, so even
+                        // a plain `source/docs` candidate rename could
+                        // collide with a real `beta/docs` skill. An ungated
+                        // remove+upsert would delete that unrelated entry
+                        // and/or fabricate a placeholder for a plain
+                        // directory. A flat `/skills` slot resolves through
+                        // the store entry itself and accepts any depth
+                        // below the source root (categorized source behind
+                        // a flat mount); inbox and Hermes nested renames
+                        // must match the entry's FULL relative chain below
+                        // the source root (category component included for
+                        // nested skills).
+                        let exact_chain: Vec<String> = match &old_type {
+                            PathType::NestedSkillDir {
+                                category,
+                                skill_name,
+                            } => vec![category.clone(), skill_name.clone()],
+                            _ => vec![old_name.clone()],
                         };
-                        self.store.write().upsert(new_entry);
-                        info!(
-                            old = %old_name, new = %new_name,
-                            "sync: skill renamed (immediate store update)"
-                        );
+                        let identity = match &old_type {
+                            PathType::SkillDir { .. } => RenameSourceIdentity::FlatSlot,
+                            _ => RenameSourceIdentity::ExactChain(&exact_chain),
+                        };
+                        if !self.rename_source_backs_store_entry(old_name, identity) {
+                            // Plain (never-activated) directory rename: the
+                            // store holds no entry originating here, so
+                            // leave it untouched — same stance as the
+                            // sentinel-gated inbox activation flow.
+                            info!(
+                                old = %old_name, new = %new_name,
+                                "sync: non-skill dir rename left the store untouched"
+                            );
+                        } else {
+                            // Reuse the shared #3999 refresh helper so the
+                            // rename keeps its invalid-dirname Degraded
+                            // semantics (adopt_directory_name) instead of
+                            // the previously inlined remove+upsert.
+                            self.update_store_after_skill_rename(old_name, new_name, &new_physical);
+                            info!(
+                                old = %old_name, new = %new_name,
+                                "sync: skill renamed (immediate store update)"
+                            );
+                        }
                     }
                     _ => {
                         // File-level rename inside a skill — trigger re-parse
@@ -1069,6 +1316,15 @@ impl SkillFs {
                             category,
                             skill_name,
                         } => Some(Self::hermes_skill_id(category, skill_name)),
+                        // H3: Hermes top-level staging rename — the new
+                        // top-level skill id is the bare name, whether the
+                        // target parsed as a category, as a HermesMeta
+                        // (in-place fresh name), or as an existing
+                        // top-level Skill. Matches
+                        // enumerate_hermes_top_level_skills and the
+                        // resolver key used for mixed-layout skills.
+                        PathType::CategoryDir { category } => Some(category.clone()),
+                        PathType::HermesMeta { name } => Some(name.clone()),
                         _ => None,
                     };
                     if let Some(ref id) = notify_id {
@@ -1231,5 +1487,218 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+
+    /// Synchronously refresh the store after a skill-directory rename.
+    ///
+    /// Drops the old store key and re-parses the `SKILL.md` under its new
+    /// path; the *directory* name becomes the store key regardless of what
+    /// the frontmatter says (the user may not have updated the `name:`
+    /// field yet). Adoption goes through the shared
+    /// [`skillfs_core::store::adopt_directory_name`], so renaming a valid
+    /// skill to a non-conforming directory (e.g. `foo_bar`) degrades the
+    /// entry exactly like the initial scan would, instead of inserting a
+    /// cleanly parsed entry under an illegal name.
+    fn update_store_after_skill_rename(&self, old_name: &str, new_name: &str, new_physical: &Path) {
+        self.store.write().remove(old_name);
+        let md_path = new_physical.join("SKILL.md");
+        let mut new_entry = match parser::parse_skill_file(&md_path) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // SKILL.md not readable yet — insert a placeholder so the
+                // directory appears in readdir immediately.
+                use skillfs_core::{ParseStatus, SkillEntry, SkillMetadata};
+                SkillEntry {
+                    metadata: SkillMetadata::default(),
+                    parameters: vec![],
+                    returns: vec![],
+                    body: String::new(),
+                    parse_status: ParseStatus::Degraded(
+                        "renamed, awaiting SKILL.md update".to_string(),
+                    ),
+                    source_path: md_path,
+                    last_modified: std::time::SystemTime::now(),
+                }
+            }
+        };
+        adopt_directory_name(&mut new_entry, new_name);
+        self.store.write().upsert(new_entry);
+    }
+
+    /// Whether the store entry keyed by `skill_name` demonstrably
+    /// originates from the source directory addressed by `identity`.
+    ///
+    /// For [`RenameSourceIdentity::ExactChain`] the entry's recorded
+    /// source must be the `SKILL.md` living under exactly that chain
+    /// below the source root — the FULL relative path, never a
+    /// trailing-segment match. The store keys skills by bare leaf
+    /// name, so the entry held under the old name may belong to a
+    /// different directory that merely shares the leaf: a real
+    /// `beta/docs` skill owns the key "docs" while a plain `source/docs`
+    /// inbox candidate (no SKILL.md, one-component chain) is being
+    /// renamed — `beta/docs` does not strip to `docs`, so that pair is
+    /// rejected instead of the rename deleting the real skill's entry
+    /// and fabricating a placeholder. Hermes nested renames likewise
+    /// must match the whole category chain.
+    ///
+    /// For [`RenameSourceIdentity::FlatSlot`] any origin below the
+    /// source root is accepted, because the flat slot resolves through
+    /// the store entry itself (see the enum).
+    ///
+    /// In either mode an entry whose origin does not strip below this
+    /// source root at all (a different root entirely) never backs the
+    /// renamed directory. Whole-path equality is unusable verbatim —
+    /// in-place mounts address the source through `/proc/self/fd/<n>`
+    /// while an initial scan records the real source prefix (and the
+    /// mkdir placeholder / the rename re-parse record the fd alias) —
+    /// so both spellings of the source root are accepted when
+    /// stripping, the same alias pair `snapshot_read_dir` reconciles.
+    fn rename_source_backs_store_entry(
+        &self,
+        skill_name: &str,
+        identity: RenameSourceIdentity<'_>,
+    ) -> bool {
+        let store = self.store.read();
+        let Some(entry) = store.get(skill_name) else {
+            return false;
+        };
+        if entry.source_path.file_name() != Some(std::ffi::OsStr::new("SKILL.md")) {
+            return false;
+        }
+        let Some(origin) = entry.source_path.parent() else {
+            return false;
+        };
+        // Accept both spellings of the source root: the real source
+        // path (initial scan) and the in-place `/proc/self/fd/<n>`
+        // alias (mkdir placeholder / post-mount re-parse).
+        let mut source_roots = vec![self.source.clone()];
+        if let Some(fd) = &self.source_dirfd {
+            use std::os::unix::io::AsRawFd;
+            source_roots.push(PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())));
+        }
+        source_roots.iter().any(|root| {
+            origin
+                .strip_prefix(root)
+                .map(|relative| match identity {
+                    RenameSourceIdentity::FlatSlot => !relative.as_os_str().is_empty(),
+                    RenameSourceIdentity::ExactChain(chain) => {
+                        !chain.is_empty() && relative == chain.iter().collect::<PathBuf>()
+                    }
+                })
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// `EROFS` gate for the always-read-only `skill-discover` virtual
+/// namespace on the namespace-mutation callbacks, mirroring the guard
+/// `write.rs` already applies to `write`/`create`/`setattr` and
+/// `link.rs` to `symlink`/`link`. `resolve_physical_path` maps every
+/// skill-discover FUSE path onto `source/skill-discover/...`, so an
+/// unguarded mkdir/unlink/rmdir/rename would mutate that physical tree
+/// through the read-only virtual view.
+fn enforce_skill_discover_readonly(path_type: &PathType) -> Option<i32> {
+    match path_type {
+        PathType::SkillMd { skill_name }
+        | PathType::SkillDir { skill_name }
+        | PathType::Passthrough { skill_name, .. }
+            if is_skill_discover_path(skill_name) =>
+        {
+            Some(libc::EROFS)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, ParseStatus, store::SkillStore};
+
+    use super::*;
+
+    fn write_skill(dir: &Path, frontmatter_name: &str) {
+        std::fs::create_dir_all(dir).expect("skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {frontmatter_name}\ndescription: demo\n---\nbody\n"),
+        )
+        .expect("SKILL.md");
+    }
+
+    #[test]
+    fn skill_dir_rename_to_invalid_name_degrades_entry() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("good-skill"), "good-skill");
+        // The post-rename tree: the same valid frontmatter now sits under
+        // a directory whose name violates the grammar.
+        write_skill(&source.path().join("foo_bar"), "good-skill");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        assert!(
+            store
+                .get("good-skill")
+                .expect("loaded before rename")
+                .parse_status
+                .is_ok()
+        );
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        );
+
+        fs.update_store_after_skill_rename("good-skill", "foo_bar", &source.path().join("foo_bar"));
+
+        let guard = shared.read();
+        assert!(guard.get("good-skill").is_none(), "old store key removed");
+        let entry = guard.get("foo_bar").expect("renamed store entry");
+        assert_eq!(entry.metadata.name, "foo_bar");
+        assert!(
+            matches!(&entry.parse_status, ParseStatus::Degraded(msg)
+                if msg.contains("foo_bar") && msg.contains("kebab")),
+            "rename to a non-conforming directory must degrade the entry, got {:?}",
+            entry.parse_status
+        );
+    }
+
+    #[test]
+    fn skill_dir_rename_without_skill_md_keeps_degradation() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(&source.path().join("good-skill"), "good-skill");
+        // SKILL.md not yet present under the renamed directory: the
+        // placeholder must still adopt the directory identity and carry
+        // the directory-name degradation alongside its own reason.
+        std::fs::create_dir_all(source.path().join("foo_bar")).expect("renamed dir");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+
+        let shared = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared.clone(),
+            false,
+        );
+
+        fs.update_store_after_skill_rename("good-skill", "foo_bar", &source.path().join("foo_bar"));
+
+        let guard = shared.read();
+        let entry = guard.get("foo_bar").expect("placeholder store entry");
+        assert_eq!(entry.metadata.name, "foo_bar");
+        assert!(
+            matches!(&entry.parse_status, ParseStatus::Degraded(msg)
+                if msg.contains("awaiting SKILL.md") && msg.contains("foo_bar")),
+            "placeholder must merge the directory-name issue, got {:?}",
+            entry.parse_status
+        );
     }
 }

@@ -1042,6 +1042,76 @@ pub(crate) fn hydrate_owned_file_contracts_with_capability_support(
     hydrated
 }
 
+const REDACTED: &str = "<redacted>";
+
+/// Removes known URLs and withholds text containing any unverified URL.
+pub(crate) fn redact_known_urls(text: &str, urls: &[String]) -> String {
+    let mut out = text.to_string();
+    for url in urls {
+        out = redact_url_runs(&out, url);
+    }
+    if out.contains("://") {
+        return "the failure text was withheld: it carried a URL that could not be \
+                shown to be free of credentials"
+            .to_string();
+    }
+    out
+}
+
+fn redact_url_runs(text: &str, url: &str) -> String {
+    if url.is_empty() {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(url) {
+        out.push_str(&rest[..at]);
+        out.push_str(REDACTED);
+        let matched = &rest[at..];
+        let end = matched
+            .find(char::is_whitespace)
+            .unwrap_or(matched.len())
+            .max(url.len());
+        rest = &matched[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Keeps only scheme and authority because paths and queries may carry secrets.
+pub(crate) fn endpoint_without_credentials(url: &str) -> Option<String> {
+    let sep = url.find("://")?;
+    let remainder = &url[sep + 3..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let (authority, tail) = remainder.split_at(authority_end);
+    if tail.contains('@') {
+        return None;
+    }
+    let host = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{}{host}", &url[..sep + 3]))
+}
+
+/// Repository URL as it may appear in user-facing text: the scheme and
+/// authority of an http(s) location, with credentials, path, and query
+/// dropped. A `file://` location keeps its path — it has no authority to
+/// hide and the tree it names is what operators need to see — while an
+/// http(s) URL whose authority cannot be isolated is reported as an opaque
+/// `<repository>`.
+pub(crate) fn repository_url_label(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        endpoint_without_credentials(url).unwrap_or_else(|| "<repository>".to_string())
+    } else {
+        url.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -153,6 +153,10 @@ impl AuditStore {
         let case_limit = fractional_count(case_count, fraction);
         let case_ids = {
             let mut statement = transaction.prepare(
+                // Order by the whole graph's latest activity, not just the case
+                // row: a failed attach/detach only touches `containment_actions`,
+                // so a graph with a stale case row must not be treated as old
+                // while its failure record is seconds old.
                 "SELECT case_id FROM risk_cases
                  WHERE status IN ('false_positive', 'accepted_risk', 'resolved')
                    AND NOT EXISTS (
@@ -160,7 +164,14 @@ impl AuditStore {
                        WHERE containment_actions.case_id = risk_cases.case_id
                          AND lifecycle_state IN ('pending', 'active', 'expiring')
                    )
-                 ORDER BY updated_at_ns ASC, case_id ASC LIMIT ?1",
+                 ORDER BY MAX(
+                     updated_at_ns,
+                     COALESCE((
+                         SELECT MAX(actions.updated_at_ns)
+                         FROM containment_actions AS actions
+                         WHERE actions.case_id = risk_cases.case_id
+                     ), 0)
+                 ) ASC, case_id ASC LIMIT ?1",
             )?;
             statement
                 .query_map(params![case_limit], |row| row.get::<_, String>(0))?

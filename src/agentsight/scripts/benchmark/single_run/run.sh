@@ -87,6 +87,9 @@ for value in "$MAX_RESULTS_GB" "$MIN_FREE_DISK_GB" "$MIN_AVAILABLE_MEMORY_MB" \
     fi
 done
 mkdir -p "$OUTPUT_DIR"
+# The collector writes this marker only on a violation, so a leftover file from
+# a previous run would fail a healthy rerun; clear it before the load starts.
+rm -f "$OUTPUT_DIR/safety-stop.json"
 RESULTS_ROOT="${RESULTS_ROOT:-$OUTPUT_DIR}"
 if [[ ! -d "$RESULTS_ROOT" ]]; then
     echo "results root does not exist: $RESULTS_ROOT" >&2

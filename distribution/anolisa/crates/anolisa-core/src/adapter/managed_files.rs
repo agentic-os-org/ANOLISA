@@ -757,10 +757,19 @@ fn relative_below_root_aliases(
     if path == lexical_root || path == canonical_root {
         return None;
     }
-    path.strip_prefix(lexical_root)
+    if let Ok(relative) = path
+        .strip_prefix(lexical_root)
         .or_else(|_| path.strip_prefix(canonical_root))
-        .ok()
-        .map(Path::to_path_buf)
+    {
+        return Some(relative.to_path_buf());
+    }
+    // Resolve parent aliases without following the managed leaf: its literal
+    // symlink target remains part of the package inventory's identity.
+    let resolved = std::fs::canonicalize(path.parent()?)
+        .ok()?
+        .join(path.file_name()?);
+    let relative = resolved.strip_prefix(canonical_root).ok()?;
+    (!relative.as_os_str().is_empty()).then(|| relative.to_path_buf())
 }
 
 fn io_verdict(path: &Path, action: &str, err: std::io::Error) -> ManagedMatch {
@@ -1340,7 +1349,10 @@ mod tests {
         };
 
         let revision = source_revision(&inventory, &lexical_root, &[]).expect("source revision");
-        assert_eq!(revision.source_root, release_root);
+        assert_eq!(
+            revision.source_root,
+            release_root.canonicalize().expect("canonical release root")
+        );
         assert_eq!(revision.files.len(), 1);
         assert_eq!(revision.files[0].relative_path, PathBuf::from("hook.py"));
         assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
@@ -1356,6 +1368,167 @@ mod tests {
         .expect("materialized files");
         assert_eq!(copied.len(), 1);
         assert_eq!(copied[0].relative_path, PathBuf::from("hook.py"));
+    }
+
+    #[cfg(unix)]
+    fn parent_alias_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, ManagedInventory) {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let base = tmp.path().canonicalize().expect("canonical base");
+        let real = base.join("real");
+        let alias = base.join("alias");
+        let release = real.join("releases/v2");
+        std::fs::create_dir_all(&release).expect("release root");
+        std::fs::write(release.join("hook.py"), b"managed").expect("managed file");
+        symlink(&real, &alias).expect("parent alias");
+        symlink("releases/v2", real.join("current")).expect("source root symlink");
+        let inventory = ManagedInventory {
+            files: vec![ManagedFile {
+                path: alias.join("releases/v2/hook.py"),
+                kind: ManagedInventoryKind::File,
+                sha256: Some(sha256(b"managed")),
+                symlink_target: None,
+            }],
+        };
+        (tmp, alias.join("current"), release, inventory)
+    }
+
+    #[cfg(unix)]
+    fn parent_alias_mappings(source: &Path) -> Vec<MaterializedMapping> {
+        vec![MaterializedMapping {
+            resource_id: "copy".into(),
+            source_root: source.to_path_buf(),
+            excluded_prefixes: Vec::new(),
+        }]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_scopes_versioned_source_and_materialized_files() {
+        let (_tmp, source, release, inventory) = parent_alias_fixture();
+        let revision = source_revision(&inventory, &source, &[]).expect("source revision");
+        assert_eq!(revision.source_root, release);
+        assert_eq!(revision.files.len(), 1);
+        assert_eq!(revision.files[0].relative_path, PathBuf::from("hook.py"));
+        assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
+        let mappings = parent_alias_mappings(&source);
+        let copied = materialized_files(&inventory, &mappings).expect("materialized files");
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].relative_path, PathBuf::from("hook.py"));
+        let canonical_inventory = ManagedInventory {
+            files: vec![ManagedFile {
+                path: release.join("hook.py"),
+                ..inventory.files[0].clone()
+            }],
+        };
+        assert_eq!(
+            source_revision(&canonical_inventory, &source, &[]).expect("control"),
+            revision
+        );
+        assert_eq!(
+            materialized_files(&canonical_inventory, &mappings).expect("control"),
+            copied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_preserves_leaf_symlink_identity() {
+        use std::os::unix::fs::symlink;
+        let (_tmp, source, release, mut inventory) = parent_alias_fixture();
+        let leaf = release.join("current.py");
+        symlink("missing.py", &leaf).expect("dangling leaf");
+        inventory.files[0] = ManagedFile {
+            path: inventory.files[0].path.with_file_name("current.py"),
+            kind: ManagedInventoryKind::Symlink,
+            sha256: None,
+            symlink_target: Some(PathBuf::from("missing.py")),
+        };
+        let revision = source_revision(&inventory, &source, &[]).expect("source revision");
+        assert_eq!(revision.files[0].relative_path, PathBuf::from("current.py"));
+        assert_eq!(revision.files[0].kind, RevisionFileKind::Symlink);
+        assert_eq!(
+            revision.files[0].symlink_target,
+            Some(PathBuf::from("missing.py"))
+        );
+        assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
+        let copied = materialized_files(&inventory, &parent_alias_mappings(&source))
+            .expect("materialized metadata");
+        assert_eq!(copied[0].kind, RevisionFileKind::Symlink);
+        assert_eq!(copied[0].relative_path, PathBuf::from("current.py"));
+        assert_eq!(copied[0].symlink_target, Some(PathBuf::from("missing.py")));
+        std::fs::remove_file(&leaf).expect("remove leaf");
+        symlink("different.py", &leaf).expect("replace leaf");
+        assert!(
+            matches!(verify_managed_bundle(&revision), ManagedMatch::Changed(reason) if reason.contains("target changed"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_excludes_outside_files_and_root_entries() {
+        use std::os::unix::fs::symlink;
+        let (tmp, source, release, mut inventory) = parent_alias_fixture();
+        let outside = tmp.path().join("outside");
+        let outside_alias = tmp.path().join("outside-alias");
+        std::fs::create_dir_all(&outside).expect("outside root");
+        std::fs::write(outside.join("hook.py"), b"managed").expect("outside file");
+        symlink(&outside, &outside_alias).expect("outside alias");
+        inventory.files.push(ManagedFile {
+            path: outside_alias.join("hook.py"),
+            ..inventory.files[0].clone()
+        });
+        inventory.files.push(ManagedFile {
+            path: inventory.files[0]
+                .path
+                .parent()
+                .expect("release alias")
+                .to_path_buf(),
+            kind: ManagedInventoryKind::Symlink,
+            sha256: None,
+            symlink_target: Some(release),
+        });
+        let revision = source_revision(&inventory, &source, &[]).expect("source revision");
+        assert_eq!(revision.files.len(), 1);
+        assert_eq!(revision.files[0].relative_path, PathBuf::from("hook.py"));
+        let copied = materialized_files(&inventory, &parent_alias_mappings(&source))
+            .expect("materialized files");
+        assert_eq!(copied.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_deduplicates_paths_but_rejects_conflicting_metadata() {
+        let (_tmp, source, release, mut inventory) = parent_alias_fixture();
+        inventory.files.push(ManagedFile {
+            path: release.join("hook.py"),
+            ..inventory.files[0].clone()
+        });
+        let mappings = parent_alias_mappings(&source);
+        assert_eq!(
+            source_revision(&inventory, &source, &[])
+                .expect("source revision")
+                .files
+                .len(),
+            1
+        );
+        assert_eq!(
+            materialized_files(&inventory, &mappings)
+                .expect("materialized files")
+                .len(),
+            1
+        );
+        inventory.files[1].sha256 = Some(sha256(b"different"));
+        assert!(
+            source_revision(&inventory, &source, &[])
+                .expect_err("conflicting source")
+                .contains("conflicting metadata")
+        );
+        assert!(
+            materialized_files(&inventory, &mappings)
+                .expect_err("conflicting materialized files")
+                .contains("conflicting metadata")
+        );
     }
 
     #[test]

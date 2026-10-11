@@ -95,5 +95,26 @@ pub fn hours_ago_ns(hours: u64) -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
-    now.saturating_sub(hours * 3600 * 1_000_000_000)
+    // Saturate so an absurd --last (up to u64::MAX) degrades to "everything"
+    // (a zero start) instead of overflowing: the nanosecond product leaves u64
+    // above ~5.12 million hours, and a debug build aborts on the multiply.
+    now.saturating_sub(hours.saturating_mul(3_600_000_000_000))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::hours_ago_ns;
+
+    #[test]
+    fn hours_ago_saturates_for_absurd_hours() {
+        // 5_124_096 hours is the first value whose nanosecond product leaves
+        // u64; asking for a window wider than the recorded history must clamp
+        // to "everything" rather than overflow.
+        assert_eq!(hours_ago_ns(5_124_096), 0);
+        assert_eq!(hours_ago_ns(u64::MAX), 0);
+
+        // A normal window still starts in the past, and stays ordered.
+        assert!(hours_ago_ns(24) > 0);
+        assert!(hours_ago_ns(48) < hours_ago_ns(24));
+    }
 }

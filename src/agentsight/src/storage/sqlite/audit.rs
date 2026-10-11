@@ -348,11 +348,15 @@ impl AuditStore {
             }
         }
 
+        // Both counts come from HashMaps, whose iteration order is randomized
+        // per process: a single-key sort made the reported order — and, for
+        // `top_commands`, which entries survive the top-10 cut — depend on the
+        // map order. Ties are broken by name.
         let mut providers: Vec<(String, u64)> = provider_counts.into_iter().collect();
-        providers.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        providers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let mut top_commands: Vec<(String, u64)> = cmd_counts.into_iter().collect();
-        top_commands.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        top_commands.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         top_commands.truncate(10);
 
         Ok(AuditSummary {
@@ -592,5 +596,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_summary_top_commands_are_stable_on_count_ties() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        let store = AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        };
+
+        // 20 distinct commands recorded once each: every count ties at 1, so
+        // both the top-10 cut and its order used to follow the HashMap
+        // iteration order (randomized per process) and two runs over the same
+        // rows could list different commands.
+        for index in 0..20u32 {
+            store
+                .insert(&AuditRecord {
+                    id: None,
+                    event_type: AuditEventType::ProcessAction,
+                    timestamp_ns: 1_000_000_000 + u64::from(index),
+                    pid: 1000 + index,
+                    ppid: Some(1),
+                    comm: "bash".to_string(),
+                    duration_ns: 0,
+                    extra: AuditExtra::ProcessAction {
+                        filename: None,
+                        args: Some(format!("cmd-{index:02}")),
+                        exit_code: Some(0),
+                    },
+                    session_id: None,
+                })
+                .unwrap();
+        }
+
+        let summary = store.summary(0).unwrap();
+        let names: Vec<&str> = summary
+            .top_commands
+            .iter()
+            .map(|(command, _)| command.as_str())
+            .collect();
+        let expected: Vec<String> = (0..10).map(|index| format!("cmd-{index:02}")).collect();
+        assert_eq!(
+            names, expected,
+            "count ties must be broken by name, not by map order"
+        );
     }
 }

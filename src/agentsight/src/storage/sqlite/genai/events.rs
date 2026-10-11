@@ -132,10 +132,21 @@ impl GenAISqliteStore {
     }
 
     /// Fetch the narrow column set preference analysis needs for completed
-    /// main-flow LLM calls at or after `since_ns`, oldest first, capped at
+    /// main-flow LLM calls at or after `since_ns`, capped at
     /// [`PREFERENCE_WINDOW_MAX_ROWS`]. Read-only: no schema or writes.
     /// `input_messages` is deliberately not selected — no rule reads it and
     /// it would multiply the memory peak of a window fetch.
+    ///
+    /// When the window is over the cap the NEWEST rows are kept — preference
+    /// analysis is about recent behavior ("wider windows only add stale
+    /// evidence"), and the trajectory provider below agrees on the cap
+    /// (`list_recent_atif_jsons` also LIMITs a DESC fetch; unlike this
+    /// store it returns rows newest-first, with no reversal). The
+    /// previous ASC-first LIMIT kept the OLDEST rows, freezing every
+    /// preference/turns/export view on the start of the window on any box
+    /// past ~43 calls/day. Rows are returned oldest-first for consumer
+    /// compatibility — the turns endpoint reverses again to answer its
+    /// documented newest-first contract.
     ///
     /// Rows are returned as raw columns: interpreting them (stripping agent
     /// template noise, mining tool names) belongs to the preference layer
@@ -146,6 +157,9 @@ impl GenAISqliteStore {
     ) -> Result<Vec<PreferenceWindowRow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
+            // Fetch newest-first (DESC LIMIT) and reverse in Rust so the cap
+            // drops the oldest rows, not the newest — the same DESC cap as
+            // list_recent_atif_jsons, which returns newest-first directly.
             "SELECT id, session_id, conversation_id, start_timestamp_ns,
                     user_query, output_messages
              FROM genai_events
@@ -153,7 +167,7 @@ impl GenAISqliteStore {
                AND event_type = 'llm_call'
                AND status = 'complete'
                AND call_kind = 'main'
-             ORDER BY start_timestamp_ns ASC
+             ORDER BY start_timestamp_ns DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(
@@ -173,6 +187,9 @@ impl GenAISqliteStore {
         for row in rows {
             result.push(row?);
         }
+        // DESC fetch, chronological return — consumers index by recency and
+        // compare adjacent rows in time order.
+        result.reverse();
         Ok(result)
     }
 
@@ -302,7 +319,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE start_timestamp_ns BETWEEN ?1 AND ?2
                AND event_type = 'llm_call'
-               AND COALESCE(agent_name, process_name) = ?3
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE
              ORDER BY start_timestamp_ns ASC"
         } else {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
@@ -489,30 +506,8 @@ impl GenAISqliteStore {
                 };
 
                 // Extract tool_call_ids from response messages (outgoing tool calls)
-                let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call
-                        .response
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.parts.iter())
-                        .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall {
-                                id: Some(tc_id),
-                                ..
-                            } = p
-                            {
-                                Some(tc_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&ids).ok()
-                    }
-                };
+                let tool_call_ids =
+                    crate::genai::semantic::tool_call_ids_json(&call.response.messages);
 
                 // Get instance ID (same logic as SLS uploader)
                 let instance = crate::genai::instance_id::get_instance_id();

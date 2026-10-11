@@ -23,14 +23,13 @@ fn bin_path() -> &'static str {
 
 /// True when `path` is a live mountpoint per `/proc/mounts`. Authoritative
 /// even for a dead FUSE endpoint (where `metadata()` would misbehave).
+/// Delegates to the production byte-exact, escape-decoding matcher.
 fn is_mounted(path: &Path) -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(mounts) = std::fs::read("/proc/mounts") else {
         return false;
     };
-    let target = path.to_string_lossy();
-    mounts
-        .lines()
-        .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, path.as_os_str().as_bytes())
 }
 
 /// Bounded, best-effort force unmount: `fusermount3 -u`, then lazy `-z`, then
@@ -820,6 +819,22 @@ fn non_tmp_dir() -> tempfile::TempDir {
         .expect("non-tmp tempdir")
 }
 
+/// A non-tmp directory short enough to hold a bindable control socket.
+///
+/// `sun_path` caps a socket address at 108 bytes on Linux. `non_tmp_dir()`
+/// lives under `CARGO_TARGET_TMPDIR`, whose length follows the checkout path,
+/// so a checkout nested a few directories deep overruns the cap and the child
+/// exits with "path must be shorter than SUN_LEN". `/dev/shm` is outside the
+/// /tmp and /var/tmp roots the PrivateTmp gate rejects and keeps the socket
+/// address near 45 bytes wherever the repository is checked out. When
+/// `/dev/shm` is missing or not writable it falls back to `non_tmp_dir()`.
+fn non_tmp_socket_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("skillfs-nontmp-")
+        .tempdir_in("/dev/shm")
+        .unwrap_or_else(|_| non_tmp_dir())
+}
+
 /// A collision-resistant leaf name (pid + nanosecond timestamp) so tests
 /// that use a fixed parent directory (e.g. /tmp) never trip over a stale
 /// path left behind by a previous manual run.
@@ -1499,7 +1514,7 @@ fn control_plane_cli_socket_with_config_trusted_peer_passes_gate() {
     }
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let config_dir = tempfile::tempdir().expect("config dir");
     let config_path = config_dir.path().join("security.toml");
@@ -1575,7 +1590,7 @@ fn control_plane_config_socket_with_cli_trusted_peer_passes_gate() {
     }
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let config_dir = tempfile::tempdir().expect("config dir");
     let config_path = config_dir.path().join("security.toml");
@@ -1972,7 +1987,7 @@ fn trusted_peer_key_with_insecure_permissions_fails_startup() {
 
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let socket_dir = non_tmp_dir();
+    let socket_dir = non_tmp_socket_dir();
     let socket_path = socket_dir.path().join("control.sock");
     let key_dir = non_tmp_dir();
     let key_path = key_dir.path().join("peer.key");
@@ -2079,7 +2094,7 @@ fn control_socket_trusted_peer_exe_nonexistent_fails() {
     // is the gate that fires — not the PrivateTmp gate on a /tmp fixture.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let out = Command::new(bin_path())
         .args([
@@ -2114,7 +2129,7 @@ fn control_socket_trusted_peer_exe_directory_fails() {
     // is the gate that fires — not the PrivateTmp gate on a /tmp fixture.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let dir = tempfile::tempdir().expect("directory for test");
     let out = Command::new(bin_path())
@@ -2325,7 +2340,7 @@ fn control_socket_created_and_accepts_ping() {
     // PrivateTmp gate rejects a daemon-facing source/socket under /tmp.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
 
     // Trusted peer = this test binary, so our own probe authenticates and
@@ -2400,7 +2415,7 @@ fn control_socket_preserves_symlink_source_identity() {
     std::os::unix::fs::symlink(physical_source.path(), &identity_root).unwrap();
 
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let mut child = Command::new(bin_path())
         .args([
@@ -2664,7 +2679,7 @@ fn control_socket_in_place_without_backing_root_fails_startup() {
     // Daemon-visible source and socket so the PrivateTmp gate passes and the
     // in-place backing-root gate is the one that fires.
     let source = non_tmp_dir();
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let out = Command::new(bin_path())
         .args([
@@ -2972,7 +2987,7 @@ fn hermes_control_socket_allowed() {
     // reject the control plane on a /tmp fixture.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let mut child = Command::new(bin_path())
         .args([
@@ -3128,7 +3143,7 @@ fn hermes_config_control_socket_allowed() {
     // reject the control plane on a /tmp fixture.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = non_tmp_dir();
+    let sock_dir = non_tmp_socket_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
     let config_dir = tempfile::tempdir().expect("config dir");
     let config_path = config_dir.path().join("security.toml");

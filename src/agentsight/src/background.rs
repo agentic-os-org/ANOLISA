@@ -149,9 +149,15 @@ pub(crate) fn handle_config_event(
             crate::genai::logtail::set_dynamic_logtail_path(path);
             let exporter = LogtailExporter::new_with_path(path, encryption_pem, trace_enabled);
             log::info!("Config watcher: LogtailExporter created (path={path}, uid={uid})");
-            if let Ok(mut guard) = pending_logtail.lock() {
-                *guard = Some(Box::new(exporter));
-            }
+            // Recover a poisoned mailbox instead of silently skipping the
+            // deposit: the panic that poisoned it happened outside this critical
+            // section, so the exporter is still valid. Skipping would log
+            // "activated dynamically" below while dynamic SLS export stayed off
+            // for the rest of the process.
+            let mut guard = pending_logtail
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = Some(Box::new(exporter));
             log::info!("Config watcher: SLS Logtail activated dynamically");
         }
         SlsConfigAction::Reactivated { path } => {
@@ -160,6 +166,26 @@ pub(crate) fn handle_config_event(
         }
     }
     action
+}
+
+/// Take the exporter a config-watcher activation deposited, if one is waiting.
+///
+/// Shared with the drain loop in `unified.rs::check_pending_logtail`. Returns
+/// `None` when the mailbox is empty or currently held; the caller drains again
+/// on its next tick. A poisoned mailbox is recovered rather than skipped — the
+/// deposited exporter is still valid, so skipping it would strand the
+/// activation for the rest of the process.
+pub(crate) fn take_pending_logtail(
+    pending_logtail: &Mutex<Option<Box<dyn GenAIExporter>>>,
+) -> Option<Box<dyn GenAIExporter>> {
+    match pending_logtail.try_lock() {
+        Ok(mut guard) => guard.take(),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            let mut guard = poisoned.into_inner();
+            guard.take()
+        }
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 pub(crate) fn start_config_watcher(
@@ -531,6 +557,100 @@ mod tests {
             crate::genai::logtail::logtail_path(),
             None,
             "handler must clear the global dynamic path on deactivation"
+        );
+
+        reset();
+    }
+
+    /// A panic while another thread held the mailbox lock poisons it for the
+    /// rest of the process. The activation must still deposit its exporter —
+    /// the drain in `unified.rs` recovers the same way — instead of logging
+    /// "activated dynamically" while dynamic SLS export stays off forever.
+    #[test]
+    fn test_handle_config_event_recovers_poisoned_mailbox() {
+        let _guard = lock_sls_path();
+        let reset = || crate::genai::logtail::set_dynamic_logtail_path("");
+        reset();
+
+        let mailbox = empty_mailbox();
+        // Poison the mailbox the way a panic elsewhere in the process would.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mailbox.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(poisoned.is_err(), "mailbox should be poisoned");
+        assert!(
+            mailbox.lock().is_err(),
+            "precondition: lock reports poisoning"
+        );
+
+        let flag = AtomicBool::new(false);
+        let action = handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":"/poisoned-activate.log"}}"#,
+            &flag,
+            || "ecs-uid".to_string(),
+            None,
+            false,
+            &mailbox,
+        );
+        assert_eq!(
+            action,
+            SlsConfigAction::Activate {
+                path: "/poisoned-activate.log".to_string()
+            }
+        );
+        assert!(
+            mailbox.lock().unwrap_or_else(|e| e.into_inner()).is_some(),
+            "an activation must reach a poisoned mailbox, not be dropped"
+        );
+
+        reset();
+    }
+
+    /// The drain must recover a poisoned mailbox too. The deposited exporter is
+    /// still valid, and leaving the drain disabled would strand it: the
+    /// activation would never register. Only a genuinely held lock defers the
+    /// drain to the next tick.
+    #[test]
+    fn test_take_pending_logtail_recovers_poisoned_mailbox() {
+        let _guard = lock_sls_path();
+        let reset = || crate::genai::logtail::set_dynamic_logtail_path("");
+        reset();
+
+        let mailbox = empty_mailbox();
+        let flag = AtomicBool::new(false);
+        handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":"/poisoned-drain.log"}}"#,
+            &flag,
+            || "ecs-uid".to_string(),
+            None,
+            false,
+            &mailbox,
+        );
+        assert!(
+            take_pending_logtail(&mailbox).is_some(),
+            "precondition: the activation deposited an exporter"
+        );
+
+        // Deposit again, then poison the mailbox with the exporter still in it.
+        let flag = AtomicBool::new(false);
+        handle_config_event(
+            r#"{"runtime":{"sls_logtail_path":"/poisoned-drain.log"}}"#,
+            &flag,
+            || "ecs-uid".to_string(),
+            None,
+            false,
+            &mailbox,
+        );
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mailbox.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(poisoned.is_err(), "mailbox should be poisoned");
+
+        assert!(
+            take_pending_logtail(&mailbox).is_some(),
+            "the drain must still take an exporter out of a poisoned mailbox"
         );
 
         reset();

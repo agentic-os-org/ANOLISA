@@ -43,7 +43,8 @@ impl HttpStore {
                 response_body     TEXT,
                 duration_ns       INTEGER NOT NULL DEFAULT 0,
                 is_sse            INTEGER NOT NULL DEFAULT 0,
-                sse_event_count   INTEGER NOT NULL DEFAULT 0
+                sse_event_count   INTEGER NOT NULL DEFAULT 0,
+                first_output_timestamp_ns INTEGER
             );"
         );
         let create_index_sql = format!(
@@ -52,6 +53,7 @@ impl HttpStore {
              CREATE INDEX IF NOT EXISTS idx_{table_name}_path ON {table_name}(path);"
         );
         conn.execute_batch(&format!("{create_table_sql}{create_index_sql}"))?;
+        ensure_first_output_column(&conn, &table_name)?;
 
         Ok(HttpStore { conn, table_name })
     }
@@ -61,8 +63,8 @@ impl HttpStore {
         let sql = format!(
             "INSERT INTO {} (timestamp_ns, pid, comm, method, path, status_code,
              request_headers, request_body, response_headers, response_body,
-             duration_ns, is_sse, sse_event_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             duration_ns, is_sse, sse_event_count, first_output_timestamp_ns)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             self.table_name
         );
         self.conn.execute(
@@ -81,6 +83,7 @@ impl HttpStore {
                 record.duration_ns as i64,
                 record.is_sse as i32,
                 record.sse_event_count as i64,
+                record.first_output_timestamp_ns.map(|v| v as i64),
             ],
         )?;
 
@@ -92,7 +95,7 @@ impl HttpStore {
         let sql = format!(
             "SELECT timestamp_ns, pid, comm, method, path, status_code,
                     request_headers, request_body, response_headers, response_body,
-                    duration_ns, is_sse, sse_event_count
+                    duration_ns, is_sse, sse_event_count, first_output_timestamp_ns
              FROM {} WHERE timestamp_ns >= ?1
              ORDER BY timestamp_ns ASC",
             self.table_name
@@ -118,7 +121,7 @@ impl HttpStore {
         let sql = format!(
             "SELECT timestamp_ns, pid, comm, method, path, status_code,
                     request_headers, request_body, response_headers, response_body,
-                    duration_ns, is_sse, sse_event_count
+                    duration_ns, is_sse, sse_event_count, first_output_timestamp_ns
              FROM {} WHERE pid = ?1
              ORDER BY timestamp_ns ASC",
             self.table_name
@@ -144,7 +147,7 @@ impl HttpStore {
         let sql = format!(
             "SELECT timestamp_ns, pid, comm, method, path, status_code,
                     request_headers, request_body, response_headers, response_body,
-                    duration_ns, is_sse, sse_event_count
+                    duration_ns, is_sse, sse_event_count, first_output_timestamp_ns
              FROM {} WHERE path LIKE ?1
              ORDER BY timestamp_ns ASC",
             self.table_name
@@ -220,6 +223,7 @@ fn row_to_record(row: &rusqlite::Row) -> Result<HttpRecord> {
     let duration_ns: i64 = row.get(10).map_err(|e| anyhow::anyhow!("{e}"))?;
     let is_sse_int: i32 = row.get(11).map_err(|e| anyhow::anyhow!("{e}"))?;
     let sse_event_count: i64 = row.get(12).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let first_output_timestamp_ns: Option<i64> = row.get(13).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(HttpRecord {
         timestamp_ns: timestamp_ns as u64,
@@ -233,10 +237,32 @@ fn row_to_record(row: &rusqlite::Row) -> Result<HttpRecord> {
         response_headers,
         response_body,
         duration_ns: duration_ns as u64,
-        first_output_timestamp_ns: None,
+        first_output_timestamp_ns: first_output_timestamp_ns.map(|v| v as u64),
         is_sse: is_sse_int != 0,
         sse_event_count: sse_event_count as usize,
     })
+}
+
+/// Idempotent migration: ensure the first-output timestamp column exists.
+///
+/// Databases created before the TTFT metadata was persisted lack
+/// `first_output_timestamp_ns`; add it via `ALTER TABLE` when missing (checked
+/// through `pragma_table_info`) so existing databases keep opening.
+fn ensure_first_output_column(conn: &Connection, table_name: &str) -> Result<()> {
+    let existing: std::collections::HashSet<String> = {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+        stmt.query_map([], |row| row.get::<_, String>(1))? // column 1 = name
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+
+    if !existing.contains("first_output_timestamp_ns") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table_name} ADD COLUMN first_output_timestamp_ns INTEGER;"
+        ))?;
+        log::info!("Migrated {table_name}: added 'first_output_timestamp_ns' column");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -281,7 +307,7 @@ mod tests {
             response_headers: r#"{"content-type":"application/json"}"#.to_string(),
             response_body: Some(r#"{"choices":[]}"#.to_string()),
             duration_ns: 500000000,
-            first_output_timestamp_ns: None,
+            first_output_timestamp_ns: Some(1_100_000_000),
             is_sse: false,
             sse_event_count: 0,
         };
@@ -295,9 +321,70 @@ mod tests {
         assert_eq!(records[0].path, "/v1/chat/completions");
         assert_eq!(records[0].status_code, 200);
         assert_eq!(records[0].pid, 1234);
+        assert_eq!(
+            records[0].first_output_timestamp_ns,
+            Some(1_100_000_000),
+            "first_output_timestamp_ns must survive the insert/query round-trip"
+        );
 
         let count = store.count().unwrap();
         assert_eq!(count, 1);
+
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_legacy_db_gains_first_output_column() {
+        let path = test_db_path("legacy_first_output");
+        let _ = fs::remove_file(&path);
+
+        // Simulate a database created before first_output_timestamp_ns existed.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE http_records (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp_ns      INTEGER NOT NULL,
+                    pid               INTEGER NOT NULL,
+                    comm              TEXT NOT NULL,
+                    method            TEXT NOT NULL,
+                    path              TEXT NOT NULL,
+                    status_code       INTEGER NOT NULL DEFAULT 0,
+                    request_headers   TEXT,
+                    request_body      TEXT,
+                    response_headers  TEXT,
+                    response_body     TEXT,
+                    duration_ns       INTEGER NOT NULL DEFAULT 0,
+                    is_sse            INTEGER NOT NULL DEFAULT 0,
+                    sse_event_count   INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        }
+
+        let store = HttpStore::new(&path).unwrap();
+
+        let record = HttpRecord {
+            timestamp_ns: 2000000000,
+            pid: 4321,
+            comm: "python".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: None,
+            response_headers: "{}".to_string(),
+            response_body: None,
+            duration_ns: 0,
+            first_output_timestamp_ns: Some(2100000000),
+            is_sse: true,
+            sse_event_count: 3,
+        };
+        store.insert(&record).unwrap();
+
+        let records = store.query_since(0).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].first_output_timestamp_ns, Some(2100000000));
 
         cleanup_db(&path);
     }

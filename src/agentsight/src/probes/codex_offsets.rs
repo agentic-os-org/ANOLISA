@@ -115,7 +115,7 @@ fn compute_head_sha256(path: &str) -> Option<String> {
     let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
     let hash = Sha256::digest(&buf);
-    Some(hash.iter().map(|b| format!("{:02x}", b)).collect())
+    Some(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]

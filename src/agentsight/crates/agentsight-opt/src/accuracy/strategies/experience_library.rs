@@ -85,11 +85,22 @@ impl ExperienceLibraryStrategy {
     fn compute_signals(calls: &[ToolCallRecord]) -> Vec<Signal> {
         let mut signals = Vec::new();
 
-        // 1. Repeat clusters: same (name, cmd) ≥ REPEAT_MIN.
+        // 1. Repeat clusters: same (name, target-or-cmd) ≥ REPEAT_MIN. A write
+        //    tool's `cmd` is the arguments JSON truncated at 50 chars, so two
+        //    rewrites of one file never share it; the recorded `target` is the
+        //    stable identity for write tools (see trace::file_target). Other
+        //    tools keep the command summary: repeated greps in one directory are
+        //    exploration, not rework.
+        fn cluster_key(c: &ToolCallRecord) -> (&str, &str) {
+            let target = crate::cost::is_write_tool(&c.name)
+                .then_some(c.target.as_deref())
+                .flatten();
+            (c.name.as_str(), target.unwrap_or(c.cmd.as_str()))
+        }
         let mut counts: HashMap<(&str, &str), (usize, &str)> = HashMap::new();
         for c in calls {
             let entry = counts
-                .entry((c.name.as_str(), c.cmd.as_str()))
+                .entry(cluster_key(c))
                 .or_insert((0, c.call_id.as_str()));
             entry.0 += 1;
         }
@@ -97,12 +108,17 @@ impl ExperienceLibraryStrategy {
             .into_iter()
             .filter(|(_, (n, _))| *n >= REPEAT_MIN)
             .collect();
-        clusters.sort_by_key(|&(_, (n, _))| std::cmp::Reverse(n));
+        // `counts` is a HashMap, whose iteration order is randomized per map
+        // instance, so clusters tying on repeat count kept the map's random
+        // order; the signal list fed to the LLM (and any lesson derived from
+        // it) then differed between runs of the same trace. Break ties by
+        // cluster key.
+        clusters.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
         for ((name, cmd), (n, first_id)) in clusters {
             let cmd_short: String = cmd.chars().take(80).collect();
             signals.push(Signal {
-                id: format!("repeat_cluster:{}:{}", name, cmd_short),
-                desc: format!("重复调用簇：{} `{}` 共 {} 次", name, cmd_short, n),
+                id: format!("repeat_cluster:{name}:{cmd_short}"),
+                desc: format!("重复调用簇：{name} `{cmd_short}` 共 {n} 次"),
                 first_call_id: first_id.to_string(),
             });
         }
@@ -194,8 +210,12 @@ impl Detector for ExperienceLibraryStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:experience_library"))
             .await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                ctx.judgments.record_ok();
+                v
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[experience_library] LLM judgment failed: {e}");
                 return vec![];
             }
@@ -243,6 +263,50 @@ impl Detector for ExperienceLibraryStrategy {
 mod tests {
     use super::*;
 
+    fn call(name: &str, cmd: &str, i: usize) -> crate::types::ToolCallRecord {
+        crate::types::ToolCallRecord {
+            name: name.into(),
+            call_id: format!("{name}-{i}"),
+            start: i as f64,
+            dur: 1.0,
+            cmd: cmd.into(),
+            err: false,
+            target: None,
+            result_tokens: None,
+        }
+    }
+
+    #[test]
+    fn repeat_cluster_signals_break_count_ties_by_key() {
+        // Two clusters with the same repeat count: the counts map is a
+        // HashMap, whose iteration order is randomized per map instance, so
+        // a count-only sort could emit the clusters' signals in either
+        // order.
+        let calls: Vec<crate::types::ToolCallRecord> = [("zeta", "grep z"), ("alpha", "grep a")]
+            .iter()
+            .flat_map(|(name, cmd)| (0..3).map(move |i| call(name, cmd, i)))
+            .collect();
+
+        for _ in 0..16 {
+            let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+            let repeat_ids: Vec<&str> = signals
+                .iter()
+                .filter(|s| s.id.starts_with("repeat_cluster:"))
+                .map(|s| s.id.as_str())
+                .collect();
+            assert_eq!(
+                repeat_ids.len(),
+                2,
+                "both clusters are signalled: {repeat_ids:?}"
+            );
+            assert!(
+                repeat_ids[0].starts_with("repeat_cluster:alpha:")
+                    && repeat_ids[1].starts_with("repeat_cluster:zeta:"),
+                "a count tie must not follow the map's iteration order: {repeat_ids:?}"
+            );
+        }
+    }
+
     fn make_call(name: &str, cmd: &str, start: f64, err: bool) -> ToolCallRecord {
         ToolCallRecord {
             name: name.into(),
@@ -251,6 +315,7 @@ mod tests {
             dur: 1.0,
             cmd: cmd.into(),
             err,
+            target: None,
             result_tokens: None,
         }
     }
@@ -271,6 +336,80 @@ mod tests {
         let signals = ExperienceLibraryStrategy::compute_signals(&calls3);
         assert_eq!(signals.len(), 1);
         assert!(signals[0].id.starts_with("repeat_cluster:"));
+    }
+
+    /// `cmd` is the arguments JSON truncated at 50 chars, so two edits of one
+    /// file never share a cluster key even though rewriting a file repeatedly is
+    /// exactly the rework this signal exists to surface. The recorded `target`
+    /// (ecb61effb) is the stable identity for write tools.
+    #[test]
+    fn repeat_cluster_groups_rewrites_of_one_file() {
+        let mut calls = vec![
+            make_call(
+                "Edit",
+                "{\"file_path\":\"src/a.rs\",\"old_string\":\"x\"",
+                1.0,
+                false,
+            ),
+            make_call(
+                "Edit",
+                "{\"file_path\":\"src/a.rs\",\"old_string\":\"y\"",
+                2.0,
+                false,
+            ),
+            make_call(
+                "Edit",
+                "{\"file_path\":\"src/a.rs\",\"old_string\":\"z\"",
+                3.0,
+                false,
+            ),
+        ];
+        for c in &mut calls {
+            c.target = Some("src/a.rs".to_string());
+        }
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.id.starts_with("repeat_cluster:Edit:")),
+            "three rewrites of one file must cluster: {signals:?}"
+        );
+    }
+
+    /// Grouping by target must stay scoped to write tools: repeated greps in one
+    /// directory with different patterns are normal exploration.
+    #[test]
+    fn repeat_cluster_ignores_non_write_targets() {
+        let mut calls = vec![
+            make_call(
+                "Grep",
+                "{\"pattern\":\"alpha\",\"path\":\"src\"}",
+                1.0,
+                false,
+            ),
+            make_call(
+                "Grep",
+                "{\"pattern\":\"beta\",\"path\":\"src\"}",
+                2.0,
+                false,
+            ),
+            make_call(
+                "Grep",
+                "{\"pattern\":\"gamma\",\"path\":\"src\"}",
+                3.0,
+                false,
+            ),
+        ];
+        for c in &mut calls {
+            c.target = Some("src".to_string());
+        }
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.id.starts_with("repeat_cluster:Grep:src")),
+            "different grep patterns must not become one repeat cluster: {signals:?}"
+        );
     }
 
     #[test]

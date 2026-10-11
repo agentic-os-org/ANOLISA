@@ -81,6 +81,46 @@ def discover(results: Path) -> list[tuple[Path, dict[str, Any]]]:
     ]
 
 
+def write_run_inventory(
+    results: Path, items: list[tuple[Path, dict[str, Any]]]
+) -> None:
+    """Export every discovered formal run without modifying source evidence."""
+    fields = (
+        "scenario",
+        "version",
+        "label",
+        "repetition",
+        "qps",
+        "duration_seconds",
+        "harness_exit_code",
+        "verdict",
+        "missing_gates",
+        "failed_gates",
+        "result_path",
+    )
+    with (results / "run-inventory.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for path, run in sorted(
+            items, key=lambda item: item[0].relative_to(results).as_posix()
+        ):
+            evaluation = run.get("evaluation") or {}
+            row = {field: run.get(field, "") for field in fields[:7]}
+            row.update(
+                verdict=evaluation.get("verdict", ""),
+                missing_gates=json.dumps(
+                    evaluation.get("missing", []), ensure_ascii=False
+                ),
+                failed_gates=json.dumps(
+                    evaluation.get("failed", []), ensure_ascii=False
+                ),
+                result_path=path.relative_to(results).as_posix(),
+            )
+            writer.writerow(row)
+
+
 def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]]:
     """Aggregate matrix repetitions by absolute QPS and version."""
     grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
@@ -850,6 +890,7 @@ def main() -> int:
     campaign_data = campaign.read_json(args.campaign)
     campaign.validate_campaign(campaign_data)
     items = discover(args.results)
+    write_run_inventory(args.results, items)
     rows = matrix_rows(items)
     write_performance(args.results, rows)
     capacities = write_capacity(args.results)

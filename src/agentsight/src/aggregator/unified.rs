@@ -223,3 +223,76 @@ impl Aggregator {
         self.http.snapshot_idle_connections()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Parser;
+    use crate::probes::sslsniff::SslEvent;
+    use std::rc::Rc;
+
+    fn ssl_event(pid: u32, ssl_ptr: u64, buf: &[u8], rw: i32) -> SslEvent {
+        SslEvent {
+            source: 0,
+            timestamp_ns: 0,
+            delta_ns: 0,
+            pid,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw,
+            comm: String::new(),
+            buf: buf.to_vec(),
+            is_handshake: false,
+            ssl_ptr,
+        }
+    }
+
+    /// End-to-end regression for the write-direction chunked terminator: a
+    /// chunked request whose final write is `0\r\n\r\n` must complete its
+    /// body. The parser used to cut the terminator from that write and emit a
+    /// synthetic SSE done event, which the aggregator silently dropped while
+    /// in RequestBodyPending — so the terminator never reached body_buffer and
+    /// `chunked_stream_complete` never fired.
+    #[test]
+    fn test_chunked_request_final_terminator_write_completes_body() {
+        let parser = Parser::new();
+        let mut aggregator = Aggregator::new();
+        let conn = ConnectionId {
+            pid: 4242,
+            ssl_ptr: 0x4321,
+        };
+
+        // rw == 1 is the write direction. The request head completes, but its
+        // chunked body still lacks the zero-size terminating chunk, so the
+        // connection stays in RequestBodyPending.
+        let headers = b"POST /v1/messages HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        aggregator.process_result(parser.parse_ssl_event(Rc::new(ssl_event(
+            conn.pid,
+            conn.ssl_ptr,
+            headers,
+            1,
+        ))));
+
+        let chunk = b"7\r\n{\"x\":1}\r\n";
+        aggregator.process_result(parser.parse_ssl_event(Rc::new(ssl_event(
+            conn.pid,
+            conn.ssl_ptr,
+            chunk,
+            1,
+        ))));
+
+        // The final write carries only the zero-size terminating chunk.
+        aggregator.process_result(parser.parse_ssl_event(Rc::new(ssl_event(
+            conn.pid,
+            conn.ssl_ptr,
+            b"0\r\n\r\n",
+            1,
+        ))));
+
+        assert!(
+            aggregator.http().has_pending_request(&conn),
+            "the terminator write must complete the chunked request body"
+        );
+    }
+}
