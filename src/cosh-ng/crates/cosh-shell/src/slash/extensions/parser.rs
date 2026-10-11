@@ -293,13 +293,26 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for ch in input.chars() {
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
             token.push(ch);
             escaped = false;
             continue;
         }
         if ch == '\\' && quote != Some('\'') {
+            // Inside double quotes, POSIX keeps a backslash literal unless it
+            // precedes `$`, '`', '"', '\', or a newline (line continuation).
+            if quote == Some('"') {
+                match chars.peek() {
+                    Some('$') | Some('`') | Some('"') | Some('\\') => escaped = true,
+                    Some('\n') => {
+                        chars.next();
+                    }
+                    _ => token.push(ch),
+                }
+                continue;
+            }
             escaped = true;
             continue;
         }
@@ -416,5 +429,78 @@ mod tests {
         );
         assert!(parse("settings set example.ops region value extra").is_err());
         assert!(parse("settings list example.ops --scope project").is_err());
+    }
+
+    #[test]
+    fn double_quoted_backslash_stays_literal_except_before_specials() {
+        assert_eq!(
+            parse("settings set example.ops pattern \"a\\d+\"").unwrap(),
+            ExtensionCommand::SettingsSet {
+                name: "example.ops".to_string(),
+                key: "pattern".to_string(),
+                value: "a\\d+".to_string(),
+                scope: "user".to_string(),
+            }
+        );
+        assert_eq!(
+            parse("new \"C:\\path\\name\"").unwrap(),
+            ExtensionCommand::New {
+                path: "C:\\path\\name".to_string(),
+                template: "minimal".to_string(),
+            }
+        );
+        assert_eq!(
+            parse("new \"a\\\"b\\$c\\`d\\\\e\"").unwrap(),
+            ExtensionCommand::New {
+                path: "a\"b$c`d\\e".to_string(),
+                template: "minimal".to_string(),
+            }
+        );
+        // A backslash-newline pair inside double quotes is a line continuation:
+        // both characters are dropped.
+        assert_eq!(
+            parse("new \"a\\\nb\"").unwrap(),
+            ExtensionCommand::New {
+                path: "ab".to_string(),
+                template: "minimal".to_string(),
+            }
+        );
+        // A trailing backslash inside an unterminated double quote stays
+        // literal, so the input still fails as an unterminated quote.
+        assert_eq!(
+            parse("new \"a\\").unwrap_err(),
+            "unterminated quote in extensions command"
+        );
+    }
+
+    #[test]
+    fn backslash_handling_keeps_single_quotes_and_bare_escapes() {
+        assert_eq!(
+            parse("settings set example.ops pattern 'a\\d+'").unwrap(),
+            ExtensionCommand::SettingsSet {
+                name: "example.ops".to_string(),
+                key: "pattern".to_string(),
+                value: "a\\d+".to_string(),
+                scope: "user".to_string(),
+            }
+        );
+        assert_eq!(
+            parse("new example\\ source").unwrap(),
+            ExtensionCommand::New {
+                path: "example source".to_string(),
+                template: "minimal".to_string(),
+            }
+        );
+        assert_eq!(
+            parse("new \\\"quoted\\\"").unwrap(),
+            ExtensionCommand::New {
+                path: "\"quoted\"".to_string(),
+                template: "minimal".to_string(),
+            }
+        );
+        assert_eq!(
+            parse("new abc\\").unwrap_err(),
+            "trailing escape in extensions command"
+        );
     }
 }
