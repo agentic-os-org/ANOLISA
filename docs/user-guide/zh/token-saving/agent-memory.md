@@ -114,13 +114,14 @@ anolisa adapter status agent-memory
 
 **前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
 
-执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。运行 `install.sh` 时设置 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主将拒绝安装，直至自行授予（例如交互式执行 `openclaw plugins install`）。
+执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。运行 `install.sh` 时设置 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主将拒绝安装，直至自行授予（例如交互式执行 `openclaw plugins install`）。`ANOLISA_ACCEPT_CAPABILITIES=0` 拒绝的是同一份同意，它是与 tokenless 的 OpenClaw 安装脚本共用的开关，因此一个变量即可覆盖两个脚本；两者同时设置时，更具体的 agent-memory 变量优先。驱动路径（`anolisa adapter enable`）目前仍无条件授予同意。
 
 安装期环境变量（运行期 `MEMORY_*` 变量见「环境变量」一节）：
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `AGENT_MEMORY_ACCEPT_CAPABILITIES` | 接受 | `1`/`true`/`yes`/`on` 在宿主声明该参数时授予同意；`0`/`false`/`no`/`off` 拒绝授予，带门禁的宿主将拒绝安装；其他取值在安装前直接报错中止（退出码 2） |
+| `AGENT_MEMORY_ACCEPT_CAPABILITIES` | 接受 | `1`/`true`/`yes`/`on` 在宿主声明该参数时授予同意；`0`/`false`/`no`/`off` 拒绝授予，带门禁的宿主将拒绝安装；其他取值在安装前直接报错中止（退出码 2）。与 `ANOLISA_ACCEPT_CAPABILITIES` 同时设置时以本变量为准——优先取决于变量是否被设置，因此本变量显式设为空值同样生效并按默认接受，此时不再读取共用变量 |
+| `ANOLISA_ACCEPT_CAPABILITIES` | 接受 | 与其他 ANOLISA OpenClaw 安装脚本共用的同意开关——tokenless 的安装脚本识别同一变量、同一取值表，因此一处设置即可在所有脚本入口拒绝授予同意。拒绝行与报错行会写明实际生效的变量名 |
 | `AGENT_MEMORY_SAFE_INSTALL` | 未设置 | `1` 时拒绝 `--dangerously-force-unsafe-install`（只对仍会传递它的宿主有意义）；把它标注为 deprecated no-op 的宿主无论如何都不会收到该参数 |
 | `OPENCLAW_BIN` | `openclaw` | 要调用的 openclaw CLI |
 | `OPENCLAW_STATE_DIR` | `~/.openclaw` | 传递给每次 openclaw CLI 调用的 state 目录 |
@@ -670,7 +671,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
 | OpenClaw 调用了宿主记忆后端或报告 `plugin tool name conflict` | 插件包、gateway/会话未更新，或提示词仍使用旧工具名 | 更新插件、重启 gateway、开始新会话，并使用 `anolisa_memory_search` / `anolisa_memory_get` 访问 ANOLISA 记忆 |
-| install.sh 报 `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 的能力同意门禁；安装参数探测失败、设置了 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0`，或脚本早于修复版本 | 查看安装输出中的探测 WARNING 或 opt-out 拒绝行；升级 agent-memory、取消该环境变量，或手动执行 `openclaw plugins install <插件目录> --force --accept-capabilities`。被拒绝授予且遭门禁拦截的安装以退出码 3 结束；若 OpenClaw 调整拒绝文案，脚本会退回退出码 1 并附带 opt-out 提示 |
+| install.sh 报 `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 的能力同意门禁；安装参数探测失败、设置了 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0`（或共用的 `ANOLISA_ACCEPT_CAPABILITIES=0`），或脚本早于修复版本 | 查看安装输出中的探测 WARNING 或 opt-out 拒绝行；升级 agent-memory、取消该环境变量，或手动执行 `openclaw plugins install <插件目录> --force --accept-capabilities`。被拒绝授予且遭门禁拦截的安装以退出码 3 结束；若 OpenClaw 调整拒绝文案，脚本会退回退出码 1 并附带 opt-out 提示 |
 | install.sh 报安装目标目录不可写 | `${OPENCLAW_STATE_DIR}/extensions`（或其最近的已存在父目录）对运行脚本的用户不可写，OpenClaw 的 `mkdir extensions/memory-anolisa` 因此以 `EACCES` 失败 | 修正该目录的属主/权限——或把 `OPENCLAW_STATE_DIR` 指向可写的 state 目录——后重跑。这是文件系统权限失败，不是策略拒绝：不要为此放宽 `security.installPolicy` |
 | install.sh 在把 `--dangerously-force-unsafe-install` 标注为 deprecated no-op 的宿主上安装失败 | OpenClaw 2026.6.5 及之后已无安装期扫描，脚本没有传递覆盖参数，也就无法影响该宿主的安装期安全；原因在 `openclaw` 自己的输出里 | 阅读脚本提示上方的 CLI 输出。只有当它点名 `security.installPolicy` 时，需要放宽的才是这条运维自有策略——重跑脚本或设置 `AGENT_MEMORY_SAFE_INSTALL` 都无法覆盖它 |
 | install.sh 报安全扫描拦截了插件 | OpenClaw 2026.6.1 及更早版本在安装期扫描插件源码，把插件用于 MCP 传输的 `child_process.spawn` 判为危险 | 取消 `AGENT_MEMORY_SAFE_INSTALL`，让脚本传递它原本被拒绝的覆盖参数，或升级 OpenClaw |

@@ -238,6 +238,13 @@ anolisa adapter enable tokenless openclaw
 anolisa adapter status tokenless
 ```
 
+The bundled OpenClaw `install.sh` grants the plugin's declared capabilities by
+default. Set `ANOLISA_ACCEPT_CAPABILITIES=0` to withhold that grant — the switch
+is shared with the agent-memory OpenClaw installer — and a host that gates
+consent then rejects the install (exit code 3) rather than receiving an implicit
+grant. See the
+[agent integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md).
+
 DeepSeek Harness requires at least one explicit profile name. When enabling
 multiple profiles, pass every name in the same command; see the plugin section
 below for the complete-set behavior. Use an enabled name when starting DSH:

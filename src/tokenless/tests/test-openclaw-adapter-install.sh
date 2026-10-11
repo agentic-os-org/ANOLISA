@@ -10,8 +10,13 @@
 #     loses the match under `pipefail`.
 #   - whole-token matching across alternate help layouts (`colon`, `paren`)
 #     as well as near-miss options (`near_match`, `unsafe_near`).
-#   - hermetic scenarios: ambient installer switches are unset per run, and
-#     the suite self-invokes under hostile values at the end.
+#   - hermetic scenarios: ambient installer switches (including the consent
+#     opt-out) are unset per run, and the suite self-invokes under hostile
+#     values at the end.
+#   - consent opt-out: ANOLISA_ACCEPT_CAPABILITIES=0 is a visible refusal on a
+#     gating host (no flag, refusal line, rc=3 attributed from the host's own
+#     rejection phrase), a stated no-op on a host without the gate, and never a
+#     misattribution of an unrelated install failure.
 #   - diagnosability: counts come from awk (always exit 0) and every
 #     assertion ends in `fail`, so a regression prints a FAIL line instead of
 #     dying silently inside a failing assignment pipeline.
@@ -68,6 +73,13 @@ if [ "$*" = "plugins install --help" ]; then
 fi
 [ "$1" = plugins ] && [ "$2" = install ]
 [ "$3" = "$ANOLISA_ADAPTER_DIR/openclaw" ]
+# An install failure that carries no consent-rejection phrase: the script must
+# report it as a generic failure even when consent was withheld, because
+# attributing it to the opt-out would send the operator after the wrong cause.
+if [ "${TEST_UNRELATED:-0}" = 1 ]; then
+    echo "install failed: EACCES: permission denied, open $ANOLISA_ADAPTER_DIR/openclaw/dist/index.js" >&2
+    exit 7
+fi
 accepted=0
 unsafe=0
 for arg in "$@"; do
@@ -117,6 +129,7 @@ run_installer() {
     : > "$TEST_ARGV_LOG"
     rm -f "$TEST_INSTALLED"
     env -u ANOLISA_DRY_RUN -u ANOLISA_TARGET -u ANOLISA_COMPONENT \
+        -u ANOLISA_ACCEPT_CAPABILITIES \
         "$@" bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1
 }
 
@@ -183,6 +196,101 @@ for TEST_SUPPORT in modern legacy near_match colon paren big \
     esac
     echo "PASS: $TEST_SUPPORT installer"
 done
+
+# --- Capability-consent opt-out (ANOLISA_ACCEPT_CAPABILITIES) ----------------
+# The switch this installer shares with the agent-memory one. Granted by
+# default; withheld it must be a visible refusal on a gating host, and the
+# refusal must be attributed from the host's own documented phrase rather than
+# from the switch alone.
+export TEST_SUPPORT=modern
+rc=0
+run_installer || rc=$?
+[ "$rc" = 0 ] || fail "consent default: rc=$rc, want 0"
+check_argv_log 'consent default' "$(argv yes no)"
+expect_log 'consent default' 'Passing --accept-capabilities'
+echo 'PASS: capability consent is granted by default'
+
+for consent in 0 false OFF ' no '; do
+    rc=0
+    run_installer ANOLISA_ACCEPT_CAPABILITIES="$consent" || rc=$?
+    [ "$rc" = 3 ] || fail "consent opt-out '$consent': rc=$rc, want 3"
+    [ ! -f "$TEST_INSTALLED" ] || fail "consent opt-out '$consent': install completed despite the refusal"
+    check_argv_log "consent opt-out '$consent'" "$(argv no no)"
+    expect_log "consent opt-out '$consent'" 'ANOLISA_ACCEPT_CAPABILITIES=0: withholding --accept-capabilities'
+    expect_no_log "consent opt-out '$consent'" 'Passing --accept-capabilities'
+    expect_log "consent opt-out '$consent'" 'install failed with consent withheld'
+    # The host's rejection text stays visible through the tee'd transcript.
+    expect_log "consent opt-out '$consent'" 'requires capability consent'
+    echo "PASS: consent opt-out '$consent' refuses visibly with rc=3"
+done
+
+for consent in 1 TRUE Yes ' on '; do
+    rc=0
+    run_installer ANOLISA_ACCEPT_CAPABILITIES="$consent" || rc=$?
+    [ "$rc" = 0 ] || fail "consent opt-in '$consent': rc=$rc, want 0"
+    check_argv_log "consent opt-in '$consent'" "$(argv yes no)"
+    expect_log "consent opt-in '$consent'" 'Passing --accept-capabilities'
+    echo "PASS: consent opt-in '$consent' keeps the grant"
+done
+
+# A host that does not gate on consent cannot be refused, and the script must
+# say so instead of implying the switch took effect.
+export TEST_SUPPORT=legacy
+rc=0
+run_installer ANOLISA_ACCEPT_CAPABILITIES=0 || rc=$?
+[ "$rc" = 0 ] || fail "ungated host opt-out: rc=$rc, want 0"
+check_argv_log 'ungated host opt-out' "$(argv no no)"
+expect_log 'ungated host opt-out' 'changes nothing on this host'
+expect_no_log 'ungated host opt-out' 'withholding --accept-capabilities'
+echo 'PASS: an ungated host is told the consent switch changes nothing'
+
+# Withheld consent plus an unrelated install failure stays a generic rc=1: the
+# attribution requires the host's consent phrase, not just the switch.
+export TEST_SUPPORT=modern
+rc=0
+run_installer ANOLISA_ACCEPT_CAPABILITIES=0 TEST_UNRELATED=1 || rc=$?
+[ "$rc" = 1 ] || fail "opt-out with unrelated error: rc=$rc, want 1"
+expect_log 'opt-out with unrelated error' 'does not look like a consent rejection'
+expect_log 'opt-out with unrelated error' 'EACCES'
+expect_no_log 'opt-out with unrelated error' 'install failed with consent withheld'
+echo 'PASS: an unrelated failure under opt-out is not reported as a consent refusal'
+
+# An unparseable value aborts before any CLI call — including before the dry-run
+# text and before the missing-CLI skip — so an operator is never left believing
+# consent was withheld while the script went on to grant it.
+for bad in maybe 't rue' '   '; do
+    : > "$TEST_ARGV_LOG"
+    rm -f "$TEST_INSTALLED"
+    rc=0
+    env -u ANOLISA_DRY_RUN ANOLISA_ACCEPT_CAPABILITIES="$bad" bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid consent value '$bad': rc=$rc, want 2"
+    [ ! -s "$TEST_ARGV_LOG" ] || fail "invalid consent value '$bad': openclaw must not be invoked"
+    grep -q 'is not a boolean' "$SANDBOX/output" \
+        || fail "invalid consent value '$bad': expected the boolean error"
+done
+echo 'PASS: an invalid consent value aborts before any OpenClaw call'
+
+rc=0
+env ANOLISA_DRY_RUN=1 ANOLISA_ACCEPT_CAPABILITIES=maybe bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "invalid consent value in dry-run: rc=$rc, want 2"
+expect_no_log 'invalid consent value in dry-run' 'DRY-RUN'
+echo 'PASS: an invalid consent value aborts before the dry-run text'
+
+rc=0
+env OPENCLAW_BIN="$SANDBOX/missing-openclaw" ANOLISA_ACCEPT_CAPABILITIES=maybe \
+    bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "invalid consent value without CLI: rc=$rc, want 2"
+grep -q 'is not a boolean' "$SANDBOX/output" \
+    || fail 'invalid consent value without CLI: expected the boolean error'
+echo 'PASS: an invalid consent value aborts even when the CLI is missing'
+
+# Dry-run describes the withheld grant without touching the CLI.
+rc=0
+run_installer ANOLISA_DRY_RUN=1 ANOLISA_ACCEPT_CAPABILITIES=0 || rc=$?
+[ "$rc" = 0 ] || fail "dry-run opt-out: rc=$rc, want 0"
+[ ! -s "$TEST_ARGV_LOG" ] || fail 'dry-run opt-out: openclaw must not be invoked'
+expect_log 'dry-run opt-out' 'withholds --accept-capabilities'
+echo 'PASS: dry-run reports the withheld consent grant'
 
 export TEST_SUPPORT=noop_rejected
 rc=0
@@ -256,6 +364,7 @@ echo 'PASS: missing install invocation fails with a diagnostic'
 if [ -z "${TEST_HOSTILE_AMBIENT:-}" ]; then
     rc=0
     env ANOLISA_DRY_RUN=1 ANOLISA_TARGET=hostile ANOLISA_COMPONENT=hostile \
+        ANOLISA_ACCEPT_CAPABILITIES=hostile \
         TEST_HOSTILE_AMBIENT=1 bash "$0" >"$SANDBOX/output" 2>&1 || rc=$?
     [ "$rc" = 0 ] || fail "hostile ambient environment broke the suite (rc=$rc)"
     echo 'PASS: hostile ambient environment does not leak into scenarios'
