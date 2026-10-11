@@ -198,6 +198,14 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+`prompt_task.py` returns only a newly created or changed regular session JSONL
+after a successful prompt, using before/after file identity, size and timestamp
+snapshots in the selected agent's directory. Unchanged historical files and
+trajectory files cannot become the response; absent/unreadable fresh evidence
+produces a clear diagnostic. The HTTP request still runs when observation is
+unavailable. This checks file freshness; concurrent writers sharing an agent
+directory cannot be uniquely correlated to a request by these snapshots.
+
 ## Troubleshooting
 
 | Issue | Fix |

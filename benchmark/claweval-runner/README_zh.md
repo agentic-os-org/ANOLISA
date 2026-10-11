@@ -198,6 +198,12 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+`prompt_task.py` 在提示请求成功后，只返回新增或变化的常规会话 JSONL 文件，
+依据选中 agent 目录内请求前后的文件标识、大小和时间戳快照判断。未变化的历史
+文件及 trajectory 文件不会被当作响应；没有可读的新证据时会明确输出诊断。
+无法观察文件时仍会执行 HTTP 请求。这只验证文件新鲜度；共享同一 agent 目录的
+并发写入无法仅通过这些快照与某个请求唯一关联。
+
 ## 故障排查
 
 | 问题 | 修复 |
