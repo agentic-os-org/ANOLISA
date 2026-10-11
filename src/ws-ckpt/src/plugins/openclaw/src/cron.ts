@@ -19,8 +19,11 @@ function shellQuote(s: string): string {
 }
 
 function buildCronLine(workspace: string, schedule: string): string {
+  // Cron scans percent signs before the shell, even inside quotes. Emit each
+  // escaped percent outside the quotes so existing backslashes remain literal.
+  const quotedWorkspace = shellQuote(workspace).replace(/%/g, "'\\%'");
   return (
-    `${schedule} /usr/local/bin/ws-ckpt checkpoint -w ${shellQuote(workspace)}` +
+    `${schedule} /usr/local/bin/ws-ckpt checkpoint -w ${quotedWorkspace}` +
     ` -s "cron-$(date +\\%s)"` +
     ` -m "scheduled snapshot"` +
     ` --metadata '{"auto":true,"type":"cron"}'` +
@@ -68,6 +71,8 @@ async function writeCrontab(lines: string[]): Promise<boolean> {
 }
 
 function extractWorkspace(line: string): string | null {
+  // Undo only our generated quote boundary before matching workspace identity.
+  line = line.replace(/'\\%'/g, "%");
   let m = MARKER_RE_QUOTED.exec(line);
   if (m) return m[1];
   m = MARKER_RE_UNQUOTED.exec(line);

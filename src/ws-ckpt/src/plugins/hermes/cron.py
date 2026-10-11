@@ -19,6 +19,9 @@ _MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)")
 
 def _build_cron_line(workspace: str, schedule: str) -> str:
     quoted_ws = "'" + workspace.replace("'", "'\\''") + "'"
+    # Cron scans percent signs before the shell, even inside quotes. Keep the
+    # escaped percent outside the quotes to preserve existing backslashes.
+    quoted_ws = quoted_ws.replace("%", "'\\%'")
     return (
         f"{schedule} /usr/local/bin/ws-ckpt checkpoint -w {quoted_ws}"
         f' -s "cron-$(date +\\%s)"'
@@ -60,6 +63,8 @@ def _write_crontab(lines: List[str]) -> bool:
 
 
 def _extract_workspace(line: str) -> Optional[str]:
+    # Undo only our generated quote boundary before matching workspace identity.
+    line = line.replace("'\\%'", "%")
     m = _MARKER_RE.search(line)
     if m:
         return m.group(1)
