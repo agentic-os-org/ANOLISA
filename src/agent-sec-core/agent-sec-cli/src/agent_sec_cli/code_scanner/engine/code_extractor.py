@@ -12,6 +12,7 @@ _PYTHON_INTERPRETERS = {"python", "python3"}
 _INLINE_RE = re.compile(
     r"""(?:^|\s)"""
     r"""(?:uv\s+run\s+(?:--\w[\w-]*(?:\s+\S+)?\s+)*)?"""  # optional uv run prefix
+    r"""(?:[^\s'"]*/)?"""  # optional interpreter path (e.g. /usr/bin/)
     r"""(bash|sh|zsh|python3?)\s+"""  # interpreter
     r"""-c\s+"""  # -c flag
     r"""(["'])((?:\\.|(?!\2).)*)\2""",  # quoted code (escape-aware)
@@ -33,6 +34,7 @@ def extract_inline_code(command: str) -> Optional[Tuple[str, Language]]:
         'python3 -c "print(1)"'
         'uv run python -c "os.system(...)"'
         'uv run --with pkg python3 -c "..."'
+        '/usr/bin/python3 -c "import os; ..."'  (absolute interpreter path)
 
     Returns ``None`` when the command does not match any known pattern.
     """
