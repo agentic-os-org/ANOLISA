@@ -1212,9 +1212,29 @@ fn persist_from_rollback_at(
     service_path: &str,
     systemctl: &str,
 ) -> Result<bool> {
-    #[cfg(test)]
-    tests::record_batch_write("persist", &guard.path);
     let data = load_rollback_from(&guard.path)?;
+    persist_rollback_data_at(
+        guard,
+        &data,
+        sysctl_path,
+        script_path,
+        service_path,
+        systemctl,
+    )
+}
+
+// Render a transaction's proposed ledger before retiring its originals on
+// disk. The caller keeps the same ledger lock throughout both writes.
+fn persist_rollback_data_at(
+    _guard: &LedgerLock,
+    data: &RollbackData,
+    sysctl_path: &str,
+    script_path: &str,
+    service_path: &str,
+    systemctl: &str,
+) -> Result<bool> {
+    #[cfg(test)]
+    tests::record_batch_write("persist", &_guard.path);
     let entries = persistable_entries(&data.entries);
     let (sysctl_content, nonsysctl_script) = render_persistence(&entries);
 
@@ -1617,12 +1637,18 @@ fn rollback_params_at(
         outcome.failed += cleanup_failed;
         return Ok((keys, outcome));
     }
-    // Rewrite the ledger with the surviving entries and regenerate the
-    // persisted files from it, so the file no longer replays what this run
-    // rolled back. Both happen once, under the guard taken above: the batch is
-    // one transaction, not one per parameter.
+    // A failed regenerate can leave the old boot config replaying the value
+    // just restored. Keep its original in the ledger until every persisted
+    // file is updated, so the same parameter can be retried after the failure.
+    persist_rollback_data_at(
+        &guard,
+        &data,
+        sysctl_path,
+        script_path,
+        service_path,
+        "systemctl",
+    )?;
     save_ledger_at(ledger, &data)?;
-    persist_from_rollback_at(&guard, sysctl_path, script_path, service_path, "systemctl")?;
     Ok((keys, outcome))
 }
 
@@ -5851,6 +5877,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rollback_param_keeps_originals_when_persistence_fails() {
+        let dir = AtomicTestDir::new("rollback-param-persist-failure");
+        let (conf, service, script) = fixture_paths(&dir);
+        let swappiness = dir.0.join("swappiness");
+        let somaxconn = dir.0.join("somaxconn");
+        fs::write(&swappiness, "10").unwrap();
+        fs::write(&somaxconn, "4096").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.swappiness", "60", "10", swappiness.to_str().unwrap()),
+                (
+                    "net.core.somaxconn",
+                    "128",
+                    "4096",
+                    somaxconn.to_str().unwrap(),
+                ),
+            ],
+        );
+        let before = fs::read_to_string(&ledger).unwrap();
+        // A directory at the generated-file path refuses atomic replacement,
+        // even for root, without requiring any host mount or kernel writes.
+        fs::create_dir(&conf).unwrap();
+        assert!(rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).is_err());
+        assert_eq!(fs::read_to_string(&swappiness).unwrap(), "60");
+        assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
+        assert_eq!(fs::read_to_string(&somaxconn).unwrap(), "4096");
+
+        fs::remove_dir(&conf).unwrap();
+        let (_, outcome) =
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).unwrap();
+        assert!(outcome.is_complete());
+        let data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ledger).unwrap()).unwrap();
+        assert!(data["entries"].get("vm.swappiness").is_none());
+        assert_eq!(data["entries"]["net.core.somaxconn"]["previous"], "128");
+        let persisted = fs::read_to_string(&conf).unwrap();
+        assert!(!persisted.contains("vm.swappiness"));
+        assert!(persisted.contains("net.core.somaxconn = 4096"));
+    }
+
+    #[test]
+    fn rollback_param_keeps_originals_after_partial_persistence() {
+        let dir = AtomicTestDir::new("rollback-param-persist-partial");
+        let (conf, service, script) = fixture_paths(&dir);
+        let swappiness = dir.0.join("swappiness");
+        let somaxconn = dir.0.join("somaxconn");
+        fs::write(&swappiness, "10").unwrap();
+        fs::write(&somaxconn, "4096").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.swappiness", "60", "10", swappiness.to_str().unwrap()),
+                (
+                    "net.core.somaxconn",
+                    "128",
+                    "4096",
+                    somaxconn.to_str().unwrap(),
+                ),
+            ],
+        );
+        let before = fs::read_to_string(&ledger).unwrap();
+        // Sysctl regeneration lands first; retiring a stale script then fails.
+        fs::create_dir(&script).unwrap();
+        fs::write(&service, "stale unit").unwrap();
+        assert!(rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).is_err());
+        assert!(!fs::read_to_string(&conf).unwrap().contains("vm.swappiness"));
+        assert!(!Path::new(&service).exists());
+        assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
+        assert_eq!(fs::read_to_string(&swappiness).unwrap(), "60");
+
+        fs::remove_dir(&script).unwrap();
+        let (_, outcome) =
+            rollback_param_at("vm.swappiness", &ledger, &conf, &service, &script).unwrap();
+        assert!(outcome.is_complete());
+        let data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ledger).unwrap()).unwrap();
+        assert!(data["entries"].get("vm.swappiness").is_none());
+        assert_eq!(data["entries"]["net.core.somaxconn"]["previous"], "128");
+    }
+
     /// The same operation on the last recorded entry runs the full rollback's
     /// terminal cleanup: the persisted files first, then the ledger.
     #[test]
@@ -6269,7 +6377,7 @@ mod tests {
     /// tests assert: the writes are counted here rather than inferred from
     /// their end state, because two writes leave the same bytes a single one
     /// does. Filled from `#[cfg(test)]` probes in `save_ledger_at` and
-    /// `persist_from_rollback_at`, the way `finalize_race_probe` stands in for
+    /// `persist_rollback_data_at`, the way `finalize_race_probe` stands in for
     /// its race window; nothing of this is compiled into a release build.
     static BATCH_WRITES: std::sync::Mutex<Vec<(&'static str, String)>> =
         std::sync::Mutex::new(Vec::new());
