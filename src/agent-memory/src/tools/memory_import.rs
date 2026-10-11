@@ -134,9 +134,14 @@ pub fn memory_import(
         tracing::info!("overwrite strategy: removed {removed} existing memories");
     }
 
+    // One shared seen-set for memories and tasks: both write into the same
+    // mount namespace, so a task and a memory with the same path collide on
+    // disk and must be reported rather than double-written.
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Import memories
     for mem in &archive.memories {
-        match import_single(svc, mem, strategy, dry_run) {
+        match import_single(svc, mem, strategy, dry_run, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
@@ -150,7 +155,7 @@ pub fn memory_import(
 
     // Import tasks
     for task in &archive.tasks {
-        match import_single(svc, task, strategy, dry_run) {
+        match import_single(svc, task, strategy, dry_run, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
@@ -204,12 +209,49 @@ enum ImportAction {
     Skipped,
 }
 
+/// Validate one archive entry before it is written.
+///
+/// The AMA format only ever contains markdown memory paths: `mem_export`
+/// filters its walk to `.md` files and `ExportedMemory::path` is documented
+/// as e.g. "facts/lesson/01J5.md". Anything else — a non-`.md` path like
+/// "facts/facts.jsonl", an empty path, or a path repeated in the same
+/// archive — is malformed input, and writing it would clobber non-memory
+/// files (the append-only fact log, the generated index) with reconstructed
+/// markdown.
+fn validate_entry_path(
+    mem: &ExportedMemory,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    if mem.path.is_empty() {
+        return Err(MemoryError::InvalidArgument(
+            "archive entry has an empty path".into(),
+        ));
+    }
+    if Path::new(&mem.path).extension().and_then(|e| e.to_str()) != Some("md") {
+        return Err(MemoryError::InvalidArgument(format!(
+            "archive entry '{}' is not a markdown (.md) memory path; \
+             AMA archives only contain .md files (as produced by mem_export)",
+            mem.path
+        )));
+    }
+    if !seen.insert(mem.path.clone()) {
+        return Err(MemoryError::InvalidArgument(format!(
+            "duplicate entry path '{}' in archive; each memory may appear once",
+            mem.path
+        )));
+    }
+    Ok(())
+}
+
 fn import_single(
     svc: &MemoryService,
     mem: &ExportedMemory,
     strategy: ImportStrategy,
     dry_run: bool,
+    seen: &mut std::collections::HashSet<String>,
 ) -> Result<ImportAction> {
+    validate_entry_path(mem, seen)?;
+
     // Security: use ns::paths::resolve_for_create to prevent path traversal
     // and enforce reserved-segment checks (.anolisa, .git*, etc.)
     let target_path = crate::ns::paths::resolve_for_create(&svc.mount, &mem.path)?;
