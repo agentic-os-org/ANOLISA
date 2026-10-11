@@ -84,6 +84,24 @@ confirm_destructive = true
 
 ---
 
+## Password-protected Excel analysis
+
+Analyze an OOXML workbook with its known password without creating an unprotected file. The readonly reader supports `.xlsx` and `.xlsm` through the optional `msoffcrypto-tool` backend:
+
+```bash
+pip install pandas openpyxl msoffcrypto-tool
+python3 SKILL_DIR/scripts/xlsx_reader.py protected.xlsx --password-env WORKBOOK_PASSWORD --json
+python3 SKILL_DIR/scripts/xlsx_reader.py protected.xlsx --password-env WORKBOOK_PASSWORD --sheet Sales --quality
+```
+
+Set `WORKBOOK_PASSWORD` in the command environment before running these examples; the flag names the environment variable and never takes the password value itself. An unset or empty variable is a usage error; the backend requires a non-empty password. The reader does not prompt, discover or store passwords, and reports do not include the credential.
+
+Known-password decryption occurs in memory, verifies the password and supported payload integrity, and keeps the original file unchanged. All-sheet and named-sheet analysis use the existing structure, quality and statistics schema. Plain Excel inputs do not require the optional dependency, including when a password variable was supplied. Missing credentials/backends, incorrect credentials and damaged encrypted inputs produce errors without plaintext output files.
+
+This option applies only to OOXML `.xlsx`/`.xlsm`; CSV, TSV and legacy XLS are rejected when the flag is used. It reads stored table values without executing macros. Worksheet protection is separate from file encryption and does not need a file password for reading.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

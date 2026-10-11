@@ -27,6 +27,14 @@ python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx --json          # machine-re
 
 Supported formats: `.xlsx`, `.xlsm`, `.csv`, `.tsv`. The script tries multiple encodings for CSV (utf-8-sig, gbk, utf-8, latin-1).
 
+For password-protected OOXML, install `msoffcrypto-tool`, set a named environment
+variable containing the known password, then use
+`xlsx_reader.py protected.xlsx --password-env WORKBOOK_PASSWORD --json`.
+The variable must exist with a non-empty password; the password value never
+appears in CLI arguments or reports. Decryption is in memory with password/integrity
+verification and no plaintext temporary file. Plain inputs need no optional backend.
+This option is exclusive to `.xlsx`/`.xlsm`; worksheet protection is not file encryption.
+
 ### Step 2 — Custom Analysis with pandas
 
 Load data and perform the analysis the user requests:
