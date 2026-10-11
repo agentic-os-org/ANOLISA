@@ -87,6 +87,9 @@ def check_freshness(directory: Path) -> tuple[bool | None, str]:
         crawl_time = get_crawl_time(md_file)
         if crawl_time is None:
             continue
+        # A future date cannot establish when a page was actually refreshed.
+        if crawl_time > now:
+            return False, f"文档时间戳晚于当前时间（{crawl_time.strftime('%Y-%m-%d %H:%M:%S')}）"
         if newest_time is None or crawl_time > newest_time:
             newest_time = crawl_time
     
