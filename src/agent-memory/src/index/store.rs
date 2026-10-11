@@ -1287,26 +1287,37 @@ fn blob_to_f32(blob: &[u8]) -> Vec<f32> {
 }
 
 /// Add `superseded_by` to the frontmatter of an existing markdown file.
+///
+/// The frontmatter opening fence is only recognized at byte 0: indexed files
+/// are not guaranteed to carry frontmatter (`mem_write` stores raw content),
+/// and a `---` separator inside the body must never be mistaken for a fence —
+/// splicing the marker there would corrupt the note.
 fn add_superseded_frontmatter(path: &std::path::Path, new_id: &str) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
-    if content.contains("superseded_by:") {
+    // Files without a leading frontmatter fence are left untouched: the
+    // DB flag is the authoritative supersession marker (see `supersede`).
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return Ok(());
+    };
+    // Locate the closing fence so the marker lands inside the frontmatter.
+    // A `superseded_by:` mention in the body does not count — only the
+    // frontmatter block can hold the authoritative on-disk marker.
+    let Some(fence_rel) = rest.find("\n---") else {
+        return Ok(()); // unclosed frontmatter — nothing to anchor to
+    };
+    let frontmatter = &rest[..fence_rel];
+    if frontmatter.contains("superseded_by:") {
         return Ok(()); // Already superseded.
     }
-    // Insert superseded_by after the first --- line if it exists.
-    if let Some(pos) = content.find("---\n") {
-        let after_first = pos + 4;
-        if let Some(second_pos) = content[after_first..].find("---\n") {
-            // Insert before the closing ---.
-            let insert_point = after_first + second_pos;
-            let new_content = format!(
-                "{}superseded_by: {}\n{}",
-                &content[..insert_point],
-                new_id,
-                &content[insert_point..]
-            );
-            std::fs::write(path, new_content)?;
-        }
-    }
+    // Insert as the last frontmatter key, right before the closing fence.
+    let insert_point = 4 + fence_rel + 1;
+    let new_content = format!(
+        "{}superseded_by: {}\n{}",
+        &content[..insert_point],
+        new_id,
+        &content[insert_point..]
+    );
+    std::fs::write(path, new_content)?;
     Ok(())
 }
 
@@ -2079,5 +2090,103 @@ mod tests {
                 "expected InvalidArgument for {bad:?}, got {err:?}"
             );
         }
+    }
+
+    /// Open an on-disk store whose db sits at `<tmp>/.anolisa/index/bm25.db`,
+    /// so `supersede` derives `mount_root = <tmp>` exactly as in production.
+    fn open_store_at_mount(tmp: &Path) -> Result<BM25Store> {
+        let db_path = tmp.join(".anolisa").join("index").join("bm25.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        BM25Store::open(&db_path, 0.01, 0.3, true)
+    }
+
+    #[test]
+    fn supersede_leaves_frontmatter_less_file_untouched() {
+        // Regression: the marker search used the first `---\n` anywhere in
+        // the file, so a `mem_write` note without frontmatter whose body
+        // uses `---` separators got `superseded_by:` spliced into its body.
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("notes").join("deploy.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        let original = "# Deploy checklist\n\nsteps\n\n---\n\nrollback\n\n---\n\nend\n";
+        std::fs::write(&note, original).unwrap();
+
+        let mut s = open_store_at_mount(tmp.path()).unwrap();
+        s.upsert("notes/deploy.md", 0, 10, original, None).unwrap();
+        s.supersede("notes/deploy.md", "01HNEWFACT").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&note).unwrap(),
+            original,
+            "frontmatter-less note must not be modified"
+        );
+    }
+
+    #[test]
+    fn supersede_marks_frontmatter_file_inside_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("facts").join("lesson").join("x.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        let original = "---\nid: abc\ntitle: t\n---\n\nbody text\n";
+        std::fs::write(&note, original).unwrap();
+
+        let mut s = open_store_at_mount(tmp.path()).unwrap();
+        s.upsert("facts/lesson/x.md", 0, 10, original, None)
+            .unwrap();
+        s.supersede("facts/lesson/x.md", "01HNEWFACT").unwrap();
+
+        let after = std::fs::read_to_string(&note).unwrap();
+        // Marker present, and inside the frontmatter block — before the
+        // closing fence, not in the body.
+        let marker = after.find("superseded_by: 01HNEWFACT").unwrap();
+        let closing = after[4..].find("\n---").unwrap() + 4;
+        assert!(
+            marker < closing,
+            "marker must stay inside frontmatter: {after:?}"
+        );
+        // Body content is preserved verbatim after the closing fence.
+        assert!(after.ends_with("---\n\nbody text\n"));
+    }
+
+    #[test]
+    fn supersede_ignores_superseded_by_mention_in_body() {
+        // The "already superseded" short-circuit must look at the
+        // frontmatter only; a body that merely mentions the key still
+        // gets marked.
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("facts").join("lesson").join("y.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        let original = "---\nid: abc\n---\n\nnotes about superseded_by semantics\n";
+        std::fs::write(&note, original).unwrap();
+
+        let mut s = open_store_at_mount(tmp.path()).unwrap();
+        s.upsert("facts/lesson/y.md", 0, 10, original, None)
+            .unwrap();
+        s.supersede("facts/lesson/y.md", "01HNEWFACT").unwrap();
+
+        let after = std::fs::read_to_string(&note).unwrap();
+        assert!(after.contains("superseded_by: 01HNEWFACT"));
+        assert!(after.contains("notes about superseded_by semantics"));
+    }
+
+    #[test]
+    fn supersede_skips_unclosed_frontmatter() {
+        // A file that starts with `---\n` but never closes the block has
+        // no frontmatter region to anchor the marker in — leave it alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("notes").join("odd.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        let original = "---\nlooks like frontmatter but never closes\n";
+        std::fs::write(&note, original).unwrap();
+
+        let mut s = open_store_at_mount(tmp.path()).unwrap();
+        s.upsert("notes/odd.md", 0, 10, original, None).unwrap();
+        s.supersede("notes/odd.md", "01HNEWFACT").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&note).unwrap(),
+            original,
+            "unclosed frontmatter must not be modified"
+        );
     }
 }
