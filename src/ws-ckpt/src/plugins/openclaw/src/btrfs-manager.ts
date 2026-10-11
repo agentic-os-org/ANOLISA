@@ -165,10 +165,11 @@ export class BtrfsManager {
       return { success: false, message: "Workspace not initialized" };
     }
 
+    const snapshotId = options?.id ?? `snap-${Date.now()}`;
     try {
       const output = await this.executor.checkpoint(
         this.workspacePath,
-        options?.id ?? `snap-${Date.now()}`,
+        snapshotId,
         {
           message: options?.message,
           metadata: options?.metadata,
@@ -178,7 +179,7 @@ export class BtrfsManager {
       if (output.exitCode !== 0) {
         return {
           success: false,
-          message: mapErrorToLLMMessage(output.stderr, { id: options?.id }),
+          message: mapErrorToLLMMessage(output.stderr, { id: snapshotId }),
         };
       }
 
@@ -187,9 +188,8 @@ export class BtrfsManager {
         return { success: true, skipped: true, reason: 'Empty workspace, no snapshot created.', message: 'Empty workspace, no snapshot created.' };
       }
 
-      // Use the caller-supplied ID directly — CLI stdout may contain
+      // Use the ID sent to the CLI directly — stdout may contain
       // ANSI codes / prompt text that breaks parseSnapshotIdFromOutput.
-      const snapshotId = options?.id ?? `snap-${Date.now()}`;
 
       // Update local cache
       let parsedMetadata: Record<string, unknown> | undefined;

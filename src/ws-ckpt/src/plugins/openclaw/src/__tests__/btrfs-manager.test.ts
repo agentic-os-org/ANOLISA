@@ -255,6 +255,31 @@ describe("BtrfsManager with mocked executor", () => {
     expect(mgr.getStore().count).toBe(1);
   });
 
+  it("keeps a generated snapshot ID stable across an asynchronous checkpoint", async () => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi.fn().mockResolvedValue(ok("[]"));
+    await mgr.initialize("/ws");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    exec.checkpoint = vi.fn().mockImplementation(async () => {
+      clock.mockReturnValue(2000);
+      return ok("done");
+    });
+    try {
+      const result = await mgr.createCheckpoint();
+      expect(exec.checkpoint).toHaveBeenCalledWith("/ws", "snap-1000", {
+        message: undefined,
+        metadata: undefined,
+      });
+      expect(result.snapshot).toBe("snap-1000");
+      expect(result.message).toContain("snap-1000");
+      expect(mgr.getStore().getAll()[0].snapshot).toBe("snap-1000");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("createCheckpoint with invalid metadata JSON", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
