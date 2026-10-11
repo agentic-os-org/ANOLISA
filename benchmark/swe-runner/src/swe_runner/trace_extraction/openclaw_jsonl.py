@@ -295,22 +295,17 @@ def _tool_name(value: Any) -> str:
     return value if isinstance(value, str) and value else "__unknown__"
 
 
-def _tool_response_text_metrics(responses: list[dict[str, Any]]) -> dict[str, int]:
-    chars = 0
-    lines = 0
-    tokens = 0
-    for response in responses:
-        text = response.get("response")
-        if not isinstance(text, str):
-            continue
-        chars += len(text)
-        lines += len(text.splitlines()) if text else 0
-        tokens += count_tokens(text)
-    return {
-        "tool_response_chars": chars,
-        "tool_response_lines": lines,
-        "tool_response_tokens_approx": tokens,
-    }
+def _tool_response_metrics(response: dict[str, Any]) -> Counter[str]:
+    text = response.get("response")
+    return Counter(
+        {
+            "tool_response_count": 1,
+            "failed_tool_response_count": int(_is_failed_tool_response(response)),
+            "tool_response_chars": len(text) if isinstance(text, str) else 0,
+            "tool_response_lines": len(text.splitlines()) if isinstance(text, str) else 0,
+            "tool_response_tokens_approx": count_tokens(text) if isinstance(text, str) else 0,
+        }
+    )
 
 
 def _is_failed_tool_response(response: dict[str, Any]) -> bool:
@@ -325,24 +320,17 @@ def _is_failed_tool_response(response: dict[str, Any]) -> bool:
     return False
 
 
-def _attach_tool_responses(step: dict[str, Any], responses: list[dict[str, Any]]) -> dict[str, int]:
-    if not responses:
-        metrics = {
-            "tool_response_count": 0,
-            "failed_tool_response_count": 0,
-            "tool_response_chars": 0,
-            "tool_response_lines": 0,
-            "tool_response_tokens_approx": 0,
-        }
-        step.update(metrics)
-        return metrics
-
-    step["tool_responses"] = responses
-    metrics = _tool_response_text_metrics(responses)
-    metrics["tool_response_count"] = len(responses)
-    metrics["failed_tool_response_count"] = sum(1 for response in responses if _is_failed_tool_response(response))
-    step.update(metrics)
-    return metrics
+def _attach_tool_responses(step: dict[str, Any], responses: list[dict[str, Any]], metrics: Counter[str]) -> None:
+    if responses:
+        step.setdefault("tool_responses", []).extend(responses)
+    for field in (
+        "tool_response_count",
+        "failed_tool_response_count",
+        "tool_response_chars",
+        "tool_response_lines",
+        "tool_response_tokens_approx",
+    ):
+        step[field] = int(step.get(field, 0)) + metrics[field]
 
 
 def _exec_command_from_tool_call(part: dict[str, Any]) -> str | None:
@@ -408,6 +396,7 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
     tool_call_counts: Counter[str] = Counter()
     tool_result_counts: Counter[str] = Counter()
     pending_tool_responses: list[dict[str, Any]] = []
+    pending_response_metrics: Counter[str] = Counter()
 
     for entry in entries:
         timestamp_ns = _timestamp_ns(entry)
@@ -422,15 +411,15 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
         if role == "toolResult":
             tool_response = _tool_response_from_entry(entry, parts)
             pending_tool_responses.append(tool_response)
+            response_metrics = _tool_response_metrics(tool_response)
+            pending_response_metrics.update(response_metrics)
             tool_result_count += 1
             response_tool_name = _tool_name(tool_response.get("tool_name"))
             tool_result_counts[response_tool_name] += 1
-            if _is_failed_tool_response(tool_response):
-                failed_tool_result_count += 1
-            response_text_metrics = _tool_response_text_metrics([tool_response])
-            tool_result_chars += response_text_metrics["tool_response_chars"]
-            tool_result_lines += response_text_metrics["tool_response_lines"]
-            tool_result_tokens_approx += response_text_metrics["tool_response_tokens_approx"]
+            failed_tool_result_count += response_metrics["failed_tool_response_count"]
+            tool_result_chars += response_metrics["tool_response_chars"]
+            tool_result_lines += response_metrics["tool_response_lines"]
+            tool_result_tokens_approx += response_metrics["tool_response_tokens_approx"]
 
         raw_usage = _entry_usage(entry)
         usage = _normalize_usage(raw_usage)
@@ -497,8 +486,9 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
                 git_diff_command_count += 1
             if _is_search_command(command):
                 search_command_count += 1
-        _attach_tool_responses(step, pending_tool_responses)
+        _attach_tool_responses(step, pending_tool_responses, pending_response_metrics)
         pending_tool_responses = []
+        pending_response_metrics = Counter()
 
         if assistant_parts:
             step["assistant_output"] = assistant_parts
@@ -516,20 +506,7 @@ def reconstruct_openclaw_jsonl_session(path: Path) -> dict[str, Any] | None:
     if not steps:
         return None
     if pending_tool_responses:
-        step = steps[-1]
-        step_tool_responses = step.setdefault("tool_responses", [])
-        if isinstance(step_tool_responses, list):
-            step_tool_responses.extend(pending_tool_responses)
-            metrics = _tool_response_text_metrics(pending_tool_responses)
-            step["tool_response_count"] = int(step.get("tool_response_count", 0)) + len(pending_tool_responses)
-            step["failed_tool_response_count"] = int(step.get("failed_tool_response_count", 0)) + sum(
-                1 for response in pending_tool_responses if _is_failed_tool_response(response)
-            )
-            step["tool_response_chars"] = int(step.get("tool_response_chars", 0)) + metrics["tool_response_chars"]
-            step["tool_response_lines"] = int(step.get("tool_response_lines", 0)) + metrics["tool_response_lines"]
-            step["tool_response_tokens_approx"] = int(step.get("tool_response_tokens_approx", 0)) + metrics[
-                "tool_response_tokens_approx"
-            ]
+        _attach_tool_responses(steps[-1], pending_tool_responses, pending_response_metrics)
 
     issue_id = extract_issue_id(first_user_msg) or _local_agent_id_from_session_file(path)
 
