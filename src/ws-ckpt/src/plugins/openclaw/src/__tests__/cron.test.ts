@@ -241,3 +241,59 @@ describe("CrontabManager.listInstalled", () => {
     expect(await CrontabManager.listInstalled("/ws")).toEqual([]);
   });
 });
+// ---------------------------------------------------------------------------
+// withLock ownership (appended)
+// ---------------------------------------------------------------------------
+
+const mockRmdirSync = rmdirSync as ReturnType<typeof vi.fn>;
+
+describe("withLock ownership", () => {
+  it("the owner removes the lock after the operation", async () => {
+    mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+    expect(await CrontabManager.sync("/ws", [])).toBe(true);
+    expect(mockRmdirSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("a timed-out caller must not evict the current holder's lock", async () => {
+    vi.useFakeTimers();
+    try {
+      // The lock directory exists and its owner never releases it.
+      mockMkdirSync.mockImplementation(() => {
+        const e = new Error("EEXIST") as NodeJS.ErrnoException;
+        e.code = "EEXIST";
+        throw e;
+      });
+      mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+      const pending = CrontabManager.sync("/ws", []);
+      await vi.advanceTimersByTimeAsync(5100);
+      // Fail-open is the documented behavior: the sync still runs.
+      expect(await pending).toBe(true);
+      // But the caller never owned the lock, so it must not remove it —
+      // doing so would admit a third writer while the holder still runs.
+      expect(mockRmdirSync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a caller blocked by a non-contention error also leaves the lock alone", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMkdirSync.mockImplementation(() => {
+        const e = new Error("EACCES") as NodeJS.ErrnoException;
+        e.code = "EACCES";
+        throw e;
+      });
+      mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+      const pending = CrontabManager.sync("/ws", []);
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(await pending).toBe(true);
+      expect(mockRmdirSync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
