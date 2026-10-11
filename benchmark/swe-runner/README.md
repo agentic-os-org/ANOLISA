@@ -409,6 +409,10 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+When collecting a time window or a run selected by metadata, reports contain only
+that collection's traces, including an empty report when no traces match.
+Without collection options, analysis includes all traces under `--trace-root`.
+
 Analyze existing traces:
 
 ```bash
