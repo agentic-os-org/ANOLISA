@@ -45,6 +45,7 @@ if _CLAW_EVAL_SRC.is_dir():
     sys.path.insert(0, str(_CLAW_EVAL_SRC))
 
 from ce_runner._common import (OPENCLAW_CONFIG, load_task_yaml, log, _REPO_DIR)
+from ce_runner.task_paths import resolve_task_path
 from ce_runner.infra import (configure_tools, cleanup_mock_services,
                               reset_services, start_mock_services,
                               restart_gateway, cleanup_config,
@@ -159,20 +160,16 @@ def main():
     timeout = args.timeout
 
     # Resolve task
-    task_yaml = str(Path(task_path))
-    if not Path(task_yaml).exists():
-        task_yaml = str(_REPO_DIR / "claw-eval" / "tasks" / task_path / "task.yaml")
-    if not Path(task_yaml).exists():
-        task_yaml = str(_REPO_DIR / "claw-eval" / "tasks" / task_path)
-    if not Path(task_yaml).exists():
-        log(f"[ERROR] Task not found: {task_path}")
+    try:
+        task_yaml, task_dir = resolve_task_path(
+            task_path, tasks_dir=_REPO_DIR / "claw-eval" / "tasks"
+        )
+    except ValueError as error:
+        log(f"[ERROR] {error}")
         sys.exit(1)
-    if not task_yaml.endswith(".yaml"):
-        task_yaml = os.path.join(task_yaml, "task.yaml")
 
     task = load_task_yaml(task_yaml)
     task_id = task["task_id"]
-    task_dir = str(Path(task_yaml).parent)
 
     log("=" * 60)
     log(f"  Prompt Task: {task_id}")
