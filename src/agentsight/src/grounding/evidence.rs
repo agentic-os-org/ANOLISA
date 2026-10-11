@@ -634,6 +634,12 @@ fn is_derived(value: f64, pool: &[EvidenceEntry]) -> bool {
             if *b != 0.0 && numbers_agree(value, a / b) {
                 return true;
             }
+            // Ratios are not commutative: an error rate or share is the
+            // quotient of the smaller operand by the larger, so checking only
+            // `a / b` reported a correctly computed ratio as invented.
+            if *a != 0.0 && numbers_agree(value, b / a) {
+                return true;
+            }
         }
     }
     false
