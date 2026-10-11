@@ -15,8 +15,8 @@ pub(crate) fn redact_text(text: &str) -> String {
         (authorization_pattern(), "$prefix$scheme <redacted>"),
         (bearer_pattern(), "$prefix<redacted>"),
         (url_password_pattern(), "$prefix<redacted>@"),
-        (sensitive_flag_pattern(), "$prefix<redacted>$suffix"),
-        (sensitive_assignment_pattern(), "$prefix<redacted>$suffix"),
+        (sensitive_flag_pattern(), "$prefix<redacted>"),
+        (sensitive_assignment_pattern(), "$prefix<redacted>"),
         (github_token_pattern(), "<redacted>"),
         (opaque_token_pattern(), "<redacted>"),
         (jwt_pattern(), "<redacted>"),
@@ -254,8 +254,11 @@ fn private_key_marker_range(line: &str, marker: &str) -> Option<(usize, usize)> 
 fn cookie_header_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
+        // Unanchored, mirroring cosh-platform/src/audit/redact.rs: a Cookie
+        // header passed as `curl -H "Cookie: …"` never sits at a line start,
+        // so the old `^`-anchored pattern let the whole header through.
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?im)(?P<prefix>^(?:set-cookie|cookie)\s*:\s*).*$")
+        Regex::new(r"(?im)(?P<prefix>\b(?:set-cookie|cookie)\s*:\s*)[^\r\n]*")
             .unwrap_or_else(|_| unreachable!("static cookie pattern must compile"))
     })
 }
@@ -293,18 +296,31 @@ fn sensitive_flag_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
+        // The key catalog and the value-span alternation mirror
+        // cosh-shell/src/evidence/redaction.rs and
+        // cosh-platform/src/audit/redact.rs — the three copies must stay in
+        // sync. Values are matched as complete shell words: a quoted secret
+        // runs to its closing quote (or end of input — fail-closed), an
+        // escaped continuation runs to the first unescaped separator, so a
+        // multi-word password can never be half redacted.
+        // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
             r#"(?ix)
             (?P<prefix>
                 (?:^|\s)
                 --(?:password|passwd|passphrase|token|access[_-]?token|refresh[_-]?token|
-                     id[_-]?token|secret|client[_-]?secret|api[_-]?key|apikey|
+                     id[_-]?token|secret|secret[_-]?key|secret[_-]?access[_-]?key|
+                     private[_-]?key|auth[_-]?token|session[_-]?token|credentials?|bearer|
+                     client[_-]?secret|api[_-]?key|apikey|access[_-]?key|
                      access[_-]?key[_-]?secret|security[_-]?token|authorization)
                 (?:=|\s+)
-                ["']?
             )
-            (?P<value>[^\s,;&"']+)
-            (?P<suffix>["']?)
+            (?:
+                "(?:\\(?:\r?\n|[^"\\\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
             "#,
         )
         .unwrap_or_else(|_| unreachable!("static sensitive flag pattern must compile"))
@@ -315,23 +331,30 @@ fn sensitive_assignment_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
+        // Same key catalog and value-span alternation as the flag pattern
+        // (mirrors cosh-shell/cosh-platform; see the note there).
+        // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
             r#"(?ix)
             (?P<prefix>
-                ["']?
+                (?:^|[\s"'])
                 (?:alibaba[_-]?cloud[_-]?access[_-]?key[_-]?id|
                    aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|
                    aws[_-]?secret[_-]?access[_-]?key|access[_-]?key[_-]?secret|
+                   secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|
+                   auth[_-]?token|session[_-]?token|credentials?|bearer|
                    dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|
                    client[_-]?secret|security[_-]?token|refresh[_-]?token|
                    access[_-]?token|github[_-]?token|id[_-]?token|
                    password|passphrase|passwd|api[_-]?key|apikey|token|secret)
-                ["']?
                 \s*(?:=|:)\s*
-                ["']?
             )
-            (?P<value>[^\s,;&"']+)
-            (?P<suffix>["']?)
+            (?:
+                "(?:\\(?:\r?\n|[^"\\\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
             "#,
         )
         .unwrap_or_else(|_| unreachable!("static sensitive assignment pattern must compile"))
@@ -465,5 +488,74 @@ mod tests {
         let redacted = redact_text(input);
 
         assert_eq!(redacted, "<redacted private key block>' --token <redacted>");
+    }
+
+    #[test]
+    fn redacts_quoted_multi_word_flag_and_assignment_values() {
+        // A quoted secret runs to its closing quote: multi-word passwords
+        // were half redated before (only up to the first space).
+        let out = redact_text(r#"run --password "correct horse battery staple""#);
+        assert_eq!(out, "run --password <redacted>");
+        for word in ["correct", "horse", "battery", "staple"] {
+            assert!(!out.contains(word), "leaked {word}: {out}");
+        }
+
+        let out = redact_text("mysql --password='swordfish hunter two'");
+        assert_eq!(out, "mysql --password=<redacted>");
+        for word in ["swordfish", "hunter", "two"] {
+            assert!(!out.contains(word), "leaked {word}: {out}");
+        }
+    }
+
+    #[test]
+    fn redacts_escaped_continuation_values() {
+        // An escaped continuation runs to the first unescaped separator.
+        let out = redact_text(r"pkg install --password=head\ LEAKSTRUCTESCTAIL");
+        assert_eq!(out, "pkg install --password=<redacted>");
+        assert!(!out.contains("LEAKSTRUCTESCTAIL"), "leaked tail: {out}");
+
+        // The redaction must stop at the separator and not eat later flags.
+        let out = redact_text(r"tool --token=alpha\ beta --region cn");
+        assert!(!out.contains("alpha"), "leaked token: {out}");
+        assert!(out.contains("--region cn"), "later flags kept: {out}");
+    }
+
+    #[test]
+    fn redacts_unterminated_quoted_value_to_end_of_input() {
+        // Fail-closed: no closing quote means the rest of the input is the
+        // secret.
+        let out = redact_text(r#"tool --password "unterminated secret tail"#);
+        assert_eq!(out, "tool --password <redacted>");
+        assert!(!out.contains("unterminated"), "leaked: {out}");
+    }
+
+    #[test]
+    fn redacts_platform_secret_key_names() {
+        // The platform key catalog (issue #1618 / PR #1765) ported to core.
+        for (input, secret) in [
+            (
+                "SECRET_KEY=django-insecure-1a2b3c4d",
+                "django-insecure-1a2b3c4d",
+            ),
+            ("private_key=rawbase64secret", "rawbase64secret"),
+            ("--secret-key sk-live-abcdef", "sk-live-abcdef"),
+            ("--auth-token tok123", "tok123"),
+            ("--session-token sess456", "sess456"),
+            ("--credentials cred789", "cred789"),
+        ] {
+            let out = redact_text(input);
+            assert!(!out.contains(secret), "leaked {secret} from {input}: {out}");
+        }
+    }
+
+    #[test]
+    fn redacts_mid_line_cookie_headers() {
+        // A Cookie header passed as a curl -H argument never sits at a line
+        // start; the old ^-anchored pattern let the whole header through.
+        let out = redact_text(r#"curl -H "Cookie: SESSIONID=deadbeefcafe1234" https://x"#);
+        assert!(!out.contains("deadbeefcafe1234"), "leaked cookie: {out}");
+
+        let out = redact_text("printf 'Set-Cookie: csrf=tok123; Path=/'");
+        assert!(!out.contains("tok123"), "leaked set-cookie: {out}");
     }
 }
