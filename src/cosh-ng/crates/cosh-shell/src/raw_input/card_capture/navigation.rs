@@ -71,11 +71,34 @@ impl CardInputState {
                 self.draft.move_line_end();
                 events.extend(self.input_event(capture));
             }
-            (b"200", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
-                self.draft_paste = true;
+            // Paste payload starts: until the closer, payload bytes are
+            // data, not keystrokes (#1721). Draft and free-text captures
+            // track the paste; choice-only cards keep ignoring it.
+            (b"200", b'~')
+                if matches!(
+                    capture,
+                    RawInputCapture::PromptDraft { .. }
+                        | RawInputCapture::TextQuestion { .. }
+                        | RawInputCapture::Question {
+                            allow_free_text: true,
+                            ..
+                        }
+                ) =>
+            {
+                self.pasting = true;
             }
-            (b"201", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
-                self.draft_paste = false;
+            (b"201", b'~')
+                if matches!(
+                    capture,
+                    RawInputCapture::PromptDraft { .. }
+                        | RawInputCapture::TextQuestion { .. }
+                        | RawInputCapture::Question {
+                            allow_free_text: true,
+                            ..
+                        }
+                ) =>
+            {
+                self.pasting = false;
             }
             (_, b'~') => {
                 // Bracketed paste and keypad sequences such as Delete end with

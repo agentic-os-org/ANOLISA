@@ -5,12 +5,13 @@ use crate::question::choices::toggle_question_option;
 use events::{
     approval_event_for_action, cancel_event, capture_action_set, capture_initial_selection,
     card_answer_event, empty_question_submission, is_csi_final_byte,
-    is_removed_question_answer_slash, is_removed_question_answer_slash_fragment,
-    question_choice_count, releases_capture, selected_options_answer,
+    is_removed_question_answer_slash, question_choice_count, releases_capture,
+    selected_options_answer,
 };
 // capture_bridge shares events::releases_capture with the consume loop (#1932).
 pub(in crate::raw_input) mod events;
 mod navigation;
+mod paste;
 mod prompt_draft;
 mod text;
 
@@ -26,9 +27,10 @@ pub(super) struct CardInputState {
     pending_input: Vec<u8>,
     /// Multi-line draft state while a PromptDraft capture is active (#1721).
     draft: PromptDraftEditor,
-    /// Bracketed paste passthrough inside the draft card: newlines paste as
-    /// draft newlines instead of submitting.
-    draft_paste: bool,
+    /// Bracketed paste in progress (#1721): payload bytes are data, not
+    /// keystrokes. Set on `200~`, cleared on `201~`, for draft and
+    /// free-text captures alike.
+    pasting: bool,
     draft_selection: Option<prompt_draft::DraftSlashSelection>,
 }
 
@@ -183,7 +185,7 @@ impl CardInputState {
                 }
                 _ => PromptDraftEditor::default(),
             };
-            self.draft_paste = false;
+            self.pasting = false;
         }
     }
 
@@ -195,7 +197,7 @@ impl CardInputState {
         self.session_marked_for_clear.clear();
         self.pending_input.clear();
         self.draft = PromptDraftEditor::default();
-        self.draft_paste = false;
+        self.pasting = false;
         self.draft_selection = None;
     }
 
@@ -222,6 +224,27 @@ impl CardInputState {
         }
         let mut idx = 0;
         while idx < input.len() {
+            if self.pasting(capture) {
+                match input[idx] {
+                    // Pasted control bytes and lone ESC bytes are data, not
+                    // editing keys (#1721); only the 201~ closer (or its
+                    // split head) stays a control sequence.
+                    0x01 | 0x05 | 0x15 | 0x08 | 0x7f => {
+                        idx += 1;
+                        continue;
+                    }
+                    0x1b if input.get(idx + 1).is_none() => {
+                        self.pending_input.push(0x1b);
+                        idx += 1;
+                        break;
+                    }
+                    0x1b if !paste::is_paste_closer_prefix(&input[idx..]) => {
+                        idx += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             match input[idx] {
                 CTRL_C => {
                     match capture {
@@ -258,7 +281,7 @@ impl CardInputState {
                     idx += 1;
                 }
                 b'\r' | b'\n' => {
-                    if matches!(capture, RawInputCapture::PromptDraft { .. }) && self.draft_paste {
+                    if matches!(capture, RawInputCapture::PromptDraft { .. }) && self.pasting {
                         idx = self.draft_pasted_newline(capture, &input, idx, &mut events);
                         continue;
                     }
@@ -652,44 +675,6 @@ impl CardInputState {
             }
             RawInputCapture::Evidence { id } => Some(RawInputEvent::EvidenceSend(id.clone())),
             RawInputCapture::PromptDraft { id, .. } => self.draft_submit_event(id, capture),
-        }
-    }
-
-    fn input_event(&self, capture: &RawInputCapture) -> Option<RawInputEvent> {
-        match capture {
-            RawInputCapture::Question {
-                id,
-                allow_free_text,
-                secret,
-                ..
-            } if *allow_free_text => {
-                if is_removed_question_answer_slash_fragment(&self.free_text) {
-                    return None;
-                }
-                if *secret {
-                    Some(RawInputEvent::CardSecretInput(
-                        id.clone(),
-                        self.free_text.clone(),
-                    ))
-                } else {
-                    Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
-                }
-            }
-            RawInputCapture::TextQuestion { id, secret, .. } => {
-                if is_removed_question_answer_slash_fragment(&self.free_text) {
-                    return None;
-                }
-                if *secret {
-                    Some(RawInputEvent::CardSecretInput(
-                        id.clone(),
-                        self.free_text.clone(),
-                    ))
-                } else {
-                    Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
-                }
-            }
-            RawInputCapture::PromptDraft { id, .. } => Some(self.draft_changed_event(id)),
-            _ => None,
         }
     }
 }
