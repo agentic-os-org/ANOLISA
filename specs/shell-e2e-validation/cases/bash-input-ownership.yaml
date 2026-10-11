@@ -1,0 +1,234 @@
+version: 1
+suite: bash-input-ownership
+defaults:
+  execution: ci
+  shell_mode: isolated
+  adapter: cosh-core
+  approval_mode: ask
+  analysis_mode: smart
+  render: terminal
+  timeout_ms: 30000
+  real_provider: false
+  command:
+    - bash
+    - -lc
+    - >-
+      cd /work/repo/src/cosh-ng &&
+      cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+      exec env TERM=xterm-256color COSH_SHELL_WIDTH=96
+      COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0
+      COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0
+      COSH_SHELL_LANG=zh-CN COSH_SHELL_RAW_SHELL=bash
+      COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+      "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
+cases:
+  - id: I01-BASH-READ-E-OWNED
+    title: Bash read -e owns foreground natural-language input
+    tags: [shell, bash, input-ownership, readline]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          prompt='__I01_READ_'E'_READY__ '; IFS= read -e -r -p "$prompt" value;
+          digest=$(printf '%s' "$value" | sha256sum | cut -d' ' -f1);
+          printf '__I01_READ_E_SHA256__<%s>\n' "$digest"
+      - type: wait_for
+        text: "__I01_READ_E_READY__ "
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: read-e-owned
+        type: wait_for
+        text: "__I01_READ_E_SHA256__<bcaf207825c2c392dceac732cf645bf40b18a8ac3318b9925c0da78f3a4aaab3>"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__I01_READ_E_SHA256__<bcaf207825c2c392dceac732cf645bf40b18a8ac3318b9925c0da78f3a4aaab3>"
+      not_contains:
+        - "failed to run cosh-core"
+    evidence:
+      points:
+        - id: read-e-owned
+          trigger_event: read-e-owned
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-READ-S-OWNED
+    title: Bash read -s owns and suppresses foreground natural-language input
+    tags: [shell, bash, input-ownership, password]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          prompt='__I01_READ_'S'_READY__ '; IFS= read -r -s -p "$prompt" value; printf '\n';
+          digest=$(printf '%s' "$value" | sha256sum | cut -d' ' -f1);
+          printf '__I01_READ_S_SHA256__<%s>\n' "$digest"
+      - type: wait_for
+        text: "__I01_READ_S_READY__ "
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: read-s-owned
+        type: wait_for
+        text: "__I01_READ_S_SHA256__<bcaf207825c2c392dceac732cf645bf40b18a8ac3318b9925c0da78f3a4aaab3>"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__I01_READ_S_SHA256__<bcaf207825c2c392dceac732cf645bf40b18a8ac3318b9925c0da78f3a4aaab3>"
+      not_contains:
+        - '解释一下 ls -la "当前目录 (preview)"'
+        - "failed to run cosh-core"
+    evidence:
+      points:
+        - id: read-s-owned
+          trigger_event: read-s-owned
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-PS1-AGENT-CONTROL
+    title: Bash routes the shared payload to Agent when no foreground consumer exists
+    tags: [shell, bash, input-ownership, control]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 10000
+      - type: line
+        text: '解释一下 ls -la "当前目录 (preview)"'
+      - id: ps1-agent-control
+        type: wait_for
+        text: "failed to run cosh-core: No such file or directory"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "failed to run cosh-core: No such file or directory"
+      not_contains:
+        - "__I01_READ_E_SHA256__<bcaf207825c2c392dceac732cf645bf40b18a8ac3318b9925c0da78f3a4aaab3>"
+    evidence:
+      points:
+        - id: ps1-agent-control
+          trigger_event: ps1-agent-control
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-READ-E-TAB-OWNED
+    title: Tab inside read -e completes through Bash Readline even while a Cosh ghost was armed
+    tags: [shell, bash, input-ownership, readline, completion]
+    shell: bash
+    command:
+      - bash
+      - -lc
+      - >-
+        cd /work/repo/src/cosh-ng &&
+        cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+        rm -rf /tmp/li-tab /tmp/li-tab-home && mkdir -p /tmp/li-tab /tmp/li-tab-home &&
+        : > /tmp/li-tab/unique-alpha-file &&
+        exec env HOME=/tmp/li-tab-home TERM=xterm-256color COSH_SHELL_WIDTH=110
+        COSH_SHELL_STARTUP_BANNER=1
+        COSH_SHELL_HEALTH_SCAN=fixture:linux-warning
+        COSH_SHELL_HEALTH_SUPPRESSION_STORE=/tmp/li-tab-home/health-suppression
+        COSH_RECOMMENDATIONS_ENABLED=0 COSH_SHELL_LANG=en-US COSH_SHELL_RAW_SHELL=bash
+        COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+        "$CARGO_TARGET_DIR/debug/cosh-shell" raw fake
+    input:
+      - type: wait_for
+        text: " › Analyze memory pressure and identify top consumers"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          prompt='__I01_TAB_'READY'__ '; IFS= read -e -r -p "$prompt" v;
+          printf '__I01_TAB_%s__<%s>\n' VALUE "$v"
+      - type: wait_for
+        text: "__I01_TAB_READY__ "
+        timeout_ms: 10000
+      - type: bytes
+        text: "/tmp/li-tab/uniq"
+      - type: bytes
+        hex: "09"
+      - type: delay
+        ms: 300
+      - type: key
+        name: enter
+      - id: read-e-tab-owned
+        type: wait_for
+        text: "__I01_TAB_VALUE__<"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        # Readline appends a space after completing a unique non-directory match.
+        - "__I01_TAB_VALUE__</tmp/li-tab/unique-alpha-file >"
+      not_contains:
+        - "Received shell prompt request"
+    evidence:
+      points:
+        - id: read-e-tab-owned
+          trigger_event: read-e-tab-owned
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: I01-BASH-PS1-GHOST-TAB-CONTROL
+    title: Tab at the primary prompt with a Cosh ghost is Cosh-owned and submits the suggestion
+    tags: [shell, bash, input-ownership, completion, control]
+    shell: bash
+    command:
+      - bash
+      - -lc
+      - >-
+        cd /work/repo/src/cosh-ng &&
+        cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+        rm -rf /tmp/li-tab-home && mkdir -p /tmp/li-tab-home &&
+        exec env HOME=/tmp/li-tab-home TERM=xterm-256color COSH_SHELL_WIDTH=110
+        COSH_SHELL_STARTUP_BANNER=1
+        COSH_SHELL_HEALTH_SCAN=fixture:linux-warning
+        COSH_SHELL_HEALTH_SUPPRESSION_STORE=/tmp/li-tab-home/health-suppression
+        COSH_RECOMMENDATIONS_ENABLED=0 COSH_SHELL_LANG=en-US COSH_SHELL_RAW_SHELL=bash
+        COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+        "$CARGO_TARGET_DIR/debug/cosh-shell" raw fake
+    input:
+      - type: wait_for
+        text: " › Analyze memory pressure and identify top consumers"
+        timeout_ms: 20000
+      - type: bytes
+        hex: "09"
+      - type: delay
+        ms: 300
+      - type: key
+        name: enter
+      - id: ps1-ghost-tab-control
+        type: wait_for
+        text: "Received shell prompt request"
+        timeout_ms: 10000
+      - type: delay
+        ms: 500
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "Received shell prompt request: Analyze memory pressure and identify top consumers"
+      not_contains:
+        - "command not found"
+    evidence:
+      points:
+        - id: ps1-ghost-tab-control
+          trigger_event: ps1-ghost-tab-control
+          layout_sensitive: true
+          required_types: [screenshot]

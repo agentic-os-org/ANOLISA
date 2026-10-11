@@ -87,6 +87,29 @@ impl std::fmt::Debug for ShellHistoryFileObserver {
     }
 }
 
+/// Receives the managed shell's PATH once, after its startup files ran.
+#[derive(Clone)]
+pub(super) struct ShellStartupPathObserver(Arc<dyn Fn(Option<String>) + Send + Sync + 'static>);
+
+impl std::fmt::Debug for ShellStartupPathObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellStartupPathObserver")
+    }
+}
+
+impl ShellStartupPathObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, path: Option<String>) {
+        (self.0)(path);
+    }
+}
+
 /// #2179: renders the input-wait hint card body into panel-family framed
 /// lines. Injected by the runtime bootstrap (which owns the UI renderer)
 /// so the relay-side sentinel emits the exact NoticePanel framing — width
@@ -197,6 +220,7 @@ pub struct ShellHostConfig {
     pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
+    pub(super) shell_startup_path_observer: Option<ShellStartupPathObserver>,
     pub(super) transcript_retention: TranscriptRetention,
     login_effect_guard: LoginEffectGuard,
 }
@@ -228,6 +252,7 @@ impl ShellHostConfig {
             assistance_control: None,
             shell_environment_observer: None,
             shell_history_file_observer: None,
+            shell_startup_path_observer: None,
             transcript_retention: TranscriptRetention::Full,
             login_effect_guard: LoginEffectGuard::new(),
         }
@@ -296,6 +321,13 @@ impl ShellHostConfig {
 
     pub(crate) fn clear_shell_history_file_observer(&mut self) {
         self.shell_history_file_observer = None;
+    }
+
+    pub(crate) fn set_shell_startup_path_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        self.shell_startup_path_observer = Some(ShellStartupPathObserver::new(observer));
     }
 
     /// Bounds byte-transcript memory for the real interactive runtime. Public

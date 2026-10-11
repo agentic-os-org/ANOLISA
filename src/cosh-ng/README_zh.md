@@ -11,7 +11,9 @@ JSONL 接口。
 默认情况下，登录 shell（例如 `cosh --login`）会在 Bash 4+ 上以真实 login 身份
 启动 Bash；设 `shell.login_identity = false` 可保留旧的非 login（`--rcfile`）启动。
 有界的真实 login 身份能力探测失败、使用 Bash 3.2（如 macOS 系统 bash），或父会话导出了 POSIX
-启动无法导入的函数名时，cosh 会自动回退。
+启动无法导入的函数名时，cosh 会自动回退。Enhanced Bash login 会在首个 prompt 前一次性
+记录最终 PATH，并仅传给 Provider 子进程。设置 `COSH_SHELL_BOOTSTRAP_PATH=0`
+可关闭该启动 PATH 交接。
 
 ## 为什么使用 cosh-ng
 

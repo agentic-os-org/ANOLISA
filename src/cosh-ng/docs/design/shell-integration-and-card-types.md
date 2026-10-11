@@ -42,6 +42,30 @@ substate of Enhanced, not a conversion to hook-free Native integration: OSC
 markers remain installed so Cosh can prove prompt ownership and switch back
 safely.
 
+## Bash Login Startup PATH Handoff
+
+An Enhanced Bash login sources its login profile in the managed shell, without a
+separate login PATH probe. After the first user `PROMPT_COMMAND` hook and before
+the first Cosh prompt boundary, the marker emits one internal OSC event:
+
+```json
+{"event":"startup_environment","token":"...","session_id":"...","path":"..."}
+```
+
+The host accepts only the first valid report whose marker token and session ID
+match. PATH is limited to 8 KiB, rejects control characters, and is normalized
+to unique absolute entries. A valid value is stored once and applied only to
+provider/Core child processes; it never changes the shell process's global
+PATH. Startup auth waits for this decision so it uses the same child PATH.
+
+The gate closes at the first prompt. Missing, malformed, oversized, forged, or
+late reports leave provider processes on their inherited PATH and never replay
+the profile. `shell.login_identity = false` keeps the marker-based login-profile
+fallback and reports its resulting PATH under the same contract. Setting
+`COSH_SHELL_BOOTSTRAP_PATH=0` disables both legacy PATH probes and this handoff.
+Native integration is unchanged; Bash non-login and zsh retain their existing
+probe behavior.
+
 ## Input Ownership and Visible State
 
 Symbols primarily describe who owns editable input before Enter, not output

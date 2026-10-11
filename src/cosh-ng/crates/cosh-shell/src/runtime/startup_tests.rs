@@ -829,6 +829,7 @@ fn bootstrap_path_without_a_plan_keeps_login_effects_armed() {
     bootstrap_process_path_from_shell(
         &RawShellKind::Unsupported("fish".into()),
         true,
+        true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
     );
@@ -838,13 +839,12 @@ fn bootstrap_path_without_a_plan_keeps_login_effects_armed() {
 
 #[test]
 fn disabled_bootstrap_path_keeps_login_effects_armed() {
-    let _env = crate::diagnostics::test_env::env_guard();
-    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", Some(OsStr::new("0")));
     let effects = LoginEffectGuard::new();
 
     bootstrap_process_path_from_shell(
         &RawShellKind::Bash,
-        true,
+        false,
+        false,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
     );
@@ -871,10 +871,50 @@ fn missing_selected_shell_reports_spawn_and_keeps_login_effects_armed() {
     bootstrap_process_path_from_shell(
         &RawShellKind::Zsh,
         true,
+        true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
     );
     assert!(!effects.may_have_started());
+}
+
+#[test]
+fn bash_login_bootstrap_path_never_runs_a_side_probe() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let dir = tempfile::tempdir().expect("create PATH wrapper directory");
+    let hits = dir.path().join("hits");
+    let wrapper = dir.path().join("bash");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf hit >> '{}'\nprintf '\\n__COSH_PATH_BEGIN__/side-probe__COSH_PATH_END__\\n'\n",
+            hits.display()
+        ),
+    )
+    .expect("write side-probe PATH wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH wrapper executable");
+    let _path = ScopedEnvVar::set("PATH", Some(dir.path().as_os_str()));
+    let _bootstrap_switch = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    let effects = LoginEffectGuard::new();
+
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &effects,
+    );
+
+    assert!(!effects.may_have_started());
+    assert!(
+        !hits.exists(),
+        "the login profile must run only in the managed shell"
+    );
+    assert_eq!(
+        std::env::var_os("PATH").as_deref(),
+        Some(dir.path().as_os_str())
+    );
 }
 
 #[test]
@@ -895,6 +935,7 @@ fn selected_bootstrap_path_plan_marks_successful_probe() {
 
     bootstrap_process_path_from_shell(
         &RawShellKind::Bash,
+        false,
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
@@ -917,6 +958,7 @@ fn selected_bootstrap_path_plan_marks_failed_probe() {
 
     bootstrap_process_path_from_shell(
         &RawShellKind::Bash,
+        false,
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
@@ -944,6 +986,7 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
     bootstrap_process_path_from_shell(
         &RawShellKind::Zsh,
         true,
+        true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
     );
@@ -953,10 +996,7 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
 
 #[test]
 fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
-    let (_, bash_login) = bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).unwrap();
-    assert_eq!(bash_login.len(), 1);
-    assert_eq!(bash_login[0].flags, "-lic");
-    assert_eq!(bash_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert!(bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).is_none());
 
     let (_, zsh_non_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, false, true).unwrap();
     assert_eq!(zsh_non_login.len(), 1);

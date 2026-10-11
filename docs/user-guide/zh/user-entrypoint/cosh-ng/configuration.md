@@ -136,7 +136,13 @@ expected = "active"
 -l` 一样读取 `/etc/profile` 和 `~/.bash_profile`。设 `login_identity = false`
 可回退到旧的非 login 启动（`--rcfile`）。Bash 4 及以上版本在有界的真实启动能力
 探测通过时走真实 login 身份路径；Bash 3.2（包括 macOS 系统 Bash）、探测失败，或父环境导出了
-POSIX 启动无法导入的函数名时都会自动回退。zsh 不受影响。
+POSIX 启动无法导入的函数名时都会自动回退。fallback marker 仍只读取一次 login profile。
+
+Enhanced Bash login 会在 login profile 和首轮用户 `PROMPT_COMMAND` hook 执行后、
+第一个 Cosh prompt 边界前，一次性记录最终 PATH。该值只传给 Provider 子进程，不会
+修改 Cosh 进程的全局 PATH。报告缺失、格式错误、超长、身份伪造或到达过晚时，Provider
+继续使用继承 PATH。设置 `COSH_SHELL_BOOTSTRAP_PATH=0` 会同时关闭旧 PATH 探针和
+这条 Bash 启动 PATH 交接；zsh 与 Bash non-login 的其他探针行为不变。
 
 ## 审计设置
 
@@ -184,6 +190,7 @@ sudo touch /etc/anolisa/.telemetry_disabled
 | `COSH_SHELL_DEFAULT_SHELL`、`COSH_SHELL_ADAPTER`、`COSH_SHELL_ANALYSIS_MODE`、`COSH_SHELL_APPROVAL_MODE` | 交互式 Shell 选择 |
 | `COSH_SHELL_INTEGRATION` | 下一次会话使用 `native` 或 `enhanced` Shell 集成 |
 | `COSH_SHELL_LOGIN_IDENTITY` | 下一次 Enhanced 登录 shell 是否启用真实 login 身份，`on`/`off`（默认 on） |
+| `COSH_SHELL_BOOTSTRAP_PATH` | 设为 `0` 可关闭启动 PATH 探测和 Bash login PATH 交接 |
 | `COSH_SHELL_LANG`、`COSH_SHELL_AI`、`COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell 语言、AI 开关和输入等待超时 |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | 允许使用 Bash history 生成建议 |
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |

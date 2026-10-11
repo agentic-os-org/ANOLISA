@@ -189,12 +189,18 @@ pub(crate) fn run_raw(
     config.integration =
         integration_for_launch(launch_options.resume.is_some(), configured_integration);
     let enhanced_integration = config.integration.uses_markers();
+    let startup_path_enabled = std::env::var("COSH_SHELL_BOOTSTRAP_PATH").as_deref() != Ok("0");
     if config.native_mode && enhanced_integration {
-        bootstrap_process_path_from_shell(&shell_kind, login, &config.winsize, &effects);
+        bootstrap_process_path_from_shell(
+            &shell_kind,
+            login,
+            startup_path_enabled,
+            &config.winsize,
+            &effects,
+        );
     }
-    // #R2: PATH bootstrap may change which bare `bash` would be launched. Only
-    // probe when every other R2 leg holds, resolve after PATH is final, and
-    // freeze the same absolute executable for both probe and spawn.
+    // #R2: only probe when every other R2 leg holds, and freeze the same
+    // absolute executable for both probe and spawn.
     if config.login_identity
         && config.login_shell
         && config.native_mode
@@ -303,19 +309,33 @@ pub(crate) fn run_raw(
             inline_state.startup_health.pending =
                 Some(spawn_startup_health_scan(cosh_config.health.clone()));
         }
-        // The credential probe only feeds startup-banner surfaces; without a
-        // banner it would just cost an extra cosh-core process per launch.
-        if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
-            if let AdapterInstance::CoshCore(core) = &adapter {
-                let core = core.clone();
-                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let startup_auth_core = (cosh_config.ai_enabled
+            && crate::runtime::startup::startup_banner_enabled())
+        .then(|| match &adapter {
+            AdapterInstance::CoshCore(core) => Some(core.clone()),
+            _ => None,
+        })
+        .flatten();
+        let managed_bash_login = startup_path_enabled
+            && config.native_mode
+            && login
+            && matches!(&shell_kind, RawShellKind::Bash);
+        if managed_bash_login {
+            let deferred_auth = startup_auth_core.map(|core| {
+                let (probe, receiver) = super::startup_auth::DeferredProbe::new(core);
                 inline_state.startup_auth.pending = Some(receiver);
-                let _ = std::thread::Builder::new()
-                    .name("cosh-startup-auth-probe".to_string())
-                    .spawn(move || {
-                        let _ = sender.send(core.ai_configured().ok());
-                    });
-            }
+                probe
+            });
+            config.set_shell_startup_path_observer(move |path| {
+                if let Some(path) = path {
+                    crate::adapter::record_trusted_startup_path(path);
+                }
+                if let Some(probe) = &deferred_auth {
+                    probe.launch();
+                }
+            });
+        } else if let Some(core) = startup_auth_core {
+            inline_state.startup_auth.pending = Some(super::startup_auth::start(core));
         }
     }
     let hook_feedback = load_hook_feedback_preferences();

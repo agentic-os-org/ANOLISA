@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -100,7 +100,7 @@ impl CoshCoreAdapter {
         let request_json = serde_json::to_string(&request)
             .map_err(|error| RegistryQueryError::Transport(format!("serialize error: {error}")))?;
 
-        let mut command = Command::new(&self.program);
+        let mut command = super::command_with_trusted_startup_path(&self.program);
         command
             .arg("--registry")
             .stdin(Stdio::piped())

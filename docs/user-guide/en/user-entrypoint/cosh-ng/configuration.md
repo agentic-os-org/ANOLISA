@@ -155,9 +155,17 @@ login_shell` == yes) and reads `/etc/profile` and `~/.bash_profile` like `bash
 -l`. Set `login_identity = false` to fall back to the previous non-login startup
 (`--rcfile`). Bash 4 and newer use the login-identity path when the bounded
 real-launch capability probe succeeds. Bash 3.2 (including the macOS system
-Bash), probe failures, and
-parent environments that export function names POSIX startup cannot import all
-fall back automatically. Zsh is unaffected.
+Bash), probe failures, and parent environments that export function names POSIX
+startup cannot import all fall back automatically. The fallback marker still
+reads the login profile exactly once.
+
+For an Enhanced Bash login, Cosh captures the final startup PATH once after the
+login profile and the first user `PROMPT_COMMAND` hook, but before the first Cosh
+prompt boundary. Only provider child processes inherit this value; Cosh does not
+change its process-wide PATH. A missing, malformed, oversized, forged, or late
+report leaves providers on the inherited PATH. Set `COSH_SHELL_BOOTSTRAP_PATH=0`
+to disable both legacy PATH probes and this Bash startup PATH handoff. Zsh and
+Bash non-login probe behavior is otherwise unchanged.
 
 ## Audit settings
 
@@ -213,6 +221,7 @@ required.
 | `COSH_SHELL_DEFAULT_SHELL`, `COSH_SHELL_ADAPTER`, `COSH_SHELL_ANALYSIS_MODE`, `COSH_SHELL_APPROVAL_MODE` | Interactive shell choices |
 | `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
 | `COSH_SHELL_LOGIN_IDENTITY` | `on`/`off` real login identity for the next Enhanced login shell (default on) |
+| `COSH_SHELL_BOOTSTRAP_PATH` | Set to `0` to disable startup PATH discovery and the Bash login PATH handoff |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |

@@ -1,0 +1,529 @@
+version: 1
+suite: bash-ssh-transparency
+defaults:
+  execution: ci
+  shell_mode: isolated
+  adapter: cosh-core
+  approval_mode: ask
+  analysis_mode: smart
+  render: terminal
+  timeout_ms: 120000
+  real_provider: false
+  command:
+    - bash
+    - -lc
+    - >-
+      cd /work/repo/src/cosh-ng &&
+      cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
+      bash /work/repo/specs/shell-e2e-validation/fixtures/setup-local-sshd.sh
+      "$CARGO_TARGET_DIR/debug/cosh-shell" &&
+      exec env HOME=/tmp/cosh-li-sshd/client-home TERM=xterm-256color COSH_SHELL_WIDTH=110
+      COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0
+      COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0
+      COSH_SHELL_LANG=zh-CN COSH_SHELL_RAW_SHELL=bash
+      COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+      "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
+cases:
+  - id: L01-BASH-SSH-REMOTE-COMMAND
+    title: Bash preserves ssh remote command output and exit status
+    tags: [shell, bash, ssh, noninteractive, exit-status]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li "printf '__L01_SSH_%s__\\n' SUCCESS";
+          printf '__L01_SSH_SUCCESS_EXIT__<%s>\n' "$?"
+      - id: ssh-success
+        type: wait_for
+        text: "__L01_SSH_SUCCESS_EXIT__<0>"
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li
+          "printf '__L01_SSH_%s__\\n' STDOUT; printf '__L01_SSH_%s__\\n' STDERR >&2; exit 37";
+          code=$?; printf '__L01_SSH_FAILURE_EXIT__<%s>\n' "$code"
+      - type: wait_for
+        text: "__L01_SSH_STDOUT__"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "__L01_SSH_STDERR__"
+        timeout_ms: 10000
+      - id: ssh-failure
+        type: wait_for
+        text: "__L01_SSH_FAILURE_EXIT__<37>"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_SSH_SUCCESS__"
+        - "__L01_SSH_SUCCESS_EXIT__<0>"
+        - "__L01_SSH_STDOUT__"
+        - "__L01_SSH_STDERR__"
+        - "__L01_SSH_FAILURE_EXIT__<37>"
+      not_contains:
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: ssh-success
+          trigger_event: ssh-success
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ssh-failure
+          trigger_event: ssh-failure
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L01-BASH-SCP-HASH
+    title: Bash preserves scp bytes and failure status over ssh
+    tags: [shell, bash, ssh, scp, hash, exit-status]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          scp -q -F /tmp/cosh-li-sshd/ssh_config /tmp/cosh-li-sshd/payload.bin cosh-li:scp.bin;
+          code=$?; hash=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li
+          "sha256sum /home/coshli/scp.bin | cut -d' ' -f1");
+          printf '__L01_SCP_RESULT__<%s><%s>\n' "$code" "$hash"
+      - id: scp-hash
+        type: wait_for
+        text: "__L01_SCP_RESULT__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          scp -q -F /tmp/cosh-li-sshd/ssh_config /tmp/cosh-li-sshd/missing.bin cosh-li:missing.bin
+          >/dev/null 2>&1; code=$?;
+          if (( code != 0 )); then printf '__L01_SCP_MISSING_%s__<%s>\n' REJECTED "$code";
+          else printf '__L01_SCP_MISSING_%s__\n' UNEXPECTED_SUCCESS; fi
+      - id: scp-failure
+        type: wait_for
+        text: "__L01_SCP_MISSING_REJECTED__"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_SCP_RESULT__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_SCP_MISSING_REJECTED__"
+      not_contains:
+        - "__L01_SCP_MISSING_UNEXPECTED_SUCCESS__"
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: scp-hash
+          trigger_event: scp-hash
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: scp-failure
+          trigger_event: scp-failure
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L01-BASH-SFTP-HASH
+    title: Bash preserves sftp bytes and failure status over ssh
+    tags: [shell, bash, ssh, sftp, hash, exit-status]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          sftp -q -F /tmp/cosh-li-sshd/ssh_config -b /tmp/cosh-li-sshd/sftp-put.batch cosh-li;
+          code=$?; hash=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li
+          "sha256sum /home/coshli/sftp.bin | cut -d' ' -f1");
+          printf '__L01_SFTP_RESULT__<%s><%s>\n' "$code" "$hash"
+      - id: sftp-hash
+        type: wait_for
+        text: "__L01_SFTP_RESULT__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          sftp -q -F /tmp/cosh-li-sshd/ssh_config -b /tmp/cosh-li-sshd/sftp-missing.batch cosh-li
+          >/dev/null 2>&1; code=$?;
+          if (( code != 0 )); then printf '__L01_SFTP_MISSING_%s__<%s>\n' REJECTED "$code";
+          else printf '__L01_SFTP_MISSING_%s__\n' UNEXPECTED_SUCCESS; fi
+      - id: sftp-failure
+        type: wait_for
+        text: "__L01_SFTP_MISSING_REJECTED__"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_SFTP_RESULT__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_SFTP_MISSING_REJECTED__"
+      not_contains:
+        - "__L01_SFTP_MISSING_UNEXPECTED_SUCCESS__"
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: sftp-hash
+          trigger_event: sftp-hash
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: sftp-failure
+          trigger_event: sftp-failure
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L01-BASH-RSYNC-HASH
+    title: Bash preserves rsync bytes and failure status over ssh
+    tags: [shell, bash, ssh, rsync, hash, exit-status]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          rsync -q -e 'ssh -F /tmp/cosh-li-sshd/ssh_config'
+          /tmp/cosh-li-sshd/payload.bin cosh-li:rsync.bin;
+          code=$?; hash=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li
+          "sha256sum /home/coshli/rsync.bin | cut -d' ' -f1");
+          printf '__L01_RSYNC_RESULT__<%s><%s>\n' "$code" "$hash"
+      - id: rsync-hash
+        type: wait_for
+        text: "__L01_RSYNC_RESULT__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          rsync -q -e 'ssh -F /tmp/cosh-li-sshd/ssh_config'
+          /tmp/cosh-li-sshd/missing.bin cosh-li:rsync-missing.bin >/dev/null 2>&1; code=$?;
+          if (( code != 0 )); then printf '__L01_RSYNC_MISSING_%s__<%s>\n' REJECTED "$code";
+          else printf '__L01_RSYNC_MISSING_%s__\n' UNEXPECTED_SUCCESS; fi
+      - id: rsync-failure
+        type: wait_for
+        text: "__L01_RSYNC_MISSING_REJECTED__"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_RSYNC_RESULT__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_RSYNC_MISSING_REJECTED__"
+      not_contains:
+        - "__L01_RSYNC_MISSING_UNEXPECTED_SUCCESS__"
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: rsync-hash
+          trigger_event: rsync-hash
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: rsync-failure
+          trigger_event: rsync-failure
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L01-BASH-GIT-SSH-HASH
+    title: Bash preserves Git commits and file bytes over ssh
+    tags: [shell, bash, ssh, git, hash, exit-status]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 20000
+      - type: line
+        text: >-
+          GIT_SSH_COMMAND='ssh -F /tmp/cosh-li-sshd/ssh_config'
+          git -C /tmp/cosh-li-sshd/git-src push -q cosh-li:/home/coshli/transport.git main:master;
+          push_code=$?; rm -rf /tmp/cosh-li-sshd/git-clone;
+          GIT_SSH_COMMAND='ssh -F /tmp/cosh-li-sshd/ssh_config'
+          git clone -q cosh-li:/home/coshli/transport.git /tmp/cosh-li-sshd/git-clone;
+          clone_code=$?; source_commit=$(git -C /tmp/cosh-li-sshd/git-src rev-parse HEAD);
+          clone_commit=$(git -C /tmp/cosh-li-sshd/git-clone rev-parse HEAD);
+          hash=$(sha256sum /tmp/cosh-li-sshd/git-clone/payload.bin | cut -d' ' -f1);
+          if [[ "$source_commit" == "$clone_commit" ]]; then state=MATCH; else state=MISMATCH; fi;
+          printf '__L01_GIT_%s__<%s><%s><%s>\n' "$state" "$push_code" "$clone_code" "$hash";
+          printf '__L01_GIT_COMMITS__<%s><%s>\n' "$source_commit" "$clone_commit"
+      - id: git-hash
+        type: wait_for
+        text: "__L01_GIT_MATCH__<0><0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 30000
+      - type: line
+        text: >-
+          rm -rf /tmp/cosh-li-sshd/git-missing;
+          GIT_SSH_COMMAND='ssh -F /tmp/cosh-li-sshd/ssh_config'
+          git clone -q cosh-li:/home/coshli/missing.git /tmp/cosh-li-sshd/git-missing >/dev/null 2>&1;
+          code=$?; if (( code != 0 )); then printf '__L01_GIT_MISSING_%s__<%s>\n' REJECTED "$code";
+          else printf '__L01_GIT_MISSING_%s__\n' UNEXPECTED_SUCCESS; fi
+      - id: git-failure
+        type: wait_for
+        text: "__L01_GIT_MISSING_REJECTED__"
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_GIT_MATCH__<0><0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_GIT_MISSING_REJECTED__"
+      not_contains:
+        - "__L01_GIT_MISMATCH__"
+        - "__L01_GIT_MISSING_UNEXPECTED_SUCCESS__"
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: git-hash
+          trigger_event: git-hash
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: git-failure
+          trigger_event: git-failure
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L01-COSH-LOGIN-SHELL-SSH-TRANSPORT
+    title: Cosh as the remote login shell preserves ssh commands and file transports
+    tags: [shell, bash, ssh, login-shell, scp, sftp, rsync, git, hash, exit-status]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 60000
+      - type: line
+        text: >-
+          printf '__L01_REMOTE_%s__<%s>\n' LOGIN_SHELL "$(getent passwd coshlicosh | cut -d: -f7)";
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'printf "__L01_REMOTE_%s__<%s>\n" ZERO "$0"'
+      - id: remote-identity
+        type: wait_for
+        text: "__L01_REMOTE_ZERO__<"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 2
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh
+          "printf '__L01_REMOTE_%s__\\n' STDOUT; printf '__L01_REMOTE_%s__\\n' STDERR >&2; exit 37";
+          printf '__L01_REMOTE_EXIT__<%s>\n' "$?"
+      - id: remote-exit
+        type: wait_for
+        text: "__L01_REMOTE_EXIT__<37>"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 3
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'cat > stdin.bin' < /tmp/cosh-li-sshd/payload.bin;
+          up=$?; hash=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'cat stdin.bin' | sha256sum | cut -d' ' -f1);
+          printf '__L01_REMOTE_%s__<%s><%s>\n' STDIO "$up" "$hash"
+      - id: remote-stdio
+        type: wait_for
+        text: "__L01_REMOTE_STDIO__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 4
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          scp -q -F /tmp/cosh-li-sshd/ssh_config /tmp/cosh-li-sshd/payload.bin cosh-li-cosh:scp.bin; a=$?;
+          scp -O -q -F /tmp/cosh-li-sshd/ssh_config /tmp/cosh-li-sshd/payload.bin cosh-li-cosh:scp-legacy.bin; b=$?;
+          h1=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'sha256sum scp.bin' | cut -d' ' -f1);
+          h2=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'sha256sum scp-legacy.bin' | cut -d' ' -f1);
+          printf '__L01_REMOTE_%s__<%s><%s><%s><%s>\n' SCP "$a" "$b" "$h1" "$h2"
+      - id: remote-scp
+        type: wait_for
+        text: "__L01_REMOTE_SCP__<0><0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 5
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          sftp -q -F /tmp/cosh-li-sshd/ssh_config -b /tmp/cosh-li-sshd/sftp-put-coshlicosh.batch cosh-li-cosh
+          >/dev/null; c=$?; h=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'sha256sum sftp.bin' | cut -d' ' -f1);
+          printf '__L01_REMOTE_%s__<%s><%s>\n' SFTP "$c" "$h"
+      - id: remote-sftp
+        type: wait_for
+        text: "__L01_REMOTE_SFTP__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 6
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          rsync -q -e 'ssh -F /tmp/cosh-li-sshd/ssh_config' /tmp/cosh-li-sshd/payload.bin cosh-li-cosh:rsync.bin;
+          c=$?; h=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh 'sha256sum rsync.bin' | cut -d' ' -f1);
+          printf '__L01_REMOTE_%s__<%s><%s>\n' RSYNC "$c" "$h"
+      - id: remote-rsync
+        type: wait_for
+        text: "__L01_REMOTE_RSYNC__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 20000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 7
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          export GIT_SSH_COMMAND='ssh -F /tmp/cosh-li-sshd/ssh_config';
+          git -C /tmp/cosh-li-sshd/git-src push -q cosh-li-cosh:/home/coshlicosh/transport.git main:master;
+          p=$?; rm -rf /tmp/cosh-li-sshd/git-cosh-clone;
+          git clone -q cosh-li-cosh:/home/coshlicosh/transport.git /tmp/cosh-li-sshd/git-cosh-clone; c=$?;
+          s=$(git -C /tmp/cosh-li-sshd/git-src rev-parse HEAD); d=$(git -C /tmp/cosh-li-sshd/git-cosh-clone rev-parse HEAD);
+          h=$(sha256sum /tmp/cosh-li-sshd/git-cosh-clone/payload.bin | cut -d' ' -f1);
+          if [[ "$s" == "$d" ]]; then st=MATCH; else st=MISMATCH; fi; unset GIT_SSH_COMMAND;
+          printf '__L01_REMOTE_GIT_%s__<%s><%s><%s>\n' "$st" "$p" "$c" "$h"
+      - id: remote-git
+        type: wait_for
+        text: "__L01_REMOTE_GIT_MATCH__<0><0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        timeout_ms: 30000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 8
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          rm -f /home/coshli/bashrc-hits /home/coshlicosh/bashrc-hits;
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li true; ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh true;
+          b=$(cat /home/coshli/bashrc-hits 2>/dev/null | wc -l); c=$(cat /home/coshlicosh/bashrc-hits 2>/dev/null | wc -l);
+          if [[ "$b" == "$c" ]]; then st=MATCH; else st=MISMATCH; fi;
+          printf '__L01_REMOTE_BASHRC_%s__<bash=%s><cosh=%s>\n' "$st" "$b" "$c";
+          ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-cosh '. ~/.bashrc';
+          printf '__L01_REMOTE_BASHRC_%s__<%s>\n' PROBE "$(cat /home/coshlicosh/bashrc-hits 2>/dev/null | wc -l)"
+      - id: remote-bashrc
+        type: wait_for
+        text: "__L01_REMOTE_BASHRC_PROBE__<"
+        timeout_ms: 10000
+      - type: wait_for
+        text: "cosh-osc$"
+        occurrence: 9
+        timeout_ms: 10000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_REMOTE_LOGIN_SHELL__</usr/local/bin/cosh>"
+        - "__L01_REMOTE_ZERO__<cosh>"
+        - "__L01_REMOTE_STDOUT__"
+        - "__L01_REMOTE_STDERR__"
+        - "__L01_REMOTE_EXIT__<37>"
+        - "__L01_REMOTE_STDIO__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_REMOTE_SCP__<0><0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_REMOTE_SFTP__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_REMOTE_RSYNC__<0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_REMOTE_GIT_MATCH__<0><0><fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83>"
+        - "__L01_REMOTE_BASHRC_MATCH__"
+        - "__L01_REMOTE_BASHRC_PROBE__<1>"
+      not_contains:
+        - "__L01_REMOTE_GIT_MISMATCH__"
+        - "__L01_REMOTE_BASHRC_MISMATCH__"
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: remote-identity
+          trigger_event: remote-identity
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-exit
+          trigger_event: remote-exit
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-stdio
+          trigger_event: remote-stdio
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-scp
+          trigger_event: remote-scp
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-sftp
+          trigger_event: remote-sftp
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-rsync
+          trigger_event: remote-rsync
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-git
+          trigger_event: remote-git
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: remote-bashrc
+          trigger_event: remote-bashrc
+          layout_sensitive: true
+          required_types: [screenshot]
+
+  - id: L01-NOISY-LOGIN-SHELL-CONTROL
+    title: A login shell that writes to stdout breaks the same transport oracles
+    tags: [shell, bash, ssh, login-shell, control]
+    shell: bash
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 60000
+      - type: line
+        text: >-
+          out=$(ssh -F /tmp/cosh-li-sshd/ssh_config cosh-li-noisy 'printf ok');
+          if [[ "$out" == ok ]]; then st=CLEAN; else st=POLLUTED; fi;
+          printf '__L01_NOISY_SSH_%s__\n' "$st"; printf '__L01_NOISY_%s__\n' SSH_DONE
+      - id: noisy-ssh
+        type: wait_for
+        text: "__L01_NOISY_SSH_DONE__"
+        timeout_ms: 10000
+      - type: line
+        text: >-
+          scp -q -F /tmp/cosh-li-sshd/ssh_config /tmp/cosh-li-sshd/payload.bin cosh-li-noisy:scp.bin >/dev/null 2>&1; a=$?;
+          scp -O -q -F /tmp/cosh-li-sshd/ssh_config /tmp/cosh-li-sshd/payload.bin cosh-li-noisy:scp-legacy.bin >/dev/null 2>&1; b=$?;
+          sftp -q -F /tmp/cosh-li-sshd/ssh_config -b /tmp/cosh-li-sshd/sftp-put-coshlinoisy.batch cosh-li-noisy >/dev/null 2>&1; c=$?;
+          rsync -q -e 'ssh -F /tmp/cosh-li-sshd/ssh_config' /tmp/cosh-li-sshd/payload.bin cosh-li-noisy:rsync.bin >/dev/null 2>&1; d=$?;
+          rm -rf /tmp/cosh-li-sshd/git-noisy-clone;
+          GIT_SSH_COMMAND='ssh -F /tmp/cosh-li-sshd/ssh_config' git clone -q cosh-li-noisy:/home/coshlinoisy/transport.git
+          /tmp/cosh-li-sshd/git-noisy-clone >/dev/null 2>&1; e=$?;
+          for pair in "SCP:$a" "SCP_LEGACY:$b" "SFTP:$c" "RSYNC:$d" "GIT:$e"; do
+          if (( ${pair#*:} != 0 )); then st=REJECTED; else st=ACCEPTED; fi;
+          printf '__L01_NOISY_%s_%s__<%s>\n' "${pair%%:*}" "$st" "${pair#*:}"; done
+      - id: noisy-transports
+        type: wait_for
+        text: "__L01_NOISY_GIT_"
+        timeout_ms: 30000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains:
+        - "__L01_NOISY_SSH_POLLUTED__"
+        - "__L01_NOISY_SCP_REJECTED__"
+        - "__L01_NOISY_SCP_LEGACY_REJECTED__"
+        - "__L01_NOISY_SFTP_REJECTED__"
+        - "__L01_NOISY_RSYNC_REJECTED__"
+        - "__L01_NOISY_GIT_REJECTED__"
+      not_contains:
+        - "__L01_NOISY_SSH_CLEAN__"
+        - "_ACCEPTED__"
+        - "failed to run cosh-core"
+        - "command not found"
+    evidence:
+      points:
+        - id: noisy-ssh
+          trigger_event: noisy-ssh
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: noisy-transports
+          trigger_event: noisy-transports
+          layout_sensitive: true
+          required_types: [screenshot]

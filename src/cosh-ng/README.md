@@ -14,8 +14,10 @@ By default a login shell (for example `cosh --login`) launches Bash with a real
 login identity on Bash 4+; set `shell.login_identity = false` to keep the previous
 non-login (`--rcfile`) startup. Cosh falls back automatically when the bounded
 login-identity capability probe fails, on Bash 3.2 (such as the macOS system
-bash), or when the
-parent exports a function name that POSIX startup cannot import.
+bash), or when the parent exports a function name that POSIX startup cannot
+import. Enhanced Bash login sessions capture the resulting PATH once, before the
+first prompt, and pass it only to provider child processes. Set
+`COSH_SHELL_BOOTSTRAP_PATH=0` to disable this startup PATH handoff.
 
 ## Why cosh-ng
 

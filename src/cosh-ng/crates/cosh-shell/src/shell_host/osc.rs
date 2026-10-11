@@ -10,6 +10,7 @@ mod marker_sequence;
 mod prompt_epoch;
 mod routing;
 mod slash_guard_echo;
+mod startup_environment;
 mod transcript_store;
 
 use alt_screen::AltScreenTracker;
@@ -23,10 +24,10 @@ use handoff_echo::PendingHandoffEcho;
 use marker_sequence::resume_abandoned_prefix;
 use marker_sequence::{find_bytes, osc_prefix_suffix_len, HistoryFileTracker, Marker};
 use slash_guard_echo::PendingSlashGuardEcho;
+use startup_environment::{normalize_shell_path, StartupEnvironmentGate, SHELL_PATH_MAX_BYTES};
 
-use std::collections::HashSet;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
@@ -52,7 +53,6 @@ const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
 const OSC_CANDIDATE_MAX_BYTES: usize = 64 * 1024;
-const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
 
 #[cfg(test)]
 thread_local! {
@@ -107,6 +107,7 @@ pub(super) struct OscParser {
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
     history_file_tracker: HistoryFileTracker,
+    startup_environment: StartupEnvironmentGate,
     /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
     /// relay; prompt_ready raises it, preexec lowers it.
     main_prompt_gate: crate::raw_input::MainPromptGate,
@@ -312,6 +313,9 @@ impl OscParser {
         {
             return Ok(());
         }
+        if self.observe_startup_environment(&marker) {
+            return Ok(());
+        }
 
         // A trusted protocol boundary ends the one-shot submission window.
         // Any incomplete candidate is ordinary terminal output and fails open.
@@ -501,6 +505,7 @@ impl OscParser {
         shell_path_names: Option<Vec<String>>,
         shell_path_suffixes: Option<Vec<String>>,
     ) {
+        self.startup_environment.close();
         self.shell_prompt_cwd.set(prompt_cwd.clone());
         self.shell_path_command_names
             .set(shell_path_names, shell_path_suffixes);
@@ -954,33 +959,6 @@ fn command_finished_event(
             capture: None,
         },
     }
-}
-
-fn normalize_shell_path(path: &str) -> String {
-    let mut seen = HashSet::new();
-    path.split(':')
-        .filter_map(normalize_absolute_path)
-        .filter(|entry| seen.insert(entry.clone()))
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
-fn normalize_absolute_path(value: &str) -> Option<String> {
-    let path = Path::new(value);
-    if !path.is_absolute() {
-        return None;
-    }
-    let mut normalized = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::CurDir => {}
-            Component::ParentDir => normalized.push(".."),
-            Component::Normal(part) => normalized.push(part),
-            Component::Prefix(_) => return None,
-        }
-    }
-    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn known_clean_control_len(bytes: &[u8]) -> Option<usize> {
