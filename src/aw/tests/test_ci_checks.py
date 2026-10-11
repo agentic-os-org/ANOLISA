@@ -48,7 +48,7 @@ class ScopeTests(GateFixture):
         self.git("config", "user.email", "fixture@example.invalid")
         return self.commit("README.md", "base")
 
-    def test_scope_uses_full_pr_and_base_advancement(self) -> None:
+    def test_scope_uses_full_pr_without_base_only_changes(self) -> None:
         base = self.init_git()
         self.git("checkout", "-qb", "feature")
         self.commit("src/aw/schema with spaces.json", "{}")
@@ -63,7 +63,7 @@ class ScopeTests(GateFixture):
         self.git("merge", "--no-edit", "unrelated")
         candidate = self.git("rev-parse", "HEAD")
         event["pull_request"] = {"base": {"sha": advanced}, "head": {"sha": head}}
-        self.assertTrue(gate.scope("pull_request", event, candidate, self.root))
+        self.assertFalse(gate.scope("pull_request", event, candidate, self.root))
 
     def test_scope_handles_removal_noop_and_event_errors(self) -> None:
         base = self.init_git()
@@ -74,8 +74,7 @@ class ScopeTests(GateFixture):
         self.git("commit", "-qm", "move out of AW")
         after = self.git("rev-parse", "HEAD")
         self.assertTrue(gate.scope("push", {"before": before, "after": after}, after, self.root))
-        for event in ("workflow_dispatch", "merge_group"):
-            self.assertTrue(gate.scope(event, {}, after, self.root))
+        self.assertTrue(gate.scope("workflow_dispatch", {}, after, self.root))
         self.assertTrue(gate.scope("push", {"before": "0" * 40, "after": after}, after, self.root))
         forced = {"before": "1" * 40, "after": after, "forced": True}
         self.assertTrue(gate.scope("push", forced, after, self.root))
@@ -94,6 +93,17 @@ class ScopeTests(GateFixture):
         for invalid in ("HEAD", "--help", "a" * 39, "a" * 40 + "\n"):
             with self.assertRaises(ValueError):
                 gate.sha(invalid)
+
+    def test_merge_group_selects_only_aw_changes(self) -> None:
+        base = self.init_git()
+        head = self.commit("src/tokenless/unrelated.txt", "unrelated")
+        event = {"merge_group": {"base_sha": base, "head_sha": head}}
+        self.assertFalse(gate.scope("merge_group", event, head, self.root))
+        head = self.commit(".github/workflows/aw-ci.yml", "gate change")
+        event["merge_group"]["head_sha"] = head
+        self.assertTrue(gate.scope("merge_group", event, head, self.root))
+        with self.assertRaises(ValueError):
+            gate.scope("merge_group", event, base, self.root)
 
     def test_required_result_truth_table(self) -> None:
         sha = "a" * 40
