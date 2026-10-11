@@ -10,6 +10,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
@@ -103,6 +106,47 @@ describe("McpStdioClient", () => {
     const client = new McpStdioClient(cfg);
     await client.stop();
   });
+
+  for (const ignoreTerm of [false, true]) {
+    it(`reaps a worker that ${ignoreTerm ? "ignores" : "handles"} SIGTERM before stop resolves`, async () => {
+      const directory = mkdtempSync(join(tmpdir(), "memory-mcp-stop-"));
+      const binaryPath = join(directory, "worker");
+      const marker = join(directory, "term-received");
+      writeFileSync(binaryPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const fs = require("node:fs");
+process.on("SIGTERM", () => {
+  fs.writeFileSync(${JSON.stringify(marker)}, "SIGTERM");
+  if (!${ignoreTerm}) process.exit(0);
+});
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2024-11-05", capabilities: {} }
+    : { content: [{ type: "text", text: String(process.pid) }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`, { mode: 0o755 });
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      let pid: number | undefined;
+      let verifiedExit = false;
+      try {
+        pid = Number(await client.callTool("memory_get_context", {}));
+        await client.stop();
+        assert.equal(readFileSync(marker, "utf8"), "SIGTERM");
+        assert.throws(() => process.kill(pid!, 0), { code: "ESRCH" });
+        verifiedExit = true;
+        await client.stop();
+      } finally {
+        if (!verifiedExit && pid !== undefined) {
+          try { process.kill(pid, "SIGKILL"); } catch {}
+        }
+        await client.stop();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);

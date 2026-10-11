@@ -469,13 +469,14 @@ export class McpStdioClient {
     this.initialized = false;
     this.deliberateStop = true;
 
-    if (!this.proc) {
+    const proc = this.proc;
+    if (!proc) {
       return;
     }
 
     // Attempt graceful shutdown: send SIGTERM, then wait briefly.
     try {
-      this.proc.kill("SIGTERM");
+      proc.kill("SIGTERM");
     } catch {
       // Ignore — process may already be dead.
     }
@@ -483,14 +484,20 @@ export class McpStdioClient {
     // Give the process 2 seconds to exit gracefully.
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
-        if (this.proc && !this.proc.killed) {
-          this.proc.kill("SIGKILL");
+        // killed only records that a signal was sent, not that the child exited.
+        if (proc.exitCode === null && proc.signalCode === null) {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+            resolve();
+          }
+        } else {
+          resolve();
         }
-        resolve();
       }, 2000);
       timeout.unref();
 
-      this.proc!.once("exit", () => {
+      proc.once("exit", () => {
         clearTimeout(timeout);
         resolve();
       });
