@@ -22,14 +22,14 @@ Exit code:
     1 — violations detected (or file cannot be opened)
 """
 
-import sys
-import os
-import zipfile
-import xml.etree.ElementTree as ET
 import json
+import os
 import re
-import tempfile
 import shutil
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NSP = f"{{{NS}}}"
@@ -270,6 +270,9 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             has_formula = cell.find(f"{NSP}f") is not None
             v_elem = cell.find(f"{NSP}v")
             value_text = v_elem.text if v_elem is not None else None
+            # Shared-string values are indices, and cached string formulas may
+            # contain digits. Only numeric cells use numeric format semantics.
+            is_numeric = cell.get("t", "n") == "n"
             total_cells += 1
 
             # Skip cells with no style
@@ -327,56 +330,70 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
 
             # Check C3: color-role violation — non-formula cell with explicit black
             # (only flag if it looks like it should be an input — has a numeric value)
-            if (not has_formula and _is_black_font(font)
-                    and value_text is not None
-                    and not font.get("bold")
-                    and num_fmt_id not in (0,)   # skip general-format black (could be label)
+            if (
+                not has_formula
+                and _is_black_font(font)
+                and is_numeric
+                and value_text is not None
+                and not font.get("bold")
+                and num_fmt_id not in (0,)  # skip general-format black (could be label)
             ):
                 try:
                     float(value_text)
                     # It's a numeric value with black font — possible missing blue input marker
-                    w.append({
-                        "type": "numeric_input_may_lack_blue",
-                        "sheet": sheet_name,
-                        "cell": cell_ref,
-                        "s": s_idx,
-                        "value": value_text,
-                        "note": "Hardcoded numeric value has black font — if this is a user-editable "
-                                "assumption, change to blue-font input style (e.g. s=1/5/7/9/11/12).",
-                    })
-                except (ValueError, TypeError):
-                    pass
-
-            # Check C4: year value with comma-formatted numFmt
-            if value_text and _looks_like_year(value_text) and _fmt_is_comma(num_fmt_id, num_fmts):
-                v.append({
-                    "type": "year_with_comma_format",
-                    "sheet": sheet_name,
-                    "cell": cell_ref,
-                    "s": s_idx,
-                    "value": value_text,
-                    "numFmtId": num_fmt_id,
-                    "fix": "Year values must use numFmtId=1 (format '0') to display as 2024 not 2,024. "
-                           "Use style index 11 or a custom xf with numFmtId=1.",
-                })
-
-            # Check C5: percentage format with value > 1 (likely 8 instead of 0.08)
-            if value_text and _fmt_is_percent(num_fmt_id, num_fmts):
-                try:
-                    pct_val = float(value_text)
-                    if pct_val > 1.0:
-                        w.append({
-                            "type": "percent_value_gt_1",
+                    w.append(
+                        {
+                            "type": "numeric_input_may_lack_blue",
                             "sheet": sheet_name,
                             "cell": cell_ref,
                             "s": s_idx,
                             "value": value_text,
-                            "displayed_as": f"{pct_val * 100:.0f}%",
-                            "note": f"Value {value_text} with percentage format displays as {pct_val*100:.0f}%. "
-                                    "If intended rate is ~{:.0f}%, store as {:.4f} instead.".format(
-                                        pct_val, pct_val / 100
-                                    ),
-                        })
+                            "note": "Hardcoded numeric value has black font — if this is a user-editable "
+                            "assumption, change to blue-font input style (e.g. s=1/5/7/9/11/12).",
+                        }
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+            # Check C4: year value with comma-formatted numFmt
+            if (
+                is_numeric
+                and value_text
+                and _looks_like_year(value_text)
+                and _fmt_is_comma(num_fmt_id, num_fmts)
+            ):
+                v.append(
+                    {
+                        "type": "year_with_comma_format",
+                        "sheet": sheet_name,
+                        "cell": cell_ref,
+                        "s": s_idx,
+                        "value": value_text,
+                        "numFmtId": num_fmt_id,
+                        "fix": "Year values must use numFmtId=1 (format '0') to display as 2024 not 2,024. "
+                        "Use style index 11 or a custom xf with numFmtId=1.",
+                    }
+                )
+
+            # Check C5: percentage format with value > 1 (likely 8 instead of 0.08)
+            if is_numeric and value_text and _fmt_is_percent(num_fmt_id, num_fmts):
+                try:
+                    pct_val = float(value_text)
+                    if pct_val > 1.0:
+                        w.append(
+                            {
+                                "type": "percent_value_gt_1",
+                                "sheet": sheet_name,
+                                "cell": cell_ref,
+                                "s": s_idx,
+                                "value": value_text,
+                                "displayed_as": f"{pct_val * 100:.0f}%",
+                                "note": f"Value {value_text} with percentage format displays as {pct_val*100:.0f}%. "
+                                "If intended rate is ~{:.0f}%, store as {:.4f} instead.".format(
+                                    pct_val, pct_val / 100
+                                ),
+                            }
+                        )
                 except (ValueError, TypeError):
                     pass
 
