@@ -318,6 +318,13 @@ changes the exit code. The listing is a snapshot — the kernel can change betwe
 the rollback. Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and
 cleans up.
 
+`sudo ktuner rollback --list --drifted` narrows that listing to the entries whose `drifted` is
+`true` — the changes something else undid. The shape is unchanged and `count` is the filtered
+count, so the command answers "what did I lose?" directly. An entry whose path could not be read
+(`drifted: null`) is **not** listed: an unreadable value is not evidence of drift, and the plain
+`--list` still shows those entries. `--drifted` without `--list` is a usage error (stderr JSON,
+exit 2), refused before the root gate like the other argument errors.
+
 ### error output (stderr)
 
 ```json

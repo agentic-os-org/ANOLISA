@@ -272,6 +272,8 @@ sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，�
 
 被内核作为互斥孪生副作用清零的条目记录 `applied = "0"`（内核实际写入的值），因此当它不再为 0 时即为漂移。路径无法读取（设备已消失、模块未加载、write-only 旋钮）时报 `live: null` 和 `drifted: null`：读不到值不算错误，漂移也不会改变退出码。列表是快照——预览与回滚之间内核可能变化。普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
 
+`sudo ktuner rollback --list --drifted` 只列出 `drifted` 为 `true` 的条目——那些被别的写者改掉的调优。输出形态不变，`count` 是过滤后的条数，因此直接回答「我丢了哪些」。路径读不到（`drifted: null`）的条目**不在**其中：读不到值不能当作漂移的证据，用不带 `--drifted` 的 `--list` 仍能看到它们。`--drifted` 不带 `--list` 是用法错误（stderr JSON、退出码 2），与其他参数错误一样在 root 检查之前拒绝。
+
 ### 错误输出（stderr）
 
 ```json

@@ -40,6 +40,7 @@ fn usage_errors_reach_stderr_as_json() {
         &["check", "--no-such-flag"][..],
         &["fix"][..],
         &["rollback", "--list", "extra"][..],
+        &["rollback", "--drifted"][..],
     ] {
         let error = error_json(arguments);
         assert!(
