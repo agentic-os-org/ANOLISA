@@ -339,6 +339,7 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
     '../utils/apiClient': apiStubs,
     '../utils/roundModel': roundModel,
     '../utils/savings': savingsModule,
+    '../utils/download': realModule('src/utils/download.ts'),
     '../utils/trajectoryTree': trajectoryTree,
     '../utils/trajectoryTextFilter': trajectoryTextFilter,
     '../components/SubagentGraph': { SubagentGraph: () => null },

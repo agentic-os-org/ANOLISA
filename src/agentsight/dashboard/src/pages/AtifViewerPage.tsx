@@ -20,6 +20,7 @@ import type { MessageKey } from '../i18n';
 import type { Round } from '../utils/roundModel';
 import { groupIntoRounds, initialRound, roundStats } from '../utils/roundModel';
 import { compoundedSavingsRate } from '../utils/savings';
+import { downloadBlob } from '../utils/download';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -882,12 +883,7 @@ export const AtifViewerPage: React.FC = () => {
   const handleDownload = useCallback(() => {
     if (!doc) return;
     const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `atif-${(doc.session_id ?? 'trajectory').slice(0, 16)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `atif-${(doc.session_id ?? 'trajectory').slice(0, 16)}.json`);
   }, [doc]);
 
   // Compute metrics (fallback when final_metrics is partial)

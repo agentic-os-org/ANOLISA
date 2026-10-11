@@ -49,7 +49,7 @@ try {
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/download-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -71,6 +71,7 @@ try {
       AGENTSIGHT_TRAJECTORY_TREE_BUILD: join(outputDir, 'utils', 'trajectoryTree.js'),
       AGENTSIGHT_TRAJECTORY_FILTER_BUILD: join(outputDir, 'utils', 'trajectoryTextFilter.js'),
       AGENTSIGHT_ROUND_MODEL_BUILD: join(outputDir, 'utils', 'roundModel.js'),
+      AGENTSIGHT_DOWNLOAD_BUILD: join(outputDir, 'utils', 'download.js'),
     },
     stdio: 'inherit',
   });

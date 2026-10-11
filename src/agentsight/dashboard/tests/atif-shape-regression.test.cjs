@@ -35,9 +35,9 @@ function viewer(locale = 'en-US') {
   function load(file, extra = '') {
     const exports = {};
     runInNewContext(readFileSync(file, 'utf8') + extra, {
-      exports, URLSearchParams, Blob,
+      exports, URLSearchParams, Blob, setTimeout: () => 0,
       URL: { createObjectURL(blob) { downloads.push(blob); return 'blob:private'; }, revokeObjectURL() {} },
-      document: { createElement: () => ({ click() {} }) },
+      document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
       FileReader: class { constructor() { readers.push(this); } readAsText() {} },
       require(name) {
         if (name === 'react') return react;
@@ -62,6 +62,7 @@ function viewer(locale = 'en-US') {
     return exports;
   }
   messages = load(join(output, '../i18n.js')).messages;
+  modules['../utils/download'] = load(join(output, '../utils/download.js'));
   modules['../components/SubagentGraph'] = load(join(output, '../components/SubagentGraph.js'));
   const page = load(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, '\nexports.parts = { isAtifDocument, StepCard };');
   function render() { stateIndex = 0; refIndex = 0; return page.AtifViewerPage(); }

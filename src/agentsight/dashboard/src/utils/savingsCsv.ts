@@ -1,4 +1,5 @@
 import type { SessionSavings } from './apiClient';
+import { downloadBlob } from './download';
 
 const COLUMNS = [
   'session_id', 'agent_name', 'request_count', 'total_input_tokens',
@@ -23,16 +24,5 @@ export function serializeSavingsCsv(sessions: readonly SessionSavings[]): string
 /** Download the displayed results without fetching another snapshot. */
 export function downloadSavingsCsv(sessions: readonly SessionSavings[]): void {
   const blob = new Blob([serializeSavingsCsv(sessions)], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = 'token-savings.csv';
-  document.body.appendChild(link);
-  try {
-    link.click();
-  } finally {
-    link.remove();
-    // Give browsers time to begin consuming the download before releasing it.
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
+  downloadBlob(blob, 'token-savings.csv');
 }
