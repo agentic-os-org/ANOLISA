@@ -440,5 +440,61 @@ describe('HookEventHandler', () => {
       expect(input['tool_name']).toBe('Bash');
       expect(input).not.toHaveProperty('skill_context');
     });
+
+    it('should pass the tool name as matcher context', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent('Bash', {
+        command: 'ls',
+      });
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PreToolUse,
+        { toolName: 'Bash' },
+      );
+    });
+  });
+
+  describe('firePostToolUseFailureEvent', () => {
+    it('should pass the tool name as matcher context', async () => {
+      const mockPlan = {
+        ...createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+        eventName: HookEventName.PostToolUseFailure,
+      };
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseFailureEvent(
+        'tool-call-1',
+        'Bash',
+        { command: 'ls' },
+        'command failed',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PostToolUseFailure,
+        { toolName: 'Bash' },
+      );
+    });
   });
 });
