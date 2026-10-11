@@ -461,7 +461,123 @@ pub struct UpdateOptConfig {
     pub search_timeout_secs: Option<u64>,
 }
 
-fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
+/// Host portion of an absolute http(s) `base_url`, or `None` when the URL
+/// does not have that shape. A trailing `:port` (only digits) is stripped;
+/// bracketed IPv6 literals keep their brackets.
+fn base_url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// The stored `base_url` becomes the target of every optimization LLM
+/// request, so it must be an absolute http(s) URL naming a host — the
+/// sink only speaks http(s), and embedded credentials are never intended.
+fn validate_base_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| "base_url must be an absolute http(s) URL".to_string())?;
+    if base_url_host(url).is_none() {
+        return Err("base_url must name a host".to_string());
+    }
+    if rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .contains('@')
+    {
+        return Err("base_url must not embed credentials".to_string());
+    }
+    Ok(())
+}
+
+/// The complete externally visible origin of an http(s) `base_url`:
+/// scheme, normalized host, and the effective port (a port-less authority
+/// takes its scheme's default). `None` when the URL does not have that
+/// shape; a bracketed IPv6 literal keeps its brackets.
+fn base_url_origin(url: &str) -> Option<(&'static str, String, u16)> {
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        return None;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port))
+            if (host.starts_with('[') || !host.contains(':'))
+                && !port.is_empty()
+                && port.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (host, Some(port.parse::<u16>().ok()?))
+        }
+        _ => (authority, None),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let effective_port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
+    Some((scheme, host.to_ascii_lowercase(), effective_port))
+}
+
+/// Whether two base URLs name different origins (scheme, normalized host or
+/// effective port). Origin-preserving path adjustments are not changes.
+/// Malformed shapes count as changes so they fail closed.
+fn origin_changes(current: &str, next: &str) -> bool {
+    match (base_url_origin(current), base_url_origin(next)) {
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    }
+}
+
+fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) -> Result<(), String> {
+    // Validate the whole update against the stored config before touching
+    // anything: a rejected update must not leave a partially-applied state
+    // such as a new provider's key paired with the previous endpoint.
+    if let Some(ref url) = update.base_url
+        && !url.is_empty()
+    {
+        validate_base_url(url)?;
+        // Retargeting the endpoint origin (scheme, host or effective port)
+        // silently forwards the stored API key and the analyzed conversation
+        // content to a different origin on the next LLM call. The change
+        // therefore requires the caller to prove knowledge of the stored key
+        // by re-entering it verbatim in the same update; origin-preserving
+        // path adjustments stay free. Proving knowledge means matching the
+        // stored key: this server is reachable cross-origin from visited web
+        // pages, so treating any replacement value as proof would let such a
+        // page retarget the endpoint with an attacker-chosen key and
+        // exfiltrate the conversation payload to it.
+        if origin_changes(&config.effective_base_url(), url) {
+            let proves_knowledge = match (
+                update.api_key.as_deref(),
+                config.effective_api_key().as_deref(),
+            ) {
+                (Some(fresh), Some(stored)) => {
+                    !fresh.is_empty() && !fresh.contains('•') && fresh == stored
+                }
+                // First-time setup has no stored key to prove knowledge of.
+                (Some(fresh), None) => !fresh.is_empty() && !fresh.contains('•'),
+                _ => false,
+            };
+            if !proves_knowledge {
+                return Err(
+                    "changing the LLM endpoint origin (scheme, host or port) requires \
+                     re-entering the current API key in the same update"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    // Apply only after every field validated.
     if let Some(ref key) = update.api_key
         && !key.is_empty()
         && !key.contains('•')
@@ -483,6 +599,7 @@ fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
     {
         config.search_timeout_secs = Some(timeout_secs);
     }
+    Ok(())
 }
 
 fn config_response(config: &OptLlmConfig) -> serde_json::Value {
@@ -505,7 +622,12 @@ pub async fn update_optimize_config(
 ) -> impl Responder {
     let updated = match persist_config_update(&data.optimize, &body) {
         Ok(updated) => updated,
-        Err(e) => {
+        Err(ConfigUpdateError::Rejected(message)) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": message
+            }));
+        }
+        Err(ConfigUpdateError::Io(e)) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("failed to persist config: {e}")
             }));
@@ -515,19 +637,28 @@ pub async fn update_optimize_config(
     HttpResponse::Ok().json(config_response(&updated))
 }
 
+enum ConfigUpdateError {
+    /// The update was refused (invalid endpoint shape, or a host change
+    /// without the API key re-entered); nothing was persisted or published.
+    Rejected(String),
+    Io(std::io::Error),
+}
+
 fn persist_config_update(
     state: &OptimizeState,
     update: &UpdateOptConfig,
-) -> std::io::Result<OptLlmConfig> {
+) -> Result<OptLlmConfig, ConfigUpdateError> {
     let mut config = state
         .config
         .write()
-        .map_err(|_| std::io::Error::other("config lock poisoned"))?;
+        .map_err(|_| ConfigUpdateError::Io(std::io::Error::other("config lock poisoned")))?;
     // Publish memory only after persistence succeeds, keeping the lock
     // through both so another update cannot save an older snapshot last.
     let mut updated = config.clone();
-    apply_config_update(&mut updated, update);
-    updated.save(&state.config_path)?;
+    apply_config_update(&mut updated, update).map_err(ConfigUpdateError::Rejected)?;
+    updated
+        .save(&state.config_path)
+        .map_err(ConfigUpdateError::Io)?;
     *config = updated.clone();
     Ok(updated)
 }
@@ -927,13 +1058,192 @@ mod tests {
             search_timeout_secs: Some(30),
         };
 
-        apply_config_update(&mut config, &update);
+        apply_config_update(&mut config, &update).unwrap();
         config.save(&tmp).unwrap();
         let loaded = OptLlmConfig::load(&tmp);
         assert_eq!(loaded.search_timeout_secs, Some(30));
         assert_eq!(config_response(&loaded)["search_timeout_secs"], 30);
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn base_url_origin_parses_scheme_host_and_effective_port() {
+        assert_eq!(
+            base_url_origin("https://api.example.com/v1"),
+            Some(("https", "api.example.com".into(), 443))
+        );
+        assert_eq!(
+            base_url_origin("http://API.example.com:8080/x"),
+            Some(("http", "api.example.com".into(), 8080))
+        );
+        assert_eq!(
+            base_url_origin("http://[::1]:8443"),
+            Some(("http", "[::1]".into(), 8443))
+        );
+        assert_eq!(
+            base_url_origin("http://localhost"),
+            Some(("http", "localhost".into(), 80))
+        );
+        assert_eq!(base_url_origin("ftp://example.com"), None);
+        assert_eq!(base_url_origin("example.com"), None);
+    }
+
+    #[test]
+    fn origin_gates_cover_scheme_and_port_changes() {
+        let mut config = OptLlmConfig {
+            api_key: Some("sk-1234567890abcd".into()),
+            base_url: Some("https://api.openai.com/v1".into()),
+            model: None,
+            search_timeout_secs: None,
+        };
+        // A scheme or port change forwards the stored Bearer key to a
+        // different origin and requires the same key proof as a host change.
+        assert!(
+            apply_config_update(
+                &mut config,
+                &UpdateOptConfig {
+                    api_key: None,
+                    base_url: Some("http://api.openai.com/v1".into()),
+                    model: None,
+                    search_timeout_secs: None,
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            apply_config_update(
+                &mut config,
+                &UpdateOptConfig {
+                    api_key: None,
+                    base_url: Some("https://api.openai.com:8443/v1".into()),
+                    model: None,
+                    search_timeout_secs: None,
+                },
+            )
+            .is_err()
+        );
+        // The default port may be spelled out; the origin is unchanged.
+        assert!(
+            apply_config_update(
+                &mut config,
+                &UpdateOptConfig {
+                    api_key: None,
+                    base_url: Some("https://api.openai.com:443/v1beta".into()),
+                    model: None,
+                    search_timeout_secs: None,
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://api.openai.com:443/v1beta")
+        );
+    }
+
+    #[test]
+    fn a_wrong_key_does_not_prove_knowledge_and_leaves_nothing_applied() {
+        let mut config = OptLlmConfig {
+            api_key: Some("sk-1234567890abcd".into()),
+            base_url: Some("https://api.openai.com/v1".into()),
+            model: Some("gpt-test".into()),
+            search_timeout_secs: None,
+        };
+        // Only the stored key proves knowledge: an attacker-chosen key with
+        // an attacker-controlled endpoint is refused, and because validation
+        // precedes application the stored config is untouched.
+        let refused = apply_config_update(
+            &mut config,
+            &UpdateOptConfig {
+                api_key: Some("attacker-chosen-key".into()),
+                base_url: Some("https://attacker.example/v1".into()),
+                model: Some("attacker-model".into()),
+                search_timeout_secs: Some(999),
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(config.api_key.as_deref(), Some("sk-1234567890abcd"));
+        assert_eq!(config.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(config.model.as_deref(), Some("gpt-test"));
+        assert_eq!(config.search_timeout_secs, None);
+    }
+
+    #[test]
+    fn local_base_url_updates_are_shape_checked_and_host_changes_need_the_key() {
+        let mut config = OptLlmConfig {
+            api_key: Some("sk-1234567890abcd".into()),
+            base_url: Some("https://api.openai.com/v1".into()),
+            model: None,
+            search_timeout_secs: None,
+        };
+        // Retargeting the host without proving knowledge of the key is the
+        // exfiltration path: the stored key would be sent to the new host.
+        let refused = apply_config_update(
+            &mut config,
+            &UpdateOptConfig {
+                api_key: None,
+                base_url: Some("https://attacker.example/v1".into()),
+                model: None,
+                search_timeout_secs: None,
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        // Same-host path adjustments stay free.
+        assert!(
+            apply_config_update(
+                &mut config,
+                &UpdateOptConfig {
+                    api_key: None,
+                    base_url: Some("https://api.openai.com/v1beta".into()),
+                    model: None,
+                    search_timeout_secs: None,
+                },
+            )
+            .is_ok()
+        );
+        // Non-http(s) shapes are refused outright.
+        for bad in [
+            "",
+            "api.example.com/v1",
+            "ftp://api.example.com",
+            "https://user:pass@e.com",
+        ] {
+            assert!(
+                apply_config_update(
+                    &mut config,
+                    &UpdateOptConfig {
+                        api_key: None,
+                        base_url: Some(bad.into()),
+                        model: None,
+                        search_timeout_secs: None,
+                    },
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
+        // A host change with the key re-entered in the same update applies.
+        assert!(
+            apply_config_update(
+                &mut config,
+                &UpdateOptConfig {
+                    api_key: Some("sk-1234567890abcd".into()),
+                    base_url: Some("https://dashscope.example.com/compatible-mode/v1".into()),
+                    model: None,
+                    search_timeout_secs: None,
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://dashscope.example.com/compatible-mode/v1")
+        );
     }
 
     #[test]
