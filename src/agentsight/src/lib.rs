@@ -52,6 +52,15 @@ pub mod tokenizer;
 pub mod token_breakdown;
 pub mod utils;
 
+// ─── Server-only modules (both servers, all OSes) ───────────────────────────
+
+// Cross-platform under the `server` feature: browser cross-origin request
+// classification shared by the Linux serve path and the macOS local viewer,
+// so both keep their local-caller conveniences without becoming cross-origin
+// data sources for visited web pages.
+#[cfg(feature = "server")]
+pub mod http_origin;
+
 // ─── Linux-only modules (eBPF observability pipeline) ──────────────────────
 
 #[cfg(all(feature = "server", target_os = "linux"))]
