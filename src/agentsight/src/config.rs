@@ -15,9 +15,6 @@ pub const DEFAULT_POLL_TIMEOUT_MS: u64 = 100;
 /// Default minimum duration threshold for HTTP requests (microseconds)
 pub const DEFAULT_MIN_DUR_US: u64 = 10_000;
 
-/// Default maximum body length for audit analyzer
-pub const DEFAULT_MAX_BODY_LEN: usize = 64 * 1024;
-
 /// Default maximum headers for HTTP parser
 pub const DEFAULT_MAX_HEADERS: usize = 64;
 
@@ -130,7 +127,8 @@ pub fn verbose() -> bool {
     VERBOSE.load(Ordering::SeqCst)
 }
 
-// ==================== Global Probe Poll Timeout ====================
+// ==================== Global Probe Poll Timeout =============}
+
 
 /// Process-wide ring-buffer poll timeout for the probe poll threads,
 /// applied by `AgentSight::new` from `AgentsightConfig::poll_timeout_ms`.
@@ -154,6 +152,34 @@ pub fn set_poll_timeout_ms(ms: u64) {
 /// Current ring-buffer poll timeout (milliseconds).
 pub fn poll_timeout_ms() -> u64 {
     POLL_TIMEOUT_MS.load(Ordering::SeqCst)
+}
+
+// ==================== Global HTTP Trace Duration Floor ====================
+
+/// Process-wide floor for the duration of HTTP request/response Chrome trace
+/// events, applied by `AgentSight::new` from `AgentsightConfig::min_duration_us`.
+///
+/// The trace exporters (`ParsedRequest::to_chrome_trace_events`,
+/// `ParsedResponse::to_chrome_trace_events`,
+/// `AggregatedResponse::to_chrome_trace_events`) cannot see the config object,
+/// so the knob is published through this global — the same pattern the verbose
+/// flag uses. Trace viewers cannot render sub-pixel durations, so events
+/// shorter than the floor are drawn with the floor's duration.
+static MIN_DURATION_US: AtomicU64 = AtomicU64::new(DEFAULT_MIN_DUR_US);
+
+/// Publish the configured minimum HTTP trace-event duration.
+///
+/// The value is clamped to at least one microsecond: a zero duration would
+/// make complete ('X') trace events invisible in Perfetto, which is what the
+/// floor exists to prevent.
+pub fn set_min_duration_us(us: u64) {
+    MIN_DURATION_US.store(us.max(1), Ordering::SeqCst);
+}
+
+/// Current minimum HTTP trace-event duration (microseconds).
+pub fn min_duration_us() -> u64 {
+    MIN_DURATION_US.load(Ordering::SeqCst)
+
 }
 
 // ==================== FFI Rule Configuration ====================
@@ -1114,16 +1140,18 @@ pub struct AgentsightConfig {
     // --- HTTP/Aggregation Configuration ---
     /// LRU cache capacity for HTTP connections
     pub connection_capacity: usize,
-    /// Minimum duration threshold for HTTP requests (microseconds)
+    /// Minimum duration threshold for HTTP request/response Chrome trace
+    /// events (microseconds). Events shorter than this are emitted with the
+    /// floor's duration so they stay visible in trace viewers. Applied
+    /// process-wide at startup via [`crate::config::set_min_duration_us`].
     pub min_duration_us: u64,
 
     // --- Parser Configuration ---
-    /// Maximum number of HTTP headers to parse
+    /// Maximum number of HTTP headers the HTTP/1 parser accepts per message.
+    /// A message with more headers is rejected by `httparse` (TooManyHeaders)
+    /// and falls through to the raw-data path. Threads into
+    /// [`crate::parser::Parser::with_max_headers`] at startup.
     pub max_headers: usize,
-
-    // --- Analyzer Configuration ---
-    /// Maximum body length for audit analysis
-    pub max_body_len: usize,
 
     // --- Logging Configuration ---
     /// Enable verbose logging
@@ -1134,8 +1162,6 @@ pub struct AgentsightConfig {
     // --- Tokenizer Configuration ---
     /// Path to tokenizer file for accurate token counting (e.g., "/path/to/tokenizer.json")
     pub tokenizer_path: Option<PathBuf>,
-    /// URL to download tokenizer from (e.g., "https://modelscope.cn/.../tokenizer.json")
-    pub tokenizer_url: Option<String>,
 
     // --- FFI Rule Configuration ---
     /// User-defined cmdline rules for process allowlist/denylist
@@ -1226,9 +1252,6 @@ impl Default for AgentsightConfig {
             // Parser defaults
             max_headers: DEFAULT_MAX_HEADERS,
 
-            // Analyzer defaults
-            max_body_len: DEFAULT_MAX_BODY_LEN,
-
             // Logging defaults
             verbose: false,
             log_path: None,
@@ -1237,10 +1260,6 @@ impl Default for AgentsightConfig {
             tokenizer_path: std::env::var("AGENTSIGHT_TOKENIZER_PATH")
                 .ok()
                 .map(PathBuf::from),
-            tokenizer_url: Some(
-                "https://www.modelscope.cn/models/Qwen/Qwen3.5-27B/resolve/master/tokenizer.json"
-                    .to_owned(),
-            ),
 
             // FFI Rule defaults
             cmdline_rules: Vec::new(),
@@ -1590,12 +1609,6 @@ impl AgentsightConfig {
         self
     }
 
-    /// Set tokenizer URL
-    pub fn set_tokenizer_url(mut self, url: Option<String>) -> Self {
-        self.tokenizer_url = url;
-        self
-    }
-
     /// Add a cmdline rule
     pub fn add_cmdline_rule(mut self, rule: CmdlineRule) -> Self {
         self.cmdline_rules.push(rule);
@@ -1763,7 +1776,6 @@ mod tests {
         assert_eq!(DEFAULT_CONNECTION_CAPACITY, 24);
         assert_eq!(DEFAULT_POLL_TIMEOUT_MS, 100);
         assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
-        assert_eq!(DEFAULT_MAX_BODY_LEN, 64 * 1024);
         assert_eq!(DEFAULT_MAX_HEADERS, 64);
         assert_eq!(PRIMARY_DB_NAME, "agentsight.db");
         assert_eq!(DEFAULT_AUDIT_TABLE, "audit_events");
@@ -1796,7 +1808,6 @@ mod tests {
         assert_eq!(config.poll_timeout_ms, 100);
         assert_eq!(config.min_duration_us, 10_000);
         assert_eq!(config.max_headers, 64);
-        assert_eq!(config.max_body_len, 64 * 1024);
         assert!(!config.verbose);
         assert!(config.log_path.is_none());
         assert!(config.target_uid.is_none());
@@ -1969,16 +1980,6 @@ mod tests {
         assert_eq!(
             config.tokenizer_path,
             Some(PathBuf::from("/path/to/tokenizer.json"))
-        );
-    }
-
-    #[test]
-    fn test_set_tokenizer_url() {
-        let config =
-            AgentsightConfig::new().set_tokenizer_url(Some("https://example.com/tok.json".into()));
-        assert_eq!(
-            config.tokenizer_url,
-            Some("https://example.com/tok.json".to_string())
         );
     }
 
