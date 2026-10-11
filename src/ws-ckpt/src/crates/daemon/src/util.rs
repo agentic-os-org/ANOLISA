@@ -131,13 +131,67 @@ pub async fn ensure_symlinks(state: &DaemonState) {
     }
 }
 
-/// Atomically replace the symlink via temp-file + rename.
+/// Repair the registration symlink via temp-file + rename.
+///
+/// Preconditions, checked explicitly: `ws_path` must be absent or a symlink
+/// — a foreign regular file or directory at the registration path is never
+/// replaced (rename(2) would silently destroy a plain file that e.g. a
+/// restore tool materialized while the daemon was down), matching the
+/// fail-safe the detached-registration guard applies to runtime ops. A
+/// directory occupying `{ws_path}.tmp` is reported by name instead of
+/// wedging every future restart behind a generic EEXIST.
 async fn rebuild_symlink(ws_path: &str, expected_subvol_path: &Path) {
     let tmp_path = format!("{}.tmp", ws_path);
-    // Best-effort cleanup of leftover residue from a prior daemon crash between
-    // symlink() and rename(); without this, symlink() returns EEXIST and
-    // recovery wedges permanently for this workspace.
-    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    // A non-symlink at the registration path is foreign content. Missing
+    // paths and existing symlinks proceed (the repair's whole purpose).
+    match tokio::fs::symlink_metadata(ws_path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!("cannot inspect registration path {}: {}", ws_path, e);
+            return;
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {}
+        Ok(meta) => {
+            warn!(
+                "registration path {} is a {} — refusing to replace it; move it \
+                 aside and restart the daemon to repair the workspace link",
+                ws_path,
+                if meta.is_dir() {
+                    "directory"
+                } else {
+                    "regular file"
+                }
+            );
+            return;
+        }
+    }
+
+    // Crash residue at the temp path: a plain file (or our own leftover
+    // symlink) is removable; a directory cannot be and would wedge every
+    // future restart on EEXIST, so name the blocker explicitly.
+    match tokio::fs::symlink_metadata(&tmp_path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!("cannot inspect {}: {}", tmp_path, e);
+            return;
+        }
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+            if let Err(e) = tokio::fs::remove_file(&tmp_path).await {
+                warn!("failed to remove stale {}: {}", tmp_path, e);
+                return;
+            }
+        }
+        Ok(_) => {
+            warn!(
+                "directory {} blocks symlink recovery for {}; remove it and \
+                 restart the daemon",
+                tmp_path, ws_path
+            );
+            return;
+        }
+    }
+
     if let Err(e) = tokio::fs::symlink(expected_subvol_path, &tmp_path).await {
         warn!("failed to create temp symlink for {}: {}", ws_path, e);
         return;
@@ -407,8 +461,101 @@ pub(crate) async fn guard_cwd_occupants(workspace: &str) -> Option<ws_ckpt_commo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[tokio::test]
+    async fn rebuild_refuses_to_replace_regular_file() {
+        // A foreign regular file at the registration path must survive the
+        // repair attempt: rename(2) would have silently replaced it.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws-reg");
+        std::fs::write(&ws, b"user data").unwrap();
+        rebuild_symlink(ws.to_str().unwrap(), Path::new("/nonexistent/subvol")).await;
+        assert_eq!(
+            std::fs::read(&ws).unwrap(),
+            b"user data",
+            "the foreign file must not be replaced"
+        );
+        // No .tmp residue is left behind by the refused repair.
+        assert!(!dir.path().join("ws-reg.tmp").exists());
+    }
+
+    async fn rebuild_refuses_to_replace_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws-dir");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(ws.join("keep.txt"), b"x").unwrap();
+        rebuild_symlink(ws.to_str().unwrap(), Path::new("/nonexistent/subvol")).await;
+        // Directory untouched (rename over a dir fails anyway, but the guard
+        // must refuse before attempting, leaving no .tmp residue).
+        assert!(ws.join("keep.txt").exists());
+        assert!(!dir.path().join("ws-dir.tmp").exists());
+    }
+
+    async fn rebuild_repairs_when_registration_path_missing() {
+        // The happy repair: path absent → symlink created and renamed.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("subvol");
+        std::fs::create_dir(&target).unwrap();
+        let ws = dir.path().join("ws-ok");
+        rebuild_symlink(ws.to_str().unwrap(), &target).await;
+        let meta = tokio::fs::symlink_metadata(&ws).await.unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&ws).unwrap(),
+            target,
+            "symlink points at the subvolume"
+        );
+    }
+
+    async fn rebuild_replaces_a_stale_symlink() {
+        // A symlink pointing at the wrong place is repairable (that is the
+        // function's purpose).
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("subvol");
+        std::fs::create_dir(&target).unwrap();
+        let ws = dir.path().join("ws-stale");
+        std::os::unix::fs::symlink("/wrong/place", &ws).unwrap();
+        rebuild_symlink(ws.to_str().unwrap(), &target).await;
+        assert_eq!(std::fs::read_link(&ws).unwrap(), target);
+    }
+
+    async fn rebuild_cleans_a_stale_file_tmp_then_repairs() {
+        // Crash residue as a plain FILE at {ws}.tmp: removed, repair proceeds.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("subvol");
+        std::fs::create_dir(&target).unwrap();
+        let ws = dir.path().join("ws-filetmp");
+        let tmp = dir.path().join("ws-filetmp.tmp");
+        std::fs::write(&tmp, b"residue").unwrap();
+        rebuild_symlink(ws.to_str().unwrap(), &target).await;
+        let meta = tokio::fs::symlink_metadata(&ws).await.unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert!(!tmp.exists(), "residue must be consumed");
+    }
+
+    async fn rebuild_reports_directory_tmp_as_blocker() {
+        // A DIRECTORY at {ws}.tmp: recovery must refuse AND leave the
+        // directory in place (no destructive rmdir), and the registration
+        // path must not gain a symlink.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws-dirtmp");
+        let tmp = dir.path().join("ws-dirtmp.tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::write(tmp.join("inside.txt"), b"y").unwrap();
+        rebuild_symlink(ws.to_str().unwrap(), Path::new("/nonexistent/subvol")).await;
+        // The blocker survives (we never rmdir foreign content) and no link
+        // was created at the registration path.
+        assert!(
+            tmp.join("inside.txt").exists(),
+            "blocker directory survives"
+        );
+        assert!(
+            !ws.exists(),
+            "no symlink may be installed while the blocker exists"
+        );
+    }
+
     async fn is_mounted_detects_real_mount_point() {
         // `/proc` is a mount point on every supported (Linux) host, and a fresh
         // temp dir never is. Guards the workspace-root check in `init`.
