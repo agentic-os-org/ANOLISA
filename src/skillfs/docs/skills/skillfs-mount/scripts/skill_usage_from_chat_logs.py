@@ -38,15 +38,36 @@ def parse_function_calls(file_path):
             except json.JSONDecodeError:
                 continue
 
-            parts = obj.get("message", {}).get("parts", [])
+            # A non-object line (array/scalar) has no message/parts; skip it
+            # instead of aborting the whole run.
+            if not isinstance(obj, dict):
+                continue
+
+            message = obj.get("message", {})
+            if not isinstance(message, dict):
+                continue
+            parts = message.get("parts", [])
+            if not isinstance(parts, list):
+                continue
             ts = obj.get("timestamp", "")
             for part in parts:
-                fc = part.get("functionCall")
-                if not fc:
+                if not isinstance(part, dict):
                     continue
+                fc = part.get("functionCall")
+                if not isinstance(fc, dict):
+                    continue
+                # The tool name is used as a Counter key, so only non-empty
+                # strings can be tallied; a list/None (or an empty
+                # ``functionCall``) is skipped instead of aborting or being
+                # reported as one unnamed tool call.
                 tool_name = fc.get("name", "")
+                if not isinstance(tool_name, str) or not tool_name:
+                    continue
+
                 args = fc.get("args", {})
                 skill_name = args.get("skill") if isinstance(args, dict) else None
+                if not isinstance(skill_name, str) or not skill_name:
+                    skill_name = None
                 yield tool_name, skill_name, ts
 
 
