@@ -115,6 +115,11 @@ ce-runner supports three task prefixes with different execution modes:
 
 ## Output
 
+Batch inputs must select each task YAML only once and declare unique, nonempty string
+`task_id` values. Duplicate selections (including directory aliases), conflicting IDs,
+and unreadable or invalid task YAMLs produce an error before gateway or worker setup.
+Use `--trials` to execute a task repeatedly.
+
 ```
 claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
 ├── <task_id>_xxxx.jsonl   # Converted trace
