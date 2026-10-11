@@ -96,8 +96,14 @@ _RESERVED_EMAIL_DOMAINS = frozenset(
         "test",
     }
 )
+# Anchored with \Z, never $: the URI is remote-identity context only when it
+# ends immediately before the address. Python's `$` also matches before one
+# trailing newline, so `scheme://\nuser@host` used to flip to the low-confidence
+# remote-identity classification while a space or a blank line in the same
+# position did not — an anchor artifact, not intent, and one the Rust V2 port
+# (whose `$` is already strict end-of-input) silently did not reproduce.
 _REMOTE_EMAIL_URI_RE = re.compile(
-    r"(?<![\w+.-])(?:git\+ssh|ssh|sftp|scp|rsync)://$", re.IGNORECASE
+    r"(?<![\w+.-])(?:git\+ssh|ssh|sftp|scp|rsync)://\Z", re.IGNORECASE
 )
 _REMOTE_COMMAND_OPTIONS_WITH_VALUE = {
     "ssh": frozenset(
