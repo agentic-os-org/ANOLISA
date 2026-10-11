@@ -41,6 +41,7 @@ type JsonRpcResponse = {
 type PendingCall = {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
+  timeout: NodeJS.Timeout;
 };
 
 const INIT_TIMEOUT_MS = 10_000;
@@ -298,26 +299,28 @@ export class McpStdioClient {
         params,
       };
 
-      const pending: PendingCall = { resolve, reject };
+      const timeoutMs =
+        timeoutOverrideMs ?? (method === "initialize" ? INIT_TIMEOUT_MS : DEFAULT_CALL_TIMEOUT_MS);
+      const pending: PendingCall = {
+        resolve,
+        reject,
+        timeout: setTimeout(() => {
+          this.takePending(id)?.reject(
+            new Error(`agent-memory call '${method}' timed out after ${timeoutMs}ms`),
+          );
+        }, timeoutMs).unref(),
+      };
       this.pending.set(id, pending);
 
       const payload = JSON.stringify(request) + "\n";
       this.proc.stdin!.write(payload, (err) => {
         if (err) {
-          this.pending.delete(id);
-          reject(new Error(`Failed to write to agent-memory stdin: ${err.message}`));
+          this.takePending(id)?.reject(
+            new Error(`Failed to write to agent-memory stdin: ${err.message}`),
+          );
         }
       });
 
-      // Timeout: reject the call if no response arrives.
-      const timeoutMs =
-        timeoutOverrideMs ?? (method === "initialize" ? INIT_TIMEOUT_MS : DEFAULT_CALL_TIMEOUT_MS);
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`agent-memory call '${method}' timed out after ${timeoutMs}ms`));
-        }
-      }, timeoutMs).unref();
     });
   }
 
@@ -368,12 +371,26 @@ export class McpStdioClient {
     }
   }
 
+  private takePending(id: number): PendingCall | undefined {
+    const pending = this.pending.get(id);
+    if (pending) {
+      this.pending.delete(id);
+      clearTimeout(pending.timeout);
+    }
+    return pending;
+  }
+
+  private rejectPendingCalls(message: string): void {
+    for (const id of this.pending.keys()) {
+      this.takePending(id)?.reject(new Error(message));
+    }
+  }
+
   private handleResponse(msg: JsonRpcResponse): void {
-    const pending = this.pending.get(msg.id);
+    const pending = this.takePending(msg.id);
     if (!pending) {
       return;
     }
-    this.pending.delete(msg.id);
 
     if (msg.error) {
       pending.reject(
@@ -424,14 +441,9 @@ export class McpStdioClient {
     this.flushStderr();
 
     // Reject all pending calls so awaiters don't hang forever.
-    for (const [id, pending] of this.pending) {
-      this.pending.delete(id);
-      pending.reject(
-        new Error(
-          `agent-memory process exited (code=${code ?? "unknown"}, signal=${signal ?? "none"})`,
-        ),
-      );
-    }
+    this.rejectPendingCalls(
+      `agent-memory process exited (code=${code ?? "unknown"}, signal=${signal ?? "none"})`,
+    );
 
     // Count this as a crash if the exit was unexpected. SIGTERM /
     // SIGKILL from `stop()` are deliberate and don't count.
@@ -456,10 +468,7 @@ export class McpStdioClient {
     this.proc = null;
     this.flushStderr();
 
-    for (const [id, pending] of this.pending) {
-      this.pending.delete(id);
-      pending.reject(new Error(`agent-memory process error: ${err.message}`));
-    }
+    this.rejectPendingCalls(`agent-memory process error: ${err.message}`);
   }
 
   private deliberateStop = false;
@@ -497,7 +506,7 @@ export class McpStdioClient {
     });
 
     this.proc = null;
-    this.pending.clear();
+    this.rejectPendingCalls("agent-memory process stopped");
     // flushStderr writes once more, but we also need to cancel the
     // pending flush timer so no extra summary line fires after stop().
     this.flushStderr();

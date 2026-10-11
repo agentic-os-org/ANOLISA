@@ -10,6 +10,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
@@ -103,6 +106,56 @@ describe("McpStdioClient", () => {
     const client = new McpStdioClient(cfg);
     await client.stop();
   });
+
+  for (const resultMode of ["success", "error", "exit"] as const) {
+    it(`releases request timers after worker ${resultMode}`, async (t) => {
+      const directory = mkdtempSync(join(tmpdir(), "memory-mcp-timers-"));
+      const binaryPath = join(directory, "worker");
+      writeFileSync(binaryPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method !== "initialize" && ${JSON.stringify(resultMode)} === "exit") process.exit(9);
+  const reply = request.method === "initialize"
+    ? { result: { protocolVersion: "2024-11-05", capabilities: {} } }
+    : ${JSON.stringify(resultMode)} === "error"
+      ? { error: { code: -32000, message: "test failure" } }
+      : { result: { content: [{ type: "text", text: "memory result" }] } };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, ...reply }) + "\\n");
+});
+`, { mode: 0o755 });
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+      const realTimeout = globalThis.setTimeout;
+      const realClear = globalThis.clearTimeout;
+      t.mock.method(globalThis, "setTimeout", (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+        const timer = realTimeout(callback, delay, ...args);
+        timers.add(timer);
+        return timer;
+      });
+      t.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout>) => {
+        timers.delete(timer);
+        realClear(timer);
+      });
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      try {
+        if (resultMode === "success") {
+          for (let i = 0; i < 10; i++) {
+            assert.equal(await client.callTool("memory_get_context", {}), "memory result");
+            assert.equal(timers.size, 0, "completed calls must not retain request timeouts");
+          }
+        } else {
+          await assert.rejects(client.callTool("memory_get_context", {}), resultMode === "error" ? /test failure/ : /process exited/);
+          assert.equal(timers.size, 0, "failed calls must not retain request timeouts");
+        }
+      } finally {
+        await client.stop();
+        for (const timer of timers) realClear(timer);
+        t.mock.restoreAll();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);
