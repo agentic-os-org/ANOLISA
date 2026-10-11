@@ -198,6 +198,20 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+Use the offline token comparison's `--check` option in automation:
+
+```bash
+python scripts/compare_session_trace_tokens.py --root claw-eval/traces --check --csv token-audit.csv
+```
+
+Check mode reports all selected trials and writes the requested CSV before
+returning exit 1 for any existing discrepancy or an empty inventory; fully matched
+evidence returns 0. `--run` restricts the checked run. Existing diagnostics include
+missing traces, input/output/assistant-count/trace-end differences and nonzero
+session cache counters. Counter semantics are unchanged, and check-mode text is
+UTF-8. Without `--check`, discrepancy and empty-inventory reports remain
+informational and return 0.
+
 ## Troubleshooting
 
 | Issue | Fix |

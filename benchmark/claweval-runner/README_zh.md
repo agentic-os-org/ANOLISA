@@ -198,6 +198,18 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+自动化流程可使用离线 token 对比的 `--check` 选项：
+
+```bash
+python scripts/compare_session_trace_tokens.py --root claw-eval/traces --check --csv token-audit.csv
+```
+
+检查模式会先报告全部选中 trial 并写入请求的 CSV；存在任一既有差异或没有记录时，
+退出码为 1，证据全部匹配时为 0。`--run` 可限定检查的运行。既有诊断包括 trace 缺失、
+输入/输出 token、assistant 数量、trace-end 差异，以及非零的会话缓存计数。
+计数语义保持不变，检查模式的文本使用 UTF-8。不使用 `--check` 时，差异报告和空记录
+报告仍为信息提示，退出码为 0。
+
 ## 故障排查
 
 | 问题 | 修复 |
