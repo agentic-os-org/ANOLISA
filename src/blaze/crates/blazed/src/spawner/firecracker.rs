@@ -1777,7 +1777,8 @@ fn configure_logs(command: &mut Command, run_dir: &Path, serial_log: bool) -> Re
 async fn read_pinned_backend_version(executable: &PinnedExecutable) -> Result<String> {
     let program = executable.program();
     let mut command = Command::new(&program);
-    command.arg("--version");
+    // Deadline expiry and caller cancellation must stop the owned probe child.
+    command.arg("--version").kill_on_drop(true);
     executable.inherit_into(&mut command);
     let output = tokio::time::timeout(Duration::from_secs(5), command.output())
         .await
@@ -1802,7 +1803,10 @@ async fn read_pinned_backend_version(executable: &PinnedExecutable) -> Result<St
 async fn read_backend_version(binary_path: &Path) -> Result<String> {
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new(binary_path).arg("--version").output(),
+        Command::new(binary_path)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     .map_err(|_| BlazeError::BackendError {
@@ -3520,6 +3524,123 @@ mod tests {
             .expect("write version binary");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .expect("make version binary executable");
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_probe_exit(pid: u32) -> bool {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                    Ok(stat)
+                        if !stat.rsplit_once(") ").is_some_and(|(_, fields)| {
+                            fields.starts_with('Z') || fields.starts_with('X')
+                        }) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    Ok(_) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(error) => panic!("cannot inspect probe child {pid}: {error}"),
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn blocked_version_probe_is_stopped(pinned: bool, cancel: bool) -> bool {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("probe directory");
+        let binary = temp.path().join("firecracker");
+        let pid_path = temp.path().join("probe.pid");
+        let input_path = temp.path().join("probe.input");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &input_path,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+        )
+        .expect("probe input FIFO");
+        // A read/write FIFO handle keeps the shell's builtin read blocked
+        // without spawning a descendant or relying on an arbitrary sleep.
+        let mut input = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&input_path)
+            .expect("open probe input");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nIFS= read -r line < '{}'\nprintf 'Firecracker v1.16.0\\n'\n",
+                pid_path.display(),
+                input_path.display(),
+            ),
+        )
+        .expect("write blocked version binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("make blocked version binary executable");
+        let executable = pinned.then(|| PinnedExecutable::open(&binary).expect("pin binary"));
+        let probe = tokio::spawn(async move {
+            match executable {
+                Some(executable) => read_pinned_backend_version(&executable).await,
+                None => read_backend_version(&binary).await,
+            }
+        });
+        let pid: u32 = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_path)
+                    && let Ok(pid) = contents.parse()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("probe child must start");
+        if cancel {
+            probe.abort();
+            assert!(
+                probe
+                    .await
+                    .expect_err("probe must be cancelled")
+                    .is_cancelled()
+            );
+        } else {
+            let error = probe
+                .await
+                .expect("probe task")
+                .expect_err("probe deadline");
+            assert!(error.to_string().contains("probe timed out"));
+        }
+        let stopped = wait_for_probe_exit(pid).await;
+        eprintln!("version probe pinned={pinned} cancel={cancel} pid={pid} stopped={stopped}");
+        // Also clean up on the unfixed tree: release the builtin read and wait
+        // for the test-owned child to exit before reporting the assertion.
+        input.write_all(b"continue\n").expect("release probe input");
+        assert!(
+            wait_for_probe_exit(pid).await,
+            "test probe must be released"
+        );
+        stopped
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn version_probe_timeout_stops_owned_children() {
+        let ordinary = blocked_version_probe_is_stopped(false, false).await;
+        let pinned = blocked_version_probe_is_stopped(true, false).await;
+        assert!(ordinary && pinned, "timed-out version probes kept running");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn version_probe_cancellation_stops_owned_children() {
+        let ordinary = blocked_version_probe_is_stopped(false, true).await;
+        let pinned = blocked_version_probe_is_stopped(true, true).await;
+        assert!(ordinary && pinned, "cancelled version probes kept running");
     }
 
     #[cfg(target_os = "linux")]
