@@ -114,16 +114,40 @@ export async function writeLine(
   filePath: string,
   data: unknown,
 ): Promise<void> {
+  await runExclusive(filePath, () => appendLine(filePath, data));
+}
+
+/**
+ * Runs `callback` while holding the file's write lock, so that read-modify-
+ * append sequences stay atomic with respect to writeLine() users on the same
+ * file. Because the mutex is not reentrant, the callback must append via
+ * appendLine() (not writeLine(), which would deadlock waiting for the lock
+ * the callback already holds).
+ */
+export async function runExclusive<T>(
+  filePath: string,
+  callback: () => Promise<T>,
+): Promise<T> {
   const lock = getFileLock(filePath);
-  await lock.runExclusive(() => {
-    const line = `${JSON.stringify(data)}\n`;
-    // Ensure directory exists before writing
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.appendFileSync(filePath, line, 'utf8');
-  });
+  return lock.runExclusive(callback);
+}
+
+/**
+ * Appends a line to a JSONL file WITHOUT acquiring the file lock.
+ * Only for use inside a runExclusive() callback, where the caller already
+ * holds the lock; use writeLine() everywhere else.
+ */
+export async function appendLine(
+  filePath: string,
+  data: unknown,
+): Promise<void> {
+  const line = `${JSON.stringify(data)}\n`;
+  // Ensure directory exists before writing
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.appendFileSync(filePath, line, 'utf8');
 }
 
 /**
