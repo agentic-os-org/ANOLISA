@@ -409,6 +409,10 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+If different case IDs map to the same portable detail CSV filename (including case-only
+differences), their filenames receive deterministic hash suffixes. Ordinary non-colliding
+filenames stay unchanged, and CSV rows always retain the original case ID.
+
 Analyze existing traces:
 
 ```bash
