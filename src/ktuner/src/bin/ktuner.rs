@@ -47,7 +47,8 @@ enum Commands {
         /// Restore only these recorded parameters, leaving the other entries
         /// in the ledger in place
         params: Vec<String>,
-        /// Show what a rollback would restore, without changing anything
+        /// Show what a rollback would restore, without changing anything;
+        /// with parameters, only the entries restoring them would touch
         #[arg(long)]
         list: bool,
     },
@@ -858,18 +859,6 @@ fn normalize_params(params: &[String]) -> Vec<String> {
 }
 
 fn cmd_rollback(params: &[String], list: bool) -> Result<i32> {
-    // `--list` keeps its read-only preview of the whole pending set, so the
-    // positionals cannot be combined with it: refusing is a usage error (the
-    // README's stderr JSON, exit 2), while ignoring them would silently answer
-    // a different question than the one asked. Checked before the root gate so
-    // it fails as an argument error, like the parser's own. One positional
-    // keeps the message byte for byte; several name every argument given.
-    if list && !params.is_empty() {
-        anyhow::bail!(
-            "rollback --list takes no parameter (got {})",
-            params.join(" ")
-        );
-    }
     let is_root = unsafe { libc::geteuid() } == 0;
     if !is_root {
         anyhow::bail!("rollback requires root (sudo ktuner rollback)");
@@ -878,8 +867,15 @@ fn cmd_rollback(params: &[String], list: bool) -> Result<i32> {
         // Read-only: no writes, no ledger deletion, no systemd changes. The
         // ledger is 0600 in a 0700 root-owned dir, so --list shares
         // rollback's root requirement; a corrupt ledger surfaces as an error
-        // here WITHOUT the destructive path having run first.
-        let entries = tuner::rollback_preview()?;
+        // here WITHOUT the destructive path having run first. Positionals
+        // narrow the preview to the entries `rollback <param>...` would
+        // restore, named the way fix/why/rollback normalize them; a name the
+        // ledger does not record is the same command error the restore gives.
+        let entries = if params.is_empty() {
+            tuner::rollback_preview()?
+        } else {
+            tuner::rollback_preview_params(&normalize_params(params))?
+        };
         let output = rollback_list_output(&entries);
         print_json(&output)?;
         return Ok(0);

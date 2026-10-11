@@ -1400,23 +1400,63 @@ pub fn rollback_preview() -> Result<Vec<RollbackPreview>> {
 /// writer/finalizer takes LOCK_EX on the same `<ledger>.lock`, so LOCK_SH
 /// keeps them out of the window without serializing parallel listings.
 fn rollback_preview_at(path: &str) -> Result<Vec<RollbackPreview>> {
+    Ok(read_pending_at(path)?
+        .map(|data| preview_entries(&data))
+        .unwrap_or_default())
+}
+
+/// The healed ledger at `path` for a read-only preview, or `None` when there
+/// is no ledger, with the locking contract [`rollback_preview_at`] documents.
+fn read_pending_at(path: &str) -> Result<Option<RollbackData>> {
     // No ledger = nothing pending, which is not an error (a fresh install, or
     // a completed rollback): --list reports an empty pending set without
     // creating the ledger directory or lock file.
     if !Path::new(path).exists() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let _guard = lock_ledger_shared_at(path)?;
     // Re-check under the shared lock: a concurrent finalize holds LOCK_EX
     // while it deletes the ledger, so the state observed here is the state
     // the read below sees.
     if !Path::new(path).exists() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     #[cfg(test)]
     tests::finalize_race_probe(path);
     let json = fs::read_to_string(path).context("读取 rollback 文件失败")?;
-    Ok(preview_entries(&parse_rollback_ledger(&json)?))
+    Ok(Some(parse_rollback_ledger(&json)?))
+}
+
+/// The pending entries a rollback of `params` would restore, for
+/// `rollback --list <param>...`.
+pub fn rollback_preview_params(params: &[String]) -> Result<Vec<RollbackPreview>> {
+    rollback_preview_params_at(params, ROLLBACK_PATH)
+}
+
+/// [`rollback_preview_params`] with the ledger path injectable (the
+/// [`rollback_preview_at`] idiom).
+///
+/// The names resolve through [`resolve_ledger_keys`] and [`rollback_units`],
+/// the lookup `rollback <param>...` itself runs, so the preview lists exactly
+/// the entries that command would restore: each named entry plus the mutually
+/// exclusive twin the ledger records for it, in the same param order as the
+/// unfiltered `--list`. A name the ledger does not record is the same command
+/// error the restore reports; an absent ledger records nothing, so every name
+/// misses there too, still without creating the ledger directory or lock file.
+fn rollback_preview_params_at(params: &[String], path: &str) -> Result<Vec<RollbackPreview>> {
+    let data = read_pending_at(path)?.unwrap_or(RollbackData {
+        version: 1,
+        entries: BTreeMap::new(),
+    });
+    let keys = resolve_ledger_keys(&data.entries, params)?;
+    let entries = rollback_units(&data.entries, &keys)
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(preview_entries(&RollbackData {
+        version: data.version,
+        entries,
+    }))
 }
 
 /// Parse rollback-ledger JSON into the healed entry map the preview walks.
@@ -1534,39 +1574,9 @@ fn rollback_params_at(
     // single record the restore will act on.
     heal_alias_duplicates(&mut data);
 
-    // Resolve every name before anything is written. A name the ledger does
-    // not record refuses the WHOLE command (the same command error a single
-    // parameter gets, reported for the first miss in the order given): a
-    // silently skipped miss would let one typo drop the rest of the batch while
-    // the run still reported success.
-    let mut keys: Vec<String> = Vec::new();
-    for param in params {
-        let key = ledger_key_for(&data.entries, param).ok_or_else(|| {
-            anyhow::anyhow!("parameter not recorded in the rollback ledger: {param}")
-        })?;
-        // Two spellings of one kernel path resolve to one key, so the second is
-        // the same record, not a second restore of it.
-        if !keys.contains(&key) {
-            keys.push(key);
-        }
-    }
-
-    // The unit is the named entry plus the mutually exclusive twin the ledger
-    // records for it: the kernel zeroes either knob when the other is written,
-    // so restoring or retiring half the pair would leave this run's own side
-    // effect outside the ledger. Naming both halves covers one unit, so the
-    // pair is restored (and counted) once, not twice.
-    let mut units: Vec<BTreeMap<String, RollbackEntry>> = Vec::new();
-    for key in &keys {
-        let mut unit = BTreeMap::new();
-        unit.insert(key.clone(), data.entries[key].clone());
-        if let Some(twin) = paired_ledger_key(&data.entries, key) {
-            unit.insert(twin.clone(), data.entries[&twin].clone());
-        }
-        if !units.iter().any(|seen| seen.keys().eq(unit.keys())) {
-            units.push(unit);
-        }
-    }
+    // Resolve every name before anything is written.
+    let keys = resolve_ledger_keys(&data.entries, params)?;
+    let units = rollback_units(&data.entries, &keys);
 
     let mut outcome = RollbackOutcome {
         restored: 0,
@@ -1624,6 +1634,55 @@ fn rollback_params_at(
     save_ledger_at(ledger, &data)?;
     persist_from_rollback_at(&guard, sysctl_path, script_path, service_path, "systemctl")?;
     Ok((keys, outcome))
+}
+
+/// The ledger key each parameter names, in the order given and deduplicated.
+///
+/// A name the ledger does not record refuses the WHOLE command (the same
+/// command error a single parameter gets, reported for the first miss in the
+/// order given): a silently skipped miss would let one typo drop the rest of
+/// the batch while the run still reported success.
+fn resolve_ledger_keys(
+    entries: &BTreeMap<String, RollbackEntry>,
+    params: &[String],
+) -> Result<Vec<String>> {
+    let mut keys: Vec<String> = Vec::new();
+    for param in params {
+        let key = ledger_key_for(entries, param).ok_or_else(|| {
+            anyhow::anyhow!("parameter not recorded in the rollback ledger: {param}")
+        })?;
+        // Two spellings of one kernel path resolve to one key, so the second is
+        // the same record, not a second restore of it.
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// The restore units the resolved `keys` cover, in the order of `keys`.
+///
+/// The unit is the named entry plus the mutually exclusive twin the ledger
+/// records for it: the kernel zeroes either knob when the other is written,
+/// so restoring or retiring half the pair would leave this run's own side
+/// effect outside the ledger. Naming both halves covers one unit, so the
+/// pair is restored (and counted) once, not twice.
+fn rollback_units(
+    entries: &BTreeMap<String, RollbackEntry>,
+    keys: &[String],
+) -> Vec<BTreeMap<String, RollbackEntry>> {
+    let mut units: Vec<BTreeMap<String, RollbackEntry>> = Vec::new();
+    for key in keys {
+        let mut unit = BTreeMap::new();
+        unit.insert(key.clone(), entries[key].clone());
+        if let Some(twin) = paired_ledger_key(entries, key) {
+            unit.insert(twin.clone(), entries[&twin].clone());
+        }
+        if !units.iter().any(|seen| seen.keys().eq(unit.keys())) {
+            units.push(unit);
+        }
+    }
+    units
 }
 
 /// Replace the ledger with `data`, keeping the merge writer's contract: a
@@ -4947,6 +5006,147 @@ mod tests {
         );
         assert!(
             !std::path::Path::new(&format!("{}.lock", ledger.display())).exists(),
+            "preview must not create the lock file"
+        );
+    }
+
+    /// `rollback --list <param>...` lists only the entries the names resolve
+    /// to — any spelling of a recorded parameter, each once — in the same
+    /// param order the unfiltered `--list` uses, with the live reading every
+    /// entry carries there.
+    #[test]
+    fn preview_params_lists_only_the_named_entries() {
+        let dir = AtomicTestDir::new("preview-params-named");
+        let swappiness = dir.0.join("swappiness");
+        let somaxconn = dir.0.join("somaxconn");
+        let keep = dir.0.join("keep_me");
+        fs::write(&swappiness, "10").unwrap();
+        fs::write(&somaxconn, "1024").unwrap();
+        fs::write(&keep, "2").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.swappiness", "60", "10", swappiness.to_str().unwrap()),
+                (
+                    "net.core.somaxconn",
+                    "128",
+                    "4096",
+                    somaxconn.to_str().unwrap(),
+                ),
+                ("vm.keep_me", "1", "2", keep.to_str().unwrap()),
+            ],
+        );
+        let ledger_before = fs::read_to_string(&ledger).unwrap();
+
+        let params = [
+            "vm.swappiness".to_string(),
+            "net/core/somaxconn".to_string(),
+            "vm/swappiness".to_string(),
+        ];
+        let entries = rollback_preview_params_at(&params, &ledger).unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                RollbackPreview {
+                    param: "net.core.somaxconn".to_string(),
+                    applied: "4096".to_string(),
+                    previous: "128".to_string(),
+                    live: Some("1024".to_string()),
+                    drifted: Some(true),
+                },
+                RollbackPreview {
+                    param: "vm.swappiness".to_string(),
+                    applied: "10".to_string(),
+                    previous: "60".to_string(),
+                    live: Some("10".to_string()),
+                    drifted: Some(false),
+                },
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(&ledger).unwrap(),
+            ledger_before,
+            "the preview is read-only"
+        );
+    }
+
+    /// Naming one half of a mutually exclusive pair lists the recorded twin
+    /// too, because `rollback <param>` restores the pair as one unit: the
+    /// preview is the entry set that restore walks, not a subset of it.
+    #[test]
+    fn preview_params_lists_the_twin_the_restore_takes_along() {
+        let dir = AtomicTestDir::new("preview-params-twin");
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio = dir.0.join("dirty_ratio");
+        let somaxconn = dir.0.join("somaxconn");
+        fs::write(&bytes, "1073741824").unwrap();
+        fs::write(&ratio, "0").unwrap();
+        fs::write(&somaxconn, "4096").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[
+                ("vm.dirty_bytes", "0", "1073741824", bytes.to_str().unwrap()),
+                ("vm.dirty_ratio", "20", "0", ratio.to_str().unwrap()),
+                (
+                    "net.core.somaxconn",
+                    "128",
+                    "4096",
+                    somaxconn.to_str().unwrap(),
+                ),
+            ],
+        );
+
+        let params = ["vm.dirty_bytes".to_string()];
+        let listed: Vec<String> = rollback_preview_params_at(&params, &ledger)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.param)
+            .collect();
+        assert_eq!(listed, ["vm.dirty_bytes", "vm.dirty_ratio"]);
+
+        // The units the restore walks for the same names hold exactly those
+        // entries.
+        let data = parse_rollback_ledger(&fs::read_to_string(&ledger).unwrap()).unwrap();
+        let keys = resolve_ledger_keys(&data.entries, &params).unwrap();
+        let restored: Vec<String> = rollback_units(&data.entries, &keys)
+            .into_iter()
+            .flat_map(|unit| unit.into_keys())
+            .collect();
+        assert_eq!(restored, listed);
+    }
+
+    /// A name the ledger does not record is the restore's own command error,
+    /// so `--list` cannot promise a rollback that would refuse; with no
+    /// ledger every name misses, and the preview still creates nothing.
+    #[test]
+    fn preview_params_refuses_an_unrecorded_name() {
+        let dir = AtomicTestDir::new("preview-params-unrecorded");
+        let swappiness = dir.0.join("swappiness");
+        fs::write(&swappiness, "10").unwrap();
+        let ledger = fixture_ledger(
+            &dir,
+            &[("vm.swappiness", "60", "10", swappiness.to_str().unwrap())],
+        );
+
+        let params = ["vm.swappiness".to_string(), "vm.typo".to_string()];
+        let error = rollback_preview_params_at(&params, &ledger)
+            .expect_err("an unrecorded name must refuse the preview");
+        assert_eq!(
+            error.to_string(),
+            "parameter not recorded in the rollback ledger: vm.typo"
+        );
+
+        let absent = dir.0.join("nested").join("rollback.json");
+        let error = rollback_preview_params_at(&params[..1], absent.to_str().unwrap())
+            .expect_err("no ledger records no parameter");
+        assert!(error.to_string().contains("not recorded"), "{error:#}");
+        assert!(
+            !absent.parent().unwrap().exists(),
+            "preview must not create the ledger directory"
+        );
+        assert!(
+            !std::path::Path::new(&format!("{}.lock", absent.display())).exists(),
             "preview must not create the lock file"
         );
     }

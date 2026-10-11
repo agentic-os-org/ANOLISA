@@ -73,6 +73,7 @@ ktuner why net.core.somaxconn
 # Undo all changes ktuner made, or the recorded parameters named
 sudo ktuner rollback          # destructive + terminal: restores and deletes the ledger
 sudo ktuner rollback --list   # read-only preview of what rollback would restore
+sudo ktuner rollback --list vm.swappiness   # preview only what rolling back vm.swappiness would restore
 sudo ktuner rollback vm.swappiness net.core.somaxconn   # restore the recorded parameters named
 ```
 
@@ -121,6 +122,8 @@ ktuner records the cleared original so `rollback` can restore it.
 For network conf parameters, interface identity is case-sensitive. Both `net/ipv4/conf/Br0.100/forwarding` and `net.ipv4.conf.Br0.100.forwarding` address the same interface; `br0.100` is a different identity. IPv6 follows the same rule. Persisted records for interfaces with literal dots use slash-first sysctl.d keys so systemd preserves those dots. This supports existing valid records or custom library recommendations; built-in rules do not currently generate per-VLAN recommendations.
 
 `sudo ktuner rollback --list` reports the live state as well: each pending entry adds `live` (the value read from the entry's path right now, or `null` when the path cannot be read — a device that is gone, a module that is not loaded) and `drifted` (whether `live` still matches the recorded `applied`; `null` when there is no live value to compare). Both fields are additions to the existing shape — `count`, `pending` and the recorded `param`/`applied`/`previous` values are unchanged — and an unreadable value is not an error: the command still exits `0`. Values are rendered and compared the same way as everywhere else in ktuner, so a sysfs option list or a multi-value sysctl is not mistaken for drift.
+
+`sudo ktuner rollback --list <param>…` narrows that preview to what `rollback <param>…` would restore: each named entry plus the mutually exclusive twin recorded with it, in the same shape and order as the full listing. A name the ledger does not record is the same command error (`2`) the restore reports.
 
 ## Permission Boundary
 

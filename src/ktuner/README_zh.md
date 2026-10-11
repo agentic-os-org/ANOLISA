@@ -28,6 +28,7 @@ ktuner why <param>             # 例如 ktuner why net.core.somaxconn
 # 回滚变更（需要 root 权限）
 sudo ktuner rollback          # 破坏性且终结（删除 ledger）
 sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
+sudo ktuner rollback --list <param> [<param>…]  # 只预览回滚这些参数将恢复的内容
 sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，例如 vm.dirty_bytes
 ```
 
@@ -255,8 +256,8 @@ sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，�
 由计数器和 `status` 表达。部分成功的批只退役落地的条目，未落地的连同其孪生保留记录，退出码
 `1`、`status` 为 `Partial`；一条都没落地时账本与持久化文件都不改动。任一名字不在账本里就在
 动任何东西之前拒绝整条命令（`2`，stderr JSON）——与单参数版本同一条命令错误：静默跳过会让拼错
-一个名字丢掉一整批回滚，而命令仍然退出 `0`。无参数的 `rollback`、`rollback --list`，以及
-`--list` 与任意位置参数同时出现（仍是用法错误）都不变。
+一个名字丢掉一整批回滚，而命令仍然退出 `0`。无参数的 `rollback` 与 `rollback --list` 不变；
+`rollback --list <param>…` 预览一批回滚（见下）。
 
 ### rollback --list 输出
 
@@ -271,6 +272,24 @@ sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，�
 ```
 
 被内核作为互斥孪生副作用清零的条目记录 `applied = "0"`（内核实际写入的值），因此当它不再为 0 时即为漂移。路径无法读取（设备已消失、模块未加载、write-only 旋钮）时报 `live: null` 和 `drifted: null`：读不到值不算错误，漂移也不会改变退出码。列表是快照——预览与回滚之间内核可能变化。普通 `ktuner rollback` 行为不变：恢复、定稿 ledger 并清理。
+
+`sudo ktuner rollback --list <param> [<param>…]` 把预览收窄到 `rollback <param> [<param>…]`
+将恢复的内容。名字的解析与回滚完全相同（同样的拼写、同一套查找），所以列出的是每个点名的条目，
+加上账本为它记录的互斥孪生——回滚会把孪生一起恢复；同一条目点名两次或用两种拼写，只列一次。
+输出的键和条目字段与不带参数的列表相同，顺序同样按 param 排列——
+`rollback --list vm/swappiness vm.dirty_bytes`：
+
+```json
+{"count": 3, "pending": [
+  {"applied": "1073741824", "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
+  {"applied": "0", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+]}
+```
+
+账本里没有的名字是与回滚相同的命令错误（`2`，stderr JSON，stdout 为空），预览因此不会承诺
+一次会被拒绝的回滚；没有账本时所有名字都算未记录。两种情况都不写入任何东西。此前 `--list`
+带任何参数都是用法错误。
 
 ### 错误输出（stderr）
 

@@ -28,6 +28,7 @@ ktuner why <param>             # e.g. ktuner why net.core.somaxconn
 # Undo changes (requires root)
 sudo ktuner rollback          # destructive + terminal (deletes the ledger)
 sudo ktuner rollback --list   # read-only preview of what rollback would restore
+sudo ktuner rollback --list <param> [<param>…]  # preview only what rolling back these would restore
 sudo ktuner rollback <param> [<param>…]  # restore the recorded parameters named, e.g. vm.dirty_bytes
 ```
 
@@ -286,9 +287,8 @@ records of the ones that did not (with their twins), exits `1` and reports
 persisted file. One name the ledger does not record refuses the whole command
 before anything is written (`2`, stderr JSON), the same command error a single
 parameter gets: skipping the miss would let a typo drop the rest of the batch
-while the run still exited `0`. `rollback` with no parameter, `rollback --list`,
-and `rollback --list` combined with any parameter (still a usage error) are
-unchanged.
+while the run still exited `0`. `rollback` with no parameter and `rollback --list`
+are unchanged; `rollback --list <param>…` previews a batch (see below).
 
 ### rollback --list output
 
@@ -317,6 +317,26 @@ reports `live: null` and `drifted: null`: an unreadable value is not an error an
 changes the exit code. The listing is a snapshot — the kernel can change between the preview and
 the rollback. Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and
 cleans up.
+
+`sudo ktuner rollback --list <param> [<param>…]` narrows the preview to what
+`rollback <param> [<param>…]` would restore. The names resolve exactly as the restore resolves
+them (the same spellings, the same lookup), so the listing is each named entry plus the mutually
+exclusive twin the ledger recorded for it, which the restore takes along; an entry named twice,
+or under two spellings, is listed once. The body has the same keys and entry fields as the
+unfiltered listing, in the same param order — `rollback --list vm/swappiness vm.dirty_bytes`:
+
+```json
+{"count": 3, "pending": [
+  {"applied": "1073741824", "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
+  {"applied": "0", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+]}
+```
+
+A name the ledger does not record is the same command error the restore reports (`2`, stderr
+JSON, nothing on stdout), so a preview never promises a rollback that would refuse; with no
+ledger every name is unrecorded. Nothing is written in either case. Before this, `--list` with
+any parameter was a usage error.
 
 ### error output (stderr)
 

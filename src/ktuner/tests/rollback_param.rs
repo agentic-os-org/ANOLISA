@@ -1,7 +1,7 @@
 //! CLI contract for the optional `ktuner rollback <param>` positional: the new
 //! argument must leave the existing invocations and their error bodies exactly
-//! as they were, and combining it with `--list` must stay a usage error rather
-//! than being silently ignored. The actual restoration is covered by the
+//! as they were, and combined with `--list` it narrows the read-only preview to
+//! the entries it names. The actual restoration is covered by the
 //! engine's private-fixture tests; this file deliberately never runs a rollback
 //! that could reach a real ledger.
 use std::process::{Command, Output};
@@ -27,26 +27,6 @@ fn root_refusal() -> String {
 
 #[test]
 fn rollback_param_cli_contract() {
-    // `--list` keeps its read-only preview of the whole pending set, so the
-    // positional is refused as a usage error instead of answering a different
-    // question than the one asked. Exit 2 + stderr JSON is the documented
-    // shape for every usage error (cf. cli_errors.rs).
-    let out = ktuner(&["rollback", "--list", "vm.swappiness"]);
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.stdout.is_empty());
-    let error: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("--list")),
-        "{error}"
-    );
-
     // A caller who cannot reach the ledger is answered before anything runs.
     // On a root host these commands would touch the real ledger, so this branch
     // only asserts the message bytes when the root gate is what answers.
@@ -54,6 +34,7 @@ fn rollback_param_cli_contract() {
         for arguments in [
             &["rollback"][..],
             &["rollback", "--list"][..],
+            &["rollback", "--list", "vm.swappiness"][..],
             &["rollback", "vm.swappiness"][..],
         ] {
             let out = ktuner(arguments);

@@ -71,6 +71,7 @@ ktuner why net.core.somaxconn
 # 撤销 ktuner 做的所有改动，或点名的已记录参数
 sudo ktuner rollback          # 破坏性且终结：恢复并删除 ledger
 sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
+sudo ktuner rollback --list vm.swappiness   # 只预览回滚 vm.swappiness 将恢复的内容
 sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记录参数
 ```
 
@@ -107,6 +108,8 @@ sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记�
 网络 conf 参数中的网卡身份区分大小写。`net/ipv4/conf/Br0.100/forwarding` 和 `net.ipv4.conf.Br0.100.forwarding` 指向同一网卡；`br0.100` 是不同的身份。IPv6 遵循相同规则。网卡包含字面点时，持久化记录使用首个分隔符为斜杠的 sysctl.d 键，让 systemd 保留这些点。此行为支持已有有效记录或自定义库推荐；当前内置规则不生成逐 VLAN 推荐。
 
 `sudo ktuner rollback --list` 也会报告当前实际状态：每个待回滚条目新增 `live`（此刻从该条目路径读到的值；路径读不到时为 `null`——设备已消失、模块未加载）和 `drifted`（`live` 是否仍与记录的 `applied` 一致；没有可比较的 live 值时为 `null`）。两个字段都是对现有形态的新增——`count`、`pending` 以及记录的 `param`/`applied`/`previous` 取值都不变——读不到值不算错误，命令仍以 `0` 退出。取值的呈现与比较与 ktuner 其他输出一致，sysfs 选项列表或多值 sysctl 不会被误报为漂移。
+
+`sudo ktuner rollback --list <param>…` 把这份预览收窄到 `rollback <param>…` 将恢复的内容：每个点名的条目，加上与它一起记录的互斥孪生，形态与顺序同完整列表。账本里没有的名字是与回滚相同的命令错误（`2`）。
 
 ## 权限边界
 
