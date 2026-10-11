@@ -152,7 +152,7 @@ impl MockBackend {
                 || policy
                     .trusted_endpoints
                     .iter()
-                    .any(|trusted| trusted == destination)
+                    .any(|trusted| trusted_endpoint_exempts(trusted, destination))
                 || destination_class != DestinationClass::Public)
         {
             return Ok(());
@@ -502,6 +502,43 @@ fn classify_destination(destination: &str) -> DestinationClass {
     classify_public_ipv4_destination(destination)
 }
 
+/// Whether one policy trusted endpoint exempts a reported sink destination.
+///
+/// The endpoint set is authored by operators as `host:port` (the dashboard
+/// suggests `10.0.0.8:443`), while a connect destination can be reported as
+/// the bare address (`8.8.8.8`). The product rule is "unless the destination
+/// is in the trusted endpoint set", so the two spellings name the same
+/// exemption: an endpoint without a port exempts every port of its address and
+/// one that names a port still exempts a destination reporting the same
+/// address without a port. Hostnames are not resolved and only match
+/// verbatim. Mirrors the ActPlane adapter's matching so both backends make the
+/// same suppression decision.
+fn trusted_endpoint_exempts(trusted: &str, destination: &str) -> bool {
+    if trusted == destination {
+        return true;
+    }
+    let Some((trusted_address, trusted_port)) = address_and_port(trusted) else {
+        return false;
+    };
+    let Some((destination_address, destination_port)) = address_and_port(destination) else {
+        return false;
+    };
+    trusted_address == destination_address
+        && destination_port.is_none_or(|port| trusted_port.is_none_or(|trusted| trusted == port))
+}
+
+/// Splits an `address` or `address:port` destination into its address and
+/// optional port.
+fn address_and_port(value: &str) -> Option<(std::net::IpAddr, Option<u16>)> {
+    if let Ok(address) = value.parse::<std::net::IpAddr>() {
+        return Some((address, None));
+    }
+    value
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|socket| (socket.ip(), Some(socket.port())))
+}
+
 fn redact_home_path(path: &str) -> String {
     if let Some(relative) = path.strip_prefix("/root/") {
         return format!("~/{relative}");
@@ -576,6 +613,89 @@ mod tests {
             source: ReplacementSource::Generic,
             replacement: ReplacementPolicy::Generic(target),
         }
+    }
+
+    fn trusted_credential_policy(trusted_endpoints: Vec<String>) -> ApplyCredentialPolicy {
+        ApplyCredentialPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "mock-trusted-sink-test".into(),
+            session_id: None,
+            root_pid: 42,
+            process_start_time: 99,
+            policy: CredentialExfiltrationPolicy {
+                policy_id: "credential-exfiltration".into(),
+                revision: 1,
+                source_patterns: vec!["/tmp/credential".into()],
+                trusted_endpoints,
+                taint_label: "CREDENTIAL".into(),
+                taint_ttl_secs: 900,
+                destination_scope: agentsight_enforcement_protocol::DestinationScope::PublicIpv4,
+                mode: PolicyMode::Audit,
+            },
+        }
+    }
+
+    #[test]
+    fn trusted_endpoint_exempts_its_address_without_the_authored_port() {
+        // The endpoint set is authored as `host:port` (the dashboard suggests
+        // `10.0.0.8:443`) while a sink can be reported as the bare address,
+        // exactly like the ActPlane adapter evaluates it. The product rule is
+        // "unless the destination is in the trusted endpoint set", so a sink
+        // on a trusted address must not produce the exfiltration chain.
+        let backend = MockBackend::new();
+        let request = trusted_credential_policy(vec!["8.8.8.8:443".into()]);
+        let binding_id = request.binding_id;
+        backend
+            .apply_credential_policy(request)
+            .expect("trusted policy should apply");
+        let receiver = backend.subscribe_security_events();
+
+        backend
+            .emit_credential_exfiltration(binding_id, "/tmp/credential", "8.8.8.8")
+            .expect("a trusted sink should be suppressed");
+
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(20)).is_err(),
+            "a sink on the trusted address must not emit a chain"
+        );
+
+        // An address the policy does not trust still reports.
+        backend
+            .emit_credential_exfiltration(binding_id, "/tmp/credential", "8.8.8.9")
+            .expect("an untrusted sink should emit");
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(20)).is_ok(),
+            "an untrusted public sink must still emit its chain"
+        );
+    }
+
+    #[test]
+    fn trusted_endpoint_keeps_the_port_a_destination_reports() {
+        // A ported destination is only exempt when the endpoint does not name
+        // a different port.
+        let backend = MockBackend::new();
+        let request = trusted_credential_policy(vec!["8.8.8.8:443".into()]);
+        let binding_id = request.binding_id;
+        backend
+            .apply_credential_policy(request)
+            .expect("trusted policy should apply");
+        let receiver = backend.subscribe_security_events();
+
+        backend
+            .emit_credential_exfiltration(binding_id, "/tmp/credential", "8.8.8.8:443")
+            .expect("the exact port should be suppressed");
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(20)).is_err(),
+            "the same address and port must be exempt"
+        );
+
+        backend
+            .emit_credential_exfiltration(binding_id, "/tmp/credential", "8.8.8.8:8443")
+            .expect("another port should emit");
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(20)).is_ok(),
+            "a different port must not be exempt"
+        );
     }
 
     #[test]
