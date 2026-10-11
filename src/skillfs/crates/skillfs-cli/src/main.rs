@@ -813,7 +813,7 @@ fn escape_ctl(s: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            c if c.is_control() => {
                 escaped.push_str(&format!("\\x{:02x}", c as u32));
             }
             c => escaped.push(c),
@@ -2924,7 +2924,7 @@ fn escape_ctl_stderr(s: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            c if c.is_control() => {
                 escaped.push_str(&format!("\\x{:02x}", c as u32));
             }
             c => escaped.push(c),
@@ -3831,5 +3831,21 @@ mod tests {
         // Multi-byte characters pass through untouched.
         assert_eq!(escape_ctl("技能 skills"), "技能 skills");
         assert_eq!(escape_ctl(""), "");
+    }
+
+    #[test]
+    fn text_escapers_cover_c1_controls() {
+        let controls: String = (0x80..=0x9f).filter_map(char::from_u32).collect();
+        for escaped in [escape_ctl(&controls), escape_ctl_stderr(&controls)] {
+            assert!(!escaped.chars().any(char::is_control));
+            assert!(escaped.contains("\\x85"));
+            assert!(escaped.contains("\\x9b"));
+            assert!(escaped.contains("\\x9d"));
+        }
+        assert_eq!(escape_ctl("caf\u{e9}\u{85}note"), "caf\u{e9}\\x85note");
+        assert_eq!(
+            escape_ctl_stderr("caf\u{e9}\u{85}note"),
+            "caf\u{e9}\\x85note"
+        );
     }
 }
