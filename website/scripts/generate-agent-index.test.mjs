@@ -167,3 +167,16 @@ test('index schema accepts component roots without allowing arbitrary paths', as
     assert.equal(pattern.test(source), false, source);
   }
 });
+
+
+for (const fence of ['```', '~~~~', '````']) {
+  test(`component summary ignores complete ${fence} example blocks`, async (t) => {
+    const {root, paths} = await createFixture(t, true);
+    const example = '# Fixture\n\n' + fence + 'shell\necho first\n\necho second\n' + fence + '\n\nThe actual component description.\n';
+    await writeFile(path.join(root, paths.anolisa, 'README.md'), example);
+    const result = generate(root);
+    assert.equal(result.status, 0, result.stderr);
+    const index = JSON.parse(await readFile(path.join(root, 'website/.generated/static/agents/repo-index.json'), 'utf8'));
+    assert.equal(index.components.find((component) => component.id === 'anolisa').description, 'The actual component description.');
+  });
+}
