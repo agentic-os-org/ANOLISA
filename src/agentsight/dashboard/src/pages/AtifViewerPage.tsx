@@ -768,6 +768,10 @@ export const AtifViewerPage: React.FC = () => {
     setNodePath(initialPath);
     setExpandedSections(new Set());
     setSelectedRound(null);
+    // Drop the previous document's savings before the new one loads: a
+    // document without a session_id never re-fetches, so the old card would
+    // otherwise stay pinned under the new trajectory.
+    setSavingsDetail(null);
 
     try {
       let data: AtifDocument;
@@ -857,6 +861,9 @@ export const AtifViewerPage: React.FC = () => {
         }
         setDoc(parsed as AtifDocument);
         setNodePath([]);
+        // Imported documents have no fetched savings; never show the
+        // previously viewed session's numbers.
+        setSavingsDetail(null);
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setLoadedQuery({ type: 'session', id: parsed.session_id ?? '' });

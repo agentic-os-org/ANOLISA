@@ -320,3 +320,21 @@ test('reuse-labels: toggling a criterion compares the selected rows', () => {
   assert.match(source, /sameMembers\(current, pending\) \? new Set\(\) : pending/);
   assert.match(source, /sameMembers\(current, ids\) \? new Set\(\) : ids/);
 });
+
+test('atif-viewer: loading or importing a document drops the previous savings', () => {
+  // The savings card is driven by `savingsDetail` alone and is only
+  // re-fetched when the new document carries a session_id. Without a reset,
+  // viewing session A then a document without a session_id (or importing a
+  // local JSON) kept A's savings card under B's trajectory.
+  const source = readSource('src/pages/AtifViewerPage.tsx');
+
+  const loadStart = source.indexOf('setDoc(null);');
+  const savingsReset = source.indexOf('setSavingsDetail(null);');
+  const fetchSavings = source.indexOf('fetchSessionSavings(data.session_id)');
+  assert.ok(loadStart >= 0 && savingsReset > loadStart && savingsReset < fetchSavings,
+    'handleLoad must clear savingsDetail before fetching the new session\'s savings');
+
+  const importReset = source.indexOf('setSavingsDetail(null);', fetchSavings);
+  assert.ok(importReset > fetchSavings,
+    'handleFileImport must clear savingsDetail for imported documents');
+});
