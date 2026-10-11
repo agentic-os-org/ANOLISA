@@ -271,3 +271,43 @@ def test_scan_rule_ref_resolve_error(mock_load: object) -> None:
     assert result.ok is False
     assert result.verdict == Verdict.ERROR
     assert "rule reference resolve failed" in result.summary
+
+
+class TestLlmModeCaseInsensitive:
+    """--mode LLM (any case/whitespace) must select the LLM engine.
+
+    The comparison was case-sensitive; "LLM"/"Llm"/" llm " silently fell
+    through to the regex engine with no error — the result summary is
+    indistinguishable from a deliberate engine choice.
+    """
+
+    def test_mode_llm_uppercase_selects_llm_engine(self):
+        from unittest.mock import patch
+
+        from agent_sec_cli.code_scanner.models import Language
+
+        with patch("agent_sec_cli.code_scanner.scanner.scan_with_llm") as llm:
+            llm.return_value = "llm-result"
+            result = scan("x", Language.BASH, mode="LLM")
+        llm.assert_called_once()
+        assert result == "llm-result"
+
+    def test_mode_llm_mixed_case_and_padding(self):
+        from unittest.mock import patch
+
+        from agent_sec_cli.code_scanner.models import Language
+
+        for mode in ("Llm", " llm ", "llm"):
+            with patch("agent_sec_cli.code_scanner.scanner.scan_with_llm") as llm:
+                llm.return_value = "llm-result"
+                scan("x", Language.BASH, mode=mode)
+            llm.assert_called_once()
+
+    def test_mode_regex_default_unchanged(self):
+        from unittest.mock import patch
+
+        from agent_sec_cli.code_scanner.models import Language
+
+        with patch("agent_sec_cli.code_scanner.scanner.scan_with_llm") as llm:
+            scan("echo hello", Language.BASH, mode="regex")
+        llm.assert_not_called()
