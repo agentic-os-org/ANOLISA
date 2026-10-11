@@ -12,11 +12,12 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 # Inline links and images: [text](target) / ![alt](target) — both follow the
 # same relative path resolution rules, so a single pattern covers them.
-LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-SKIP_PREFIXES = ("http://", "https://", "mailto:", "#", "<")
+LINK_RE = re.compile(r'!?\[[^\]]*\]\((<[^>\n]*>|[^)\s]+)(?:\s+"[^"]*")?\)')
+SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
 def repo_root() -> Path:
@@ -55,9 +56,10 @@ def check_file(md: Path, root: Path) -> list[str]:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     for match in LINK_RE.finditer(text):
         target = match.group(1)
-        if target.startswith(SKIP_PREFIXES):
+        destination = target[1:-1] if target.startswith("<") else target
+        if SCHEME_RE.match(destination) or destination.startswith("//"):
             continue
-        path_part = target.split("#", 1)[0]
+        path_part = unquote(urlsplit(destination).path)
         if not path_part:
             continue
         resolved = (md.parent / path_part).resolve()
