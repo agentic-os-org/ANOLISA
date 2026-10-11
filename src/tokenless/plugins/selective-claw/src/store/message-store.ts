@@ -144,7 +144,7 @@ export class MessageStore {
         FROM messages_fts fts
         JOIN messages m ON m.message_id = fts.rowid
         WHERE messages_fts MATCH ? AND m.session_id = ?
-        ORDER BY rank
+        ORDER BY rank, m.message_id
         LIMIT ?
       `).all(sanitized, sessionId, limit) as RawMessageRow[];
 

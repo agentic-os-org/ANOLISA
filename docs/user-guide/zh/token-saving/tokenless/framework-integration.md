@@ -78,6 +78,37 @@ Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
+### selective-claw 会话归档搜索
+
+`selective-claw` 是独立的可选 OpenClaw 上下文引擎，源码位于
+`src/tokenless/plugins/selective-claw`。它完整保留最近的轮次，将较早的轮次作为摘要注入。
+需要 Node.js 22+ 和 OpenClaw 2026.5.22 或更高版本。从插件源码目录构建并安装：
+
+```bash
+cd /path/to/ANOLISA/src/tokenless/plugins/selective-claw
+npm install
+npm run build
+openclaw plugins install .
+```
+
+摘要未包含需要的细节时，可调用 `search_turns`，传入关键词或带引号的短语。
+搜索覆盖当前会话的归档消息，按相关性返回匹配项：
+
+```json
+{ "query": "Docker compose", "limit": 5 }
+```
+
+响应包含 `found` 和 `matches`。每个匹配项返回 `turnSeq`、消息序号 `seq`、`role` 和预览。
+预览最多保留 300 个 Unicode 字符，截断时追加省略号。`limit` 默认返回 5 条匹配消息，支持 1–20。
+同一轮次可能匹配多条消息；将需要的、不重复的 `turnSeq` 传给 `expand_turn`，即可读取完整原始消息：
+
+```json
+{ "turn_ids": [2] }
+```
+
+FTS 运算符单词按普通关键词处理。空查询返回零条匹配；SQLite 缺少 FTS5 支持时也返回空结果。
+对于已知的轮次编号，仍可使用 `expand_turn`。
+
 ### DeepSeek Harness 原生处理路径
 
 DSH Bundle 要求 Node.js 22 或更高版本，并需要兼容的 DSH profile。应在同一条

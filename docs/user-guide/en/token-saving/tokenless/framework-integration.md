@@ -84,6 +84,42 @@ compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
+### selective-claw archived conversation search
+
+`selective-claw` is a separate optional OpenClaw context engine in
+`src/tokenless/plugins/selective-claw`. It keeps recent turns in full and older
+turns as summaries. It requires Node.js 22+ and OpenClaw 2026.5.22 or later.
+Build and install the plugin from its source directory:
+
+```bash
+cd /path/to/ANOLISA/src/tokenless/plugins/selective-claw
+npm install
+npm run build
+openclaw plugins install .
+```
+
+When a summary omits a detail you need, call `search_turns` with keywords or a
+quoted phrase. Search covers the current conversation's archived messages and
+returns relevance-ranked matches:
+
+```json
+{ "query": "Docker compose", "limit": 5 }
+```
+
+The response has `found` and `matches`. Each match includes `turnSeq`, the message
+`seq`, `role`, and a preview of at most 300 Unicode characters plus an ellipsis
+when truncated. `limit` defaults to 5 matching messages and supports 1–20.
+Several messages can belong to one turn; pass the distinct `turnSeq` values you
+need to `expand_turn` for the full original messages:
+
+```json
+{ "turn_ids": [2] }
+```
+
+FTS operator words are treated as literal keywords. Empty queries return no
+matches. An empty result can also mean SQLite lacks FTS5 support; `expand_turn`
+still works for known turn numbers.
+
 ### DeepSeek Harness native processing
 
 The DSH bundle requires Node.js 22 or later and a compatible DSH profile. Pass

@@ -63,7 +63,13 @@ openclaw plugins install /path/to/selective-claw
 
 ### 验证生效
 
-安装后，selective-claw 会自动注册为上下文引擎并注册 `expand_turn` 工具。默认配置即可工作，无需额外设置。
+安装后，selective-claw 会自动注册为上下文引擎，并注册 `expand_turn` 和 `search_turns` 工具。
+默认配置即可工作，无需额外设置。
+
+`search_turns({ query: "Docker compose", limit: 5 })` 可在当前会话的归档消息中按关键词查找旧轮次。
+每个匹配项返回 `turnSeq`、消息序号、角色和简短预览；再将需要的轮次编号传给
+`expand_turn({ turn_ids: [2] })` 读取完整消息。默认返回 5 条匹配消息，最多 20 条。
+完整用法见[Agent 集成指南](../../../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md)。
 
 ## 配置项
 

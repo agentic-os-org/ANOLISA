@@ -6,6 +6,7 @@ import { DEFAULT_CONFIG } from "../types.js";
 import { createConnection } from "../db/connection.js";
 import { SelectiveContextEngine } from "../engine.js";
 import { createSummarizer } from "../summarize.js";
+import { executeSearchTurns } from "../search-tool.js";
 
 function resolveConfig(api: OpenClawPluginApi): SelectiveClawConfig {
   const pluginConfig = api.pluginConfig ?? {};
@@ -63,6 +64,34 @@ function createExpandTurnTool(engine: SelectiveContextEngine, boundSessionId?: s
   };
 }
 
+function createSearchTurnTool(engine: SelectiveContextEngine, boundSessionId?: string) {
+  return {
+    name: "search_turns",
+    label: "Search Turns",
+    description:
+      "Search this conversation's archived messages by keyword to discover older turn numbers. " +
+      "Returns short previews; pass the relevant turn numbers to expand_turn for full messages.",
+    parameters: {
+      type: "object",
+      required: ["query"],
+      properties: {
+        query: { type: "string", minLength: 1, description: "Keywords or a quoted phrase to find" },
+        limit: { type: "integer", minimum: 1, maximum: 20, default: 5, description: "Maximum matching messages" },
+      },
+    },
+    async execute(_toolCallId: string, params: { query?: unknown; limit?: number }) {
+      const sessionId = boundSessionId ?? engine.getActiveSessionId();
+      const result = sessionId === null || typeof params?.query !== "string"
+        ? { found: 0, matches: [] }
+        : executeSearchTurns(engine.getStore(), sessionId, params.query, params.limit);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        details: result,
+      };
+    },
+  };
+}
+
 export default function activate(api: OpenClawPluginApi): void {
   const config = resolveConfig(api);
 
@@ -86,6 +115,10 @@ export default function activate(api: OpenClawPluginApi): void {
     (api.registerTool as any)(
       (ctx: { sessionId?: string }) => createExpandTurnTool(engine, ctx?.sessionId),
       { name: "expand_turn" },
+    );
+    (api.registerTool as any)(
+      (ctx: { sessionId?: string }) => createSearchTurnTool(engine, ctx?.sessionId),
+      { name: "search_turns" },
     );
   }
 }
