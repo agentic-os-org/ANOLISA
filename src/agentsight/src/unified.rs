@@ -40,6 +40,7 @@ use crate::database::{
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::FfiEventSender;
+use crate::genai::binding::BindingInjector;
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::genai::{GenAIBuilder, GenAIExporter, LogtailExporter};
 use crate::interruption::{
@@ -73,6 +74,8 @@ pub struct AgentSight {
     analyzer: Analyzer,
     /// GenAI semantic builder
     genai_builder: GenAIBuilder,
+    /// Correlates LLM calls with active enforcement bindings before export.
+    binding_injector: BindingInjector,
     /// Pluggable GenAI event exporters (JSONL, SLS, etc.)
     genai_exporters: Vec<Box<dyn GenAIExporter>>,
     /// Direct reference to the SQLite GenAI store for two-phase pending/complete writes.
@@ -962,6 +965,7 @@ impl AgentSight {
             aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits),
             analyzer,
             genai_builder: GenAIBuilder::new(),
+            binding_injector: BindingInjector::new(&config.ffi_enforcer_socket),
             genai_exporters,
             genai_sqlite_store,
             interruption_detector: if config.features.interruption_detection_enabled {
@@ -1353,7 +1357,7 @@ impl AgentSight {
             let mut analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
-            let (output, pending_info) = self.genai_builder.build_with_pending(
+            let (mut output, pending_info) = self.genai_builder.build_with_pending(
                 &analysis_results,
                 &self.response_mapper,
                 &self.pid_agent_name_cache,
@@ -1374,6 +1378,10 @@ impl AgentSight {
                     }
                 }
             }
+
+            // Enrich before either immediate export or deferred queuing so every
+            // downstream path observes the same correlation identity.
+            self.binding_injector.inject(&mut output.events);
 
             // FFI fallback: when every built LLM event is semantically empty
             // (the underlying body format could not be parsed into
