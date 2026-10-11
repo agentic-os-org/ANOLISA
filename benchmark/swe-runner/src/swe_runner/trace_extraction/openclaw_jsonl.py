@@ -24,7 +24,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from swe_runner.trace_extraction.helpers import extract_issue_id, ns_to_iso, parse_time_value
+from swe_runner.trace_extraction.helpers import ExtractionError, extract_issue_id, ns_to_iso, parse_time_value
 from swe_runner.trace_extraction.token_counting import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,10 @@ def _timestamp_ns(entry: dict[str, Any]) -> int | None:
     for key in ("timestamp", "created_at", "createdAt", "time"):
         value = entry.get(key)
         if isinstance(value, str) and value.strip():
-            return parse_time_value(value)
+            try:
+                return parse_time_value(value)
+            except ExtractionError as exc:
+                logger.warning("Skipping malformed OpenClaw timestamp field=%s value=%r error=%s", key, value, exc)
     return None
 
 

@@ -409,6 +409,10 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Malformed timestamps in session entries emit a warning and use another supported
+timestamp field when available. Messages and token usage are retained even when
+an entry has no usable timestamp; explicit analysis time bounds remain validated.
+
 Analyze existing traces:
 
 ```bash
