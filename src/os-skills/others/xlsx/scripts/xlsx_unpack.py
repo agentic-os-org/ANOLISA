@@ -23,10 +23,8 @@ def pretty_print_xml(content: bytes) -> str:
     """Pretty-print XML bytes. Returns original content on parse failure."""
     try:
         dom = xml.dom.minidom.parseString(content)
-        pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-        # Remove the extra blank lines toprettyxml adds
-        lines = [line for line in pretty.splitlines() if line.strip()]
-        return "\n".join(lines) + "\n"
+        # Blank lines inside text nodes are cell data, not formatting whitespace.
+        return dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
     except Exception:
         return content.decode("utf-8", errors="replace")
 
