@@ -198,6 +198,23 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+### 选择任务生成试验报告
+
+重复使用 `--task-id`，只为指定任务生成详细报告，并保留每个任务的全部试验：
+
+```bash
+python scripts/generate_trial_reports.py \
+  --config claw-eval/config_general.yaml \
+  --trace-dir /path/to/traces --output-dir /path/to/selected-reports \
+  --task-id C01zh_mortgage_prepay --task-id C01en_mortgage_prepay
+```
+
+ID 按现有 trace 文件名规则匹配：`TASK_ID_TRIAL_ID.jsonl` 删除最后一个下划线分隔的
+后缀后得到 `TASK_ID`。匹配采用完整 ID，按文件名排序处理，重复的 ID 不会导致试验重复。
+选择值两端的空白会被忽略。空 ID 或没有对应 trace 的 ID 会产生用法错误，在创建输出或
+分类试验前停止。不传 `--task-id` 时仍处理全部 trace。只有选中的试验可能调用 judge，
+其他任务已有的报告文件会保留。
+
 ## 故障排查
 
 | 问题 | 修复 |
