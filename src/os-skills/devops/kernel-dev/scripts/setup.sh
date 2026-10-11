@@ -43,7 +43,10 @@ echo ""
 # Check OS
 echo -e "${BLUE}Step 2: OS Verification${NC}"
 if grep -qi 'alinux\|alnx' /etc/os-release 2>/dev/null; then
-    OS_NAME=$(grep -i 'PRETTY_NAME' /etc/os-release | cut -d'"' -f2)
+    OS_NAME=$(grep -i '^PRETTY_NAME=' /etc/os-release | head -1 | cut -d'=' -f2-)
+    case "$OS_NAME" in
+        \"*\"|\'*\') OS_NAME="${OS_NAME:1:${#OS_NAME}-2}" ;;
+    esac
     echo -e "  ${GREEN}✓${NC} $OS_NAME"
 else
     echo -e "  ${YELLOW}⚠${NC} Warning: Not Alinux4 system"
