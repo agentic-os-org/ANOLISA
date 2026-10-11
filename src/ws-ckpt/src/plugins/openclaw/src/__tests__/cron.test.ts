@@ -119,6 +119,32 @@ describe("parseSchedulesUpdate", () => {
 });
 
 describe("CrontabManager.sync", () => {
+  it.each(["/work/team's project", "/work/'quoted'", "/work/flag -w 'quoted'"])(
+    "recognizes generated entries for %s during repeated sync and removal",
+    async (workspace) => {
+      const other = "0 * * * * ws-ckpt checkpoint -w '/other' -s legacy";
+      let lines = ["# keep this comment", other];
+      mockRunCrontab.mockImplementation(async (args: string[], options?: { input: string }) => {
+        if (args[0] === "-l") return { exitCode: 0, stdout: lines.join("\n"), stderr: "" };
+        if (args[0] === "-") {
+          lines = options!.input.trimEnd().split("\n");
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        throw new Error("Unexpected crontab command");
+      });
+      try {
+        expect(await CrontabManager.sync(workspace, ["5 4 * * *"])).toBe(true);
+        expect(await CrontabManager.sync(workspace, ["5 4 * * *"])).toBe(true);
+        expect(lines).toHaveLength(3);
+        expect(await CrontabManager.listInstalled(workspace)).toEqual(["5 4 * * *"]);
+        expect(await CrontabManager.remove(workspace)).toBe(true);
+        expect(lines).toEqual(["# keep this comment", other]);
+      } finally {
+        mockRunCrontab.mockReset();
+      }
+    },
+  );
+
   it("replaces old entries and adds new", async () => {
     mockRunCrontab
       .mockResolvedValueOnce({ exitCode: 0, stdout: "0 * * * * ws-ckpt checkpoint -w '/ws' -i x\n# comment\n", stderr: "" })

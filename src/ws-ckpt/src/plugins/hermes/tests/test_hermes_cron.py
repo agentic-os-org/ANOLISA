@@ -1,6 +1,7 @@
 """Tests for hermes cron module."""
 
 from unittest.mock import MagicMock, patch, call
+import pytest
 
 from hermes.cron import (
     validate_cron_expr,
@@ -107,6 +108,10 @@ class TestBuildCronLine:
 
 
 class TestExtractWorkspace:
+    @pytest.mark.parametrize("workspace", ["/work/team's project", "/work/'quoted'", "/work/flag -w 'quoted'"])
+    def test_generated_quoted_workspace_round_trip(self, workspace):
+        assert _extract_workspace(_build_cron_line(workspace, "5 4 * * *")) == workspace
+
     def test_quoted(self):
         line = "0 * * * * ws-ckpt checkpoint -w '/my/ws' -i x"
         assert _extract_workspace(line) == "/my/ws"
@@ -170,6 +175,25 @@ class TestWriteCrontab:
 
 
 class TestCrontabManagerSync:
+    def test_quoted_workspace_sync_is_idempotent_and_removable(self):
+        workspace = "/work/team's project"
+        other = "0 * * * * ws-ckpt checkpoint -w '/other' -s legacy"
+        lines = ["# keep this comment", other]
+
+        def write(updated):
+            lines[:] = updated
+            return True
+
+        with patch.object(CrontabManager, "_with_lock", side_effect=lambda fn: fn()), patch(
+            "hermes.cron._read_crontab", side_effect=lambda: list(lines)
+        ), patch("hermes.cron._write_crontab", side_effect=write):
+            assert CrontabManager.sync(workspace, ["5 4 * * *"])
+            assert CrontabManager.sync(workspace, ["5 4 * * *"])
+            assert len(lines) == 3
+            assert CrontabManager.list_installed(workspace) == ["5 4 * * *"]
+            assert CrontabManager.remove(workspace)
+            assert lines == ["# keep this comment", other]
+
     @patch("hermes.cron.os.close")
     @patch("hermes.cron.os.open", return_value=99)
     @patch("hermes.cron.fcntl.flock")
