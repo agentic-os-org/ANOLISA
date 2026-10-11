@@ -130,6 +130,8 @@ Copy any skill directory to one of the skill search paths:
 4. Test the skill in Copilot Shell.
 5. Submit a pull request.
 
+Read headerless tables with `xlsx_reader.py --no-header`; see the [input-mode guide](../../docs/user-guide/en/user-entrypoint/os-skills.md#headerless-spreadsheet-inputs).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.

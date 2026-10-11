@@ -27,10 +27,13 @@ from pathlib import Path
 # Format detection and loading
 # ---------------------------------------------------------------------------
 
-def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dict:
+def detect_and_load(
+    file_path: str, sheet_name_filter: str | None = None, *, no_header: bool = False
+) -> dict:
     """
     Load file into {sheet_name: DataFrame} dict.
     CSV/TSV files are mapped to a single-key dict using the file stem as key.
+    With no_header=True, retain every data record and generate stable column names.
 
     Raises ValueError for unsupported formats or encoding failures.
     """
@@ -49,12 +52,13 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
 
     if suffix in (".xlsx", ".xlsm"):
         target = sheet_name_filter if sheet_name_filter else None
-        result = pd.read_excel(file_path, sheet_name=target)
+        result = pd.read_excel(file_path, sheet_name=target, header=None if no_header else 0)
         # pd.read_excel with sheet_name=None returns dict; with a name, returns DataFrame
-        if isinstance(result, dict):
-            return result
-        else:
-            return {sheet_name_filter: result}
+        sheets = result if isinstance(result, dict) else {sheet_name_filter: result}
+        if no_header:
+            for frame in sheets.values():
+                frame.columns = [f"column_{i + 1}" for i in range(len(frame.columns))]
+        return sheets
 
     elif suffix in (".csv", ".tsv"):
         sep = "\t" if suffix == ".tsv" else ","
@@ -63,7 +67,9 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
         for enc in encodings:
             try:
                 import pandas as pd
-                df = pd.read_csv(file_path, sep=sep, encoding=enc)
+                df = pd.read_csv(file_path, sep=sep, encoding=enc, header=None if no_header else 0)
+                if no_header:
+                    df.columns = [f"column_{i + 1}" for i in range(len(df.columns))]
                 df._reader_encoding = enc  # attach metadata (non-standard, for reporting)
                 return {path.stem: df}
             except (UnicodeDecodeError, Exception) as e:
@@ -332,10 +338,14 @@ def main() -> None:
         "--quality", action="store_true",
         help="Run data quality audit only (skip stats)"
     )
+    parser.add_argument(
+        "--no-header", action="store_true",
+        help="Keep the first record as data and generate column_1, column_2, ... names"
+    )
     args = parser.parse_args()
 
     try:
-        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet)
+        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet, no_header=args.no_header)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

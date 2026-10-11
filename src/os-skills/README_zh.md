@@ -127,6 +127,8 @@ sudo yum install os-skills
 4. 在 Copilot Shell 中测试技能。
 5. 提交 Pull Request。
 
+使用 `xlsx_reader.py --no-header` 读取无表头数据表，详见[输入模式指南](../../docs/user-guide/zh/user-entrypoint/os-skills.md#无表头电子表格输入)。
+
 ## 许可证
 
 Apache License 2.0 — 详见 [LICENSE](../../LICENSE)。

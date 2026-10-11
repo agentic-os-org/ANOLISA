@@ -84,6 +84,21 @@ confirm_destructive = true
 
 ---
 
+## 无表头电子表格输入
+
+当 CSV、TSV 或 Excel 工作表首行是数据而非列名时，使用 `--no-header`：
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py records.csv --no-header --json
+python3 SKILL_DIR/scripts/xlsx_reader.py records.xlsx --no-header --sheet Sales --quality
+```
+
+首条数据记录会计入预览、质量检查和数值统计。列按从左到右命名为 `column_1`、`column_2` 等；每个 Excel 工作表独立生成列名。此选项适用于所有已加载工作表，也支持 `--sheet` 选择以及文本和 JSON 报告。缺失值、CSV 引号、TSV 分隔符和既有编码回退行为保持不变。
+
+有列名的文件无需此选项，默认仍将首行作为表头。该选项选择单一的无表头输入模式，不自动识别多层或合并表头。原始文件不会被修改。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
