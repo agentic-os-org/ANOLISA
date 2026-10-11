@@ -84,6 +84,22 @@ confirm_destructive = true
 
 ---
 
+## PDF navigation links
+
+Use `--links` with JSON output to inspect navigation targets embedded on selected pages. This reads metadata without following URIs or opening destination files.
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f handbook.pdf --format json --links --pages 1-3 --metadata
+```
+
+Each selected page gains a `links` array; pages without links use `[]`. Records retain the fields returned by PyMuPDF. `kind` identifies the action, `from` becomes a four-number hotspot rectangle, and a point-valued `to` becomes `[x, y]`. Nonnegative destination `page` indices become one-based numbers, consistent with page reports; negative indirect-destination sentinels remain unchanged.
+
+URI actions provide `uri`; remote or launch actions can provide `file`. Optional fields such as `xref`, `id` and `zoom` are retained. Symbolic targets remain text. Depending on the engine version, a remote indirect target can appear as a symbolic `to` with `page: -1`, or as a filename/URI anchor. The returned representation and engine coordinates are preserved.
+
+Page selection controls both text and links, while metadata remains independently selectable. Omit the flag to retain existing output. Text-mode use is rejected before engine loading or file access, and the PDF stays unchanged. This covers page-link actions separately from TOC bookmarks and review annotations.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

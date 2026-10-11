@@ -49,6 +49,8 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+Read page navigation targets with `read_pdf.py --format json --links`; see the [link reference](../../docs/user-guide/en/user-entrypoint/os-skills.md#pdf-navigation-links).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
