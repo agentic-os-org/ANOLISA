@@ -7,6 +7,7 @@
 mod api;
 mod checkpoint_store;
 mod cli;
+mod client;
 mod daemon;
 mod error;
 #[cfg(feature = "test-failpoints")]
@@ -54,19 +55,30 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Daemon(action) => match action {
             DaemonAction::Start { config } => daemon::run(&config).await,
             DaemonAction::Reload { socket } => {
-                println!("Sending reload signal to daemon at {}", socket.display());
-                // In v0.1 just print guidance; actual signal delivery deferred.
-                println!("  hint: kill -HUP $(pidof blazed)");
+                let value = client::admin_reload(&socket).await?;
+                println!("Reloaded policies on daemon at {}", socket.display());
+                let policies = value.get("policies").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("  policies : {policies}");
                 Ok(())
             }
             DaemonAction::Doctor { config } => {
                 let config_path = config.unwrap_or_else(|| "/etc/anolisa/blaze/config.toml".into());
                 println!("blazed doctor");
                 println!("  config : {}", config_path.display());
-                match blaze_core::config::DaemonConfig::load(&config_path) {
+                let loaded = blaze_core::config::DaemonConfig::load(&config_path);
+                match &loaded {
                     Ok(_) => println!("  config parse : ok"),
                     Err(e) => println!("  config parse : FAIL ({e})"),
                 }
+                // Probe the socket the loaded config names (the CLI default
+                // when the config itself is broken). The probe reports; it
+                // must not gate the doctor run.
+                let socket = loaded.as_ref().map_or_else(
+                    |_| std::path::PathBuf::from("/run/blaze/api.sock"),
+                    |cfg| cfg.daemon.socket.clone(),
+                );
+                println!("  socket : {}", socket.display());
+                println!("  {}", client::doctor_socket_line(&socket).await);
                 Ok(())
             }
         },
