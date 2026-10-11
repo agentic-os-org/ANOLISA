@@ -889,6 +889,124 @@ impl SkillFs {
             return;
         }
 
+        // Virtual-path type confusion, rename arm: a FILE side may never
+        // move onto a virtual directory slot. `create`/`mknod`/`symlink`
+        // reject fresh entries at `Root`/`SkillsDir`/`SkillDir`/
+        // `CategoryDir` slots with `EROFS` because those slots resolve
+        // onto `source/<name>` and a materialized plain regular file
+        // there is invisible through the mount (lookup answers from the
+        // store) or wrong-typed once the store learns the name as a
+        // directory — `rename` had no matching arm, so
+        // `mv /skills/<skill>/<file> /skills/<fresh>` physically
+        // materialized a plain file at `source/<fresh>` (and the Hermes
+        // twin onto a fresh category slot). Only file-capable old sides
+        // are gated: directory renames (`SkillDir` → `SkillDir`
+        // whole-skill moves, Hermes `NestedSkillDir` and staging-root
+        // flows) keep their own validated paths below.
+        let old_side_is_file = matches!(
+            old_path_type,
+            PathType::SkillMd { .. }
+                | PathType::Passthrough { .. }
+                | PathType::NestedSkillMd { .. }
+                | PathType::NestedPassthrough { .. }
+                | PathType::HermesMeta { .. }
+                | PathType::HermesMetaChild { .. }
+                | PathType::CategoryPassthrough { .. }
+        );
+        let new_side_is_virtual_dir_slot = matches!(
+            new_path_type,
+            PathType::SkillDir { .. }
+                | PathType::CategoryDir { .. }
+                | PathType::Root
+                | PathType::SkillsDir
+        );
+        if old_side_is_file && new_side_is_virtual_dir_slot {
+            self.ro_warn("rename", &new_path);
+            self.emit_op_event_with_detail(
+                req,
+                &old_path_type,
+                SkillEventKind::Rename,
+                SkillEventAction::Rejected,
+                Some(libc::EROFS),
+                None,
+                Some(format!(
+                    "class=virtual_dir_slot old={old_path} new={new_path}"
+                )),
+            );
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        // The inbox twin of the arm above. The inbox presents
+        // `/.skillfs-inbox/<candidate>` as a virtual DIRECTORY facade
+        // over the physical `source/<candidate>`, and the create side
+        // enforces "an inbox candidate must be a directory" with
+        // `EISDIR` (`write.rs` create_impl rejects a fresh entry at the
+        // slot before any physical resolution). `rename` had no matching
+        // arm: `mv /.skillfs-inbox/<demo>/note /.skillfs-inbox/fresh`
+        // passed the same-namespace check and moved the regular file to
+        // `source/<fresh>` — the inbox readdir then hides that
+        // non-directory while direct lookup returns `ENOTDIR`, so the
+        // file is no longer reachable through the mount. Gate a
+        // physically non-directory inbox source targeting the
+        // `InboxSkillDir` slot before the physical rename, mirroring the
+        // create-side errno/audit contract. Directory moves onto a fresh
+        // slot stay allowed and the sanctioned whole-candidate
+        // `InboxSkillDir` → `InboxSkillDir` rename keeps its own flow.
+        if matches!(
+            (&old_path_type, &new_path_type),
+            (
+                PathType::InboxPassthrough { .. },
+                PathType::InboxSkillDir { .. }
+            )
+        ) {
+            // Probe the old side's type with the long-path-safe parent-fd
+            // + leaf pair — `open_parent_dir_for` then `fstatat` with
+            // `AT_SYMLINK_NOFOLLOW`, the same capability `getattr`'s
+            // ENAMETOOLONG fallback uses — instead of `symlink_metadata`
+            // on the full absolute physical path. A cached inbox entry
+            // can physically sit deep enough that its absolute path
+            // exceeds PATH_MAX: the full-path stat then fails with
+            // `ENAMETOOLONG`, and folding that probe error into "not a
+            // plain file" re-opened exactly the hole this arm closes
+            // (review follow-up: a 4201-char old path skipped the gate,
+            // the parent-fd rename fallback then succeeded and the file
+            // vanished into the slot). Probe errors are therefore
+            // propagated: a source whose type cannot be determined
+            // refuses the rename with the probe's own errno instead of
+            // proceeding untyped (ENOENT still answers ENOENT, just
+            // before the physical rename instead of at it).
+            match self
+                .open_parent_dir_for(&old_path)
+                .map_err(std::io::Error::from_raw_os_error)
+                .and_then(|(parent_fd, leaf)| fstatat_leaf(&parent_fd, &leaf, false))
+            {
+                Ok(meta) if meta.st_mode & libc::S_IFDIR == 0 => {
+                    self.ro_warn("rename", &new_path);
+                    self.emit_op_event_with_detail(
+                        req,
+                        &old_path_type,
+                        SkillEventKind::Rename,
+                        SkillEventAction::Rejected,
+                        Some(libc::EISDIR),
+                        None,
+                        Some(format!(
+                            "class=virtual_dir_slot old={old_path} new={new_path}"
+                        )),
+                    );
+                    reply.error(libc::EISDIR);
+                    return;
+                }
+                // A physically-directory source keeps its sanctioned
+                // directory-move flow below.
+                Ok(_) => {}
+                Err(e) => {
+                    reply.error(errno(&e));
+                    return;
+                }
+            }
+        }
+
         // I4/H3: reject renames on hidden skills unless both sides
         // match the post-publish grace whitelist.
         //
