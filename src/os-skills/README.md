@@ -49,6 +49,12 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## Reading Protected PDFs
+
+The `pdf-reader` skill reads password-protected PDFs when given a known password
+using `--password` or `--password-env NAME`. The environment option reads the
+password from a named variable, keeping its value out of command arguments.
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

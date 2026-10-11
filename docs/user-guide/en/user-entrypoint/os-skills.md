@@ -68,6 +68,20 @@ anolisa status os-skills
 
 ---
 
+## Reading protected PDFs
+
+Use the installed `pdf-reader` skill to extract a protected document with a known
+password. Set `PDF_PASSWORD` in the invoking environment, then run:
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f protected.pdf --password-env PDF_PASSWORD -p 1-3 --format json
+```
+
+Alternatively, use `--password PASSWORD`. The two password options are mutually
+exclusive. Extraction authenticates before reading pages or metadata. A missing
+or incorrect password exits nonzero and reports an error on stderr; password
+values are excluded from these diagnostics.
+
 ## Configuration
 
 Configuration file: `~/.config/os-skills/config.toml`

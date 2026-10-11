@@ -19,4 +19,15 @@ Options: `-p "1-5,7"` page range, `--format json` structured output, `--metadata
 
 Tables: `--tables --format json` adds a `tables` array to each selected page: `{"bbox": [x0,y0,x1,y1], "rows": [[cell, ...], ...]}` from PyMuPDF table detection; pages without ruled tables report `"tables": []`. Plain page text and the default schemas are unchanged; the flag is rejected for text output.
 
+For a protected PDF, supply its known password with `--password`, or use
+`--password-env NAME` to read it from an environment variable. These options are
+mutually exclusive. Missing or incorrect passwords produce a nonzero exit and
+an error on stderr before document text is extracted.
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f protected.pdf --password-env PDF_PASSWORD -p 1-3
+```
+
+Set `PDF_PASSWORD` in the invoking environment before running this example.
+
 Setup: `pip install PyMuPDF`

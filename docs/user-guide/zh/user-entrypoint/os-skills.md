@@ -68,6 +68,19 @@ anolisa status os-skills
 
 ---
 
+## 读取受保护的 PDF
+
+使用已安装的 `pdf-reader` 技能和已知密码提取受保护文档。先在调用环境中
+设置 `PDF_PASSWORD`，然后运行：
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f protected.pdf --password-env PDF_PASSWORD -p 1-3 --format json
+```
+
+也可使用 `--password PASSWORD`，两个密码选项不能同时指定。提取工具会在
+读取页面或元数据前验证密码。密码缺失或不正确时会以非零状态退出，并在
+stderr 中报告错误；这些诊断不会显示密码值。
+
 ## 配置
 
 配置文件：`~/.config/os-skills/config.toml`
