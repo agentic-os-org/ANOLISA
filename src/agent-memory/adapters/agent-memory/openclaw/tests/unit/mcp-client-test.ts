@@ -10,6 +10,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
@@ -102,6 +105,41 @@ describe("McpStdioClient", () => {
   it("stop() is safe when the process was never started", async () => {
     const client = new McpStdioClient(cfg);
     await client.stop();
+  });
+
+  it("recovers after a worker exits in the middle of a JSON response", { timeout: 20_000 }, async () => {
+    const sandbox = mkdtempSync(join(tmpdir(), "memory-restart-framing-"));
+    const worker = join(sandbox, "worker.mjs");
+    writeFileSync(worker, `#!${process.execPath}
+import { existsSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const marker = ${JSON.stringify(join(sandbox, "started"))};
+const firstRun = !existsSync(marker);
+writeFileSync(marker, "started");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (!request.id) return;
+  if (request.method === "tools/call" && firstRun) {
+    process.stdout.write('{"jsonrpc":"2.0","id":' + request.id + ',"result":', () => process.exit(1));
+    return;
+  }
+  const result = request.method === "initialize" ? {} : {
+    content: [{ type: "text", text: "recovered:" + process.env.MEMORY_SESSION_ID }],
+  };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`, { mode: 0o755 });
+    const client = new McpStdioClient({ ...cfg, binaryPath: worker });
+    try {
+      await assert.rejects(client.callTool("memory_observe", { content: "first" }), /process exited/);
+      assert.equal(
+        await client.callTool("memory_observe", { content: "retry" }),
+        "recovered:ses_test",
+      );
+    } finally {
+      await client.stop();
+      rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
