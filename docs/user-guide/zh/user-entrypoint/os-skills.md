@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## PDF 内嵌附件
+
+发现 PDF 中内嵌的支持文件，并选择提取其中一个，保持文档不变。两种附件模式均要求 JSON：
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f portfolio.pdf --format json --attachments
+python3 SKILL_DIR/scripts/read_pdf.py -f portfolio.pdf --format json --extract-attachment 0 --output recovered.bin
+```
+
+文档级 `attachments` 列表包含稳定的零起始 `index` 及 SDK 元数据：内嵌名称、文件名、描述、解压后 `size`、存储 `length`、日期及可用的 portfolio、校验值信息。索引按附件物理顺序排列，能区分重复名称。字符串和 PDF 日期保留 SDK 表示；存储的校验值是元数据，不是验证结果。页面选择影响文本页面，附件仍属于整个文档。元数据发现不会载入附件内容。
+
+从列表选择索引并显式提供 `--output`。读取器提取精确字节，支持压缩二进制、UTF-8 和空内容；PDF 内的文件名不会被用于决定文件系统目标。JSON 还报告 `extracted_attachment`，包含所选索引、输出路径和字节大小。选中的内容会载入内存，不会执行附件程序或动作。
+
+输出父目录必须存在。提取会发布完整的新文件，拒绝所有既有输出路径，包括源 PDF 和并发创建的文件。发布要求同文件系统的硬链接支持；失败时不会留下部分新输出，并会清理私有暂存。未知索引、缺少输出路径或不兼容的文本模式选项会明确报错。省略附件选项时保持原文本、JSON 结构；源 PDF 字节保持不变。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
