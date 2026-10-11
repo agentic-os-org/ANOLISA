@@ -62,6 +62,19 @@ def pack(source_dir: str, xlsx_path: str) -> None:
         )
         sys.exit(1)
 
+    # Refuse to pack our own output into itself: when the target lives inside
+    # the source directory, the walk below would pick up the half-written
+    # archive and store a truncated or self-referential member.
+    out_abs = os.path.abspath(xlsx_path)
+    src_abs = os.path.abspath(source_dir)
+    if out_abs == src_abs or out_abs.startswith(src_abs + os.sep):
+        print(
+            "ERROR: output file must be outside the source directory "
+            f"(got '{xlsx_path}' inside '{source_dir}')",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print("✓ All XML files are well-formed")
 
     # Count files to pack
@@ -71,8 +84,17 @@ def pack(source_dir: str, xlsx_path: str) -> None:
         for dirpath, _, filenames in os.walk(source_dir):
             for fname in filenames:
                 fpath = os.path.join(dirpath, fname)
-                arcname = os.path.relpath(fpath, source_dir)
+                # Zip member names are OPC part names: always forward slashes,
+                # never os.sep (a backslash member name is unresolvable in
+                # Excel and LibreOffice on every platform).
+                arcname = os.path.relpath(fpath, source_dir).replace(os.sep, "/")
                 z.write(fpath, arcname)
+
+    # The forward-slash invariant, asserted where a regression would show up.
+    with zipfile.ZipFile(xlsx_path, "r") as z:
+        members = z.namelist()
+        assert not any("\\" in name for name in members), \
+            "packed archive contains backslash member names"
 
     size = os.path.getsize(xlsx_path)
     print(f"Packed {file_count} files → '{xlsx_path}' ({size:,} bytes)")
