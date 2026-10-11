@@ -323,12 +323,16 @@ impl PinnedExecutable {
             use std::os::fd::AsRawFd;
             use std::os::unix::fs::MetadataExt;
 
+            // A FIFO must reach the file-kind check without waiting for a writer.
             let mut source = std::fs::File::from(
-                rustix::fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()).map_err(
-                    |error| BlazeError::BackendError {
-                        msg: format!("cannot open backend executable {}: {error}", path.display()),
-                    },
-                )?,
+                rustix::fs::open(
+                    path,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+                .map_err(|error| BlazeError::BackendError {
+                    msg: format!("cannot open backend executable {}: {error}", path.display()),
+                })?,
             );
             let metadata = source
                 .metadata()
@@ -2085,6 +2089,125 @@ mod tests {
             format!("{error}").contains("regular file"),
             "unexpected error: {error}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinning_rejects_fifos_without_waiting_for_a_writer() {
+        const FIFO_ENV: &str = "BLAZE_TEST_PIN_FIFO";
+        const STARTED_ENV: &str = "BLAZE_TEST_PIN_STARTED";
+
+        if let Some(path) = std::env::var_os(FIFO_ENV) {
+            let started = std::env::var_os(STARTED_ENV).expect("child start marker");
+            std::fs::write(started, b"started").expect("mark pin attempt");
+            let error = PinnedExecutable::open(Path::new(&path))
+                .expect_err("a FIFO is not a backend executable");
+            assert!(error.to_string().contains("not a regular file"));
+            return;
+        }
+
+        // Isolate the synchronous open in a subprocess: a regression must not
+        // block the test runtime, and panic cleanup must retain the child owner.
+        struct ProbeChild(std::process::Child);
+        impl Drop for ProbeChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        fn wait_for_probe(
+            child: &mut ProbeChild,
+            timeout: Duration,
+        ) -> Option<std::process::ExitStatus> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if let Some(status) = child.0.try_wait().expect("probe status") {
+                    return Some(status);
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        let mut all_prompt = true;
+        for symlinked in [false, true] {
+            let temp = tempfile::tempdir().expect("FIFO directory");
+            let fifo = temp.path().join("backend.fifo");
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                &fifo,
+                rustix::fs::Mode::from_bits_truncate(0o600),
+            )
+            .expect("backend FIFO");
+            let path = if symlinked {
+                let link = temp.path().join("backend");
+                std::os::unix::fs::symlink(&fifo, &link).expect("backend symlink");
+                link
+            } else {
+                fifo.clone()
+            };
+            let started = temp.path().join("started");
+            let mut child = ProbeChild(
+                std::process::Command::new(std::env::current_exe().expect("test binary"))
+                    .args([
+                        "--exact",
+                        "spawner::tests::pinning_rejects_fifos_without_waiting_for_a_writer",
+                    ])
+                    .env(FIFO_ENV, &path)
+                    .env(STARTED_ENV, &started)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .expect("pin probe subprocess"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !started.exists() {
+                assert!(child.0.try_wait().expect("probe status").is_none());
+                assert!(Instant::now() < deadline, "pin probe must start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let status = wait_for_probe(&mut child, Duration::from_secs(2));
+            let prompt = status.is_some();
+            let wait_channel = std::fs::read_to_string(format!("/proc/{}/wchan", child.0.id()))
+                .unwrap_or_default();
+            eprintln!(
+                "FIFO pin symlinked={symlinked} pid={} prompt={prompt} wait_channel={wait_channel:?}",
+                child.0.id(),
+            );
+            // Also unblock the unfixed tree before asserting. Linux permits an
+            // O_RDWR FIFO open without a peer; it releases the child's O_RDONLY.
+            let _release = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo)
+                .expect("release any blocked FIFO open");
+            let status = status
+                .or_else(|| wait_for_probe(&mut child, Duration::from_secs(2)))
+                .expect("released pin probe must exit");
+            assert!(status.success(), "FIFO must be rejected as non-regular");
+            all_prompt &= prompt;
+        }
+        assert!(all_prompt, "pinning waited for a FIFO writer");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pinned_regular_binary_remains_executable() {
+        let pinned = PinnedExecutable::open(Path::new("/bin/sh")).expect("pin regular executable");
+        let mut command = Command::new(pinned.program());
+        command
+            .args(["-c", "printf pinned-binary"])
+            .kill_on_drop(true);
+        pinned.inherit_into(&mut command);
+        let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+            .await
+            .expect("pinned execution deadline")
+            .expect("execute pinned binary");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"pinned-binary");
     }
 
     #[cfg(target_os = "linux")]
