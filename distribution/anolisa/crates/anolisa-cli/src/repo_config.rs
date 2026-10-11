@@ -591,9 +591,64 @@ impl RepoConfig {
 /// rules as configured base_urls, except plaintext `http://` is allowed:
 /// typing the flag is itself the explicit opt-in that `insecure = true`
 /// provides in the file. Returns the URL with any trailing slash trimmed.
+///
+/// Contract: the override is fully literal — it is used verbatim, never
+/// substituted — so a `$` is exactly as legal here as in any other path,
+/// and every literal `$` URL (a directory named `repo$arch`, `$stable`,
+/// `${arch}`, a lone `$`) is accepted unchanged. A reference to a name
+/// the config layer would substitute in a `base_url` template is still
+/// accepted: no heuristic can tell a template pasted onto the flag from
+/// a path that legitimately contains that text, and the flag has no
+/// substitution contract to enforce. [`override_template_var_warning`]
+/// gives the caller a non-blocking hint for the suspected-template case.
 pub fn normalize_override_url(url: &str) -> Result<String, RepoConfigError> {
     validate_base_url("<cli-override>", url, true)?;
     Ok(url.trim_end_matches('/').to_string())
+}
+
+/// Variable names the config layer substitutes in a `base_url` template
+/// (the vocabulary `resolved_base_url` feeds to `substitute_vars`). Used
+/// only as the suspected-template heuristic for `--repo` overrides — see
+/// [`override_template_var_warning`].
+const TEMPLATE_VAR_NAMES: [&str; 5] = ["os", "arch", "basearch", "releasever", "channel"];
+
+/// First `$name` reference in `url` whose `name` is in the substitution
+/// vocabulary, or `None`. `$name` parsing matches `substitute_vars`:
+/// `name` is the longest run of `[a-z_]` after the `$`, so e.g.
+/// `repo$stable`, `$FOO` and a lone `$` are not template references
+/// (`stable`/`` are not vocabulary names) and stay literal.
+fn template_var_reference(url: &str) -> Option<String> {
+    let mut rest = url;
+    while let Some(idx) = rest.find('$') {
+        let after = &rest[idx + 1..];
+        let name_len = after
+            .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+            .unwrap_or(after.len());
+        let name = &after[..name_len];
+        if TEMPLATE_VAR_NAMES.contains(&name) {
+            return Some(name.to_string());
+        }
+        rest = after;
+    }
+    None
+}
+
+/// Non-blocking hint for a `--repo` override that contains a `$name`
+/// reference to a name the config layer substitutes in `base_url`
+/// templates (`$os`, `$arch`, `$basearch`, `$releasever`, `$channel`).
+/// Such an override is never substituted — it is fetched with the
+/// `$name` intact — which is usually a template pasted onto the one
+/// path that never expands it. Returns the warning text, or `None`
+/// when the URL carries no suspected-template reference.
+pub fn override_template_var_warning(url: &str) -> Option<String> {
+    template_var_reference(url).map(|name| {
+        format!(
+            "--repo is used literally, so '${name}' is not substituted and \
+             will be fetched as-is — if that is a config template, replace \
+             '${name}' with its value or configure it as a backend base_url, \
+             where variables are substituted"
+        )
+    })
 }
 
 /// Enforce the base_url shape rules (see module docs): scheme, non-empty
@@ -1544,6 +1599,77 @@ base_url = "file:///tmp/repo $channel/v1/"
         assert_eq!(
             normalize_override_url("file:///tmp/repo dir").expect("override with space"),
             "file:///tmp/repo dir"
+        );
+    }
+
+    /// A `--repo` override is fully literal, so every `$`-bearing URL is
+    /// accepted — including `$name` references to the substitution
+    /// vocabulary. `file:///tmp/repo$arch` (reviewer reproduction: a
+    /// real directory whose name contains `$arch`) and the pasted
+    /// template `https://example.com/anolisa/$arch/v1/` both normalize
+    /// unchanged; only a shape violation (scheme, query) is rejected.
+    #[test]
+    fn override_url_with_template_var_is_accepted_with_hint() {
+        for (url, var) in [
+            ("file:///tmp/repo$arch", "arch"),
+            ("https://example.com/anolisa/$arch/v1/", "arch"),
+            ("https://example.com/anolisa/$channel/v1/", "channel"),
+        ] {
+            let normalized = normalize_override_url(url)
+                .unwrap_or_else(|e| panic!("literal $ override {url:?} must be accepted: {e:?}"));
+            assert_eq!(normalized, url.trim_end_matches('/'));
+            let warning = override_template_var_warning(url).unwrap_or_else(|| {
+                panic!("override {url:?} must carry the suspected-template hint")
+            });
+            assert!(
+                warning.contains(&format!("'${var}'"))
+                    && warning.contains("used literally")
+                    && warning.contains("base_url"),
+                "url {url:?}: got {warning:?}"
+            );
+        }
+        // Shape rules still reject non-URLs independently of any `$`.
+        assert!(normalize_override_url("https://example.com/anolisa/$arch/v1/?token=x").is_err());
+        assert!(normalize_override_url("ftp://example.com/anolisa/$arch/").is_err());
+    }
+
+    /// A literal `$` that is not a vocabulary reference stays a legal
+    /// part of the URL: `--repo` has no substitution contract, so
+    /// directories like `repo$stable` (reviewer reproduction) must keep
+    /// working exactly as before the check existed, and without the
+    /// suspected-template hint. `$FOO` (uppercase, not a vocabulary
+    /// name), a lone `$`, `$$` and the braced `${arch}` form (which
+    /// `substitute_vars` itself does not expand) are all literals here
+    /// too.
+    #[test]
+    fn override_url_with_literal_dollar_is_accepted() {
+        for url in [
+            "file:///tmp/repo$stable",
+            "https://example.com/anolisa/v1/x$y",
+            "https://example.com/anolisa/v1/$",
+            "https://example.com/anolisa/v1/$$",
+            "https://example.com/anolisa/v1/${arch}",
+            "https://example.com/anolisa/v1/$FOO",
+        ] {
+            let normalized = normalize_override_url(url)
+                .unwrap_or_else(|e| panic!("literal $ override {url:?} must be accepted: {e:?}"));
+            assert_eq!(normalized, url.trim_end_matches('/'));
+            assert!(
+                override_template_var_warning(url).is_none(),
+                "literal $ override {url:?} must not trigger the template hint"
+            );
+        }
+    }
+
+    #[test]
+    fn override_url_without_dollar_normalizes() {
+        assert_eq!(
+            normalize_override_url("https://example.com/anolisa/v1/").expect("clean override"),
+            "https://example.com/anolisa/v1"
+        );
+        assert_eq!(
+            normalize_override_url("file:///srv/repo/").expect("file override"),
+            "file:///srv/repo"
         );
     }
 
