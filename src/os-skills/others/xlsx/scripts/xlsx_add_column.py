@@ -101,8 +101,74 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     sys.exit(1)
 
 
-def add_shared_string(work_dir: str, text: str) -> int:
+NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+SHARED_STRINGS_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml."
+    "sharedStrings+xml"
+)
+
+
+def _register_default_namespace(namespace: str) -> None:
+    """Point the serializer's default prefix at this file's namespace."""
+    ET.register_namespace("", namespace)
+
+
+def _ensure_shared_strings_part(work_dir: str) -> str:
+    """Return the sharedStrings.xml path, creating the part when absent.
+
+    A workbook without shared strings is valid OOXML — openpyxl writes
+    inline strings, so files authored by it have no sharedStrings part.
+    Adding the first text cell must create the part together with its
+    package registrations (the [Content_Types].xml override and the
+    workbook relationship), or Excel treats the repacked file as corrupt.
+    Mirrors the same bootstrap in xlsx_insert_row.py.
+    """
     ss_path = os.path.join(work_dir, "xl", "sharedStrings.xml")
+    if os.path.exists(ss_path):
+        return ss_path
+
+    root = ET.Element(_tag("sst"))
+    root.set("count", "0")
+    root.set("uniqueCount", "0")
+    _register_default_namespace(NS_SS)
+    ET.ElementTree(root).write(ss_path, encoding="unicode", xml_declaration=False)
+
+    ct_path = os.path.join(work_dir, "[Content_Types].xml")
+    ct_tree = ET.parse(ct_path)
+    part_name = "/xl/sharedStrings.xml"
+    if not any(
+        override.get("PartName") == part_name for override in ct_tree.getroot()
+    ):
+        override = ET.SubElement(ct_tree.getroot(), f"{{{NS_CT}}}Override")
+        override.set("PartName", part_name)
+        override.set("ContentType", SHARED_STRINGS_CONTENT_TYPE)
+        _register_default_namespace(NS_CT)
+        ct_tree.write(ct_path, encoding="unicode", xml_declaration=False)
+
+    rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+    rels_tree = ET.parse(rels_path)
+    used_ids = {rel.get("Id") for rel in rels_tree.getroot()}
+    next_id = 1
+    while f"rId{next_id}" in used_ids:
+        next_id += 1
+    rel = ET.SubElement(
+        rels_tree.getroot(), f"{{{NS_PKG_REL}}}Relationship"
+    )
+    rel.set("Id", f"rId{next_id}")
+    rel.set(
+        "Type",
+        "http://schemas.openxmlformats.org/officeDocument/2006/"
+        "relationships/sharedStrings",
+    )
+    rel.set("Target", "sharedStrings.xml")
+    _register_default_namespace(NS_PKG_REL)
+    rels_tree.write(rels_path, encoding="unicode", xml_declaration=False)
+    return ss_path
+
+
+def add_shared_string(work_dir: str, text: str) -> int:
+    ss_path = _ensure_shared_strings_part(work_dir)
     tree = ET.parse(ss_path)
     root = tree.getroot()
 
