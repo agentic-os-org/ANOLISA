@@ -170,27 +170,33 @@ export class McpStdioClient {
   private async doStart(): Promise<void> {
     this.spawnProcess();
 
-    // Send MCP initialize handshake.
-    const initResult = await this.sendRaw("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: {
-        name: "openclaw-agent-memory-plugin",
-        version: PLUGIN_VERSION,
-      },
-    });
+    try {
+      // Send MCP initialize handshake.
+      const initResult = await this.sendRaw("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: {
+          name: "openclaw-agent-memory-plugin",
+          version: PLUGIN_VERSION,
+        },
+      });
 
-    if (!initResult) {
-      throw new Error("agent-memory initialize handshake returned no result");
+      if (!initResult) {
+        throw new Error("agent-memory initialize handshake returned no result");
+      }
+
+      // Send initialized notification (no response expected).
+      this.sendNotification("notifications/initialized");
+
+      this.initialized = true;
+      // Successful init: reset the respawn counter so the next crash
+      // gets a full quota of retries again.
+      this.respawnAttempts = 0;
+    } catch (error) {
+      // A retry must not replace the only reference to a live failed worker.
+      if (this.proc) await this.stop();
+      throw error;
     }
-
-    // Send initialized notification (no response expected).
-    this.sendNotification("notifications/initialized");
-
-    this.initialized = true;
-    // Successful init: reset the respawn counter so the next crash
-    // gets a full quota of retries again.
-    this.respawnAttempts = 0;
   }
 
   private spawnProcess(): void {

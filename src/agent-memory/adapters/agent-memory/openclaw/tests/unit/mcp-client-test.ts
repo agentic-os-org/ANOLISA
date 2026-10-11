@@ -10,6 +10,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
@@ -103,6 +106,58 @@ describe("McpStdioClient", () => {
     const client = new McpStdioClient(cfg);
     await client.stop();
   });
+
+  for (const firstResult of ["error", "empty"] as const) {
+    it(`releases an ${firstResult} initialize worker before a successful retry`, async () => {
+      const directory = mkdtempSync(join(tmpdir(), "memory-mcp-init-"));
+      const binaryPath = join(directory, "worker");
+      const marker = join(directory, "workers");
+      writeFileSync(binaryPath, `#!/usr/bin/env node
+const fs = require("node:fs");
+const readline = require("node:readline");
+const marker = ${JSON.stringify(marker)};
+const first = !fs.existsSync(marker);
+fs.appendFileSync(marker, String(process.pid) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let response;
+  if (request.method === "initialize" && first) {
+    response = ${JSON.stringify(firstResult)} === "error"
+      ? { error: { code: -32001, message: "initialization failed" } }
+      : { result: null };
+  } else {
+    response = { result: request.method === "initialize"
+      ? { protocolVersion: "2024-11-05", capabilities: {} }
+      : { content: [{ type: "text", text: "reinitialized" }] } };
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, ...response }) + "\\n");
+});
+`, { mode: 0o755 });
+      const client = new McpStdioClient({ ...cfg, binaryPath });
+      try {
+        await assert.rejects(client.callTool("memory_get_context", {}), firstResult === "error"
+          ? /JSON-RPC error -32001: initialization failed/
+          : /initialize handshake returned no result/);
+        const firstPid = Number(readFileSync(marker, "utf8").trim());
+        let firstExited = false;
+        try { process.kill(firstPid, 0); } catch (error: any) { firstExited = error.code === "ESRCH"; }
+        assert.equal(await client.callTool("memory_get_context", {}), "reinitialized");
+        assert.equal(firstExited, true, "failed worker must exit before startup rejects");
+        const secondPid = Number(readFileSync(marker, "utf8").trim().split("\n")[1]);
+        await client.stop();
+        assert.throws(() => process.kill(secondPid, 0), { code: "ESRCH" });
+      } finally {
+        await client.stop();
+        if (existsSync(marker)) {
+          for (const pid of readFileSync(marker, "utf8").trim().split("\n").map(Number)) {
+            try { process.kill(pid, "SIGKILL"); } catch {}
+          }
+        }
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);
