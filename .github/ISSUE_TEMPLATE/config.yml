@@ -6,5 +6,5 @@ contact_links:
     about: Check the documentation before opening an issue.
 
   - name: 🔒 Report a security vulnerability
-    url: https://github.com/alibaba/anolisa/security/advisories/new
+    url: https://github.com/agentic-os-org/ANOLISA/security/advisories/new
     about: Report vulnerabilities privately. Do not include security details in a public issue.

@@ -92,7 +92,7 @@ terminal-runner/
 ### 安装
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/benchmark/terminal-runner
 ./scripts/setup.sh
 ```

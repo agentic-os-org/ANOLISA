@@ -100,7 +100,7 @@ Supported platforms:
 A one-liner install script that prefers npm and builds from source instead. The choice between the two is made **before** npm runs — when npm is missing, the platform is musl Linux, or you set `TOKENLESS_FORCE_BUILD=1`. Once `npm install` has been invoked the installer does **not** switch method automatically: npm's exit status cannot prove that its postinstall left no framework registration behind, so a failure at that stage is reported as an incomplete installation — keeping and naming whatever could not be rolled back — rather than as a successful source build. Re-run it, or build from source explicitly with `TOKENLESS_FORCE_BUILD=1`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | bash
 ```
 
 Prerequisites depend on which path the script takes:
@@ -115,8 +115,8 @@ The script supports Linux and macOS only; on Windows it exits with an error, so 
 Pin a version or set a custom install directory. Pass the variables to `bash`, not to `curl`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
 ```
 
 A pinned version is a hard pin: the source build downloads only the matching `tokenless/v<VERSION>` tag. If that tag does not exist the installer fails instead of silently building `main`.
@@ -124,7 +124,7 @@ A pinned version is a hard pin: the source build downloads only the matching `to
 The installer records what it created in `~/.local/share/tokenless/install-receipt`. To remove exactly those paths later:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/uninstall.sh | bash
 ```
 
 ### Method D: Skill (for agents)

@@ -11,7 +11,7 @@ Tokenless 面向工具调用密集的 AI Agent。它的 CLI 可以精简 Schema 
 源码构建适合开发和调试。当前项目只在 Linux 上验证和支持源码构建：
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/tokenless
 cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version

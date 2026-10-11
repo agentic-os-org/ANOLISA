@@ -137,7 +137,7 @@ read 响应过大时返回 HTTP 502 和
 还需要控制 guest 操作并发数。当前不支持文件流式传输、交互式终端和会话复用。
 
 可选 TCP listener 目前没有 daemon 级访问边界。在
-[issue #2223](https://github.com/alibaba/anolisa/issues/2223) 解决前，生产配置应
+[issue #2223](https://github.com/agentic-os-org/ANOLISA/issues/2223) 解决前，生产配置应
 保持 `listen.http_addr` 关闭。Daemon 停止时也不会等待全部 HTTP handler 或
 释放所有 runtime owner，因此正在执行的请求可能看到连接关闭。
 

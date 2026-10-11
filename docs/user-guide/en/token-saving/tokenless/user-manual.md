@@ -11,7 +11,7 @@ Start with the [Quick Start](QUICKSTART.md) if this is your first use.
 Source builds are intended for development and debugging. The project currently validates and supports source builds on Linux only:
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa/src/tokenless
 cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version

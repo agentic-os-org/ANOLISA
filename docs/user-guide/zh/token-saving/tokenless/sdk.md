@@ -23,7 +23,7 @@ Agent 生命周期时使用 `TokenlessSdk`。不需要接入生命周期、只�
 
 ### 从 GitHub Release 安装
 
-从 [v0.7.14](https://github.com/alibaba/anolisa/releases/tag/tokenless/v0.7.14) 开始，
+从 [v0.7.14](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.7.14) 开始，
 Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 或更高版本，
 请根据目标系统选择原生 `anolisa-tokenless` Wheel：
 
@@ -39,7 +39,7 @@ Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 �
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.5/anolisa_tokenless-0.8.5-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.5/anolisa_tokenless-0.8.5-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。

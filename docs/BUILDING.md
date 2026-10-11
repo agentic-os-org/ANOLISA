@@ -11,7 +11,7 @@ runtime setup.
 ## 1. Prepare a checkout
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa
 ```
 
@@ -172,7 +172,7 @@ the affected Rust component's gate. `ktuner tune`, Blaze Firecracker paths,
 FUSE mounts, eBPF tracing, and system daemons need host privileges or kernel
 features beyond a normal unit-test run.
 
-The [CI workflow](https://github.com/alibaba/anolisa/blob/main/.github/workflows/ci.yaml) adds coverage, packaging,
+The [CI workflow](https://github.com/agentic-os-org/ANOLISA/blob/main/.github/workflows/ci.yaml) adds coverage, packaging,
 frontend, adapter, and integration checks for selected components. Those jobs
 are stricter than the smallest local commands in the matrix, so consult the
 workflow when a change touches a generated package or a framework adapter.

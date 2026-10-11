@@ -26,9 +26,9 @@
 [English](README.md) · [项目网站](https://agentic-os.sh/zh/) ·
 [快速开始](https://agentic-os.sh/zh/docs/quickstart/) ·
 [用户指南](https://agentic-os.sh/zh/docs/user-guide/) ·
-[参与贡献](https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING_zh.md)
+[参与贡献](https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING_zh.md)
 
-[![许可证](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/alibaba/anolisa/blob/main/LICENSE)
+[![许可证](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/agentic-os-org/ANOLISA/blob/main/LICENSE)
 [![平台](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/zh/docs/user-guide/installation/)
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
 [![OWASP Agentic Top 10: 7 Full, 3 Partial](https://img.shields.io/badge/OWASP_Agentic_Top_10-7_Full,_3_Partial-blue)](docs/user-guide/zh/agent-security/owasp-agentic-top10.md)
@@ -277,13 +277,13 @@ anolisa install tokenless
 
 </div>
 
-- 遇到问题或有新的 Agent 场景，欢迎[提交 Issue](https://github.com/alibaba/anolisa/issues)。
+- 遇到问题或有新的 Agent 场景，欢迎[提交 Issue](https://github.com/agentic-os-org/ANOLISA/issues)。
 - 提交 Pull Request 前，请先阅读
-  [贡献指南](https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING_zh.md)。
+  [贡献指南](https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING_zh.md)。
 - 安全问题请通过
-  [安全策略](https://github.com/alibaba/anolisa/blob/main/SECURITY.md)中的渠道报告。
+  [安全策略](https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md)中的渠道报告。
 
 ## 许可证
 
 ANOLISA 基于
-[Apache License 2.0](https://github.com/alibaba/anolisa/blob/main/LICENSE) 发布。
+[Apache License 2.0](https://github.com/agentic-os-org/ANOLISA/blob/main/LICENSE) 发布。

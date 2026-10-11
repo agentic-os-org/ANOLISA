@@ -96,7 +96,7 @@ npm uninstall -g anolisa-tokenless
 一键安装脚本，优先使用 npm，否则源码构建。两者的选择发生在**执行 npm 之前**——无 npm、平台为 musl Linux，或显式设置 `TOKENLESS_FORCE_BUILD=1`。一旦调用了 `npm install`，安装器**不再自动切换**方式：npm 的退出码无法证明其 postinstall 没有留下框架注册，因此该阶段的失败会被报告为「安装未完成」——保留并指名无法回滚的内容——而不是改用源码构建后宣称安装成功。请重新执行，或用 `TOKENLESS_FORCE_BUILD=1` 显式选择源码构建：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | bash
 ```
 
 前置依赖取决于脚本实际走哪条路径：
@@ -111,8 +111,8 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 可指定版本或安装目录。变量要传给 `bash`，不要传给 `curl`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | TOKENLESS_VERSION=0.7.4 bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
 ```
 
 指定版本是强约束：源码构建只下载对应的 `tokenless/v<VERSION>` tag。该 tag 不存在时安装直接失败，不会静默改用 `main` 分支构建。
@@ -120,7 +120,7 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 安装脚本会把本次创建的文件记录到 `~/.local/share/tokenless/install-receipt`。之后可以只删除这些记录的路径：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agentic-os-org/ANOLISA/main/src/tokenless/scripts/uninstall.sh | bash
 ```
 
 ### 方式 D：Skill（面向 Agent）

@@ -25,7 +25,7 @@ one response or retrieving one Stash entry. Use `TokenlessStats` only for statis
 ### Install from GitHub Release
 
 Official SDK wheels are attached to Tokenless GitHub Releases starting with
-[v0.7.14](https://github.com/alibaba/anolisa/releases/tag/tokenless/v0.7.14). They require
+[v0.7.14](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.7.14). They require
 CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the target system:
 
 | System | Release asset |
@@ -41,7 +41,7 @@ into a virtual environment:
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.5/anolisa_tokenless-0.8.5-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.8.5/anolisa_tokenless-0.8.5-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not

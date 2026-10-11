@@ -59,7 +59,7 @@ local `main` from the official repository and create a working branch.
 ```bash
 git clone https://github.com/<your-account>/anolisa.git
 cd anolisa
-git remote add upstream https://github.com/alibaba/anolisa.git
+git remote add upstream https://github.com/agentic-os-org/ANOLISA.git
 git fetch upstream
 git switch main
 git merge --ff-only upstream/main

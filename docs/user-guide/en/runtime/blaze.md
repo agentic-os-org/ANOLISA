@@ -161,7 +161,7 @@ supported.
 
 The optional TCP listener does not yet enforce a daemon-wide access boundary.
 Leave `listen.http_addr` disabled in production until
-[issue #2223](https://github.com/alibaba/anolisa/issues/2223) is resolved.
+[issue #2223](https://github.com/agentic-os-org/ANOLISA/issues/2223) is resolved.
 Daemon shutdown also does not yet wait for every active HTTP handler or release
 all runtime owners, so an in-flight request may observe a closed connection.
 

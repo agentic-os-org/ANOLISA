@@ -9,7 +9,7 @@
 ## 1. 准备源码目录
 
 ```bash
-git clone https://github.com/alibaba/anolisa.git
+git clone https://github.com/agentic-os-org/ANOLISA.git anolisa
 cd anolisa
 ```
 
@@ -153,7 +153,7 @@ daemon，默认 user profile 不会创建 user service。
 `cargo doc --workspace --no-deps`。`ktuner tune`、Blaze Firecracker 路径、FUSE 挂载、
 eBPF tracing 和系统 daemon 需要普通单元测试之外的主机权限或内核能力。
 
-[CI workflow](https://github.com/alibaba/anolisa/blob/main/.github/workflows/ci.yaml) 还会为部分组件执行 coverage、打包、前端、
+[CI workflow](https://github.com/agentic-os-org/ANOLISA/blob/main/.github/workflows/ci.yaml) 还会为部分组件执行 coverage、打包、前端、
 adapter 和集成检查。这些任务比矩阵中的最小本地命令更严格，涉及生成制品或框架
 adapter 时应再查看 workflow。
 
