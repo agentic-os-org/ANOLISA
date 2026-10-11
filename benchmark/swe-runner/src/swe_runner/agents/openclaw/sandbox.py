@@ -234,6 +234,16 @@ def _enable_tokenless_plugin(config: dict[str, object]) -> None:
             allowed_plugins.append(_TOKENLESS_PLUGIN_ID)
 
 
+# Subprocess bounds: these calls run while preparing sandboxes and inside
+# the cleanup callback (remove_agent_containers runs in prepared.cleanup()),
+# so an unresponsive CLI or docker daemon must fail the instance visibly
+# instead of hanging the whole batch forever. Mirrors env_checks (5s) and
+# workspace docker exec (60s).
+_SANDBOX_DOCKER_TIMEOUT_SECONDS = 30
+_SANDBOX_RECREATE_TIMEOUT_SECONDS = 120
+_SANDBOX_EXPLAIN_TIMEOUT_SECONDS = 60
+
+
 class OpenClawSandboxManager:
     """Configure one sandbox agent inside one per-instance OpenClaw profile."""
 
@@ -292,6 +302,7 @@ class OpenClawSandboxManager:
         run_command(
             [self._cli_path, "--profile", self._profile, "sandbox", "recreate", "--agent", agent_id, "--force"],
             check=True,
+            timeout=_SANDBOX_RECREATE_TIMEOUT_SECONDS,
         )
         self.remove_stale_agent_containers(agent_id)
 
@@ -299,6 +310,7 @@ class OpenClawSandboxManager:
         scope_key = build_openclaw_agent_scope_key(agent_id)
         result = run_command(
             ["docker", "ps", "-aq", "--filter", f"label={_OPENCLAW_SANDBOX_SESSION_LABEL}={scope_key}"],
+            timeout=_SANDBOX_DOCKER_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             logger.warning(
@@ -314,6 +326,7 @@ class OpenClawSandboxManager:
 
         remove_result = run_command(
             ["docker", "rm", "-f", *container_ids],
+            timeout=_SANDBOX_DOCKER_TIMEOUT_SECONDS,
         )
         if remove_result.returncode != 0:
             logger.warning(
@@ -388,6 +401,7 @@ class OpenClawSandboxManager:
         result = run_command(
             [self._cli_path, "--profile", self._profile, "sandbox", "explain", "--agent", spec.agent_id, "--json"],
             check=True,
+            timeout=_SANDBOX_EXPLAIN_TIMEOUT_SECONDS,
         )
         try:
             data = json.loads(result.stdout)
