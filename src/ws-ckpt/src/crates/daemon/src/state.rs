@@ -969,8 +969,17 @@ impl DaemonState {
                         rebuilt.snapshots.len(),
                         ws_id
                     );
-                    // Persist rebuilt index
-                    let _ = index_store::save(path, &rebuilt).await;
+                    // Persist rebuilt index. A failed save leaves the empty
+                    // on-disk index diverging from the in-memory one, so the
+                    // same rebuild repeats on every restart until it
+                    // succeeds — surface it instead of dropping it silently.
+                    if let Err(error) = index_store::save(path, &rebuilt).await {
+                        warn!(
+                            "Failed to persist rebuilt index for {}: {error}; \
+                             rebuild will repeat on next restart",
+                            ws_id
+                        );
+                    }
                     rebuilt
                 }
                 _ => index,
