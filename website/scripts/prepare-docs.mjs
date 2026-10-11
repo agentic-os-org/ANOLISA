@@ -1,5 +1,8 @@
 import {copyFile, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import path from 'node:path';
+import remarkGfm from 'remark-gfm';
+import remarkParse from 'remark-parse';
+import {unified} from 'unified';
 import {
   exists,
   generatedDir,
@@ -21,6 +24,7 @@ const imagePrefix = 'docs/images/';
 // Images referenced by documentation, collected while links are rewritten and
 // copied into the generated static directory afterwards.
 const referencedImages = new Set();
+const markdownParser = unified().use(remarkParse).use(remarkGfm);
 
 function normalizedTarget(relativePath) {
   const parsed = path.posix.parse(toPosix(relativePath));
@@ -81,11 +85,30 @@ function knownAlias(source, unresolvedPath) {
   return undefined;
 }
 
+function codeRanges(markdown) {
+  const ranges = [];
+  // Parse only for source positions. Re-serializing the tree would normalize
+  // code delimiters, whitespace and examples that must retain their source.
+  function visit(node) {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start !== undefined && end !== undefined) {
+      const fenced = node.type === 'code' && /^ {0,3}(`{3,}|~{3,})/.test(markdown.slice(start, end));
+      if (node.type === 'inlineCode' || fenced) ranges.push([start, end, fenced]);
+    }
+    for (const child of node.children || []) visit(child);
+  }
+  visit(markdownParser.parse(markdown));
+  return ranges;
+}
+
 async function rewriteLinks(markdown, source) {
   const sourceDirectory = path.posix.dirname(source);
   const replacements = [];
+  const protectedRanges = codeRanges(markdown);
   const linkPattern = /(!?)\[([^\]]*)\]\(([^)]+)\)/g;
   for (const match of markdown.matchAll(linkPattern)) {
+    if (protectedRanges.some(([start, end]) => match.index >= start && match.index < end)) continue;
     const rawTarget = match[3].trim();
     if (/^(?:[a-z]+:|#|\/)/i.test(rawTarget)) continue;
     const [targetWithoutHash, hash = ''] = rawTarget.split('#', 2);
@@ -139,17 +162,18 @@ async function rewriteLinks(markdown, source) {
 }
 
 function stripLocaleSwitchLinks(markdown) {
-  let inFence = false;
+  const protectedRanges = codeRanges(markdown);
+  let position = 0;
   let dropFollowingBlank = false;
   return markdown
     .split('\n')
     .filter((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
+      const start = position;
+      position += line.length + 1;
+      if (protectedRanges.some(([left, right]) => start < right && start + line.length >= left)) {
         dropFollowingBlank = false;
         return true;
       }
-      if (inFence) return true;
       if (dropFollowingBlank && /^[ \t]*\r?$/.test(line)) {
         dropFollowingBlank = false;
         return false;
@@ -165,32 +189,19 @@ function stripLocaleSwitchLinks(markdown) {
 }
 
 function makeMdxSafe(markdown) {
-  let inFence = false;
-  return markdown
-    .split('\n')
-    .map((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
-        return line;
-      }
-      if (inFence) return line;
-      return line
-        .replace(/\\`/g, '&#96;')
-        .split(/(`+[^`]*`+)/g)
-        .map((segment, index) => {
-          if (index % 2 === 1) {
-            const content = segment
-              .replace(/^`+|`+$/g, '')
-              .replace(/&#96;/g, '`')
-              .replace(/(?<!\\)\|/g, '\\|');
-            const delimiter = content.includes('`') ? '``' : '`';
-            return `${delimiter}${content}${delimiter}`;
-          }
-          return segment.replace(/</g, '&lt;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;');
-        })
-        .join('');
-    })
-    .join('\n');
+  const escapeProse = (text) => text
+    .replace(/\\`/g, '&#96;')
+    .replace(/</g, '&lt;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;');
+  const parts = [];
+  let position = 0;
+  for (const [start, end, fenced] of codeRanges(markdown).sort((left, right) => left[0] - right[0])) {
+    parts.push(escapeProse(markdown.slice(position, start)));
+    const code = markdown.slice(start, end);
+    parts.push(fenced ? code : code.replace(/(?<!\\)\|/g, '\\|'));
+    position = end;
+  }
+  parts.push(escapeProse(markdown.slice(position)));
+  return parts.join('');
 }
 
 function sidebarLabel(document, title, locale) {
