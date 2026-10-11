@@ -117,4 +117,89 @@ describe("McpStdioClient", () => {
       await client.stop();
     }
   });
+
+  it("spawn failures count toward the respawn cap and give up", async () => {
+    // MAX_RESPAWN_ATTEMPTS is 3 in mcp-client.ts. Node reports a failed
+    // spawn via the 'error' event ('exit' never fires), so a spawn failure
+    // must count toward the same bound as a crash — otherwise a missing
+    // binary makes every tool call retry a doomed spawn forever and the
+    // decisive "gave up" state never engages.
+    const client = new McpStdioClient(cfg);
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      let gaveUp = false;
+      // A couple of extra rounds beyond the cap; each round leaves time for
+      // the async 'error' event to land before the next lazy-start attempt.
+      for (let i = 0; i < 3 + 2 && !gaveUp; i++) {
+        try {
+          await client.callTool("memory_search", { query: "x" });
+          assert.fail("expected callTool to reject");
+        } catch (err) {
+          gaveUp = /gave up/.test((err as Error).message);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.ok(
+        gaveUp,
+        `spawn failures must count toward the respawn cap and reach the \
+"gave up" state; observed console errors: ${errors.join(" | ")}`,
+      );
+      // Once given up, the client must refuse without spawning again.
+      await assert.rejects(
+        client.callTool("memory_search", { query: "x" }),
+        /gave up/,
+      );
+    } finally {
+      console.error = originalError;
+      await client.stop();
+    }
+  });
+
+  it("a deliberate stop survives an error event and is cleared only by exit", async () => {
+    // The reviewed sequence: stop() sets deliberateStop, kill() produces an
+    // 'error' before the child later emits 'exit'. The error handler must
+    // keep the flag armed — the crash guard inside countCrash consults it —
+    // so the subsequent 'exit' still recognizes the deliberate stop and does
+    // not consume a respawn attempt (or reach the give-up cap) during an
+    // intentional teardown. Only the terminal 'exit' clears the flag.
+    const client = new McpStdioClient(cfg);
+    const internals = client as unknown as {
+      deliberateStop: boolean;
+      initialized: boolean;
+      proc: unknown;
+      handleError: (err: Error, countCrash: (detail: string) => void) => void;
+      handleExit: (
+        code: number | null,
+        signal: string | null,
+        countCrash: (detail: string) => void,
+      ) => void;
+    };
+    internals.deliberateStop = true;
+    internals.initialized = true;
+    internals.proc = { killed: false };
+
+    const countCrash = () => {
+      // Mirrors the real closure's first guard: a deliberate stop is not a
+      // crash. The flag assertions below prove the guard sees `true` at the
+      // exit event too, not only at the error event.
+      if (internals.deliberateStop) return;
+      throw new Error("countCrash must not count a deliberate stop");
+    };
+    internals.handleError(new Error("kill failed: EPERM"), countCrash);
+    assert.equal(
+      internals.deliberateStop,
+      true,
+      "the error event must not clear the deliberate-stop flag",
+    );
+    internals.handleExit(0, "SIGTERM", countCrash);
+    assert.equal(
+      internals.deliberateStop,
+      false,
+      "the terminal exit clears the flag",
+    );
+  });
 });
