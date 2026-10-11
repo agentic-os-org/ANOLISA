@@ -52,7 +52,14 @@ def _match_with_targets(
     for seg in segments:
         m = main_pat.search(seg)
         if m and any(
-            t.start() > m.start() for tp in target_pats if (t := tp.search(seg))
+            # Every target occurrence counts, not just the first: a
+            # sensitive path can appear on BOTH sides of the command
+            # ("cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys"),
+            # and target.search() returning the earlier source match
+            # first made the rule miss the sensitive destination.
+            t.start() > m.start()
+            for tp in target_pats
+            for t in tp.finditer(seg)
         ):
             evidence.append(seg.strip())
     return evidence
