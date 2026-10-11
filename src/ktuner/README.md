@@ -17,6 +17,7 @@ sudo ktuner tune --dry-run     # preview, no changes
 sudo ktuner tune               # apply all
 sudo ktuner tune --conservative
 sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
+sudo ktuner tune --only vm.swappiness   # apply only the named parameters
 
 # Fix a single parameter (requires root)
 sudo ktuner fix <param>        # e.g. sudo ktuner fix vm.swappiness
@@ -145,12 +146,44 @@ recording that cleared original in the ledger (so `rollback` restores it) and
 persists only the written half, which reproduces the same cleared state at
 boot; the built-in rules never plan both halves of a pair at once.
 
+`tune --only <param>` (repeatable) keeps only the named recommendations in the
+plan: it accepts the same spellings as `fix`/`why`, applies after the
+`--category`/`--conservative` filters, and is the mirror of `--exclude`, with
+which it is mutually exclusive — a run that carries both is a usage error
+(exit 2, stderr JSON). Every in-scope entry the selection does not name is
+left out exactly like an exclusion (not written, not recorded in the ledger,
+not persisted) and is reported in `would_skip` with the reason `not_selected`,
+which outranks `unwritable` and `runtime_dangerous` so the counts do not drift
+with the environment. A name that matches no recommendation in scope is not
+an error: it is echoed in `unmatched_only`, in the spelling given — an empty
+plan reports every given name. With nothing selected the run answers `status:
+"blocked"` and exits 1 like any other plan with nothing applicable;
+`blocked_not_selected` joins the short-circuit counts and the four add up to
+`recommendations`.
+
+```json
+{"blocked": 11, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "net.core.netdev_max_backlog", "reason": "not_selected"}, ...]}
+```
+
+An unmatched name cannot select anything, so a plan selected only by unmatched
+names has nothing applicable and reports its own count key:
+
+```json
+{"applied": 0, "blocked": 53, "blocked_not_selected": 53, "blocked_runtime_dangerous": 0, "blocked_unwritable": 0, "dry_run": true, "recommendations": 53, "status": "blocked", "unmatched_only": ["vm.swappiness", "no_such_ktuner_param"], "would_apply": [], "would_skip": [ ... ]}
+```
+
+`--only` narrows the plan like `--exclude` and, like it, does not reach the
+kernel's own side effects: writing one half of a mutually exclusive pair still
+zeroes the other half (`mm/page-writeback.c`, `mm/util.c`), so a parameter the
+selection left out is cleared in the kernel when its counterpart is written.
+The ledger still records the cleared original and `rollback` restores it.
+
 `tune --dry-run` previews the plan instead; `status` uses the same
 vocabulary as the short-circuit path (`planned` here; `optimal`/`blocked`
 when there is nothing to apply). `would_apply` lists the entries a real run
 would write, `would_skip` names the ones this run leaves out (with the
-reason: `unwritable`, `runtime_dangerous`, or `excluded` for an `--exclude`
-name), and `blocked` stays their count:
+reason: `unwritable`, `runtime_dangerous`, or `excluded` / `not_selected` for
+a name a selection left out), and `blocked` stays their count:
 
 ```json
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}

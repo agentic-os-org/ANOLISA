@@ -17,6 +17,7 @@ sudo ktuner tune --dry-run     # 预览，不做实际变更
 sudo ktuner tune               # 全部应用
 sudo ktuner tune --conservative
 sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一项
+sudo ktuner tune --only vm.swappiness   # 只应用点名的参数
 
 # 修正单个参数（需要 root 权限）
 sudo ktuner fix <param>        # 例如 sudo ktuner fix vm.swappiness
@@ -134,11 +135,38 @@ sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，�
 不丢原值）、只持久化真正写入的那一半，重启时由内核重现同样的清零状态；
 内置规则从不同时把一对孪生的两半放进计划。
 
+`tune --only <param>`（可重复）只把点名的建议留在计划里：拼写与 `fix`/`why`
+一致，在 `--category`/`--conservative` 过滤之后生效，是 `--exclude` 的镜像
+——两者互斥，同时给出是用法错误（exit 2、stderr JSON）。范围内未被点名的
+条目与排除一样处理（不写入、不进回滚账本、不持久化），在 `would_skip` 中以
+原因 `not_selected` 列出；`not_selected` 优先于 `unwritable` 和
+`runtime_dangerous`，计数不随环境漂移。没有命中范围内任何建议的名字不算
+错误——按给定拼写回显在 `unmatched_only` 中（计划为空时所有给出的名字都会
+出现）。全部未选中时与任何无可应用项的计划一样输出 `status: "blocked"`、
+退出码 1；`blocked_not_selected` 与其余短路计数并列，四者加总等于
+`recommendations`：
+
+```json
+{"blocked": 11, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "net.core.netdev_max_backlog", "reason": "not_selected"}, ...]}
+```
+
+未命中的名字选不中任何条目；当计划只由未命中的名字选定时它无可应用项，
+短路输出用各自的键报告计数：
+
+```json
+{"applied": 0, "blocked": 53, "blocked_not_selected": 53, "blocked_runtime_dangerous": 0, "blocked_unwritable": 0, "dry_run": true, "recommendations": 53, "status": "blocked", "unmatched_only": ["vm.swappiness", "no_such_ktuner_param"], "would_apply": [], "would_skip": [ ... ]}
+```
+
+`--only` 与 `--exclude` 一样只筛计划，管不到内核自身的副作用：互斥 sysctl 对
+中写入一半仍会把另一半清零（`mm/page-writeback.c`、`mm/util.c`），因此被
+`--only` 留在计划外的参数在其对应项被写入时仍会被内核清零。ktuner 照旧把被
+清零的原值记入账本，`rollback` 因此能恢复。
+
 `tune --dry-run` 输出的是预览；`status` 与短路路径使用同一套取值
 （此处为 `planned`；无可应用项时为 `optimal`/`blocked`）。`would_apply`
 列出真实运行会写入的项，`would_skip` 列出本次运行不写入的项及原因
-（`unwritable`、`runtime_dangerous`，或 `--exclude` 点名时的 `excluded`），
-`blocked` 为这些项的数量：
+（`unwritable`、`runtime_dangerous`，或选择器点名时的 `excluded` /
+`not_selected`），`blocked` 为这些项的数量：
 
 ```json
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}

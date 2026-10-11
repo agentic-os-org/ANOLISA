@@ -32,6 +32,9 @@ enum Commands {
         /// Apply everything but this parameter; may be repeated
         #[arg(long)]
         exclude: Vec<String>,
+        /// Apply only this parameter; may be repeated
+        #[arg(long)]
+        only: Vec<String>,
     },
     /// Fix a single parameter
     Fix {
@@ -91,7 +94,8 @@ fn main() {
             conservative,
             category: cat,
             exclude,
-        } => cmd_tune(dry_run, conservative, cat, exclude),
+            only,
+        } => cmd_tune(dry_run, conservative, cat, exclude, only),
         Commands::Fix { param, dry_run } => cmd_fix(&param, dry_run),
         Commands::Why { param } => cmd_why(&param),
         Commands::Rollback { params, list } => cmd_rollback(&params, list),
@@ -218,29 +222,121 @@ const RUNTIME_DANGEROUS: &str = "runtime_dangerous";
 /// was told to leave alone is dropped whether or not this environment could
 /// have written it.
 const EXCLUDED: &str = "excluded";
+/// Why a real `tune` run leaves out an in-scope recommendation the operator
+/// did not name in `--only`. Like `excluded` this is the operator's own
+/// instruction, so it is reported first and for every other entry: the named
+/// parameters are the plan this run was asked for, and everything else is
+/// dropped whether or not this environment could have written it.
+const NOT_SELECTED: &str = "not_selected";
 
 /// Whether a user-selected parameter name (`fix <param>`, `why <param>`,
-/// `tune --exclude <param>`) addresses `candidate`: the verbatim spelling
-/// first, then the sysctl alias (slash/dot and case) with sysfs identities
-/// and network interface names preserved. One predicate so every consumer
-/// accepts exactly the same spellings.
+/// `tune --exclude <param>`, `tune --only <param>`) addresses `candidate`:
+/// the verbatim spelling first, then the sysctl alias (slash/dot and case)
+/// with sysfs identities and network interface names preserved. One predicate
+/// so every consumer accepts exactly the same spellings; `--exclude` drops
+/// what it addresses, `--only` keeps it.
 fn param_matches(candidate: &str, requested: &str) -> bool {
     candidate == requested || normalize_param(candidate) == normalize_param(requested)
 }
 
-/// Whether `--exclude` names this parameter.
-fn is_excluded(param: &str, excludes: &[String]) -> bool {
-    excludes.iter().any(|exclude| param_matches(param, exclude))
+/// Whether one of `names` addresses `param`: the one predicate behind every
+/// operator selection. `--exclude` drops the parameters its names address,
+/// `--only` drops the ones they do not.
+fn is_excluded(param: &str, names: &[String]) -> bool {
+    names.iter().any(|name| param_matches(param, name))
+}
+
+/// The operator's plan selection: `--exclude` names the recommendations to
+/// leave out, `--only` names the ones to keep, and neither flag selects the
+/// whole plan. Both flags name parameters the same way (the shared
+/// [`is_excluded`] predicate) and feed the same [`skip_reason`] classification
+/// and [`would_skip_json`] list, so they differ only in the sense of a match.
+#[derive(Clone, Copy)]
+enum Selection<'a> {
+    /// No flag: every in-scope recommendation is selected.
+    All,
+    /// `--exclude`: everything but the named parameters.
+    Except(&'a [String]),
+    /// `--only`: nothing but the named parameters.
+    Only(&'a [String]),
+}
+
+impl<'a> Selection<'a> {
+    /// The names the operator gave, whichever flag carried them.
+    fn names(self) -> &'a [String] {
+        match self {
+            Selection::All => &[],
+            Selection::Except(names) | Selection::Only(names) => names,
+        }
+    }
+
+    /// Whether the operator's instruction drops `param`: `--exclude` drops
+    /// what its names address, `--only` drops what they do not.
+    fn drops(self, param: &str) -> bool {
+        let named = is_excluded(param, self.names());
+        match self {
+            Selection::All => false,
+            Selection::Except(_) => named,
+            Selection::Only(_) => !named,
+        }
+    }
+
+    /// The reason a dropped entry is reported with, or `None` when no flag
+    /// dropped anything.
+    fn drop_reason(self) -> Option<&'static str> {
+        match self {
+            Selection::All => None,
+            Selection::Except(_) => Some(EXCLUDED),
+            Selection::Only(_) => Some(NOT_SELECTED),
+        }
+    }
+
+    /// The key the inert-name report is published under, or `None` when no
+    /// flag was given.
+    fn unmatched_key(self) -> Option<&'static str> {
+        match self {
+            Selection::All => None,
+            Selection::Except(_) => Some("unmatched_exclude"),
+            Selection::Only(_) => Some("unmatched_only"),
+        }
+    }
+
+    /// The inert-name report this selection owes, under the flag's own key:
+    /// the names that addressed no in-scope recommendation, in the order
+    /// given. `None` when no flag was given or every name matched.
+    fn unmatched_report(
+        self,
+        in_scope: &[Recommendation],
+    ) -> Option<(&'static str, serde_json::Value)> {
+        let key = self.unmatched_key()?;
+        let names = unmatched_exclude_json(in_scope, self)?;
+        Some((key, names))
+    }
+}
+
+/// A plain name list reads as `--exclude`: the spelling the existing call
+/// sites use, where an empty list (no names) selects the whole plan.
+impl<'a, T> From<&'a T> for Selection<'a>
+where
+    T: AsRef<[String]> + ?Sized,
+{
+    fn from(names: &'a T) -> Self {
+        Selection::Except(names.as_ref())
+    }
 }
 
 /// Why a real `tune` run would leave `rec` out, or `None` when this
 /// environment can take it. Pure, so the applicability filter, the
 /// short-circuit counts and the dry-run preview classify one list
-/// identically. The operator's own exclusion outranks the environment
+/// identically. The operator's own selection outranks the environment
 /// reasons: it is the reason THIS run drops the entry.
-fn skip_reason(rec: &Recommendation, excludes: &[String]) -> Option<&'static str> {
-    if is_excluded(&rec.param, excludes) {
-        Some(EXCLUDED)
+fn skip_reason<'a>(
+    rec: &Recommendation,
+    selection: impl Into<Selection<'a>>,
+) -> Option<&'static str> {
+    let selection = selection.into();
+    if selection.drops(&rec.param) {
+        selection.drop_reason()
     } else if !rec.writable {
         Some(UNWRITABLE)
     } else if category::is_runtime_dangerous(&rec.param) {
@@ -272,35 +368,39 @@ fn predicted_score(eval: &rules::EvalResult, view: &[Recommendation]) -> usize {
 
 /// The `would_skip` payload: every in-scope recommendation a real run would
 /// leave out, in plan order, with the reason it is left out.
-fn would_skip_json(in_scope: &[Recommendation], excludes: &[String]) -> Vec<serde_json::Value> {
+fn would_skip_json<'a>(
+    in_scope: &[Recommendation],
+    selection: impl Into<Selection<'a>>,
+) -> Vec<serde_json::Value> {
+    let selection = selection.into();
     in_scope
         .iter()
         .filter_map(|rec| {
-            skip_reason(rec, excludes).map(|reason| json!({ "param": rec.param, "reason": reason }))
+            skip_reason(rec, selection)
+                .map(|reason| json!({ "param": rec.param, "reason": reason }))
         })
         .collect()
 }
 
-/// The `unmatched_exclude` report: the `--exclude` names that dropped nothing
-/// from this run's plan, in the order given. A name that matches no in-scope
+/// The inert-name report: the selection's names that addressed nothing in
+/// this run's plan, in the order given. A name that matches no in-scope
 /// recommendation — a typo, or one outside `--category`/`--conservative` — is
 /// not an error (the same command is scripted across hosts whose plans
-/// differ), but an inert exclusion must be visible or the caller cannot tell
-/// that its instruction did nothing. An empty plan drops nothing, so every
-/// given name is reported there too. `None` when every name matched: the key
-/// appears only when there is something to report, so a run without
-/// `--exclude` (or with every exclusion effective) keeps its exact old shape.
-fn unmatched_exclude_json(
+/// differ), but an inert instruction must be visible or the caller cannot
+/// tell that it did nothing. An empty plan addresses nothing, so every given
+/// name is reported there too. `None` when every name matched: the report
+/// appears only when there is something to say, under the key
+/// [`Selection::unmatched_key`] names, so a run without a selection keeps its
+/// exact old shape.
+fn unmatched_exclude_json<'a>(
     in_scope: &[Recommendation],
-    excludes: &[String],
+    selection: impl Into<Selection<'a>>,
 ) -> Option<serde_json::Value> {
-    let unmatched: Vec<&str> = excludes
+    let selection = selection.into();
+    let unmatched: Vec<&str> = selection
+        .names()
         .iter()
-        .filter(|exclude| {
-            !in_scope
-                .iter()
-                .any(|rec| param_matches(&rec.param, exclude))
-        })
+        .filter(|name| !in_scope.iter().any(|rec| param_matches(&rec.param, name)))
         .map(String::as_str)
         .collect();
     (!unmatched.is_empty()).then(|| json!(unmatched))
@@ -311,48 +411,54 @@ fn unmatched_exclude_json(
 ///
 /// `in_scope` is the recommendation list after the category/conservative
 /// filters but BEFORE the skip classification; `applicable` is the number
-/// that survives it (writable, not runtime-dangerous, and not excluded by the
-/// operator). Returns `None` when tune should proceed (at least one
-/// applicable recommendation).
-fn tune_short_circuit(
+/// that survives it (writable, not runtime-dangerous, and not dropped by the
+/// operator's selection). Returns `None` when tune should proceed (at least
+/// one applicable recommendation).
+fn tune_short_circuit<'a>(
     in_scope: &[Recommendation],
     applicable: usize,
-    excludes: &[String],
+    selection: impl Into<Selection<'a>>,
 ) -> Option<(serde_json::Value, i32)> {
+    let selection = selection.into();
     if applicable > 0 {
         return None;
     }
     if in_scope.is_empty() {
         // Genuinely nothing to recommend in scope — unchanged output and code.
-        // An --exclude name cannot have dropped anything from an empty plan,
-        // so every given name is inert here too: the report follows the same
-        // one rule on every shape — a name that removed nothing from this
-        // run's plan appears in `unmatched_exclude` — instead of the key
-        // vanishing exactly on the hosts with the least to reconcile.
+        // A selection name cannot have acted on an empty plan, so every given
+        // name is inert here too: the report follows the same one rule on
+        // every shape — a name that did nothing to this run's plan appears in
+        // the selection's own key — instead of vanishing exactly on the hosts
+        // with the least output to reconcile.
         let mut body = json!({ "status": "optimal", "applied": 0 });
-        if let Some(unmatched) = unmatched_exclude_json(in_scope, excludes) {
-            body["unmatched_exclude"] = unmatched;
+        if let Some((key, unmatched)) = selection.unmatched_report(in_scope) {
+            body[key] = unmatched;
         }
         return Some((body, 0));
     }
     // Recommendations exist but every one was filtered out before any write.
     // Reporting "optimal" here is false: `check` exits 1 on the same host.
     // skip_reason classifies each rec exactly once, so the counts always add
-    // up to in_scope.len(); `blocked_excluded` joins the partition when
-    // --exclude dropped something. A non-dry-run tune answers with this body
-    // too, and the counts alone cannot be reconciled with what `check` keeps
-    // reporting — `would_skip` names the entries, same shape as the preview.
+    // up to in_scope.len(); `blocked_excluded` and `blocked_not_selected` join
+    // the partition when the selection dropped something. A non-dry-run tune
+    // answers with this body too, and the counts alone cannot be reconciled
+    // with what `check` keeps reporting — `would_skip` names the entries, same
+    // shape as the preview.
     let unwritable = in_scope
         .iter()
-        .filter(|r| skip_reason(r, excludes) == Some(UNWRITABLE))
+        .filter(|r| skip_reason(r, selection) == Some(UNWRITABLE))
         .count();
     let runtime_dangerous = in_scope
         .iter()
-        .filter(|r| skip_reason(r, excludes) == Some(RUNTIME_DANGEROUS))
+        .filter(|r| skip_reason(r, selection) == Some(RUNTIME_DANGEROUS))
         .count();
     let excluded = in_scope
         .iter()
-        .filter(|r| skip_reason(r, excludes) == Some(EXCLUDED))
+        .filter(|r| skip_reason(r, selection) == Some(EXCLUDED))
+        .count();
+    let not_selected = in_scope
+        .iter()
+        .filter(|r| skip_reason(r, selection) == Some(NOT_SELECTED))
         .count();
     let mut body = json!({
         "status": "blocked",
@@ -360,15 +466,18 @@ fn tune_short_circuit(
         "recommendations": in_scope.len(),
         "blocked_unwritable": unwritable,
         "blocked_runtime_dangerous": runtime_dangerous,
-        "would_skip": would_skip_json(in_scope, excludes),
+        "would_skip": would_skip_json(in_scope, selection),
     });
-    // The --exclude-only keys, and only when they have something to report: a
+    // The selection-only keys, and only when they have something to report: a
     // run without the flag keeps the exact shape its consumers already read.
     if excluded > 0 {
         body["blocked_excluded"] = json!(excluded);
     }
-    if let Some(unmatched) = unmatched_exclude_json(in_scope, excludes) {
-        body["unmatched_exclude"] = unmatched;
+    if not_selected > 0 {
+        body["blocked_not_selected"] = json!(not_selected);
+    }
+    if let Some((key, unmatched)) = selection.unmatched_report(in_scope) {
+        body[key] = unmatched;
     }
     Some((
         body,
@@ -387,16 +496,17 @@ fn tune_short_circuit(
 /// reserves for a host with nothing to recommend. `would_apply` lists the
 /// entries a real run would write; `would_skip` names the ones it would leave
 /// out — this environment filtered them (unwritable, or runtime-dangerous) or
-/// the operator excluded them — with the reason, so the parameters a partial
-/// plan leaves behind are visible and not just counted. `blocked` stays their
-/// count.
-fn dry_run_output(
+/// the operator's selection dropped them — with the reason, so the parameters
+/// a partial plan leaves behind are visible and not just counted. `blocked`
+/// stays their count.
+fn dry_run_output<'a>(
     in_scope: &[Recommendation],
     applicable: &[Recommendation],
-    excludes: &[String],
+    selection: impl Into<Selection<'a>>,
 ) -> serde_json::Value {
+    let selection = selection.into();
     let recs_json: Vec<serde_json::Value> = applicable.iter().map(rec_json).collect();
-    let would_skip = would_skip_json(in_scope, excludes);
+    let would_skip = would_skip_json(in_scope, selection);
     let mut body = json!({
         "dry_run": true,
         "status": "planned",
@@ -404,8 +514,8 @@ fn dry_run_output(
         "would_apply": recs_json,
         "would_skip": would_skip,
     });
-    if let Some(unmatched) = unmatched_exclude_json(in_scope, excludes) {
-        body["unmatched_exclude"] = unmatched;
+    if let Some((key, unmatched)) = selection.unmatched_report(in_scope) {
+        body[key] = unmatched;
     }
     body
 }
@@ -419,23 +529,25 @@ fn dry_run_output(
 /// it read `would_apply`, found nothing and had no way to distinguish
 /// "nothing to plan" from "the flag was ignored". `would_apply` is empty here
 /// because nothing is applicable, `would_skip` lists everything in scope
-/// (environment-filtered or operator-excluded), `blocked` stays its length
-/// (the count the planned shape reports, and the sum of the short-circuit's
-/// `blocked_unwritable` / `blocked_runtime_dangerous` / `blocked_excluded`
-/// partitions), and `status` keeps the short-circuit vocabulary (`optimal` /
-/// `blocked`). The short-circuit body already carries `unmatched_exclude`
-/// when an `--exclude` name was inert, so the preview inherits it.
-fn dry_run_preview(
+/// (environment-filtered or dropped by the operator's selection), `blocked`
+/// stays its length (the count the planned shape reports, and the sum of the
+/// short-circuit's `blocked_unwritable` / `blocked_runtime_dangerous` /
+/// `blocked_excluded` / `blocked_not_selected` partitions), and `status` keeps
+/// the short-circuit vocabulary (`optimal` / `blocked`). The short-circuit
+/// body already carries the inert-name report when a selection name did
+/// nothing, so the preview inherits it.
+fn dry_run_preview<'a>(
     mut body: serde_json::Value,
     in_scope: &[Recommendation],
-    excludes: &[String],
+    selection: impl Into<Selection<'a>>,
 ) -> serde_json::Value {
+    let selection = selection.into();
     if let Some(object) = body.as_object_mut() {
         object.insert("dry_run".to_string(), json!(true));
         object
             .entry("would_apply".to_string())
             .or_insert_with(|| json!([]));
-        let would_skip = would_skip_json(in_scope, excludes);
+        let would_skip = would_skip_json(in_scope, selection);
         object.insert("blocked".to_string(), json!(would_skip.len()));
         object.insert("would_skip".to_string(), json!(would_skip));
     }
@@ -448,18 +560,19 @@ fn dry_run_preview(
 /// adjusted — must stay assertable on a dev host.
 ///
 /// `would_skip` names the entries this run left out (unwritable,
-/// runtime-dangerous, or excluded by the operator), in the dry-run preview's
-/// shape: a partial tune answers exit 0 while `check` keeps exiting 1 on the
-/// same host, and the filtered entries are exactly the difference between the
-/// two — without them in the body, a caller cannot reconcile a real `tune`
-/// with `check` or with its own dry-run preview.
-fn tune_output(
+/// runtime-dangerous, or dropped by the operator's selection), in the dry-run
+/// preview's shape: a partial tune answers exit 0 while `check` keeps exiting
+/// 1 on the same host, and the filtered entries are exactly the difference
+/// between the two — without them in the body, a caller cannot reconcile a
+/// real `tune` with `check` or with its own dry-run preview.
+fn tune_output<'a>(
     in_scope: &[Recommendation],
     outcome: &tuner::ApplyOutcome,
     score_before: usize,
     score_after: usize,
-    excludes: &[String],
+    selection: impl Into<Selection<'a>>,
 ) -> serde_json::Value {
+    let selection = selection.into();
     let failed: Vec<serde_json::Value> = outcome
         .failed
         .iter()
@@ -475,10 +588,10 @@ fn tune_output(
         "clamped": clamped,
         "score_before": score_before,
         "score_after": score_after,
-        "would_skip": would_skip_json(in_scope, excludes),
+        "would_skip": would_skip_json(in_scope, selection),
     });
-    if let Some(unmatched) = unmatched_exclude_json(in_scope, excludes) {
-        body["unmatched_exclude"] = unmatched;
+    if let Some((key, unmatched)) = selection.unmatched_report(in_scope) {
+        body[key] = unmatched;
     }
     body
 }
@@ -488,7 +601,24 @@ fn cmd_tune(
     conservative: bool,
     cat: Option<String>,
     exclude: Vec<String>,
+    only: Vec<String>,
 ) -> Result<i32> {
+    // The two flags are opposite directions of one instruction, so a run that
+    // carried both would have to guess which one wins; refusing is a usage
+    // error (the README's stderr JSON, exit 2), while ignoring one of them
+    // would silently answer a different question than the one asked. Checked
+    // before the root gate so it fails as an argument error, like the
+    // parser's own.
+    if !exclude.is_empty() && !only.is_empty() {
+        anyhow::bail!("tune takes either --only or --exclude, not both");
+    }
+    let selection = if !only.is_empty() {
+        Selection::Only(&only)
+    } else if !exclude.is_empty() {
+        Selection::Except(&exclude)
+    } else {
+        Selection::All
+    };
     if !dry_run {
         let is_root = unsafe { libc::geteuid() } == 0;
         if !is_root {
@@ -513,16 +643,17 @@ fn cmd_tune(
     // in a container with read-only /proc/sys, where every rec is refreshed
     // as unwritable) — reporting optimal in the latter case contradicts
     // check's exit 1 on the same host. The dry-run preview lists the filtered
-    // entries themselves through the same skip_reason, and `--exclude` enters
-    // that classification here, after the category/conservative filters.
+    // entries themselves through the same skip_reason, and the operator's
+    // selection (`--exclude` / `--only`) enters that classification here,
+    // after the category/conservative filters.
     let applicable: Vec<Recommendation> = recs
         .iter()
-        .filter(|r| skip_reason(r, &exclude).is_none())
+        .filter(|r| skip_reason(r, selection).is_none())
         .cloned()
         .collect();
-    if let Some((output, code)) = tune_short_circuit(&recs, applicable.len(), &exclude) {
+    if let Some((output, code)) = tune_short_circuit(&recs, applicable.len(), selection) {
         let output = if dry_run {
-            dry_run_preview(output, &recs, &exclude)
+            dry_run_preview(output, &recs, selection)
         } else {
             output
         };
@@ -531,7 +662,7 @@ fn cmd_tune(
     }
 
     if dry_run {
-        let output = dry_run_output(&recs, &applicable, &exclude);
+        let output = dry_run_output(&recs, &applicable, selection);
         print_json(&output)?;
         return Ok(0);
     }
@@ -540,7 +671,7 @@ fn cmd_tune(
     let (_, eval_after) = gather()?;
     let score_after = eval_after.score();
 
-    let output = tune_output(&recs, &outcome, score_before, score_after, &exclude);
+    let output = tune_output(&recs, &outcome, score_before, score_after, selection);
     print_json(&output)?;
     // Mirror `check`'s exit convention (1 = attention needed): a tune that
     // failed some or all writes must not report success — the old code exited
@@ -1786,6 +1917,360 @@ mod tests {
         assert_eq!(
             skip_reason(&rec("vm.dirty_background_ratio", true), &excludes),
             None
+        );
+    }
+
+    #[test]
+    fn only_matches_the_same_aliases_as_fix_and_why() {
+        // `--only` addresses a parameter in exactly the spellings fix/why
+        // resolve (the shared param_matches predicate) and keeps it: the
+        // selection is the operator's instruction, so the named parameter is
+        // in the plan and every other parameter is dropped as not_selected.
+        for spelling in ["vm.swappiness", "vm/swappiness", "VM.SWAPPINESS"] {
+            assert_eq!(
+                skip_reason(
+                    &rec("vm.swappiness", true),
+                    Selection::Only(&[spelling.to_string()])
+                ),
+                None,
+                "{spelling} must select vm.swappiness"
+            );
+        }
+        // Sysfs identities are filesystem names: no dot folding, no case
+        // folding — the dotted spelling selects nothing, so the identity is
+        // dropped.
+        assert_eq!(
+            skip_reason(
+                &rec("block/Disk.0/scheduler", true),
+                Selection::Only(&["block.Disk.0.scheduler".to_string()])
+            ),
+            Some(NOT_SELECTED)
+        );
+        // Network identities keep case and literal dots: the dotted alias
+        // selects Br0.100, while the lower-cased interface name is another
+        // identity and selects nothing.
+        assert_eq!(
+            skip_reason(
+                &rec("net/ipv4/conf/Br0.100/forwarding", true),
+                Selection::Only(&["net.ipv4.conf.Br0.100.forwarding".to_string()])
+            ),
+            None
+        );
+        assert_eq!(
+            skip_reason(
+                &rec("net/ipv4/conf/Br0.100/forwarding", true),
+                Selection::Only(&["net.ipv4.conf.br0.100.forwarding".to_string()])
+            ),
+            Some(NOT_SELECTED)
+        );
+    }
+
+    #[test]
+    fn not_selected_outranks_the_environment_reasons() {
+        // The operator's selection is the reason THIS run drops the entry: a
+        // parameter outside `--only` is reported as not_selected whether or
+        // not this environment could have written it, exactly as `excluded`
+        // outranks the environment reasons on the other flag. A parameter the
+        // selection does name keeps its environment classification.
+        let only = vec!["vm.swappiness".to_string()];
+        assert_eq!(
+            skip_reason(&rec("kernel.shmmax", false), Selection::Only(&only)),
+            Some(NOT_SELECTED)
+        );
+        assert_eq!(
+            skip_reason(&rec("vm.nr_hugepages", true), Selection::Only(&only)),
+            Some(NOT_SELECTED)
+        );
+        assert_eq!(
+            skip_reason(&rec("vm.swappiness", false), Selection::Only(&only)),
+            Some(UNWRITABLE)
+        );
+        assert_eq!(
+            skip_reason(
+                &rec("vm.nr_hugepages", true),
+                Selection::Only(&["vm.nr_hugepages".to_string()])
+            ),
+            Some(RUNTIME_DANGEROUS)
+        );
+        assert_eq!(
+            skip_reason(&rec("vm.swappiness", true), Selection::Only(&only)),
+            None
+        );
+        // Without a selection the environment reasons are unchanged.
+        assert_eq!(
+            skip_reason(&rec("kernel.shmmax", false), &[]),
+            Some(UNWRITABLE)
+        );
+    }
+
+    #[test]
+    fn would_skip_names_unselected_entries_in_plan_order() {
+        // The skip list keeps plan order and one reason per entry: an
+        // unselected entry joins a selected-but-unwritable one instead of
+        // replacing or reordering it, and the selection outranks the
+        // environment only for the entries it actually drops.
+        let in_scope = vec![
+            rec("vm.swappiness", true),
+            rec("fs.file-max", false),
+            rec("vm.nr_hugepages", true),
+        ];
+        assert_eq!(
+            json!(would_skip_json(
+                &in_scope,
+                Selection::Only(&["vm.swappiness".to_string(), "fs.file-max".to_string()])
+            )),
+            json!([
+                { "param": "fs.file-max", "reason": "unwritable" },
+                { "param": "vm.nr_hugepages", "reason": "not_selected" },
+            ])
+        );
+    }
+
+    #[test]
+    fn dry_run_output_keeps_only_the_selected_entries() {
+        // The preview must show the plan the operator asked for: only the
+        // named parameter stays applicable and every other entry is named in
+        // would_skip with the selection's reason, so a script can tell why
+        // the parameters `check` still reports are not scheduled.
+        let in_scope = vec![rec("vm.swappiness", true), rec("net.core.somaxconn", true)];
+        let output = dry_run_output(
+            &in_scope,
+            &[rec("vm.swappiness", true)],
+            Selection::Only(&["vm.swappiness".to_string()]),
+        );
+        assert_eq!(output["status"], json!("planned"));
+        assert_eq!(output["would_apply"].as_array().map(Vec::len), Some(1));
+        assert_eq!(output["would_apply"][0]["param"], json!("vm.swappiness"));
+        assert_eq!(
+            output["would_skip"],
+            json!([{ "param": "net.core.somaxconn", "reason": "not_selected" }])
+        );
+        assert_eq!(output["blocked"], json!(1));
+        // An inert name is reported under the only key, never the exclude one.
+        let inert = dry_run_output(
+            &in_scope,
+            &[rec("vm.swappiness", true)],
+            Selection::Only(&["vm.swappiness".to_string(), "no_such_param".to_string()]),
+        );
+        assert_eq!(inert["unmatched_only"], json!(["no_such_param"]));
+        assert!(inert.get("unmatched_exclude").is_none());
+        // A run without --only keeps the exact old body: no new keys.
+        let plain = dry_run_output(&in_scope, &in_scope, &[]);
+        assert_eq!(plain["would_skip"], json!([]));
+        assert!(
+            plain.get("unmatched_only").is_none() && plain.get("blocked_not_selected").is_none(),
+            "the compatibility shape must not grow the new keys: {plain}"
+        );
+    }
+
+    #[test]
+    fn tune_short_circuit_blocked_counts_not_selected_entries() {
+        // Nothing outside the selection is applicable: the operator's own
+        // selection is why nothing can be written, so the body reports the
+        // blocked verdict check's exit 1 demands — never "optimal" — and the
+        // new count names the reason alongside the environment partitions.
+        let in_scope = vec![rec("vm.swappiness", true), rec("fs.file-max", true)];
+        let only = vec!["net.core.somaxconn".to_string()];
+        let (output, code) = tune_short_circuit(&in_scope, 0, Selection::Only(&only))
+            .expect("nothing applicable short-circuits");
+        assert_eq!(code, 1);
+        assert_eq!(output["status"], json!("blocked"));
+        assert_eq!(output["recommendations"], json!(2));
+        assert_eq!(output["blocked_not_selected"], json!(2));
+        assert_eq!(output["blocked_unwritable"], json!(0));
+        assert_eq!(output["blocked_runtime_dangerous"], json!(0));
+        assert!(
+            output.get("blocked_excluded").is_none(),
+            "the exclude count belongs to the other flag: {output}"
+        );
+        assert_eq!(
+            output["would_skip"],
+            json!([
+                { "param": "vm.swappiness", "reason": "not_selected" },
+                { "param": "fs.file-max", "reason": "not_selected" },
+            ])
+        );
+
+        // Mixed selection and environment reasons: the counts partition
+        // in_scope exactly.
+        let mixed = vec![
+            rec("vm.swappiness", true),
+            rec("vm.nr_hugepages", true),
+            rec("fs.file-max", false),
+        ];
+        let (output, _) =
+            tune_short_circuit(&mixed, 0, Selection::Only(&["fs.file-max".to_string()]))
+                .expect("blocked short-circuits");
+        assert_eq!(output["recommendations"], json!(3));
+        assert_eq!(output["blocked_not_selected"], json!(2));
+        assert_eq!(output["blocked_unwritable"], json!(1));
+        assert_eq!(output["blocked_runtime_dangerous"], json!(0));
+        assert_eq!(
+            output["blocked_unwritable"].as_u64().unwrap()
+                + output["blocked_runtime_dangerous"].as_u64().unwrap()
+                + output["blocked_not_selected"].as_u64().unwrap(),
+            output["recommendations"].as_u64().unwrap()
+        );
+
+        // Without --only the blocked body keeps its exact key set: the
+        // selection's count cannot appear on its own.
+        let (plain, _) = tune_short_circuit(&mixed, 0, &[]).expect("blocked short-circuits");
+        assert!(
+            plain.get("blocked_not_selected").is_none() && plain.get("unmatched_only").is_none(),
+            "the compatibility shape must not grow the new keys: {plain}"
+        );
+    }
+
+    #[test]
+    fn tune_output_names_not_selected_entries() {
+        // The real-run body lists the unselected entries in the preview's
+        // shape: a partial tune answers exit 0 while check keeps exiting 1 on
+        // the same parameters, and the selection is the difference.
+        let in_scope = vec![rec("vm.swappiness", true), rec("fs.file-max", true)];
+        let outcome = tuner::ApplyOutcome {
+            applied: 1,
+            failed: vec![],
+            clamped: vec![],
+        };
+        let output = tune_output(
+            &in_scope,
+            &outcome,
+            30,
+            35,
+            Selection::Only(&["vm/swappiness".to_string()]),
+        );
+        assert_eq!(output["applied"], json!(1));
+        assert_eq!(
+            output["would_skip"],
+            json!([{ "param": "fs.file-max", "reason": "not_selected" }])
+        );
+        assert_eq!(
+            output["applied"].as_u64().unwrap()
+                + output["would_skip"].as_array().unwrap().len() as u64,
+            in_scope.len() as u64
+        );
+    }
+
+    #[test]
+    fn unmatched_only_reports_only_inert_names() {
+        // A name that selects nothing is not an error, but it must be
+        // visible: listing it (the spelling as given, in order) is the only
+        // way a caller can tell "you selected something that is not planned
+        // here" from a silent empty plan. A matched name leaves no trace
+        // beyond the entries left out.
+        let in_scope = vec![rec("vm.swappiness", true)];
+        assert_eq!(
+            unmatched_exclude_json(
+                &in_scope,
+                Selection::Only(&["no_such_param".to_string(), "vm/swappiness".to_string()])
+            ),
+            Some(json!(["no_such_param"]))
+        );
+        assert_eq!(
+            unmatched_exclude_json(&in_scope, Selection::Only(&["vm.swappiness".to_string()])),
+            None
+        );
+        // An empty plan selects nothing, so every given name is inert.
+        assert_eq!(
+            unmatched_exclude_json(&[], Selection::Only(&["vm.swappiness".to_string()])),
+            Some(json!(["vm.swappiness"]))
+        );
+        // No flag: no report, whatever the plan.
+        assert_eq!(unmatched_exclude_json(&in_scope, &[]), None);
+    }
+
+    #[test]
+    fn an_empty_plan_reports_every_only_name_as_inert() {
+        // The optimal shape follows the same one rule as every other shape:
+        // an --only name that selected nothing from this run's plan is
+        // reported in unmatched_only. An empty plan selected nothing, so
+        // every given name is inert — the key cannot vanish exactly on the
+        // hosts where the caller has the least output to reconcile it with.
+        let only = vec!["vm.swappiness".to_string(), "no_such_param".to_string()];
+        let (output, code) =
+            tune_short_circuit(&[], 0, Selection::Only(&only)).expect("nothing to recommend");
+        assert_eq!(code, 0);
+        assert_eq!(
+            output,
+            json!({
+                "status": "optimal",
+                "applied": 0,
+                "unmatched_only": ["vm.swappiness", "no_such_param"],
+            })
+        );
+        let preview = dry_run_preview(output, &[], Selection::Only(&only));
+        assert_eq!(preview["status"], json!("optimal"));
+        assert_eq!(preview["would_apply"], json!([]));
+        assert_eq!(preview["would_skip"], json!([]));
+        assert_eq!(preview["blocked"], json!(0));
+        assert_eq!(
+            preview["unmatched_only"],
+            json!(["vm.swappiness", "no_such_param"])
+        );
+    }
+
+    #[test]
+    fn only_and_exclude_are_rejected_before_the_root_gate() {
+        // The two flags together are refused before the root gate: on an
+        // unprivileged host a root-first order would answer "tune requires
+        // root", so the usage message proves the guard runs first. The call
+        // returns before gather() either way, so it cannot touch the system.
+        let err = cmd_tune(
+            false,
+            false,
+            None,
+            vec!["vm.dirty_ratio".to_string()],
+            vec!["vm.swappiness".to_string()],
+        )
+        .expect_err("both flags must be refused");
+        assert_eq!(
+            format!("{err:#}"),
+            "tune takes either --only or --exclude, not both"
+        );
+    }
+
+    #[test]
+    fn a_run_without_only_keeps_the_old_bodies() {
+        // The compatibility contract at the builder level: without --only the
+        // four shapes are exactly the bodies the exclude-era tests pin, and
+        // none of them can grow an only key or a not_selected reason on its
+        // own — the new vocabulary belongs to the flag that introduced it.
+        let in_scope = vec![rec("vm.swappiness", true), rec("fs.file-max", false)];
+        let skip = json!([{ "param": "fs.file-max", "reason": "unwritable" }]);
+        let dry = dry_run_output(&in_scope, &in_scope[..1], &[]);
+        assert_eq!(dry["would_skip"], skip);
+        assert!(
+            dry.get("unmatched_only").is_none() && dry.get("blocked_not_selected").is_none(),
+            "a no-flag preview must keep its old key set: {dry}"
+        );
+        let (blocked, _) = tune_short_circuit(&in_scope, 0, &[]).expect("blocked short-circuits");
+        assert_eq!(
+            blocked,
+            json!({
+                "status": "blocked",
+                "applied": 0,
+                "recommendations": 2,
+                "blocked_unwritable": 1,
+                "blocked_runtime_dangerous": 0,
+                "would_skip": [{ "param": "fs.file-max", "reason": "unwritable" }],
+            })
+        );
+        let preview = dry_run_preview(blocked, &in_scope, &[]);
+        assert!(
+            preview.get("unmatched_only").is_none()
+                && preview.get("blocked_not_selected").is_none(),
+            "a no-flag preview must keep its old key set: {preview}"
+        );
+        let outcome = tuner::ApplyOutcome {
+            applied: 1,
+            failed: vec![],
+            clamped: vec![],
+        };
+        let real = tune_output(&in_scope, &outcome, 30, 35, &[]);
+        assert_eq!(real["would_skip"], skip);
+        assert!(
+            real.get("unmatched_only").is_none() && real.get("blocked_not_selected").is_none(),
+            "a no-flag run body must keep its old key set: {real}"
         );
     }
 

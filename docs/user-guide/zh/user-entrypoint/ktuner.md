@@ -60,6 +60,7 @@ sudo ktuner tune --dry-run
 sudo ktuner tune               # 应用全部
 sudo ktuner tune --conservative
 sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一项
+sudo ktuner tune --only vm.swappiness       # 只应用点名的参数
 
 # 修复单个参数
 sudo ktuner fix vm.swappiness
@@ -101,6 +102,13 @@ sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记�
 `unmatched_exclude` 中（计划为空时是全部给出的名字），而不是让命令失败。把全部建议
 排除是 `blocked` 运行、退出码 `1`，与任何无可应用项的计划一致。互斥 sysctl 对中写入另一半时，内核仍会把
 被排除的一半清零；ktuner 记录被清零的原值，`rollback` 可以恢复。
+
+`tune --only <param>`（可重复）是 `--exclude` 的镜像——两者互斥，同时给出是
+命令错误（`2`）。只有点名的建议留在计划里；范围内其余条目出现在 `would_skip`
+中、原因为 `not_selected`，未命中范围内任何建议的名字回显在 `unmatched_only`
+中而不是让命令失败（什么都没选中是 `blocked` 运行、退出码 `1`）。与
+`--exclude` 一样，它只筛计划：写入互斥孪生的另一半时，内核仍会把被留下的
+一半清零。
 
 ---
 

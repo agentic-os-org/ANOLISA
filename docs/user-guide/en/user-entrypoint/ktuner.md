@@ -62,6 +62,7 @@ sudo ktuner tune --dry-run
 sudo ktuner tune               # apply all
 sudo ktuner tune --conservative
 sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
+sudo ktuner tune --only vm.swappiness       # apply only the named parameters
 
 # Fix a single parameter
 sudo ktuner fix vm.swappiness
@@ -115,6 +116,14 @@ failing the run (on an empty plan, every given name). Excluding every recommenda
 is a `blocked` run with exit code `1`, like any other plan with nothing applicable. Excluding one half of a mutually exclusive
 sysctl pair does not stop the kernel from zeroing it when the other half is written;
 ktuner records the cleared original so `rollback` can restore it.
+
+`tune --only <param>` (repeatable) is the mirror of `--exclude` — the two are
+mutually exclusive, and a run carrying both is a command error (`2`). Only the named
+recommendations stay in the plan; every other in-scope entry is listed in `would_skip`
+with reason `not_selected`, and a name that matches nothing in scope is echoed in
+`unmatched_only` instead of failing the run (selecting nothing is a `blocked` run,
+exit code `1`). Like `--exclude`, it filters the plan only: it does not stop the
+kernel from zeroing a mutually exclusive twin when the other half is written.
 
 ---
 
