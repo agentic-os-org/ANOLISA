@@ -179,6 +179,30 @@ describe("extractCjkTrigrams", () => {
 });
 
 describe("buildRecallQueries", () => {
+  it("keeps the 200-unit raw fallback on a complete code point", () => {
+    const prefix = "a".repeat(199);
+    const queries = buildRecallQueries(prefix + "🙂 suffix");
+    assert.ok(queries.includes(prefix), "the fallback must stop before the split emoji");
+    for (const query of queries) {
+      assert.equal(Buffer.from(query, "utf8").toString("utf8"), query);
+    }
+  });
+
+  it("does not fit half an emoji into the UTF-8 byte budget", () => {
+    const prefix = "a".repeat(MAX_QUERY_BYTES - 3);
+    const queries = buildRecallQueries(prefix + "🙂 suffix");
+    assert.ok(queries.includes(prefix), "the full raw candidate must stop before the emoji");
+    for (const query of queries) {
+      assert.equal(Buffer.from(query, "utf8").toString("utf8"), query);
+      assert.ok(Buffer.byteLength(query, "utf8") <= MAX_QUERY_BYTES);
+    }
+  });
+
+  it("retains a complete emoji when all its bytes fit", () => {
+    const prefix = "a".repeat(MAX_QUERY_BYTES - 4);
+    assert.ok(buildRecallQueries(prefix + "🙂 suffix").includes(prefix + "🙂"));
+  });
+
   it("returns deduplicated candidates", () => {
     const queries = buildRecallQueries("codeword");
     const unique = new Set(queries);

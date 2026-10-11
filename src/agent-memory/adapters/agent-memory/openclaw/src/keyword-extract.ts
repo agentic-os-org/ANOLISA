@@ -128,6 +128,21 @@ export function extractCjkTrigrams(text: string): string[] {
 }
 
 /**
+ * Keep a UTF-16 length limit from splitting a surrogate pair.
+ */
+function truncateToCodeUnitLimit(text: string, limit: number): string {
+  let end = Math.min(text.length, limit);
+  if (end > 0 && end < text.length) {
+    const previous = text.charCodeAt(end - 1);
+    const next = text.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      end--;
+    }
+  }
+  return text.slice(0, end);
+}
+
+/**
  * Truncate a string so its UTF-8 encoding does not exceed maxBytes.
  */
 function truncateToByteLimit(text: string, maxBytes: number): string {
@@ -143,7 +158,7 @@ function truncateToByteLimit(text: string, maxBytes: number): string {
       hi = mid - 1;
     }
   }
-  return text.slice(0, lo);
+  return truncateToCodeUnitLimit(text, lo);
 }
 
 /**
@@ -166,7 +181,7 @@ export function buildRecallQueries(text: string): string[] {
   const keywords = extractKeywords(text);
   const cjkTrigrams = extractCjkTrigrams(text);
 
-  const truncated = truncateToByteLimit(text.slice(0, 200), MAX_QUERY_BYTES);
+  const truncated = truncateToByteLimit(truncateToCodeUnitLimit(text, 200), MAX_QUERY_BYTES);
   const fullText = truncateToByteLimit(text, MAX_QUERY_BYTES);
 
   const candidates: string[] = [];
