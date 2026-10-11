@@ -86,9 +86,14 @@ def find_ws_path(work_dir: str, sheet_name: str | None) -> str:
     for rel in rels_tree.getroot():
         if rel.get("Id") == rid:
             target = rel.get("Target")
-            # Handle absolute paths (starting with /) and relative paths
+            # Absolute part names ("/xl/worksheets/sheet1.xml", the openpyxl
+            # form) resolve from the package root. Relative targets are the
+            # Excel/LibreOffice form and resolve against the source part's
+            # directory — the rels file lives in xl/_rels/, so the base is xl/.
             if target.startswith("/"):
-                target = target[1:]  # Remove leading /
+                target = target[1:]
+            else:
+                target = "xl/" + target
             return os.path.join(work_dir, target)
 
     print(f"ERROR: Relationship not found: {rid}")
