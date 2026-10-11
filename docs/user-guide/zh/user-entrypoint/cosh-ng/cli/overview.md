@@ -12,6 +12,7 @@
 | `svc` | `status`、`start`、`stop`、`restart`、`enable`、`disable`、`list` |
 | `checkpoint` | `init`、`recover`、`create`、`list`、`restore`、`status`、`delete`、`diff`、`cleanup` |
 | `audit` | `check`、`log`、`status`、`events`、`trace`、`export`、`prune`、`policy` |
+| `login-shell` | `status`、`register`、`unregister`、`set`、`restore` |
 
 使用 `cosh-cli <domain> --help` 和 `cosh-cli <domain> <action> --help` 查看准确参数和默认值。
 
@@ -47,3 +48,5 @@ cosh-cli svc restart nginx --dry-run
 5. 单独保留 stderr；stdout 是自动化接口。
 
 请先阅读[输出格式](../output-format.md)，再按需查看[软件包管理](package-management.md)、[服务管理](service-management.md)、[工作区快照](checkpoint.md)和[安全审计](audit.md)。
+
+[登录 Shell 管理](login-shell.md)将注册、显式账户选择与 Agent 会话接入分开管理。

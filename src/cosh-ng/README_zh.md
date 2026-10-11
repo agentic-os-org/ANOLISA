@@ -30,6 +30,8 @@ JSONL 接口。
 Bash 无法禁用退出脚本，因此隔离模式下的 Bash login 调用会以状态码 2 拒绝。
 详见 [Shell 启动选项](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/interactive-mode.md)。
 
+使用 `cosh-cli login-shell status --user alice` 检查 Linux 登录 Shell 注册及账户 Shell。注册、显式账户选择/恢复与 Agent 会话接入保持独立。特权账户选择会先检查目标账户的执行权限，再修改 Shell。参见[登录 Shell 管理](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/login-shell.md)。
+
 ## 安装
 
 在 Alibaba Cloud Linux 4 上，通过 ANOLISA CLI 和 RPM backend 把 cosh-ng

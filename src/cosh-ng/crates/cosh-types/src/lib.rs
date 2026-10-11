@@ -9,6 +9,7 @@ pub mod audit;
 pub mod checkpoint;
 pub mod config;
 pub mod error;
+pub mod login_shell;
 pub mod output;
 pub mod pkg;
 pub mod svc;
