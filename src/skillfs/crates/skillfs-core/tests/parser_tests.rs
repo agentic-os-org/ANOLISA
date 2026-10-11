@@ -78,6 +78,24 @@ fn test_parse_invalid_yaml_fixture() {
 }
 
 #[test]
+fn whitespace_only_frontmatter_matches_empty_frontmatter() {
+    let empty = parser::parse_skill_md("---\n\n---\nBody\n", "fallback-name");
+    for whitespace in ["\t", " ", "  ", " \n\t ", "\r\n \t\r"] {
+        let content = format!("---\n{whitespace}\n---\nBody\n");
+        let entry = parser::parse_skill_md(&content, "fallback-name");
+        assert!(
+            entry.parse_status.is_degraded(),
+            "{whitespace:?}: {:?}",
+            entry.parse_status
+        );
+        assert_eq!(entry.parse_status, empty.parse_status);
+        assert_eq!(entry.metadata.name, empty.metadata.name);
+        assert_eq!(entry.metadata.description, empty.metadata.description);
+        assert_eq!(entry.body, empty.body);
+    }
+}
+
+#[test]
 fn test_parse_missing_name_fixture() {
     let content = load_fixture("missing_name.md");
     let entry = parser::parse_skill_md(&content, "fallback-name");
