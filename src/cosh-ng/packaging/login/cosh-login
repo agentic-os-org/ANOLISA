@@ -1,0 +1,26 @@
+#!/bin/bash
+# Login-shell wrapper for cosh-ng (system install). AgenticOS images point
+# user login shells here; the wrapper execs the cosh entry while it is
+# healthy and degrades to /bin/bash otherwise, so a damaged cosh runtime can
+# never lock users out of the machine.
+#
+# The health gate is content-level, not just [ -x ]: when cosh-shell keeps
+# its exec bit but holds garbage, execve(2) fails with ENOEXEC and bash
+# reinterprets the file as a shell script, ending the session before any
+# post-exec fallback could run. Checking the ELF magic first is fail-closed:
+# a missing file, dangling symlink, unreadable file, or non-ELF content all
+# degrade to bash. dd(1) follows the /usr/bin/cosh -> cosh-shell symlink, so
+# the resolved target is what gets checked. dd/od/tr are POSIX coreutils and
+# stay available in rescue environments.
+cosh=/usr/bin/cosh
+fallback_shell=/bin/bash
+
+if [ -x "$cosh" ] && \
+    [ "$(dd if="$cosh" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+    export SHELL="$cosh"
+    exec -a "-cosh" "$cosh" "$@"
+fi
+
+echo "Error: cosh-ng login runtime unavailable; falling back to $fallback_shell." >&2
+export SHELL="$fallback_shell"
+exec -a "-bash" "$fallback_shell" "$@"
