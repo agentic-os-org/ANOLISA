@@ -1134,6 +1134,423 @@ mod tests {
         assert!(!owned.exists(), "owned file must be removed after the hook");
     }
 
+    /// End-to-end wiring: the plan runs `RunHook(PostUninstall)` after
+    /// `RemoveOwnedFiles`, and the hook script ships in the payload as an
+    /// owned layout file (the contract's canonical placement), so the
+    /// removal step deletes it before the post phase resolves. Without
+    /// staging, every payload-shipped post_uninstall hook is silently
+    /// skipped as Missing. Pins that the teardown stages the script so the
+    /// phase still executes, and that the payload copy is removed.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_runs_contract_declared_post_uninstall_hook() {
+        use anolisa_core::{
+            FileOwner, InstalledObject, ObjectKind, ObjectStatus, OwnedFile, OwnedFileKind,
+        };
+        use anolisa_platform::fs_layout::FsLayout;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        let owned = layout.bin_dir.join("ws-ckpt");
+        std::fs::write(&owned, b"binary").expect("write owned");
+
+        // Hook script shipped under the datadir, declared by the contract
+        // and recorded as an owned layout file - a real install writes it
+        // into installed.toml alongside the binary.
+        let hook_dir = layout.datadir.join("hooks").join("ws-ckpt");
+        std::fs::create_dir_all(&hook_dir).expect("mkdir hook dir");
+        let hook_script = hook_dir.join("post-uninstall.sh");
+        let sentinel = tmp.path().join("post-uninstall.ran");
+        std::fs::write(
+            &hook_script,
+            format!("#!/bin/sh\ntouch {}\n", sentinel.display()),
+        )
+        .expect("write hook");
+        let mut perm = std::fs::metadata(&hook_script).expect("stat").permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&hook_script, perm).expect("chmod");
+
+        // Installed component-manifest snapshot carrying the contract hook.
+        let manifest_path =
+            common::installed_component_manifest_path(&layout, "ws-ckpt", "uninstall")
+                .expect("manifest path");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).expect("mkdir manifest dir");
+        std::fs::write(
+            &manifest_path,
+            r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.1.0"
+
+            # Hooks parse only on the minimal-schema path, which is gated on
+            # the presence of [component.layout].
+            [component.layout]
+            modes = ["system"]
+
+            [[component.hooks]]
+            phase = "post_uninstall"
+            script = "{datadir}/hooks/ws-ckpt/post-uninstall.sh"
+            strict = false
+            "#,
+        )
+        .expect("write installed manifest");
+
+        let mut state = legacy_state_for_layout(&layout);
+        state.objects.push(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "ws-ckpt".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: vec![
+                OwnedFile {
+                    path: owned.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: Some("0".repeat(64)),
+                    kind: OwnedFileKind::File,
+                    referent: None,
+                    mode: None,
+                    capabilities: Vec::new(),
+                },
+                OwnedFile {
+                    path: hook_script.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: Some("0".repeat(64)),
+                    kind: OwnedFileKind::File,
+                    referent: None,
+                    mode: None,
+                    capabilities: Vec::new(),
+                },
+            ],
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+            provisioned_packages: Vec::new(),
+        });
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
+            .expect("seed state save");
+
+        handle_with_fake_effects(
+            args("ws-ckpt", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect("uninstall with contract hook must succeed");
+
+        assert!(
+            sentinel.exists(),
+            "contract-declared post_uninstall hook must have run after file removal",
+        );
+        assert!(
+            !hook_script.exists(),
+            "payload hook script must be removed by the uninstall",
+        );
+        assert!(!owned.exists(), "owned file must be removed");
+        assert!(
+            !layout.state_dir.join("uninstall-hooks").exists(),
+            "staged post-uninstall copies must be cleaned up",
+        );
+    }
+
+    /// Shared fixture for the staging-boundary regressions: an owned
+    /// binary plus a contract-persisted `post_uninstall` hook the teardown
+    /// will try to stage. `script` is the raw manifest value (a layout
+    /// template or a plain path); `extra_files` are appended to the owned
+    /// record after the binary.
+    fn seed_teardown_with_hook(
+        layout: &anolisa_platform::fs_layout::FsLayout,
+        script: &str,
+        extra_files: Vec<std::path::PathBuf>,
+    ) {
+        use anolisa_core::{
+            FileOwner, InstalledObject, ObjectKind, ObjectStatus, OwnedFile, OwnedFileKind,
+        };
+        let owned = layout.bin_dir.join("ws-ckpt");
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        std::fs::write(&owned, b"binary").expect("write owned");
+
+        let manifest_path =
+            common::installed_component_manifest_path(layout, "ws-ckpt", "uninstall")
+                .expect("manifest path");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).expect("mkdir manifest dir");
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.1.0"
+
+            [component.layout]
+            modes = ["system"]
+
+            [[component.hooks]]
+            phase = "post_uninstall"
+            script = "{script}"
+            strict = false
+            "#
+            ),
+        )
+        .expect("write installed manifest");
+
+        let mut files = vec![OwnedFile {
+            path: owned,
+            owner: FileOwner::Anolisa,
+            sha256: Some("0".repeat(64)),
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        }];
+        for path in extra_files {
+            files.push(OwnedFile {
+                path,
+                owner: FileOwner::Anolisa,
+                sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
+                mode: None,
+                capabilities: Vec::new(),
+            });
+        }
+        let mut state = legacy_state_for_layout(layout);
+        state.objects.push(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "ws-ckpt".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files,
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+            provisioned_packages: Vec::new(),
+        });
+        crate::test_support::write_legacy_state(&state, &layout.state_dir.join("installed.toml"))
+            .expect("seed state save");
+    }
+
+    /// Boundary before staging: the `post_uninstall` script path comes
+    /// from the persisted contract, so a source outside the owned roots
+    /// must not be copied into the state directory - trusted territory
+    /// `run_hook` executes from without further questions. The spec stays
+    /// untouched so `run_hook` rejects the path itself, exactly as it did
+    /// before staging existed.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_does_not_stage_post_uninstall_hook_outside_owned_roots() {
+        use anolisa_platform::fs_layout::FsLayout;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+
+        // A real, executable script - but directly under the layout
+        // prefix, outside every ANOLISA-owned root.
+        let smuggled = tmp.path().join("smuggled-post-uninstall.sh");
+        let sentinel = tmp.path().join("smuggled.ran");
+        std::fs::write(
+            &smuggled,
+            format!("#!/bin/sh\ntouch {}\n", sentinel.display()),
+        )
+        .expect("write smuggled script");
+        let mut perm = std::fs::metadata(&smuggled).expect("stat").permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&smuggled, perm).expect("chmod");
+
+        seed_teardown_with_hook(&layout, &smuggled.display().to_string(), Vec::new());
+
+        // Non-strict: the rejected path surfaces as a warning and the
+        // uninstall itself still succeeds.
+        handle_with_fake_effects(
+            args("ws-ckpt", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect("uninstall must complete; the rejected hook is a warning");
+
+        assert!(
+            !sentinel.exists(),
+            "a post_uninstall script outside the owned roots must never execute",
+        );
+        assert!(
+            !layout.state_dir.join("uninstall-hooks").exists(),
+            "an out-of-roots script must not be staged into the state directory",
+        );
+        assert!(
+            !layout.bin_dir.join("ws-ckpt").exists(),
+            "owned file must still be removed"
+        );
+    }
+
+    /// Boundary before staging, symlink flavor: a hook path under the
+    /// owned roots that symlinks out of them canonicalizes outside and
+    /// must not be staged either - the copy would carry and execute the
+    /// target's bytes from trusted territory.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_does_not_stage_post_uninstall_hook_symlinking_outside_owned_roots() {
+        use anolisa_platform::fs_layout::FsLayout;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+
+        let hook_dir = layout.datadir.join("hooks").join("ws-ckpt");
+        std::fs::create_dir_all(&hook_dir).expect("mkdir hook dir");
+        let hook_script = hook_dir.join("post-uninstall.sh");
+        let outside = tmp.path().join("outside-post-uninstall.sh");
+        let sentinel = tmp.path().join("outside.ran");
+        std::fs::write(
+            &outside,
+            format!("#!/bin/sh\ntouch {}\n", sentinel.display()),
+        )
+        .expect("write outside script");
+        let mut perm = std::fs::metadata(&outside).expect("stat").permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&outside, perm).expect("chmod");
+        std::os::unix::fs::symlink(&outside, &hook_script).expect("symlink hook script");
+
+        seed_teardown_with_hook(
+            &layout,
+            "{datadir}/hooks/ws-ckpt/post-uninstall.sh",
+            vec![hook_script.clone()],
+        );
+
+        handle_with_fake_effects(
+            args("ws-ckpt", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect("uninstall must complete; the rejected hook is a warning");
+
+        assert!(
+            !sentinel.exists(),
+            "a post_uninstall script reached through a symlink escape must never execute",
+        );
+        assert!(
+            !layout.state_dir.join("uninstall-hooks").exists(),
+            "a symlink escape must not be staged into the state directory",
+        );
+        assert!(
+            !layout.bin_dir.join("ws-ckpt").exists(),
+            "owned file must still be removed"
+        );
+    }
+
+    /// The staged post-uninstall copies are scratch, not durable state:
+    /// when a later owned-file removal fails, the executor aborts before
+    /// `RunHook(PostUninstall)` consumes them, and the hook's own payload
+    /// file may already be deleted - a retry would then find no source and
+    /// never re-stage, so the executable copy must not survive the failed
+    /// attempt.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_purges_staged_hooks_when_file_removal_fails() {
+        use anolisa_platform::fs_layout::FsLayout;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+
+        // A payload-shipped hook script under the datadir, declared by the
+        // contract and recorded as an owned layout file.
+        let hook_dir = layout.datadir.join("hooks").join("ws-ckpt");
+        std::fs::create_dir_all(&hook_dir).expect("mkdir hook dir");
+        let hook_script = hook_dir.join("post-uninstall.sh");
+        let sentinel = tmp.path().join("post-uninstall.ran");
+        std::fs::write(
+            &hook_script,
+            format!("#!/bin/sh\ntouch {}\n", sentinel.display()),
+        )
+        .expect("write hook");
+        let mut perm = std::fs::metadata(&hook_script).expect("stat").permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&hook_script, perm).expect("chmod");
+
+        // A recorded owned "file" that is actually a non-empty directory:
+        // `fs::remove_file` fails on it, aborting the teardown after the
+        // hook script itself was already removed.
+        let blocked = layout.bin_dir.join("blocked");
+        std::fs::create_dir_all(&blocked).expect("mkdir blocked");
+        std::fs::write(blocked.join("occupant"), b"x").expect("occupy blocked");
+
+        seed_teardown_with_hook(
+            &layout,
+            "{datadir}/hooks/ws-ckpt/post-uninstall.sh",
+            vec![hook_script.clone(), blocked],
+        );
+
+        let err = handle_with_fake_effects(
+            args("ws-ckpt", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect_err("removal failure must abort the uninstall");
+        assert!(
+            err.reason().contains("failed to remove"),
+            "error must name the failed removal, got: {}",
+            err.reason()
+        );
+
+        assert!(
+            !layout.state_dir.join("uninstall-hooks").exists(),
+            "staged copies must be purged when the teardown aborts early",
+        );
+        assert!(
+            !hook_script.exists(),
+            "the loop removed the hook script before failing",
+        );
+        assert!(
+            !sentinel.exists(),
+            "the post phase never ran, so its script must not have executed",
+        );
+    }
+
     /// Purge stays gated until manifest-driven config/cache/state
     /// discovery lands. Pins that the gate text mentions purge and
     /// steers users at `--dry-run` / the uninstall subset, and that no
