@@ -10,6 +10,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpStdioClient, buildChildEnv, resolveMcpToolName } from "../../src/mcp-client.js";
 
 describe("resolveMcpToolName", () => {
@@ -102,6 +105,36 @@ describe("McpStdioClient", () => {
   it("stop() is safe when the process was never started", async () => {
     const client = new McpStdioClient(cfg);
     await client.stop();
+  });
+
+  it("preserves Unicode in JSON-RPC replies split at byte boundaries", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "memory-mcp-utf8-"));
+    const binaryPath = join(directory, "worker");
+    const expected = "中文记忆 🙂 café — project notes";
+    writeFileSync(binaryPath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", async (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2024-11-05", capabilities: {} }
+    : { content: [{ type: "text", text: ${JSON.stringify(expected)} }] };
+  const bytes = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+  for (const byte of bytes) {
+    process.stdout.write(Buffer.from([byte]));
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+});
+`, { mode: 0o755 });
+    const client = new McpStdioClient({ ...cfg, binaryPath });
+    try {
+      assert.equal(await client.callTool("memory_search", { query: "notes" }), expected);
+      assert.equal(await client.callTool("memory_get_context", {}), expected);
+    } finally {
+      await client.stop();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
