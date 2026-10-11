@@ -346,6 +346,16 @@ def convert_session_to_trace(
             "timestamp": tc_info.get("timestamp", now_iso()),
         }
 
+    def _append_tool_dispatch(tool_id: str, tc_info: dict[str, Any]) -> None:
+        nonlocal tool_dispatches
+        body_events.append(_make_tool_dispatch(tool_id, tc_info))
+        tool_dispatches += 1
+        if tc_info.get("name") == "exec":
+            virtual = _try_extract_mcporter_dispatch(tool_id, tc_info, task, trace_id)
+            if virtual:
+                body_events.append(virtual)
+                tool_dispatches += 1
+
     for event in session_events:
         etype = event.get("type", "")
 
@@ -497,20 +507,11 @@ def convert_session_to_trace(
             # not tool_result timestamp. Will be sorted into correct position.
             if tool_call_id in tool_call_map:
                 tc_info = dict(tool_call_map[tool_call_id])
-                body_events.append(_make_tool_dispatch(tool_call_id, tc_info))
-                tool_dispatches += 1
-
-                # If this was an exec call with mcporter, also emit a virtual
-                # tool_dispatch for the actual tool name so graders can detect it
-                if tc_info.get("name") == "exec":
-                    virtual = _try_extract_mcporter_dispatch(
-                        tool_call_id, tc_info, task, trace_id,
-                    )
-                    if virtual:
-                        body_events.append(virtual)
-                        tool_dispatches += 1
-
+                _append_tool_dispatch(tool_call_id, tc_info)
                 del tool_call_map[tool_call_id]
+
+    for tool_call_id, tc_info in tool_call_map.items():
+        _append_tool_dispatch(tool_call_id, tc_info)
 
     # Sort body events by timestamp (stable sort preserves original order for ties)
     body_events.sort(key=lambda e: e["timestamp"])
