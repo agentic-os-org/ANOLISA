@@ -305,6 +305,10 @@ swe-runner run \
 | `--redo` | `false` | 重新运行已经有 result 文件的实例 |
 | `--verbose, -v` | `false` | 写入 DEBUG 级别日志 |
 
+所选批次的 `instance_id` 必须唯一。由于工作区和输出路径按 ID 组织，重复
+ID 会在 agent 准备前报告。此约束同样适用于自定义数据集和直接调用
+`run_batch` 的方式。
+
 ## Agent adapter
 
 ### `cosh`

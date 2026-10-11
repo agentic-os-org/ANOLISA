@@ -27,6 +27,7 @@ from swe_runner.cli_commands import (
     evaluate_patches_command,
     run_instances_command,
 )
+from swe_runner.run.execution.orchestrator import DuplicateInstanceError
 from swe_runner.trace_extraction import ExtractionError
 
 app = typer.Typer(
@@ -119,7 +120,7 @@ def run(
             redo=redo,
             verbose=verbose,
         )
-    except CommandUsageError as e:
+    except (CommandUsageError, DuplicateInstanceError) as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(code=1) from None
     except AgentEnvironmentError as e:

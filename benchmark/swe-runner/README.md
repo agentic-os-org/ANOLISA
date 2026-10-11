@@ -312,6 +312,10 @@ When enabled, runner:
 | `--redo` | `false` | Rerun instances that already have result files |
 | `--verbose, -v` | `false` | Write DEBUG logs |
 
+Selected batches must have unique `instance_id` values. Duplicate IDs are
+reported before agent preparation because cases share workspace and output
+paths by ID. This also applies to custom datasets and direct `run_batch` calls.
+
 ## Agent Adapters
 
 ### `cosh`
