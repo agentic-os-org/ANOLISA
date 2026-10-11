@@ -113,14 +113,29 @@ pub fn memory_search(
                     // corpus supplement) can safely request hybrid without
                     // checking config first. Uses search_scoped for consistent
                     // agent scope filtering.
+                    //
+                    // The degradation swaps the *ranking algorithm* only; the rest
+                    // of the request contract still applies. Filtering by category
+                    // here (as the bm25 and embedded vector/hybrid paths do) keeps
+                    // `category` from silently widening to every category on the
+                    // path most deployments take — no provider is the default — and
+                    // reporting `tokens` keeps audit accounting equal on all three.
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+                    let hits = filter_by_category(
+                        index.search_scoped(query, top_k.max(1), scope_ref)?,
+                        category,
+                    );
+                    let tokens = hits
+                        .iter()
+                        .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
+                        .sum();
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(format!("bm25(fallback from {mode}):len={}", query.len()))
-                            .bytes(hits.len() as u64),
+                            .bytes(hits.len() as u64)
+                            .tokens(tokens),
                     );
                     return Ok(hits);
                 }
