@@ -33,11 +33,11 @@ Limitations:
   - External workbook links in xl/externalLinks/ are NOT updated.
 """
 
-import sys
 import os
 import re
-import xml.etree.ElementTree as ET
+import sys
 import xml.dom.minidom
+import xml.etree.ElementTree as ET
 
 
 def col_letter(n: int) -> str:
@@ -77,7 +77,7 @@ def _shift_refs(text: str, at: int, delta: int) -> str:
     return re.sub(pattern, replacer, text)
 
 
-def shift_formula(formula: str, at: int, delta: int) -> str:
+def _shift_cell_formula(formula: str, at: int, delta: int) -> str:
     """
     Shift absolute and mixed row references >= `at` by `delta` in a formula string.
 
@@ -107,6 +107,51 @@ def shift_formula(formula: str, at: int, delta: int) -> str:
     return "".join(result)
 
 
+def shift_formula(formula: str, at: int, delta: int) -> str:
+    """Shift A1 cell references and entire-row ranges such as ``$5:$10``.
+
+    Entire-row references retain sheet qualifiers and absolute markers. Their
+    endpoints stay within the worksheet's row bounds, including after deletion.
+    String literals and bracketed labels are excluded from row-range matching.
+    """
+    tokens = re.compile(
+        r'"(?:[^"]|"")*"'
+        r"|(?P<rows>(?<![\w.$\\?])"
+        r"(?P<qualifier>(?:'(?:[^']|'')*'|(?:\[[^\]]+\])?[\w.$\\]+"
+        r"(?::[\w.$\\]+)?)!)?"
+        r"(?P<left_absolute>\$?)(?P<left>\d+):"
+        r"(?P<right_absolute>\$?)(?P<right>\d+)(?![\w.$\\?!]))"
+        r"|'(?:[^']|'')*'"
+        r"|\[(?:[^\[\]]|\[[^\]]*\])*\]"
+    )
+    result = []
+    cursor = 0
+    for match in tokens.finditer(formula):
+        if match.group("rows") is None:
+            continue
+        left, right = int(match.group("left")), int(match.group("right"))
+        if not (1 <= left <= 1048576 and 1 <= right <= 1048576):
+            continue
+
+        def shift_endpoint(value: int, original: str) -> str:
+            if value < at:
+                return original
+            return str(min(1048576, max(1, value + delta)))
+
+        result.append(_shift_cell_formula(formula[cursor : match.start()], at, delta))
+        result.append(
+            (match.group("qualifier") or "")
+            + match.group("left_absolute")
+            + shift_endpoint(left, match.group("left"))
+            + ":"
+            + match.group("right_absolute")
+            + shift_endpoint(right, match.group("right"))
+        )
+        cursor = match.end()
+    result.append(_shift_cell_formula(formula[cursor:], at, delta))
+    return "".join(result)
+
+
 def shift_sqref(sqref: str, at: int, delta: int) -> str:
     """
     Shift row references in a sqref string (space-separated cell/range addresses).
@@ -115,8 +160,8 @@ def shift_sqref(sqref: str, at: int, delta: int) -> str:
     parts = sqref.split()
     result = []
     for part in parts:
-        if ':' in part:
-            left, right = part.split(':', 1)
+        if ":" in part:
+            left, right = part.split(":", 1)
             left = shift_formula(left, at, delta)
             right = shift_formula(right, at, delta)
             result.append(f"{left}:{right}")
