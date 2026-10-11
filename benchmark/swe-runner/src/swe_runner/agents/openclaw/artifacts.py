@@ -16,12 +16,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
-from pydantic import BaseModel, Field
+from swe_runner.common.artifact_metadata import ArtifactMetadata
 
 
-class OpenClawArtifacts(BaseModel):
+class OpenClawArtifacts(ArtifactMetadata):
     """Metadata emitted by the OpenClaw adapter and consumed by OpenClaw-aware outputs."""
 
     base_agent_id: str | None = None
@@ -40,34 +38,3 @@ class OpenClawArtifacts(BaseModel):
     openclaw_tokenless_hook_seen: str | None = None
     openclaw_tokenless_exec_tool_calls: str | None = None
     openclaw_tokenless_evidence_error: str | None = None
-    extra_metadata: dict[str, str] = Field(default_factory=dict)
-
-    @classmethod
-    def from_metadata(cls, metadata: Mapping[str, object] | None) -> OpenClawArtifacts:
-        """Build OpenClaw artifacts from persisted metadata."""
-        if metadata is None:
-            return cls()
-
-        known_fields = set(cls.model_fields) - {"extra_metadata"}
-        known_values: dict[str, str] = {}
-        extra_metadata: dict[str, str] = {}
-        for key, value in metadata.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                continue
-            if key in known_fields:
-                known_values[key] = value
-            else:
-                extra_metadata[key] = value
-        return cls(**known_values, extra_metadata=extra_metadata)
-
-    def to_metadata(self) -> dict[str, str]:
-        """Return the persisted metadata representation."""
-        metadata = dict(self.extra_metadata)
-        for key, value in self.model_dump(exclude={"extra_metadata"}).items():
-            if isinstance(value, str) and value:
-                metadata[key] = value
-        return metadata
-
-    def with_updates(self, **updates: str | None) -> OpenClawArtifacts:
-        """Return a copy with OpenClaw metadata fields updated."""
-        return self.model_copy(update={key: value for key, value in updates.items() if value is not None})
