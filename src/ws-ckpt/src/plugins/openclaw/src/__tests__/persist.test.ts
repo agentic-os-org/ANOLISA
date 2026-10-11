@@ -165,4 +165,41 @@ describe("persistConfig", () => {
       expect.stringContaining("/custom/ws-ckpt.json")
     );
   });
+
+  it("removes the temp file when the rename fails", () => {
+    const mockUnlinkSync = fs.unlinkSync as ReturnType<typeof vi.fn>;
+    mockExistsSync.mockReturnValue(false);
+    mockMkdirSync.mockReturnValue(undefined);
+    mockWriteFileSync.mockReturnValue(undefined);
+    mockRenameSync.mockImplementation(() => { throw new Error("EISDIR"); });
+
+    const err = persistConfig({ autoCheckpoint: true });
+    expect(err).toContain("EISDIR");
+    const tmpPath = mockWriteFileSync.mock.calls[0][0] as string;
+    expect(mockUnlinkSync).toHaveBeenCalledWith(tmpPath);
+  });
+
+  it("removes a partial temp file when the write fails", () => {
+    const mockUnlinkSync = fs.unlinkSync as ReturnType<typeof vi.fn>;
+    mockExistsSync.mockReturnValue(false);
+    mockMkdirSync.mockReturnValue(undefined);
+    mockWriteFileSync.mockImplementation(() => { throw new Error("ENOSPC"); });
+
+    const err = persistConfig({ autoCheckpoint: true });
+    expect(err).toContain("ENOSPC");
+    expect(mockUnlinkSync).toHaveBeenCalledWith(
+      expect.stringContaining("ws-ckpt.json.tmp.")
+    );
+  });
+
+  it("does not touch the temp file on success", () => {
+    const mockUnlinkSync = fs.unlinkSync as ReturnType<typeof vi.fn>;
+    mockExistsSync.mockReturnValue(false);
+    mockMkdirSync.mockReturnValue(undefined);
+    mockWriteFileSync.mockReturnValue(undefined);
+    mockRenameSync.mockReturnValue(undefined);
+
+    expect(persistConfig({ autoCheckpoint: true })).toBe("");
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+  });
 });
