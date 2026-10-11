@@ -727,3 +727,108 @@ async fn startup_catch_up_prunes_the_backlog_before_admission() {
     );
     assert!(!running.socket_path.exists());
 }
+
+const OBSERVABILITY_BACKLOG_ROWS: usize = 200;
+
+/// Seeds the observability database with expired rows plus one fresh row.
+///
+/// The schema comes from the production writer; the bulk of the rows is
+/// inserted directly with a 2020 `observed_at_epoch`, far outside the 7-day
+/// retention window. One raw fresh row carries the current epoch so the prune
+/// keeps exactly it.
+fn seed_observability_backlog(db: &Path) {
+    let record = asc_observability::ObservabilityRecord::from_json_value(&serde_json::json!({
+        "hook": "before_agent_run",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "metadata": {"sessionId": "s-seed", "runId": "r-seed"},
+        "metrics": {"prompt": "x"},
+    }))
+    .expect("observability record");
+    let writer =
+        asc_persistence_sqlite::observability::ObservabilitySqliteWriter::new(db).expect("writer");
+    writer.write_or_raise(&record, 1000).expect("seed record");
+    drop(writer);
+
+    let mut conn = rusqlite::Connection::open(db).expect("open seeded observability db");
+    conn.pragma_update(None, "busy_timeout", 200).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let tx = conn.transaction().expect("seed transaction");
+    {
+        let mut expired = tx
+            .prepare(
+                "INSERT INTO observability_events
+                    (hook, observed_at, observed_at_epoch, session_id, run_id, metrics_json, metadata_json)
+                 VALUES ('before_agent_run', '2020-01-01T00:00:00Z', 1577836800.0, 's-backlog', 'r-backlog', '{}', '{}')",
+            )
+            .expect("prepare expired");
+        for _ in 0..OBSERVABILITY_BACKLOG_ROWS {
+            expired.execute([]).expect("insert backlog row");
+        }
+        tx.execute(
+            "INSERT INTO observability_events
+                (hook, observed_at, observed_at_epoch, session_id, run_id, metrics_json, metadata_json)
+             VALUES ('before_agent_run', '2026-01-01T00:00:00Z', ?1, 's-fresh', 'r-fresh', '{}', '{}')",
+            rusqlite::params![now],
+        )
+        .expect("insert fresh row");
+    }
+    tx.commit().expect("commit seed");
+}
+
+fn observability_row_count(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    conn.query_row("SELECT COUNT(*) FROM observability_events", [], |row| {
+        row.get(0)
+    })
+    .expect("count")
+}
+
+/// The observability store joins the retention lifecycle: expired rows are
+/// pruned by the startup catch-up before admission, not only at shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_startup_catch_up_also_prunes_the_observability_backlog() {
+    let directory = create_runtime_directory();
+    let data_dir = directory.join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let db = data_dir.join("observability.db");
+    seed_observability_backlog(&db);
+    assert_eq!(
+        observability_row_count(&db),
+        i64::try_from(OBSERVABILITY_BACKLOG_ROWS).unwrap() + 2
+    );
+    assert!(!marker_path(&db).exists());
+
+    let mut running = start_daemon(&directory, &data_dir);
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+
+    wait_for_socket(&mut running).await;
+    let marker = marker_path(&db);
+    assert!(
+        marker.exists(),
+        "the startup catch-up pass must also cover the observability store"
+    );
+    assert_eq!(
+        observability_row_count(&db),
+        1,
+        "expired observability rows must be pruned before admission"
+    );
+
+    let signal = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(running.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(signal.success());
+    let status = wait_for_exit(&mut running).await;
+    assert!(
+        status.success(),
+        "stderr: {}",
+        read_stderr(&running.directory)
+    );
+}

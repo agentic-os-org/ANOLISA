@@ -512,6 +512,11 @@ periodic scheduler 或完整 JobSupervisor。目的：让长驻 daemon 自持 Se
 retention（#6602/#6679）——v1 依赖短命 CLI 进程 `atexit` 补做维护，长驻 daemon 永不裁剪，
 SIGKILL/OOM/掉电后重启也不补做，数据库在长期运行的主机上无界增长。
 
+同一服务也承载 Observability `SQLite` 的周期 retention：两库各有独立
+gate marker/lock，同一 pass 内组合执行；任一库 `Failed`/`Contended` 即按 `failure_retry`
+重试（另一库的 gate 重查为无害 no-op），observability 库的 warm 失败仅为告警（best-effort
+流），不阻塞 admission。
+
 - **trigger**：启动 catch-up 一次（`retention::run_startup_catchup`，在 UDS admission 之前
   完成），此后每 `check_interval`（默认 1h）重查共享跨进程 daily gate；gate 本身仍决定是否
   真正执行。pass 内部失败按 `failure_retry`（默认 60s）退避重试。catch-up 与 shutdown 信号
@@ -541,7 +546,7 @@ SIGKILL/OOM/掉电后重启也不补做，数据库在长期运行的主机上�
   本身（任务总是 await 其 in-flight `spawn_blocking` pass，join 完成 ⇒ pass 已终止），此后
   组合根才执行 final pass——严格后置，不再与残留 maintenance 竞争。
   取消优先级：调度 `select!` 以 cancellation 臂为 `biased` 首位，且 tick 唤醒后、启动任何新 `spawn_blocking` pass 前再次确认取消标志；取消状态转换与新 pass 提交经共享 lifecycle 锁（gate）串行化——`cancel` 与调度循环的「检查+提交」段互斥，信号不会落在检查返回 `false` 与 `spawn_blocking` 提交之间，取消信号一旦发出，即使 tick 同时就绪也不得再调度新 pass（否则新 pass 会侵占 65s join 预算）；失败退避的重试等待同样遵循该优先级。
-  停机预算：retention terminal join 与 SkillFS worker / reconciliation 的 runtime drain 共享同一 65s stop deadline 并行等待（`shutdown_by`），加 UDS drain 2s、Tokio shutdown 1s 与 telemetry shutdown 2s 后仍在 unit 的 `TimeoutStopSec=75` 之内（预算明细见 DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md）。join 超时只降级 security final pass——跳过它并以 FAILURE 退出码报告（与 SIGKILL 同级：进程退出兜底）；worker drain 与 observability close 与 retention 无关，照常执行。final pass 自身受剩余预算约束：必须在 stop deadline + 1s + 5s（`FINAL_PASS_BUDGET`）内完成，剩余不足 2s（`FINAL_PASS_MIN_BUDGET`，`SqliteSink::close_with_deadline`）时跳过 pass、只关连接，marker 不前进，下次启动 catch-up 补跑（DJOB-RET-015/016）。
+  停机预算：retention terminal join 与 SkillFS worker / reconciliation 的 runtime drain 共享同一 65s stop deadline 并行等待（`shutdown_by`），加 UDS drain 2s、Tokio shutdown 1s 与 telemetry shutdown 2s 后仍在 unit 的 `TimeoutStopSec=75` 之内（预算明细见 DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md）。join 超时同时降级两库 final pass——跳过它们并以 FAILURE 退出码报告（与 SIGKILL 同级：进程退出兜底；在途 pass 可能持有任一 store 的 mutex）；worker drain 与 retention 无关，照常执行。final pass 自身受剩余预算约束：必须在 stop deadline + 1s + 5s（`FINAL_PASS_BUDGET`）内完成，剩余不足 2s（`FINAL_PASS_MIN_BUDGET`，`SqliteSink::close_with_deadline`）时跳过 pass、只关连接，marker 不前进，下次启动 catch-up 补跑（DJOB-RET-015/016）。
 - **restart**：无内存状态；重启后由启动 catch-up + 共享 marker 文件恢复（硬杀补做）。
 
 可执行验收 fixture（`v2/apps/asc-daemon/tests/retention_lifecycle.rs`；DJOB-RET-006 为真
@@ -565,7 +570,7 @@ SIGKILL/OOM/掉电后重启也不补做，数据库在长期运行的主机上�
 | DJOB-RET-016 | 剩余预算充足时 final pass 照常执行 | `asc-sqlite-kernel` 单测 `a_final_pass_with_budget_left_still_runs` |
 | DJOB-RET-011 | `cancel` 与「检查+提交」段互斥（gate 被持有时不得完成） | `retention.rs` 单测 `cancel_serializes_with_the_submission_section` |
 | DJOB-RET-012 | `shutdown_by` 遵守共享 deadline（已过期的 deadline 立即报 false） | `retention.rs` 单测 `a_stuck_pass_misses_a_shared_deadline_promptly` |
-| DJOB-RET-013 | retention join 超时只跳过 security final pass，observability close 照常 | `sinks.rs` 单测 `a_retention_join_timeout_skips_only_the_security_final_pass` |
+| DJOB-RET-013 | retention join 超时跳过两库 final pass（在途 pass 可能持有任一 store 的 mutex） | `sinks.rs` 单测 `a_retention_join_timeout_skips_both_final_passes` |
 
 运行入口：`cargo test -p asc-daemon --test retention_lifecycle --locked --offline`；
 in-module 单测：`cargo test -p asc-daemon --lib --locked --offline` 与

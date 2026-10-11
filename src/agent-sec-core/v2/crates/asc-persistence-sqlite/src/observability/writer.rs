@@ -13,7 +13,7 @@ use asc_observability::{
     OBSERVABILITY_SQLITE_SCHEMA_VERSION, ObservabilityRecord, config::get_observability_db_path,
 };
 use asc_security_events::ConfigError;
-use asc_sqlite_kernel::{KernelError, SqliteSink, SqliteStore, current_epoch};
+use asc_sqlite_kernel::{KernelError, MaintenanceOutcome, SqliteSink, SqliteStore, current_epoch};
 
 use crate::observability::policy::ObservabilityFaultPolicy;
 use crate::observability::repository::{ObservabilityEventRepository, check_schema};
@@ -133,6 +133,16 @@ impl ObservabilitySqliteWriter {
     /// [`SqliteSink::close_with_deadline`].
     pub fn close_with_deadline(&self, deadline: Option<std::time::Instant>) {
         self.sink.close_with_deadline(current_epoch(), deadline);
+    }
+
+    /// Runs the gated maintenance pass as of `now` without closing the writer.
+    ///
+    /// The daemon's periodic retention task calls this; [`ObservabilitySqliteWriter::close_at`]
+    /// remains the shutdown path. A failed pass does not advance the gate's
+    /// marker, so the next call retries.
+    #[must_use]
+    pub fn run_maintenance_at(&self, now: f64) -> MaintenanceOutcome {
+        self.sink.run_maintenance_detailed(now)
     }
 }
 
@@ -263,5 +273,58 @@ mod tests {
             !dir.path().join("observability.db.maintenance").exists(),
             "the gate must not record a failed pass - the marker belongs to a successful prune"
         );
+    }
+
+    #[test]
+    fn run_maintenance_at_prunes_expired_records_without_closing() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("observability.db");
+        let writer = ObservabilitySqliteWriter::new(&path).expect("writer");
+        writer.probe().expect("probe");
+
+        // A 2020 record is far outside the 7-day window anchored at the
+        // 2026-01-02 `now`; the 2026-01-01 record survives.
+        let expired = {
+            let hook = ObservabilityHook::BeforeAgentRun;
+            let mut metrics = Map::new();
+            metrics.insert(hook.metric_names()[0].to_owned(), json!("x"));
+            let observed_at = FixedOffset::east_opt(0)
+                .expect("utc offset")
+                .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                .single()
+                .expect("timestamp");
+            ObservabilityRecord::new(
+                hook,
+                observed_at,
+                ObservabilityMetadata::new("s-1", "r-1"),
+                metrics,
+            )
+            .expect("record")
+        };
+        writer
+            .write_or_raise(&expired, 1000)
+            .expect("write expired");
+        writer.write_or_raise(&record(), 1000).expect("write fresh");
+
+        let now = 1_767_312_000.0; // 2026-01-02T00:00:00Z
+        assert_eq!(writer.run_maintenance_at(now), MaintenanceOutcome::Ran);
+        assert!(
+            writer.sink().store().is_open(),
+            "a periodic pass must not close the store"
+        );
+
+        let count = writer
+            .sink()
+            .store()
+            .with_connection(false, |conn| {
+                conn.query_row("SELECT COUNT(*) FROM observability_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(KernelError::from)
+            })
+            .expect("connection")
+            .expect("store open");
+        assert_eq!(count, 1, "only the expired record is pruned");
+        writer.close_at(now + 172_800.0);
     }
 }

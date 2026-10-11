@@ -1,4 +1,4 @@
-//! Periodic security-event `SQLite` retention for the long-lived daemon.
+//! Periodic `SQLite` retention for the long-lived daemon.
 //!
 //! v1 ran retention when short-lived CLI processes exited through `atexit`,
 //! and the daemon only ran the gated pass in `event_sinks.close()` after its
@@ -278,24 +278,24 @@ pub async fn run_startup_catchup(
     match tokio::task::spawn_blocking(move || pass(now)).await {
         Ok(MaintenanceOutcome::Failed(error)) => {
             report(&format!(
-                "agent-sec-daemon: security event sqlite retention catch-up failed, retrying: {error}"
+                "agent-sec-daemon: sqlite retention catch-up failed, retrying: {error}"
             ));
             MaintenanceOutcome::Failed(error)
         }
         Ok(MaintenanceOutcome::Contended) => {
             report(
-                "agent-sec-daemon: security event sqlite retention catch-up found the gate lock held, retrying",
+                "agent-sec-daemon: sqlite retention catch-up found the gate lock held, retrying",
             );
             MaintenanceOutcome::Contended
         }
         Ok(MaintenanceOutcome::Ran) => {
-            report("agent-sec-daemon: security event sqlite retention catch-up pass completed");
+            report("agent-sec-daemon: sqlite retention catch-up pass completed");
             MaintenanceOutcome::Ran
         }
         Ok(MaintenanceOutcome::NotDue) => MaintenanceOutcome::NotDue,
         Err(problem) => {
             report(&format!(
-                "agent-sec-daemon: security event sqlite retention catch-up panicked: {problem}"
+                "agent-sec-daemon: sqlite retention catch-up panicked: {problem}"
             ));
             MaintenanceOutcome::Failed(format!("startup catch-up panicked: {problem}"))
         }
@@ -331,15 +331,13 @@ async fn run_with_startup(
         }
         Some(MaintenanceOutcome::Ran | MaintenanceOutcome::NotDue) => schedule.check_interval,
         None => {
-            report(
-                "agent-sec-daemon: security event sqlite retention catch-up abandoned: shutdown requested",
-            );
+            report("agent-sec-daemon: sqlite retention catch-up abandoned: shutdown requested");
             // Own the in-flight pass through to its end: dropping the handle
             // here would detach it from the terminal join, and the final
             // pass could then contend with it for the store mutex.
             if let Err(problem) = (&mut catchup).await {
                 report(&format!(
-                    "agent-sec-daemon: security event sqlite retention catch-up panicked: {problem}"
+                    "agent-sec-daemon: sqlite retention catch-up panicked: {problem}"
                 ));
             }
             let _ = admitted.send(false);
@@ -404,7 +402,7 @@ async fn run_periodic(
             match attempt {
                 Ok(MaintenanceOutcome::Failed(error)) => {
                     report(&format!(
-                        "agent-sec-daemon: security event sqlite retention failed, retrying: {error}"
+                        "agent-sec-daemon: sqlite retention failed, retrying: {error}"
                     ));
                     if sleep_or_cancel(&mut cancelled, schedule.failure_retry).await {
                         return;
@@ -412,20 +410,20 @@ async fn run_periodic(
                 }
                 Ok(MaintenanceOutcome::Contended) => {
                     report(
-                        "agent-sec-daemon: security event sqlite retention lock is held by another process, retrying",
+                        "agent-sec-daemon: sqlite retention lock is held by another process, retrying",
                     );
                     if sleep_or_cancel(&mut cancelled, schedule.failure_retry).await {
                         return;
                     }
                 }
                 Ok(MaintenanceOutcome::Ran) => {
-                    report("agent-sec-daemon: security event sqlite retention pass completed");
+                    report("agent-sec-daemon: sqlite retention pass completed");
                     break;
                 }
                 Ok(MaintenanceOutcome::NotDue) => break,
                 Err(problem) => {
                     report(&format!(
-                        "agent-sec-daemon: security event sqlite retention task panicked: {problem}"
+                        "agent-sec-daemon: sqlite retention task panicked: {problem}"
                     ));
                     // A panic is a bug, not a retryable failure: the next
                     // attempt waits for the regular cadence instead of
@@ -446,6 +444,39 @@ async fn sleep_or_cancel(cancelled: &mut watch::Receiver<bool>, delay: Duration)
         biased;
         _ = cancelled.changed() => true,
         () = tokio::time::sleep(delay) => *cancelled.borrow(),
+    }
+}
+
+/// Combines the security and observability retention outcomes into the one
+/// the retention task schedules around.
+///
+/// A failure or contention in either store must schedule the failure retry:
+/// re-running the other store's pass is safe because its gate independently
+/// decides whether anything is due, so a store whose pass already ran (or was
+/// not due) contributes a no-op re-check. `Ran` outranks `NotDue` so the
+/// completion report fires when either store did work.
+pub fn combine_outcomes(
+    security: MaintenanceOutcome,
+    observability: MaintenanceOutcome,
+) -> MaintenanceOutcome {
+    match (security, observability) {
+        (
+            MaintenanceOutcome::Failed(security_error),
+            MaintenanceOutcome::Failed(observability_error),
+        ) => MaintenanceOutcome::Failed(format!(
+            "security store: {security_error}; observability store: {observability_error}"
+        )),
+        (MaintenanceOutcome::Failed(error), _) => {
+            MaintenanceOutcome::Failed(format!("security store: {error}"))
+        }
+        (_, MaintenanceOutcome::Failed(error)) => {
+            MaintenanceOutcome::Failed(format!("observability store: {error}"))
+        }
+        (MaintenanceOutcome::Contended, _) | (_, MaintenanceOutcome::Contended) => {
+            MaintenanceOutcome::Contended
+        }
+        (MaintenanceOutcome::Ran, _) | (_, MaintenanceOutcome::Ran) => MaintenanceOutcome::Ran,
+        (MaintenanceOutcome::NotDue, MaintenanceOutcome::NotDue) => MaintenanceOutcome::NotDue,
     }
 }
 
@@ -680,5 +711,42 @@ mod tests {
         );
 
         release_tx.send(()).expect("unblock the detached pass");
+    }
+
+    #[test]
+    fn combining_outcomes_prioritizes_failures_and_contention() {
+        assert_eq!(
+            combine_outcomes(
+                MaintenanceOutcome::Ran,
+                MaintenanceOutcome::Failed("x".into())
+            ),
+            MaintenanceOutcome::Failed("observability store: x".into())
+        );
+        assert_eq!(
+            combine_outcomes(
+                MaintenanceOutcome::Failed("y".into()),
+                MaintenanceOutcome::Ran
+            ),
+            MaintenanceOutcome::Failed("security store: y".into())
+        );
+        assert_eq!(
+            combine_outcomes(
+                MaintenanceOutcome::Failed("a".into()),
+                MaintenanceOutcome::Failed("b".into())
+            ),
+            MaintenanceOutcome::Failed("security store: a; observability store: b".into())
+        );
+        assert_eq!(
+            combine_outcomes(MaintenanceOutcome::NotDue, MaintenanceOutcome::Contended),
+            MaintenanceOutcome::Contended
+        );
+        assert_eq!(
+            combine_outcomes(MaintenanceOutcome::Ran, MaintenanceOutcome::NotDue),
+            MaintenanceOutcome::Ran
+        );
+        assert_eq!(
+            combine_outcomes(MaintenanceOutcome::NotDue, MaintenanceOutcome::NotDue),
+            MaintenanceOutcome::NotDue
+        );
     }
 }

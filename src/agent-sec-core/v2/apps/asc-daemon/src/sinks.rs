@@ -98,33 +98,32 @@ pub(crate) struct DurableSinks {
 
 /// The durable sinks plus the shutdown decisions about the final passes.
 ///
-/// The observability lifecycle is independent of the security store, so its
-/// close always runs. The security final pass is skipped only when the
-/// retention task failed to join and an orphaned pass may still hold the
-/// store mutex - skipping it must not take the worker drain or the
-/// observability close down with it. Both gated maintenance passes must
+/// Both final passes are skipped when the retention task failed to join:
+/// its blocking attempt covers both stores, so an orphaned pass may still
+/// hold either store's mutex when the join times out. Both gated
+/// maintenance passes must
 /// finish by `final_pass_deadline` and are skipped when the remaining stop
 /// budget cannot fit them (`None` runs them without a deadline).
 pub(crate) struct ShutdownPlan {
     sinks: DurableSinks,
-    security_final_pass: bool,
+    final_passes: bool,
     final_pass_deadline: Option<std::time::Instant>,
 }
 
 impl ShutdownPlan {
     /// Builds a plan from the retention join outcome.
     ///
-    /// `security_final_pass` is `true` only when the retention task joined
-    /// within the shared stop deadline (or never started). The final passes
-    /// must finish by `final_pass_deadline`.
+    /// `final_passes` is `true` only when the retention task joined within
+    /// the shared stop deadline (or never started). The final passes must
+    /// finish by `final_pass_deadline`.
     pub(crate) fn new(
         sinks: DurableSinks,
-        security_final_pass: bool,
+        final_passes: bool,
         final_pass_deadline: Option<std::time::Instant>,
     ) -> Self {
         Self {
             sinks,
-            security_final_pass,
+            final_passes,
             final_pass_deadline,
         }
     }
@@ -136,15 +135,16 @@ impl ShutdownPlan {
 
     /// Closes what the shutdown decision still allows.
     ///
-    /// The observability close is unconditional; the security final pass
-    /// runs only when the retention task joined within the shared stop
-    /// deadline, so it can never contend with an orphaned maintenance pass.
-    /// Both are skipped when the remaining stop budget cannot fit them.
+    /// Both final passes run only when the retention task joined within
+    /// the shared stop deadline: the task owns one blocking attempt that
+    /// covers both stores, so an orphaned pass may still hold either
+    /// store's mutex when the join times out. Both are skipped when the
+    /// remaining stop budget cannot fit them.
     pub(crate) fn close(&self) {
-        self.sinks
-            .observability
-            .close_with_deadline(self.final_pass_deadline);
-        if self.security_final_pass {
+        if self.final_passes {
+            self.sinks
+                .observability
+                .close_with_deadline(self.final_pass_deadline);
             self.sinks
                 .security
                 .close_with_deadline(self.final_pass_deadline);
@@ -192,11 +192,11 @@ mod tests {
         )
     }
 
-    // DJOB-RET-013: a retention join timeout skips only the security final
-    // pass - the observability lifecycle is independent of the security
-    // store and still closes.
+    // DJOB-RET-013: a retention join timeout skips both final passes - the
+    // retention task owns one blocking attempt per pass across both stores,
+    // so an orphaned pass may still hold either store's mutex.
     #[test]
-    fn a_retention_join_timeout_skips_only_the_security_final_pass() {
+    fn a_retention_join_timeout_skips_both_final_passes() {
         let (dir, sinks) = warmed_sinks();
         let plan = ShutdownPlan::new(sinks, false, None);
         plan.close();
@@ -205,8 +205,8 @@ mod tests {
             "the security final pass must be skipped"
         );
         assert!(
-            dir.path().join("observability.db.maintenance").exists(),
-            "the observability close must still run"
+            !dir.path().join("observability.db.maintenance").exists(),
+            "the observability final pass must be skipped too"
         );
     }
 

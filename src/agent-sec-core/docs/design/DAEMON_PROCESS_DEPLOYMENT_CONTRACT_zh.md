@@ -344,11 +344,11 @@ runner 工作目录的 owner、权限和 umask。
 worker join（65s）、reconciliation join（30s）并行等待、共享同一 65s stop deadline，再加
 Tokio shutdown 1s 与 telemetry shutdown 2s，合计约 70s；unit 另设 `TimeoutStopSec=75`（为
 security final pass 与观测余量保留），超时由 systemd 对 control group 发 SIGKILL。retention
-join 超时只跳过 security final pass（daemon 以 FAILURE 退出码报告该降级）；SkillFS worker
-drain 与 observability close 不受该超时影响，照常执行。
+join 超时跳过两库 final pass（daemon 以 FAILURE 退出码报告该降级；在途 pass 可能持有任一
+store 的 mutex）；SkillFS worker drain 不受该超时影响，照常执行。
 
-security final pass 自身有明确的剩余预算：drains 完成后，final pass（含 observability
-同路径的 gated maintenance）必须在 stop deadline + Tokio shutdown 1s + 5s
+两库 final pass 自身有明确的剩余预算：drains 完成后，final pass（security 与
+observability 的 gated maintenance）必须在 stop deadline + Tokio shutdown 1s + 5s
 （`FINAL_PASS_BUDGET`）之内完成；剩余预算不足 2s（`FINAL_PASS_MIN_BUDGET`，见
 `SqliteSink::close_with_deadline`）时直接跳过该 pass、只关闭连接，gate marker 不前进，
 下次启动的 catch-up pass 补跑该 prune（与硬杀死同一恢复路径）。周期 pass 持续失败导致

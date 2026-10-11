@@ -226,6 +226,23 @@ impl ConfiguredObservabilitySinks {
             writer.close_with_deadline(deadline);
         }
     }
+
+    /// Runs the gated `SQLite` retention pass without closing the writer.
+    ///
+    /// The daemon's periodic retention task calls this for the observability
+    /// store alongside the security store's pass; the shared cross-process
+    /// gate decides whether anything actually runs. A failed pass does not
+    /// advance the gate's marker, so the next call retries. After a failed
+    /// startup warm this returns `NotDue` until the next record re-warms
+    /// the writer - the observability stream is best-effort by design.
+    #[must_use]
+    pub fn run_sqlite_retention(&self, now: f64) -> MaintenanceOutcome {
+        self.sqlite
+            .peek()
+            .map_or(MaintenanceOutcome::NotDue, |writer| {
+                writer.run_maintenance_at(now)
+            })
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +356,29 @@ mod tests {
         sinks.warm_jsonl().expect("warm independent jsonl");
         assert!(sinks.warm_sqlite().is_err());
         assert!(jsonl.exists());
+    }
+
+    #[test]
+    fn observability_run_sqlite_retention_runs_once_per_window_without_closing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sinks = ConfiguredObservabilitySinks::new(
+            dir.path().join("observability.jsonl"),
+            dir.path().join("observability.db"),
+        );
+
+        // Before the SQLite writer is warmed there is nothing to maintain.
+        assert_eq!(
+            sinks.run_sqlite_retention(1000.0),
+            MaintenanceOutcome::NotDue
+        );
+
+        sinks.warm_sqlite().expect("warm sqlite");
+        assert_eq!(sinks.run_sqlite_retention(1000.0), MaintenanceOutcome::Ran);
+        assert_eq!(
+            sinks.run_sqlite_retention(1001.0),
+            MaintenanceOutcome::NotDue
+        );
+        sinks.close();
     }
 }
 
