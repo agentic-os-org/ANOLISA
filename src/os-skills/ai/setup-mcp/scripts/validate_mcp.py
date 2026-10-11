@@ -89,6 +89,11 @@ def check(config_path):
         if not has:
             print(f"ERROR: [{name}] missing transport field (command/httpUrl/url)", file=sys.stderr)
             ok = False
+        for field in has:
+            value = cfg[field]
+            if not isinstance(value, str) or not value.strip():
+                print(f"ERROR: [{name}] {field} must be a non-empty string", file=sys.stderr)
+                ok = False
 
         # No forbidden fields
         bad = FORBIDDEN_FIELDS & cfg.keys()
