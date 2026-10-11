@@ -34,6 +34,23 @@ anolisa install os-skills
 
 ---
 
+## CSV 和 TSV 编码
+
+`xlsx` 技能包含 `xlsx_reader.py`，可读取电子表格导出数据而不修改源文件。
+脚本需要 `pandas`；读取 Excel 文件还需要 `openpyxl`。在已安装的 `xlsx`
+技能目录中，可指定已知的 Python 编码，避免旧版 CSV 或 TSV 数据的编码歧义：
+
+```bash
+python3 scripts/xlsx_reader.py export.csv --encoding cp1252 --json
+python3 scripts/xlsx_reader.py export.tsv --encoding utf-16 --json
+```
+
+`--encoding CODEC` 仅使用指定编码。未知编码或解码失败时退出码为 1，错误输出到
+stderr，不会回退到其他编码。该选项适用于 `.csv` 和 `.tsv`，Excel 输入会拒绝它。
+不指定该选项时仍自动检测编码。
+
+---
+
 ## 技能分类
 
 ### 系统管理

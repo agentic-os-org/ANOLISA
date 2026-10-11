@@ -46,6 +46,11 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 电子表格读取
+
+`xlsx` 技能的读取脚本支持通过 `--encoding` 指定 CSV 和 TSV 导出文件的已知编码，
+默认仍自动检测编码。详见[编码参考](../../docs/user-guide/zh/user-entrypoint/os-skills.md#csv-和-tsv-编码)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

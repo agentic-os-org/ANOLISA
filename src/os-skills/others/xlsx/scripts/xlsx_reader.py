@@ -8,6 +8,7 @@ Usage:
     python3 xlsx_reader.py <file> --sheet Sales     # analyze one sheet
     python3 xlsx_reader.py <file> --json            # machine-readable output
     python3 xlsx_reader.py <file> --quality         # data quality audit only
+    python3 xlsx_reader.py export.csv --encoding cp1252  # known legacy encoding
 
 Supports: .xlsx, .xlsm, .csv, .tsv
 Does NOT modify the source file in any way.
@@ -27,7 +28,11 @@ from pathlib import Path
 # Format detection and loading
 # ---------------------------------------------------------------------------
 
-def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dict:
+def detect_and_load(
+    file_path: str,
+    sheet_name_filter: str | None = None,
+    encoding: str | None = None,
+) -> dict:
     """
     Load file into {sheet_name: DataFrame} dict.
     CSV/TSV files are mapped to a single-key dict using the file stem as key.
@@ -46,6 +51,8 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
         raise FileNotFoundError(f"File not found: {file_path}")
 
     suffix = path.suffix.lower()
+    if encoding is not None and suffix not in (".csv", ".tsv"):
+        raise ValueError("--encoding is supported only for CSV and TSV inputs")
 
     if suffix in (".xlsx", ".xlsm"):
         target = sheet_name_filter if sheet_name_filter else None
@@ -58,11 +65,19 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
 
     elif suffix in (".csv", ".tsv"):
         sep = "\t" if suffix == ".tsv" else ","
+        if encoding is not None:
+            try:
+                df = pd.read_csv(file_path, sep=sep, encoding=encoding)
+            except (LookupError, UnicodeError) as exc:
+                raise ValueError(f"Cannot read {file_path} with encoding {encoding!r}: {exc}") from exc
+            df._reader_encoding = encoding
+            return {path.stem: df}
         encodings = ["utf-8-sig", "gbk", "utf-8", "latin-1"]
         last_error = None
         for enc in encodings:
             try:
                 import pandas as pd
+
                 df = pd.read_csv(file_path, sep=sep, encoding=enc)
                 df._reader_encoding = enc  # attach metadata (non-standard, for reporting)
                 return {path.stem: df}
@@ -326,6 +341,10 @@ def main() -> None:
     parser.add_argument("file", help="Path to .xlsx, .xlsm, .csv, or .tsv file")
     parser.add_argument("--sheet", help="Analyze a specific sheet only", default=None)
     parser.add_argument(
+        "--encoding", default=None,
+        help="Use this encoding exclusively for CSV/TSV (default: auto-detect)",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="Output machine-readable JSON"
     )
     parser.add_argument(
@@ -335,7 +354,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet)
+        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet, encoding=args.encoding)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

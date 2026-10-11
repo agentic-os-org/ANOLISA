@@ -34,6 +34,25 @@ Once installed, OS Skills are available to any ANOLISA-compatible Agent runtime.
 
 ---
 
+## CSV and TSV Encoding
+
+The `xlsx` skill includes `xlsx_reader.py` for reading spreadsheet exports without
+modifying the source. It requires `pandas`; reading Excel files also requires
+`openpyxl`. From the installed `xlsx` skill directory, use a known Python codec
+to avoid ambiguity in legacy CSV or TSV data:
+
+```bash
+python3 scripts/xlsx_reader.py export.csv --encoding cp1252 --json
+python3 scripts/xlsx_reader.py export.tsv --encoding utf-16 --json
+```
+
+`--encoding CODEC` uses only the selected codec. An unknown codec or decoding
+failure exits with code 1 and writes an error to stderr, without falling back to
+another encoding. The option is accepted for `.csv` and `.tsv`; Excel inputs
+reject it. Omit it to retain automatic encoding detection.
+
+---
+
 ## Skill Categories
 
 ### System Administration
