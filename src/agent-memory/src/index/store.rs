@@ -810,6 +810,21 @@ impl BM25Store {
         Ok(out)
     }
 
+    /// Return paths retired by conflict resolution, independent of the
+    /// best-effort frontmatter marker written by [`Self::supersede`].
+    ///
+    /// # Errors
+    /// Returns database errors rather than treating an unreadable lifecycle
+    /// state as an empty set of retired memories.
+    pub fn superseded_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM files WHERE is_superseded = 1")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     /// Mark a file as superseded by another file. The superseded file
     /// remains on disk but is excluded from normal search.
     pub fn supersede(&mut self, old_path: &str, new_id: &str) -> Result<()> {
