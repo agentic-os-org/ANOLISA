@@ -106,6 +106,33 @@ _log = logging.getLogger(__name__)
 _LOG_PREFIX = "OpenClaw"
 
 
+def _strip_trailing_comment(line: str) -> str:
+    """Strip a trailing shell comment, ignoring # inside quoted strings.
+
+    The previous ``line[:line.index(" #")]`` cut at the first " #" even
+    inside quotes, truncating commands like ``echo "revenue #1 in Q3"``.
+    """
+    quote: str | None = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+        elif quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "#" and i > 0 and line[i - 1] in " 	":
+            return line[:i].rstrip()
+        i += 1
+    return line
+
+
 class OpenClawExternalAgent(BaseAgent):
     """Route between an OpenClaw process on the **host** and a Harbor Docker container.
 
@@ -812,9 +839,10 @@ class OpenClawExternalAgent(BaseAgent):
                 steps.append("\n".join(block))
                 continue
 
-            # Regular command line – strip trailing comments.
-            if " #" in line and not line.startswith("#"):
-                line = line[:line.index(" #")].strip()
+            # Regular command line – strip trailing comments (a # inside
+            # quotes is content, not a comment).
+            if not line.startswith("#"):
+                line = _strip_trailing_comment(line).strip()
             if line:
                 steps.append(line)
             i += 1
