@@ -46,6 +46,11 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## OpenClaw 模型选择
+
+OpenClaw 安装脚本在去重前规范化 `--model-id` 和 `--extra-model` 中可选的 provider 前缀，
+保证配置的模型引用一致。详见[用户指南](../../docs/user-guide/zh/user-entrypoint/os-skills.md)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

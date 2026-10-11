@@ -18,7 +18,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-
 DEFAULT_CONFIG_PATH = Path("~/.openclaw/openclaw.json").expanduser()
 
 BILLING_ALIASES = {
@@ -312,7 +311,7 @@ def build_dingtalk_channel(args):
     }
 
 
-def build_config(args):
+def build_config(args: argparse.Namespace) -> tuple[dict, dict]:
     billing = normalize_billing(args.billing)
     region = normalize_region(args.region)
     plan = BILLING_PLANS[billing]
@@ -321,7 +320,9 @@ def build_config(args):
     api_key = resolve_api_key(args, plan)
     validate_api_key_for_billing(billing, api_key, plan)
     model_id = strip_provider_prefix(args.model_id or plan["default_model"])
-    model_refs = ordered_unique([model_id, *args.extra_model, *plan["models"]])
+    model_refs = ordered_unique(
+        strip_provider_prefix(model) for model in [model_id, *args.extra_model, *plan["models"]]
+    )
 
     primary_ref = f"{provider_id}/{model_id}"
     config = {
