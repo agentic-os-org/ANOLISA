@@ -6,6 +6,7 @@
  * from this module to avoid circular dependencies.
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import type { BtrfsManager } from "./btrfs-manager.js";
 import type { OpenClawPluginApi } from "../types-shim.js";
@@ -56,6 +57,16 @@ export function cwdInsideWorkspace(workspace: string): { inside: boolean; cwd: s
   } catch {
     return { inside: false, cwd: "" };
   }
-  const ws = path.resolve(workspace);
+  // process.cwd() reports the physical path (the kernel's getcwd resolves
+  // symlinks), while the registered workspace IS a symlink into backend
+  // storage after init — resolve it the same way before comparing, or a
+  // cwd inside the workspace never matches. Falls back to the lexical
+  // path for pre-init workspaces that do not exist yet.
+  let ws: string;
+  try {
+    ws = fs.realpathSync(path.resolve(workspace));
+  } catch {
+    ws = path.resolve(workspace);
+  }
   return { inside: cwd === ws || cwd.startsWith(ws + path.sep), cwd };
 }
