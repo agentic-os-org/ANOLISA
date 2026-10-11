@@ -6908,14 +6908,40 @@ fn eval_ip_default_ttl(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 }
 
 fn eval_tcp_frto(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_frto";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_frto_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_frto",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_frto`] (the `eval_*_at` idiom).
+///
+/// Through v5.12 net/ipv4/sysctl_net_ipv4.c registered tcp_frto as a plain
+/// `proc_dointvec` int with no min/max (v5.10/v5.11/v5.12 sysctl_net_ipv4.c:
+/// 1184-1189), so -1 is a legal, persistent value there, and the only
+/// consumer is a truthiness test (net/ipv4/tcp_input.c:2195 in v6.6, :2596 in
+/// master: `tp->frto = READ_ONCE(net->ipv4.sysctl_tcp_frto) && ...` arms
+/// F-RTO). The unsigned reader parsed "-1" to Err and fell back to 0 — the
+/// *disabled* value — so the `== 0` gate invented a finding on a host whose
+/// F-RTO is on. Since v5.13 the knob is u8 (`proc_dou8vec_minmax`, no
+/// extra1/extra2; v5.13 sysctl_net_ipv4.c:1191-1196, v6.6 :1215-1221, master
+/// :1328-1334), where negatives are rejected at write time; the signed
+/// reader keeps the truthiness contract correct on both registrations.
+fn eval_tcp_frto_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_frto".to_string(),
@@ -13201,6 +13227,42 @@ mod tests {
         eval_tcp_frto(&info, &mut recs);
         if let Some(rec) = recs.iter().find(|r| r.param == "net.ipv4.tcp_frto") {
             assert_eq!(rec.recommended_value, "2");
+        }
+    }
+
+    #[test]
+    fn test_tcp_frto_reads_truthiness_signed() {
+        // tcp_frto was a plain proc_dointvec int with no min/max through
+        // v5.12 (net/ipv4/sysctl_net_ipv4.c:1184-1189 in v5.10/v5.11/v5.12),
+        // so -1 is a legal, persistent value there, and the only consumer is
+        // a truthiness test (net/ipv4/tcp_input.c: `tp->frto =
+        // READ_ONCE(net->ipv4.sysctl_tcp_frto) && ...` arms F-RTO). The
+        // unsigned reader parsed "-1" to Err and fell back to 0, the
+        // *disabled* value, so the `== 0` gate invented a finding on a host
+        // whose F-RTO is on. The listener gate is passed in like
+        // eval_tcp_fastopen_at so the branch stays assertable on any host.
+        let info = make_test_info();
+        for (value, expects_rec) in [(-1, false), (0, true), (1, false), (2, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "ktuner_tcp_frto_{}_{:?}_{value}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, format!("{value}\n")).unwrap();
+            let mut recs = Vec::new();
+            let checked = eval_tcp_frto_at(&info, &mut recs, path.to_str().unwrap(), true);
+            std::fs::remove_file(&path).ok();
+            assert_eq!(checked, 1);
+            assert_eq!(
+                recs.len(),
+                usize::from(expects_rec),
+                "value {value}: only 0 disables F-RTO"
+            );
+            if expects_rec {
+                assert_eq!(recs[0].param, "net.ipv4.tcp_frto");
+                assert_eq!(recs[0].current_value, "0");
+                assert_eq!(recs[0].recommended_value, "2");
+            }
         }
     }
 
