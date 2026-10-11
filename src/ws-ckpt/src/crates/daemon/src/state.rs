@@ -861,29 +861,18 @@ impl DaemonState {
     /// Check if a workspace is quiescent (no recent writes).
     /// Returns true if safe to snapshot, or if no watcher is registered.
     pub async fn check_workspace_quiescent(&self, ws_id: &str) -> bool {
-        // Extract the AtomicBool from the watcher without holding the lock across await
-        let is_writing_arc = {
+        // Extract the last-activity timestamp from the watcher without
+        // holding the lock across await
+        let last_activity_arc = {
             let watchers = match self.watchers.lock() {
                 Ok(w) => w,
                 Err(_) => return true,
             };
-            match watchers.get(ws_id) {
-                Some(w) => Some(std::sync::Arc::clone(&w.is_writing_flag())),
-                None => None,
-            }
+            watchers.get(ws_id).map(|w| w.last_activity())
         };
-        match is_writing_arc {
+        match last_activity_arc {
             None => true,
-            Some(flag) => {
-                if !flag.load(std::sync::atomic::Ordering::Acquire) {
-                    return true;
-                }
-                // Wait 100ms quiet period
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                flag.store(false, std::sync::atomic::Ordering::Release);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                !flag.load(std::sync::atomic::Ordering::Acquire)
-            }
+            Some(last_activity_ms) => crate::fs_watcher::wait_quiescent(&last_activity_ms).await,
         }
     }
 
