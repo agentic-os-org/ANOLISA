@@ -33,14 +33,22 @@ Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 �
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple 芯片 | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
 
-下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.8.4 安装到虚拟环境：
+下文的生命周期 API 示例要求 Tokenless 0.8.0 或更高版本。把 `TOKENLESS_VERSION` 设为
+[`tokenless` Release 列表](https://github.com/alibaba/anolisa/releases?q=tokenless)
+中最新的一项（本页最后校验时为 `0.8.4`），再把它对应的 Linux x86_64 Wheel 安装到虚拟环境：
 
 ```bash
+TOKENLESS_VERSION=0.8.4   # 最新的已发布 tokenless Release
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.4/anolisa_tokenless-0.8.4-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/alibaba/anolisa/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless-${TOKENLESS_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
+
+只有已发布的 Release 才提供 Wheel 资产，因此 Release 尚未发布的版本会返回 HTTP 404。
+若 `pip install` 报出这个 404，请改用 Release 列表中上一个版本；Adapter 安装包遇到同一个
+404 时的排查步骤见[故障排查](troubleshooting.md)。
 
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。
 Release 同时提供 `SHA256SUMS-python-wheels.txt`，可用于校验下载内容。

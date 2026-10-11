@@ -34,15 +34,24 @@ CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the targe
 | Linux aarch64 | `anolisa_tokenless-<version>-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl` |
 | macOS Apple silicon | `anolisa_tokenless-<version>-cp311-abi3-macosx_11_0_arm64.whl` |
 
-The lifecycle API examples below require Tokenless 0.8.0. Install v0.8.4 on Linux x86_64
-into a virtual environment:
+The lifecycle API examples below require Tokenless 0.8.0 or later. Set `TOKENLESS_VERSION` to the
+newest entry on the [`tokenless` releases page](https://github.com/alibaba/anolisa/releases?q=tokenless)
+— `0.8.4` when this page was last checked — and install its Linux x86_64 wheel into a virtual
+environment:
 
 ```bash
+TOKENLESS_VERSION=0.8.4   # newest published tokenless release
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/alibaba/anolisa/releases/download/tokenless/v0.8.4/anolisa_tokenless-0.8.4-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/alibaba/anolisa/releases/download/tokenless/v${TOKENLESS_VERSION}/anolisa_tokenless-${TOKENLESS_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
+
+Only a published release serves wheel assets, so a version whose release is still pending
+answers HTTP 404. When `pip install` reports that 404, take the previous release from the
+releases page instead; the [troubleshooting guide](troubleshooting.md) walks through the
+same 404 for adapter bundles.
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not
 support Alpine Linux or other musl-based distributions. The Release also includes
