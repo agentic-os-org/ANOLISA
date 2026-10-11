@@ -47,7 +47,9 @@ use super::driver::{
     DriverPlan, EnableProgress, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
     find_binary_in_path,
 };
-use super::managed_files::{MaterializedMapping, copy_materialized_resource};
+use super::managed_files::{
+    MaterializedMapping, copy_materialized_resource, remove_materialized_resource,
+};
 use crate::manifest::AdapterConfigSetSpec;
 
 /// Default timeout for an OpenClaw CLI invocation.
@@ -769,19 +771,12 @@ impl FrameworkDriver for OpenClawDriver {
         let skill_resources = claim_skill_resources(claim);
         for skill_name in &skill_resources {
             let skill_dir = home.join("skills").join(skill_name);
-            match ctx.ops.remove_tree(&skill_dir) {
-                Ok(true) => messages.push(format!(
-                    "removed openclaw skill dir {}",
-                    skill_dir.display()
-                )),
-                Ok(false) => {} // already gone, idempotent
-                Err(err) => {
-                    messages.push(format!(
-                        "failed to remove skill dir {}: {err}",
-                        skill_dir.display()
-                    ));
-                    cleanup_complete = false;
-                }
+            let resource_id = format!("openclaw_skill_{skill_name}");
+            if let Err(message) =
+                remove_skill_dir(claim, &resource_id, &skill_dir, ctx.ops, &mut messages)
+            {
+                messages.push(message);
+                cleanup_complete = false;
             }
         }
 
@@ -3012,6 +3007,57 @@ fn json_list_confirms_plugin_absent(output: &CliOutput, plugin_id: &str) -> bool
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().all(|item| item["level"] == "info"))
     })
+}
+
+/// Remove one copied skill on disable. Receipts that record their
+/// materialized files delete exactly those entries and keep anything else in
+/// the directory; receipts written before files were recorded keep the
+/// previous whole-directory removal.
+pub(crate) fn remove_skill_dir(
+    claim: &AdapterClaim,
+    resource_id: &str,
+    skill_dir: &Path,
+    ops: &dyn super::driver::AdapterOps,
+    messages: &mut Vec<String>,
+) -> Result<(), String> {
+    if !claim
+        .materialized_files
+        .iter()
+        .any(|file| file.resource_id == resource_id)
+    {
+        return match ops.remove_tree(skill_dir) {
+            Ok(true) => {
+                messages.push(format!("removed skill dir {}", skill_dir.display()));
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(err) => Err(format!(
+                "failed to remove skill dir {}: {err}",
+                skill_dir.display()
+            )),
+        };
+    }
+    match remove_materialized_resource(claim, resource_id, ops) {
+        Ok(outcome) => {
+            match &outcome.kept_root {
+                Some(root) => messages.push(format!(
+                    "removed {} ANOLISA-managed file(s) from skill dir {}; kept the directory \
+                     because it holds files ANOLISA did not write or that were modified",
+                    outcome.removed,
+                    root.display()
+                )),
+                None if outcome.removed > 0 => {
+                    messages.push(format!("removed skill dir {}", skill_dir.display()));
+                }
+                None => {}
+            }
+            Ok(())
+        }
+        Err(err) => Err(format!(
+            "failed to remove skill dir {}: {err}",
+            skill_dir.display()
+        )),
+    }
 }
 
 /// Extract skill names from a claim's `skill_resources` by parsing the

@@ -70,6 +70,12 @@ impl Default for CoshDriver {
 }
 
 impl FrameworkDriver for CoshDriver {
+    // The extension dir carries COSH_OWNERSHIP_MARKER: apply_enable refuses an
+    // unmarked existing dir and reclaims a marked orphan itself.
+    fn owns_preexisting_materialized_roots(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "cosh"
     }

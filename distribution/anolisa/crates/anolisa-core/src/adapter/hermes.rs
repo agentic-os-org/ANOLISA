@@ -484,20 +484,16 @@ impl FrameworkDriver for HermesDriver {
             for skill_res_id in &hermes.skill_resources {
                 if let Some(resource) = claim.resource(skill_res_id)
                     && let ClaimResourceKind::ExternalPath { path } = &resource.kind
+                    && let Err(message) = super::openclaw::remove_skill_dir(
+                        claim,
+                        skill_res_id,
+                        path,
+                        ctx.ops,
+                        &mut messages,
+                    )
                 {
-                    match ctx.ops.remove_tree(path) {
-                        Ok(true) => {
-                            messages.push(format!("removed skill dir {}", path.display()));
-                        }
-                        Ok(false) => {} // already gone
-                        Err(err) => {
-                            cleanup_complete = false;
-                            messages.push(format!(
-                                "failed to remove skill dir {}: {err}",
-                                path.display()
-                            ));
-                        }
-                    }
+                    cleanup_complete = false;
+                    messages.push(message);
                 }
             }
         }

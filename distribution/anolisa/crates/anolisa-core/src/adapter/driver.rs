@@ -732,6 +732,13 @@ pub trait FrameworkDriver: Send + Sync {
         Ok(())
     }
 
+    /// Whether this driver decides itself how to treat a materialized
+    /// destination that already exists without a prior receipt (for example
+    /// through an ownership marker). When `false`, the Manager refuses to
+    /// enable into a non-empty destination the prior receipt does not own.
+    fn owns_preexisting_materialized_roots(&self) -> bool {
+        false
+    }
     /// Source-to-resource copies this driver will explicitly materialize.
     ///
     /// The Manager maps only package-owned source entries through these
