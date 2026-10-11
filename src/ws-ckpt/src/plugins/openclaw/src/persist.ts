@@ -3,7 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import type { PluginConfig } from "./types.js";
 
-type PersistableKeys = Pick<PluginConfig, "autoCheckpoint" | "workspace" | "cronSchedules">;
+type PersistableKeys = Pick<
+  PluginConfig,
+  "autoCheckpoint" | "workspace" | "cronSchedules"
+>;
 
 function resolveConfigPath(): string {
   const stateDir =
@@ -18,12 +21,17 @@ export function loadPersistedConfig(): Partial<PluginConfig> {
     if (!fs.existsSync(p)) return {};
     const raw = fs.readFileSync(p, "utf-8");
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return {};
     const result: Partial<PluginConfig> = {};
-    if (typeof parsed.autoCheckpoint === "boolean") result.autoCheckpoint = parsed.autoCheckpoint;
-    if (typeof parsed.workspace === "string") result.workspace = parsed.workspace;
+    if (typeof parsed.autoCheckpoint === "boolean")
+      result.autoCheckpoint = parsed.autoCheckpoint;
+    if (typeof parsed.workspace === "string")
+      result.workspace = parsed.workspace;
     if (Array.isArray(parsed.cronSchedules)) {
-      result.cronSchedules = parsed.cronSchedules.filter((e: unknown) => typeof e === "string");
+      result.cronSchedules = parsed.cronSchedules.filter(
+        (e: unknown) => typeof e === "string",
+      );
     }
     return result;
   } catch {
@@ -32,6 +40,7 @@ export function loadPersistedConfig(): Partial<PluginConfig> {
 }
 
 export function persistConfig(partial: Partial<PersistableKeys>): string {
+  let tmpPath: string | undefined;
   try {
     const configPath = resolveConfigPath();
     let existing: Record<string, unknown> = {};
@@ -39,15 +48,21 @@ export function persistConfig(partial: Partial<PersistableKeys>): string {
       if (fs.existsSync(configPath)) {
         const raw = fs.readFileSync(configPath, "utf-8");
         const parsed = JSON.parse(raw);
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
           existing = parsed;
         }
       }
-    } catch { /* start fresh */ }
+    } catch {
+      /* start fresh */
+    }
     Object.assign(existing, partial);
     const dir = path.dirname(configPath);
     fs.mkdirSync(dir, { recursive: true });
-    const tmpPath = `${configPath}.tmp.${process.pid}`;
+    tmpPath = `${configPath}.tmp.${process.pid}`;
     fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2) + "\n", {
       encoding: "utf-8",
       mode: 0o600,
@@ -56,5 +71,13 @@ export function persistConfig(partial: Partial<PersistableKeys>): string {
     return "";
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
+  } finally {
+    if (tmpPath) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        /* missing after rename, or best-effort failed-save cleanup */
+      }
+    }
   }
 }
