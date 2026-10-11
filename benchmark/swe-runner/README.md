@@ -409,6 +409,13 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Detail and metric CSVs include each trace's recorded total cost. Instance summaries
+include the number of traces with a finite recorded cost, their cost sum, and their
+mean cost. Missing or unusable costs stay blank and are excluded from that mean;
+a recorded zero counts as known. Costs retain the source trace's units. If finite
+costs overflow during aggregation, analysis reports the affected instance before
+writing reports; source traces remain unchanged.
+
 Analyze existing traces:
 
 ```bash

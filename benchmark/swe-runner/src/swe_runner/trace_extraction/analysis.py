@@ -18,6 +18,7 @@ import json
 import logging
 from collections import Counter
 from collections.abc import Iterator
+from math import fsum, isfinite
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,17 @@ def _json_counter_value(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def _recorded_cost(value: Any) -> str:
+    """Serialize a finite recorded cost, leaving absent or unusable costs blank."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return ""
+    try:
+        cost = float(value)
+    except OverflowError:
+        return ""
+    return str(cost) if isfinite(cost) else ""
+
+
 def _counter_from_row(row: dict[str, str | int], key: str) -> Counter[str]:
     value = row.get(key)
     if not isinstance(value, str) or not value:
@@ -152,6 +164,7 @@ def analyze_trace_files(
             "total_steps": total_steps,
         }
         if include_metrics:
+            row["total_cost"] = _recorded_cost(trace_data.get("total_cost"))
             for field in _TRACE_NUMERIC_FIELDS:
                 row[field] = _safe_int(trace_data.get(field))
             for field in _TRACE_COUNTER_FIELDS:
@@ -182,6 +195,16 @@ def analyze_trace_files(
             "max_total_tokens": max(total_tokens_list),
         }
         if include_metrics:
+            recorded_costs = [float(row["total_cost"]) for row in rows if row["total_cost"] != ""]
+            try:
+                cost_total = fsum(recorded_costs)
+            except OverflowError as exc:
+                raise ExtractionError(
+                    f"Recorded cost sum for instance {instance_id} cannot be represented as a finite number"
+                ) from exc
+            summary_row["recorded_cost_count"] = len(recorded_costs)
+            summary_row["total_recorded_cost"] = str(cost_total) if recorded_costs else ""
+            summary_row["avg_recorded_cost"] = str(cost_total / len(recorded_costs)) if recorded_costs else ""
             for field in _TRACE_NUMERIC_FIELDS:
                 values = [int(row[field]) for row in rows]
                 summary_row[f"avg_{field}"] = _format_metric(_mean(values))
