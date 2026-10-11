@@ -4587,6 +4587,61 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         );
     }
 
+    /// A v2 contract that adds a hook phase no anolisa command runs is the
+    /// same authoring defect a fresh install refuses; the update path must
+    /// run the identical check in download-verify, so the dead phase cannot
+    /// be smuggled in through `anolisa update`. Pins that the refusal leaves
+    /// the installed files and the recorded state untouched.
+    #[test]
+    fn raw_update_refuses_when_new_artifact_adds_dead_hook_phase() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body: &[u8] = b"installed 0.1.0\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+
+        // v2's contract adds pre_restart: valid manifest vocabulary, but no
+        // anolisa command resolves it.
+        let manifest = format!(
+            "{}{}",
+            raw_manifest("foo", "0.2.0"),
+            "\n[[component.hooks]]\nphase = \"pre_restart\"\nscript = \"{datadir}/hooks/foo/pre-restart.sh\"\nstrict = false\n"
+        );
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let artifact = tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/foo", new_body),
+        ]);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &artifact,
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("update must refuse a phase no command runs");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("no anolisa command runs"),
+            "refusal must name the dead phase, got: {}",
+            err.reason()
+        );
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            old_body,
+            "refused update must not change the old binary"
+        );
+        assert_eq!(
+            owned_artifact(&find_component(&c, "foo")).version,
+            "0.1.0",
+            "refused update must not change the recorded version"
+        );
+    }
+
     /// A successful update resets transient state: status returns to Installed
     /// and stale service rows from the old version are cleared (the new
     /// manifest declares no services here).

@@ -1358,6 +1358,48 @@ fn install_raw_pre_install_hook_skipped_as_missing_on_fresh_install() {
     );
 }
 
+/// A contract phase no anolisa command executes is an authored-input
+/// defect: the install handler must refuse it as `INVALID_ARGUMENT` with
+/// exit status 2 — not `EXECUTION_FAILED`/exit 1 — before laying any
+/// files, the same distinction `validate_owned_install` draws between bad
+/// input and machine failure.
+#[test]
+fn install_raw_dead_hook_phase_is_invalid_argument() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_hook(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        "pre_restart",
+        false,
+        "#!/bin/sh\ntrue\n",
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("a hook phase no anolisa command runs must be refused");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert_eq!(err.exit_code(), 2, "authored-input defects exit 2");
+    assert!(
+        err.reason().contains("no anolisa command runs"),
+        "reason must explain the refusal: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("pre_restart"),
+        "reason must name the declared phase: {}",
+        err.reason()
+    );
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "refused install must not lay the binary"
+    );
+}
+
 #[test]
 fn install_raw_uses_embedded_manifest_without_local_catalog() {
     let tmp = tempdir().expect("tmpdir");

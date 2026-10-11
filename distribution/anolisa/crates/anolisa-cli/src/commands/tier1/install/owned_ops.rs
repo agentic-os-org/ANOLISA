@@ -46,7 +46,9 @@ use super::io_util::{
     service_cleanup_suffix, write_installed_component_manifest,
 };
 use super::provision::{retained_packages_note, run_provision};
-use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
+use super::raw::{
+    InstallHooks, prepare_raw_execution, resolve_install_hooks, unrunnable_hook_phase_reason,
+};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
@@ -321,6 +323,17 @@ impl OwnedOps for RawReplayOps<'_> {
                         "failed to parse component manifest for preflight: {err}"
                     ))
                 })?;
+            // The same hook-phase contract a fresh install enforces
+            // (`validate_owned_install`): a v2 that adds a phase no command
+            // runs is an authoring defect, and the update path must refuse
+            // it rather than place it. Failing in download-verify keeps the
+            // host untouched — no backup, no placement, no record write.
+            // Replay (repair) skips the preflight and this check with it:
+            // it re-places the recorded manifest and must not turn a legacy
+            // dead-phase declaration into a recovery blocker.
+            if let Some(reason) = unrunnable_hook_phase_reason(&manifest, &self.component) {
+                return Err(OwnedOpError(reason));
+            }
             warnings = super::provision::run_runtime_preflight(&manifest, &self.env, "update")
                 .map_err(|err| OwnedOpError(err.reason()))?;
         }
