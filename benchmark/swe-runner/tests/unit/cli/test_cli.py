@@ -622,3 +622,59 @@ def test_evaluate_none_namespace_uses_local_build_mode(mocker: MockerFixture) ->
     assert result.exit_code == 0
     mock_run_evaluation.assert_called_once()
     assert mock_run_evaluation.call_args.kwargs["namespace"] is None
+
+def test_run_exits_nonzero_when_every_instance_fails(tmp_path):
+    report = RunReport(
+        succeeded=0,
+        failed=3,
+        total=3,
+        instance_ids=["inst-1", "inst-2", "inst-3"],
+        metadata_path=tmp_path / "run" / "run_metadata.json",
+    )
+
+    with patch("swe_runner.cli_commands.RunSession") as mock_session_cls:
+        mock_session_cls.return_value.execute.return_value = report
+
+        result = runner.invoke(app, ["run", "--agent", "openclaw", "--output", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "0/3 succeeded" in result.output
+    assert "All 3 instance(s) failed" in result.output
+
+
+def test_run_exits_zero_for_partial_success(tmp_path):
+    report = RunReport(
+        succeeded=1,
+        failed=2,
+        total=3,
+        instance_ids=["inst-1", "inst-2", "inst-3"],
+        metadata_path=tmp_path / "run" / "run_metadata.json",
+    )
+
+    with patch("swe_runner.cli_commands.RunSession") as mock_session_cls:
+        mock_session_cls.return_value.execute.return_value = report
+
+        result = runner.invoke(app, ["run", "--agent", "openclaw", "--output", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "1/3 succeeded" in result.output
+    assert "instance(s) failed" not in result.output
+
+
+def test_run_exits_zero_with_message_when_nothing_to_process(tmp_path):
+    report = RunReport(
+        succeeded=0,
+        failed=0,
+        total=0,
+        instance_ids=[],
+        metadata_path=None,
+    )
+
+    with patch("swe_runner.cli_commands.RunSession") as mock_session_cls:
+        mock_session_cls.return_value.execute.return_value = report
+
+        result = runner.invoke(app, ["run", "--agent", "openclaw", "--output", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "No instances to process" in result.output
+
