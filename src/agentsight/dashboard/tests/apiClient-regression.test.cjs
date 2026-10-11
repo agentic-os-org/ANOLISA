@@ -24,6 +24,10 @@ const {
   containmentLifecyclePresentation,
 } = require(process.env.AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD);
 const {
+  effectiveBindingMode,
+  legacyBindingMode,
+} = require(process.env.AGENTSIGHT_ENFORCEMENT_MODE_BUILD);
+const {
   formatNs,
   formatNsPadded,
   formatMsCompact,
@@ -754,4 +758,45 @@ test('selection shortcuts compare members, not sizes', () => {
   assert.equal(sameMembers(ticked, new Set(['a', 'b'])), false);
   assert.equal(sameMembers(new Set(), new Set()), true);
   assert.equal(sameMembers(ticked, new Set()), false);
+});
+
+test('legacy bindings report their enforcing mode from the DSL', () => {
+  // Enforcers built before `policy_mode` existed persisted only the DSL. The
+  // audit view read the field directly, so a binding that blocks showed as
+  // audit-only while the enforcement page showed it as blocking.
+  const legacy = { policy_mode: null, policy_dsl: 'block open file "/etc/passwd" if AGENT' };
+  // What the audit view used to evaluate — the stored field is simply absent
+  // on rows written by an older enforcer, so the check answered false.
+  assert.notEqual(legacy.policy_mode, 'enforce');
+  assert.equal(effectiveBindingMode(legacy), 'enforce');
+  assert.equal(
+    effectiveBindingMode({ policy_mode: null, policy_dsl: 'block connect endpoint "*" if CREDENTIAL' }),
+    'enforce',
+  );
+  assert.equal(
+    effectiveBindingMode({ policy_mode: null, policy_dsl: 'notify connect endpoint "*" if CREDENTIAL' }),
+    'audit',
+  );
+  assert.equal(
+    effectiveBindingMode({ policy_mode: null, policy_dsl: 'allow open file "*" if AGENT' }),
+    'observe',
+  );
+  // A stored mode wins over the DSL shape.
+  assert.equal(effectiveBindingMode({ policy_mode: 'audit', policy_dsl: 'block open file "x" if AGENT' }), 'audit');
+  assert.equal(legacyBindingMode('block open file "x" if AGENT'), 'enforce');
+});
+
+test('both protection views resolve a binding mode through the shared helper', () => {
+  // The audit view read `policy_mode` directly, so a binding persisted by an
+  // older enforcer — where the field is absent and only the DSL carries the
+  // mode — reported as audit-only while it was actually blocking. Both views
+  // must ask the shared helper, or they can disagree again.
+  const { readFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const auditPage = readFileSync(join(process.cwd(), 'src/pages/SystemAuditPage.tsx'), 'utf8');
+  const riskPage = readFileSync(join(process.cwd(), 'src/pages/RiskEnforcementPage.tsx'), 'utf8');
+
+  assert.match(auditPage, /effectiveBindingMode\(binding\.request\) === 'enforce'/);
+  assert.match(riskPage, /effectiveBindingMode\(binding\.request\)/);
+  assert.doesNotMatch(auditPage, /request\.policy_mode === 'enforce'/);
 });
