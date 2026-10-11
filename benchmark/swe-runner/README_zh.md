@@ -399,6 +399,9 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+Trace 文件必须是 UTF-8 编码的 JSON 对象。不可读取的文件、无效 JSON 及
+非对象根节点会作为分析错误报告，并包含对应路径。
+
 分析已有 trace：
 
 ```bash

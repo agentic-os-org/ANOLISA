@@ -409,6 +409,9 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Trace files must contain UTF-8 JSON objects. Unreadable files, invalid JSON,
+and non-object roots are reported as analysis errors with the affected path.
+
 Analyze existing traces:
 
 ```bash
