@@ -1716,3 +1716,118 @@ fn non_cosh_core_grace_released_tool_call_keeps_legacy_fallback() {
         "the M3 guard must not reach non-cosh-core drivers"
     );
 }
+
+/// #1776 regression: a plan-mode denial that cannot be delivered (no
+/// live owner for the control response) must stop the batch, exactly
+/// like the trust/auto shell-policy refusals. The partition used to
+/// drop the `AwaitingTerminalSweep` outcome and keep processing the
+/// batch, which advanced approval state — a pending card for a
+/// trailing allowed request — while the denied request was still
+/// unhomed, awaiting the terminal sweep.
+fn plan_governed(event: AgentEvent, policy_decision: GovernancePolicyDecision) -> GovernedEvent {
+    GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision,
+        event,
+        reason: "test".to_string(),
+        display_text: String::new(),
+        auto_execute: false,
+    }
+}
+
+#[test]
+fn plan_mode_denial_awaiting_terminal_sweep_stops_batch() {
+    let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+    let mut detached_run = crate::agent::events::tests::test_active_run();
+    detached_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
+    let run_request = detached_run.request.clone();
+    let mut state = InlineState {
+        plan_mode: true,
+        ..InlineState::default()
+    };
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    assert!(adapter.capabilities().control_protocol);
+    let mut output = Vec::new();
+    let mutating = plan_governed(
+        AgentEvent::ToolPermissionRequest {
+            run_id: "request-1".to_string(),
+            request_id: "approval-sweep".to_string(),
+            tool_name: "run_shell_command".to_string(),
+            tool_input: serde_json::json!({ "command": "rm -rf /tmp/plan_demo" }),
+            tool_use_id: "tool-sweep".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        GovernancePolicyDecision::NeedsUserApproval,
+    );
+    // Read-only investigation stays available in plan mode; without the
+    // fix this trailing request is recorded as a pending card even
+    // though the batch should have stopped at the undelivered denial.
+    let allowed = plan_governed(
+        AgentEvent::ToolPermissionRequest {
+            run_id: "request-1".to_string(),
+            request_id: "approval-after".to_string(),
+            tool_name: "Read".to_string(),
+            tool_input: serde_json::json!({ "file_path": "/etc/os-release" }),
+            tool_use_id: "tool-after".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        GovernancePolicyDecision::NeedsUserApproval,
+    );
+    state
+        .control
+        .approval_ledger_mut()
+        .register("request-1", "approval-sweep");
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &[mutating, allowed],
+        Some(&run_request),
+        detached_run.origin,
+        &mut output,
+        &adapter,
+    )
+    .expect("render plan-mode batch");
+
+    // The denial was not deliverable (no live owner), so the request
+    // stays unhomed for the terminal sweep, and the batch stopped
+    // before any approval pass: no card, no local refusal record,
+    // nothing recorded for the trailing allowed request either.
+    assert!(state.approvals.requests.is_empty());
+    assert!(state.approvals.active_panel_id.is_none());
+    assert_eq!(
+        state
+            .control
+            .approval_ledger()
+            .unresponded_for_run("request-1"),
+        vec!["approval-sweep"]
+    );
+    assert!(approval_rx.try_iter().next().is_none());
+
+    // The run-terminal sweep is the denial's terminal home: exactly one
+    // deny response for the plan-mode gated request.
+    crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+        &mut state,
+        "request-1",
+        &detached_run.handle,
+    );
+    let responses: Vec<_> = approval_rx
+        .try_iter()
+        .filter_map(|message| match message {
+            crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+            crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+        })
+        .collect();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].request_id, "approval-sweep");
+    assert!(matches!(
+        responses[0].decision,
+        ApprovalDecision::Deny { .. }
+    ));
+    assert!(state
+        .control
+        .approval_ledger()
+        .unresponded_for_run("request-1")
+        .is_empty());
+}

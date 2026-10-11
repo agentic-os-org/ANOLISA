@@ -950,8 +950,9 @@ fn cancelled_and_reaped_probe_stays_idle_despite_overdue_checks() {
 #[test]
 fn ecs_refresh_message_is_appended_and_bilingual() {
     use crate::config::Language;
-    let id = *MessageId::ALL.last().unwrap();
-    assert_eq!(format!("{id:?}"), "AuthEcsRefreshing");
+    // AuthEcsRefreshing stays the ECS segment's tail; the plan-mode ids
+    // (#1776) were appended after it as the new enum tail.
+    let id = MessageId::AuthEcsRefreshing;
     assert_eq!(id as usize, MessageId::AuthEcsCancelHint as usize + 1);
     assert_eq!(
         I18n::new(Language::EnUs).t(id),

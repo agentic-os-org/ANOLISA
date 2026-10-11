@@ -67,10 +67,10 @@ pub(crate) fn is_sensitive_target(token: &str) -> bool {
 
 pub use broker::{apply_readonly_config, can_run_approved_bash_tool};
 pub use classification::{
-    canonical_tool_name, classify_command_interaction, is_readonly_builtin_tool_name,
-    is_shell_tool_name, known_provider_tool, obvious_tty_command_reason, provider_tool_class,
-    ApprovalRisk, CommandInteractionProfile, KnownProviderTool, OutputStability, ProviderToolClass,
-    PtyRequirement,
+    canonical_tool_name, classify_command_interaction, is_plan_mode_allowed_tool_name,
+    is_readonly_builtin_tool_name, is_shell_tool_name, known_provider_tool,
+    obvious_tty_command_reason, provider_tool_class, ApprovalRisk, CommandInteractionProfile,
+    KnownProviderTool, OutputStability, ProviderToolClass, PtyRequirement,
 };
 pub use command_risk::{
     assess_shell_command, blocked_shell_binding_assessment, AssessmentConfidence, AssessmentPolicy,

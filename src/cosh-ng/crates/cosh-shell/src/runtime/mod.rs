@@ -25,6 +25,7 @@ pub(crate) mod mode;
 mod mode_tests;
 #[cfg(test)]
 mod mvp_loop_tests;
+pub(crate) mod plan_mode;
 pub(crate) mod prelude;
 pub(crate) mod prompt_draft;
 pub(crate) mod provider_cancellation_artifacts;

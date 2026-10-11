@@ -10,7 +10,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeAnalysisLine => "分析: {mode}",
         MessageId::ModeRoutingLine => "输入路由: {mode}",
         MessageId::ModeSummaryFooter => {
-            "使用 /mode approval、/mode analysis 或 /mode routing 查看详情。"
+            "使用 /mode approval、/mode analysis、/mode routing 或 /mode plan 查看详情。"
         }
         MessageId::RoutingModeTitle => "输入路由",
         MessageId::RoutingModeCurrentBody => "当前: {mode}",
@@ -35,7 +35,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeLanguageFooter => "使用 /config language [auto|en-US|zh-CN]。",
         MessageId::ModeUnknownBody => "未知模式: {mode}",
         MessageId::ModeUnknownFooter => {
-            "使用 /mode approval、/mode analysis 或 /mode routing。"
+            "使用 /mode approval、/mode analysis、/mode routing 或 /mode plan。"
         }
         MessageId::ApprovalModeTitle => "审批模式",
         MessageId::ApprovalModeSetBody => "模式已设置为 {mode}。",
@@ -92,6 +92,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AnalysisModeRemainsBody => "模式仍为 {mode}。",
         MessageId::AnalysisModeCancelBody => "模式未改变: {mode}。",
         MessageId::AnalysisModeCancelFooter => "没有执行 shell 命令。",
+        MessageId::HelpSummaryPlan => "切换 plan mode",
+        MessageId::HelpSummaryModePlan => "打开或关闭 plan mode",
+        MessageId::ModePlanLine => "计划: {mode}",
+        MessageId::PlanModeTitle => "Plan mode",
+        MessageId::PlanModeCurrentBody => "当前: {mode}",
+        MessageId::PlanModeSetBody => "Plan mode 已设置为 {mode}。",
+        MessageId::PlanModeUnknownBody => "未知 plan mode 取值: {mode}",
+        MessageId::PlanModeUsageFooter => "使用 /mode plan on|off|status，或 /plan 直接切换。",
+        MessageId::PlanModeOnFooter => {
+            "只读工具仍会执行；执行变更前请运行 /plan（或 /mode plan off）退出。"
+        }
+        MessageId::PlanModeOffFooter => {
+            "工具恢复按当前审批模式处理。"
+        }
         _ => return None,
     })
 }

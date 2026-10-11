@@ -161,6 +161,22 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/plan",
+            usage: "/plan",
+            summary_id: MessageId::HelpSummaryPlan,
+            group: Some("Modes"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/mode",
+            usage: "/mode plan [on|off|status]",
+            summary_id: MessageId::HelpSummaryModePlan,
+            group: Some("Modes"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/agent",
             usage: "/agent",
             summary_id: MessageId::HelpSummaryAgent,

@@ -7,6 +7,8 @@ use crate::approval::broker::{
 };
 use crate::approval::handoff::shell_handoff_command_from_request;
 use crate::approval::journal::approval_audit_input;
+use crate::approval::plan_mode::{deny_request_for_plan_mode, plan_mode_denies_request};
+use crate::approval::policy::{deny_policy_refused_request, ShellRequestPolicyHandling};
 use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::evidence_delivery::record_readonly_compound_completion;
@@ -43,6 +45,19 @@ pub(crate) fn render_trusted_tool<W: Write>(
         };
         // Hook ask decisions must never be auto-approved
         if request.hook_requires_approval {
+            continue;
+        }
+        // Plan mode (#1776): read-only investigation only — mutating tool
+        // requests are refused with the `/plan` exit pointer instead of
+        // being auto-approved.
+        if plan_mode_denies_request(state, &request) {
+            match deny_request_for_plan_mode(state, &request) {
+                ShellRequestPolicyHandling::Continue | ShellRequestPolicyHandling::Refused => {}
+                ShellRequestPolicyHandling::AwaitingTerminalSweep => {
+                    render_approval_requests(state, &blocked_approval_ids, output)?;
+                    return Ok(true);
+                }
+            }
             continue;
         }
         // Trust may bypass approval only for identities in the explicit
@@ -208,6 +223,19 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         };
         // Hook ask decisions must never be auto-approved
         if request.hook_requires_approval {
+            continue;
+        }
+        // Plan mode (#1776): read-only investigation only — mutating tool
+        // requests are refused with the `/plan` exit pointer instead of
+        // being auto-approved or falling through to an approval card.
+        if plan_mode_denies_request(state, &request) {
+            match deny_request_for_plan_mode(state, &request) {
+                ShellRequestPolicyHandling::Continue | ShellRequestPolicyHandling::Refused => {}
+                ShellRequestPolicyHandling::AwaitingTerminalSweep => {
+                    render_approval_requests(state, &blocked_approval_ids, output)?;
+                    return Ok(true);
+                }
+            }
             continue;
         }
         if provider_tool_call_fallback && !request_is_executable_bash_tool(&request) {
@@ -480,18 +508,14 @@ pub(super) enum ShellRequestPolicyDecision {
     DenyDuplicateHostExecuted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShellRequestPolicyHandling {
-    Continue,
-    Refused,
-    AwaitingTerminalSweep,
-}
-
 /// Applies the shell-request policy gate to one event.
 ///
 /// A delivered refusal is event-local, so callers keep processing the batch.
 /// Without a live owner, callers stop before the tail record pass so the
 /// detached terminal sweep retains responsibility for the response.
+/// The handling enum and shared refusal delivery live in
+/// `approval::policy` so `approval::plan_mode` never depends back on
+/// `agent` (D16 stays the only registered reverse edge).
 fn handle_shell_request_policy(
     state: &mut InlineState,
     run_request: Option<&AgentRequest>,
@@ -506,7 +530,7 @@ fn handle_shell_request_policy(
             DUPLICATE_HOST_EXECUTED_SHELL_DENY_MESSAGE
         }
     };
-    deny_policy_refused_shell_request(state, request, reason)
+    deny_policy_refused_request(state, request, reason)
 }
 
 /// Refusal reason for a shell tool call the host already executed once and
@@ -928,38 +952,4 @@ fn respond_auto_approval_to_provider(
     };
     let _ = active_run.handle.respond_approval(response);
     true
-}
-
-/// Refuses one shell request on policy grounds: answer the owning provider
-/// when there is a control request to answer, then record the refusal.
-///
-/// A successfully delivered control refusal gets a terminal home so the tail
-/// pass cannot resurface it. If delivery is unavailable, the request remains
-/// unhomed for the active or detached terminal sweep. Streamed fallbacks have
-/// no provider response and are recorded as shell-local refusals.
-fn deny_policy_refused_shell_request(
-    state: &mut InlineState,
-    request: &RuntimeApprovalRequest,
-    reason: &str,
-) -> ShellRequestPolicyHandling {
-    let Some(request_id) = request.request_id.as_deref() else {
-        record_policy_refused_request(state, request.clone());
-        return ShellRequestPolicyHandling::Refused;
-    };
-    let Some(active_run) = state.agent_run.active.as_ref() else {
-        return ShellRequestPolicyHandling::AwaitingTerminalSweep;
-    };
-    let response = provider_deny_response(
-        ProviderResponseInput {
-            request_id,
-            tool_use_id: request.tool_use_id.as_deref(),
-            tool_input: request.tool_input.as_ref(),
-        },
-        reason.to_string(),
-    );
-    if active_run.handle.respond_approval(response).is_err() {
-        return ShellRequestPolicyHandling::AwaitingTerminalSweep;
-    }
-    record_policy_refused_request(state, request.clone());
-    ShellRequestPolicyHandling::Refused
 }

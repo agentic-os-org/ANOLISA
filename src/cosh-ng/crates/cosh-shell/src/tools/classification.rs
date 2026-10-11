@@ -175,6 +175,31 @@ pub fn is_readonly_builtin_tool_name(name: &str) -> bool {
     provider_tool_class(name) == ProviderToolClass::ReadOnlyBuiltin
 }
 
+/// Plan mode keeps the investigation surface alive (#1776): read-only
+/// builtins, user questions, skill loads, todos, LSP queries, web reads,
+/// and the shell-evidence channel stay available while planning.
+/// Anything that writes, executes, or schedules is denied instead.
+pub fn is_plan_mode_allowed_tool_name(name: &str) -> bool {
+    matches!(
+        known_provider_tool(name),
+        Some(
+            KnownProviderTool::ReadFile
+                | KnownProviderTool::Grep
+                | KnownProviderTool::Glob
+                | KnownProviderTool::ListDirectory
+                | KnownProviderTool::ReadManyFiles
+                | KnownProviderTool::ShellEvidence
+                | KnownProviderTool::AskUserQuestion
+                | KnownProviderTool::WebFetch
+                | KnownProviderTool::WebSearch
+                | KnownProviderTool::Skill
+                | KnownProviderTool::Todo
+                | KnownProviderTool::TodoWrite
+                | KnownProviderTool::Lsp,
+        )
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandInteractionProfile {
     pub pty_requirement: PtyRequirement,

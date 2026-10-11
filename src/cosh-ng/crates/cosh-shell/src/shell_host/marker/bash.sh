@@ -456,7 +456,7 @@ _cosh_should_intercept_unknown() {
 _cosh_is_slash_control_candidate() {
   local command="$1"
   case "$command" in
-    /about|/agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mcp|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/stats|/status|/task)
+    /about|/agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mcp|/mode|/new|/plan|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/stats|/status|/task)
       return 0
       ;;
   esac

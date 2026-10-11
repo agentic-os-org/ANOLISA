@@ -84,3 +84,23 @@ macro_rules! enhanced_routing_mode_ids {
         );
     };
 }
+
+// Appended as a trailing segment so existing MessageId discriminants stay stable (#1776).
+macro_rules! plan_mode_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryPlan,
+            HelpSummaryModePlan,
+            ModePlanLine,
+            PlanModeTitle,
+            PlanModeCurrentBody,
+            PlanModeSetBody,
+            PlanModeUnknownBody,
+            PlanModeUsageFooter,
+            PlanModeOnFooter,
+            PlanModeOffFooter,
+        );
+    };
+}

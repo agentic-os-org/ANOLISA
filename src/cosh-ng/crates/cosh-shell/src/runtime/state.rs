@@ -116,6 +116,11 @@ pub(crate) struct InlineState {
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
+    /// Plan mode (#1776): while on, the agent investigates only —
+    /// mutating tool requests are denied with a pointer at `/plan`,
+    /// read-only tools keep running. Session-local state; persistence
+    /// is a follow-up.
+    pub(crate) plan_mode: bool,
     pub(crate) analysis_mode: AnalysisMode,
     pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(crate) debug: bool,
