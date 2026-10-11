@@ -200,7 +200,10 @@ fn map_operation_to_strategy_label(operation: &str) -> &str {
 
 /// Generate a human-readable optimization reason for a given operation.
 fn generate_optimization_reason(operation: &str, before_tokens: i64, after_tokens: i64) -> String {
-    let saved = before_tokens - after_tokens;
+    // Clamp at 0 — a record can never legitimately expand, but guard against
+    // it rather than report a negative saving. The callers clamp the same way
+    // before summing, so this sentence agrees with the item's `saved_tokens`.
+    let saved = (before_tokens - after_tokens).max(0);
     let pct = if before_tokens > 0 {
         (saved as f64 / before_tokens as f64 * 100.0).round() as i64
     } else {
@@ -1635,6 +1638,13 @@ mod tests {
             0,
             "summary total_saved_tokens must clamp at 0"
         );
+        let reason = body["sessions"][0]["optimization_items"][0]["optimization_reason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("saving 0% (0 tokens)"),
+            "the sentence sitting next to saved_tokens must not claim a negative saving: {reason}"
+        );
 
         // Detail endpoint: same clamp.
         let state = make_app_state(db_path);
@@ -1659,6 +1669,11 @@ mod tests {
             body["total_compounded_saved"].as_i64().unwrap(),
             0,
             "detail total_compounded_saved must clamp at 0"
+        );
+        let reason = body["items"][0]["optimization_reason"].as_str().unwrap();
+        assert!(
+            reason.contains("saving 0% (0 tokens)"),
+            "the detail sentence must not claim a negative saving: {reason}"
         );
 
         // Restore HOME
@@ -1711,6 +1726,18 @@ mod tests {
     fn test_generate_optimization_reason_zero_before() {
         let reason = generate_optimization_reason("compress-response", 0, 0);
         assert!(reason.contains("0%"));
+    }
+
+    /// A row whose `after_tokens` exceeds `before_tokens` has no saving to
+    /// report: the item's `saved_tokens` clamps at 0, so the sentence next to
+    /// it in the same DTO must not claim a negative one.
+    #[test]
+    fn test_generate_optimization_reason_never_reports_a_negative_saving() {
+        let reason = generate_optimization_reason("compress-response", 800, 1000);
+        assert!(
+            reason.contains("saving 0% (0 tokens)"),
+            "an expanding row saves nothing: {reason}"
+        );
     }
 
     // ─── Unit tests for compute_diff_lines ────────────────────────────
