@@ -32,6 +32,8 @@ there because the original would remain visible and total context would grow. It
 only for additive environment-error guidance. A statistics record proves that a candidate became
 smaller, not by itself that the host removed the original from its model request.
 
+Retained JSON numbers preserve their precision during PostTool cleanup and record reduction. Core selects TOON only when decoding it recovers the same retained values and types; otherwise it keeps a JSON representation.
+
 ## Adapter processing rules
 
 The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one

@@ -2444,6 +2444,38 @@ mod tests {
         assert!(!applied.response.stash_keys.is_empty());
     }
 
+    #[test]
+    fn post_tool_lossless_cleanup_preserves_exact_numbers() {
+        for literal in [
+            "18446744073709551617",
+            "-9223372036854775809",
+            "1.234567890123456789",
+            "1e-400",
+        ] {
+            let content = format!(
+                "{{\n{}\"value\": {literal},\n{}\"label\": \"synthetic\"\n}}",
+                " ".repeat(600),
+                " ".repeat(600)
+            );
+            for replace_with_text in [false, true] {
+                let mut request = post_tool_request(&content);
+                request.content_origin = ContentOrigin::ApiResponse;
+                request.capabilities.replace_with_text = replace_with_text;
+                let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+                assert_eq!(outcome.response.disposition, Disposition::Applied);
+                assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+                assert_eq!(
+                    outcome.response.applied_operations,
+                    [AppliedOperation::JsonCleanup]
+                );
+                assert!(outcome.response.stash_keys.is_empty());
+                let output: Value = serde_json::from_str(&outcome.response.output).unwrap();
+                assert!(output["value"].is_number());
+                assert_eq!(output["value"].to_string(), literal);
+            }
+        }
+    }
+
     fn post_tool_request(content: &str) -> PostToolRequest {
         PostToolRequest {
             result_kind: ResultKind::Tool,

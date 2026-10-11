@@ -70,6 +70,8 @@ session. Short or already compact payloads may save only a few percent or pass
 through unchanged. See [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md#run-the-repository-reference-workload)
 for the exact inputs, command, full output, and limitations.
 
+Retained JSON numbers preserve their precision during PostTool cleanup and record reduction. Core selects TOON only when decoding it recovers the same retained values and types; otherwise it keeps a JSON representation.
+
 ## Applicable Scenarios & Expected Effects
 
 tokenless optimizes the tool-related content it handles—tool schemas, tool/API
