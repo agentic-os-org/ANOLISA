@@ -64,7 +64,15 @@ def _format_cosh(scan_result: dict) -> str:
     if verdict == "pass":
         return json.dumps({"decision": "allow"})
 
-    descs = [f"- {f['desc_zh']}" for f in findings]
+    # CLI 版本漂移时 findings 可能非列表/元素非字典/缺 desc_zh：fail-open
+    # 契约优先于崩溃（与 codex/qwen/qoder 的 .get 链对齐）
+    if not isinstance(findings, list):
+        findings = []
+    descs = [
+        f"- {f.get('desc_zh', f.get('desc_en', ''))}"
+        for f in findings
+        if isinstance(f, dict)
+    ]
     msg = f"[code-scanner] Detected {len(findings)} issue(s):\n" + "\n".join(descs)
 
     if verdict in {"warn", "deny"} and _MODE == "ask":
