@@ -255,19 +255,35 @@ fn flush(
     // the full subtree is still O(new files) because only directories
     // that received events are expanded, not the entire mount tree.
     let mut expanded: HashSet<PathBuf> = HashSet::new();
+    // Directories whose complete current file set was walked. A directory
+    // moved away and replaced within one debounce window (snapshot restore,
+    // `mv dir aside && mv new dir`) coalesces into a single event for a path
+    // that exists again, so no Remove ever names the old children.
+    let mut walked_dirs: Vec<String> = Vec::new();
     for path in pending_modify.iter() {
         if path.is_dir() {
+            let mut complete = true;
             for entry in walkdir::WalkDir::new(path)
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|e| !is_under_meta(mount, e.path()))
-                .flatten()
-                .filter(|e| e.file_type().is_file())
             {
-                expanded.insert(entry.path().to_path_buf());
+                match entry {
+                    Ok(entry) if entry.file_type().is_file() => {
+                        expanded.insert(entry.path().to_path_buf());
+                    }
+                    Ok(_) => {}
+                    // An unreadable subtree must not read as deleted.
+                    Err(_) => complete = false,
+                }
+            }
+            if complete && let Some(rel) = relative(mount, path) {
+                walked_dirs.push(rel);
             }
         }
     }
+    let walked_files: HashSet<String> =
+        expanded.iter().filter_map(|p| relative(mount, p)).collect();
     pending_modify.extend(expanded);
 
     // Phase 2 (lock-free): I/O — stat + extract text. Walking the FS and
@@ -329,6 +345,21 @@ fn flush(
     // entire walk+extract pass.
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
     let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+    if !walked_dirs.is_empty() {
+        // Literal prefix comparison: SQL LIKE would treat `_`/`%` in
+        // directory names as wildcards.
+        for known in store.known_paths()? {
+            let under_walked = walked_dirs.iter().any(|dir| {
+                dir.is_empty()
+                    || known
+                        .strip_prefix(dir.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            });
+            if under_walked && !walked_files.contains(&known) {
+                to_remove.push(known);
+            }
+        }
+    }
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
             tracing::warn!("index remove failed for {rel}: {e}");
