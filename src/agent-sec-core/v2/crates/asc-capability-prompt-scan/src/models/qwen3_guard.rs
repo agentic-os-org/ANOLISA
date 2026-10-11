@@ -435,11 +435,11 @@ fn match_label_token(token: &str) -> Option<&'static str> {
 fn collect_label_probabilities(top: &[Value]) -> HashMap<String, f64> {
     let mut raw: HashMap<String, f64> = HashMap::new();
     for t in top {
-        let tok = t.get("token").and_then(Value::as_str).unwrap_or("");
+        let surface = t.get("token").and_then(Value::as_str).unwrap_or("");
         let Some(lp) = t.get("logprob").and_then(Value::as_f64) else {
             continue;
         };
-        if let Some(label) = match_label_token(tok) {
+        if let Some(label) = match_label_token(surface) {
             let p = lp.exp();
             raw.entry(label.to_string())
                 .and_modify(|e| *e = e.max(p))
