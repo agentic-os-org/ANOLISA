@@ -1531,3 +1531,133 @@ fn normal_load_and_commit_reject_divergent_snapshot() {
     assert_eq!(table_count(&store, "task_events"), 1);
     assert_eq!(table_count(&store, "command_receipts"), 1);
 }
+
+#[test]
+fn suspended_cancel_after_cancelled_retryable_failure_settles() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    store
+        .commit_task(&task_commit(
+            &task_id,
+            &actor_id,
+            "wedge-source",
+            '1',
+            vec![
+                submitted(&task_id, &actor_id),
+                envelope(
+                    &task_id,
+                    &actor_id,
+                    2,
+                    TaskEvent::TaskQueued {
+                        run_id: run_id.clone(),
+                        runtime: RuntimeSelector {
+                            runtime: BoundedName::new("core").unwrap(),
+                            profile: None,
+                        },
+                    },
+                ),
+                envelope(
+                    &task_id,
+                    &actor_id,
+                    3,
+                    TaskEvent::RunStarted {
+                        run_id: run_id.clone(),
+                    },
+                ),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+    // The audited race: one commit carries the durable cancel request and
+    // the retryable runtime failure, leaving the Task Suspended+Failed with
+    // the request already recorded and the run lease released.
+    store
+        .commit_task(&task_commit(
+            &task_id,
+            &actor_id,
+            "wedge-race",
+            '2',
+            vec![
+                envelope(
+                    &task_id,
+                    &actor_id,
+                    4,
+                    TaskEvent::CancellationRequested {
+                        run_id: run_id.clone(),
+                        cause: CancelReason::UserRequested,
+                    },
+                ),
+                envelope(
+                    &task_id,
+                    &actor_id,
+                    5,
+                    TaskEvent::RunFailed {
+                        run_id: run_id.clone(),
+                        error: cosh_gateway_contracts::error::ContractError::new(
+                            "retryable_runtime_failure",
+                            cosh_gateway_contracts::error::ErrorCategory::RuntimeUnavailable,
+                            true,
+                            "Runtime is temporarily unavailable",
+                        )
+                        .unwrap(),
+                    },
+                ),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+    store
+        .connection_mut()
+        .execute(
+            "INSERT INTO run_leases(
+                 run_id, task_id, actor_id, lease_owner, generation, revision,
+                 expires_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, 'released-cancel-owner', 1, 1, 50, 2)",
+            params![run_id.as_str(), task_id.as_str(), actor_id.as_str()],
+        )
+        .unwrap();
+    let wedged = store.load_task(&task_id).unwrap();
+    assert_eq!(wedged.state(), TaskState::Suspended);
+    assert!(wedged.cancellation_requested());
+
+    // The coordinator re-cancel replays the guarded suspended-cancel triple
+    // verbatim; the store must settle it instead of rejecting forever.
+    store
+        .commit_suspended_cancel(
+            &task_commit(
+                &task_id,
+                &actor_id,
+                "wedge-resettle",
+                '3',
+                vec![
+                    envelope(
+                        &task_id,
+                        &actor_id,
+                        6,
+                        TaskEvent::CancellationRequested {
+                            run_id: run_id.clone(),
+                            cause: CancelReason::UserRequested,
+                        },
+                    ),
+                    envelope(
+                        &task_id,
+                        &actor_id,
+                        7,
+                        TaskEvent::RunCancelled {
+                            run_id: run_id.clone(),
+                            stage: CancellationStage::Runtime,
+                        },
+                    ),
+                    envelope(&task_id, &actor_id, 8, TaskEvent::TaskCancelled),
+                ],
+                Vec::new(),
+            ),
+            &run_id,
+        )
+        .unwrap();
+    let settled = store.load_task(&task_id).unwrap();
+    assert_eq!(settled.state(), TaskState::Cancelled);
+    assert_eq!(table_count(&store, "task_events"), 8);
+}
