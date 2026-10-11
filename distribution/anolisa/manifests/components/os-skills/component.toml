@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.16"
 
 [component]
 name = "os-skills"
-version = "0.6.1"
+version = "0.6.3"
 layer = "runtime"
 domain = "tools"
 description = "Curated OS Skill library for agent runtimes"
