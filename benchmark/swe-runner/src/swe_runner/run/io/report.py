@@ -35,6 +35,9 @@ class RunReport(BaseModel):
     metadata_path: Path | None = None
     started_at_ns: int = 0
     ended_at_ns: int = 0
+    # Instances filtered out by resume because a previous run already wrote
+    # their per-instance result files. Zero for fresh and --redo runs.
+    skipped_existing: int = 0
 
     model_config = {"arbitrary_types_allowed": True}
 
