@@ -79,7 +79,9 @@ export function detectBOM(buf: Buffer): BOMInfo | null {
  */
 function decodeUTF16BE(buf: Buffer): string {
   if (buf.length === 0) return '';
-  const swapped = Buffer.from(buf); // swap16 mutates in place, so copy
+  // Match Node's UTF-16LE decoder: ignore an incomplete final code unit.
+  const usable = buf.length - (buf.length % 2);
+  const swapped = Buffer.from(buf.subarray(0, usable)); // swap16 mutates, so copy
   swapped.swap16();
   return swapped.toString('utf16le');
 }
