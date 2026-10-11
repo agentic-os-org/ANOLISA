@@ -49,6 +49,12 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## Spreadsheet Edit Preview
+
+The XLSX row-shift helper supports `--dry-run` to inspect change counts for
+worksheets, charts, tables and pivot caches before applying an edit. See the
+[user guide](../../docs/user-guide/en/user-entrypoint/os-skills.md) for the preview workflow.
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

@@ -84,6 +84,21 @@ confirm_destructive = true
 
 ---
 
+## 电子表格编辑预览
+
+解包 XLSX 工作簿后，可先预览行引用移动，再应用编辑：
+
+```bash
+python3 src/os-skills/others/xlsx/scripts/xlsx_shift_rows.py /tmp/xlsx_work insert 5 2 --dry-run
+python3 src/os-skills/others/xlsx/scripts/xlsx_shift_rows.py /tmp/xlsx_work insert 5 2
+```
+
+参数依次为解包目录、`insert` 或 `delete`、起始行和行数。`--dry-run` 执行相同的
+转换并报告各部分及总修改计数，同时保持每个文件不变。它覆盖辅助脚本已有的工作表、
+图表、表格和透视缓存引用。命名范围、结构化表格引用和外部工作簿链接仍需手动检查。
+查看预览后，去掉 `--dry-run` 运行命令应用修改，然后重新打包并验证工作簿。
+预览成功退出 0；CLI 语法无效退出 2。
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

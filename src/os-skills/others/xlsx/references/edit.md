@@ -508,11 +508,16 @@ Inserting a row at position N shifts all rows from N downward. Every reference t
 
 ```bash
 # Insert 1 row at row 5: all rows 5 and below shift down by 1
+python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 1 --dry-run
 python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 1
 
 # Delete 1 row at row 8: all rows 9 and above shift up by 1
 python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1
 ```
+
+Use `--dry-run` first to inspect the same per-part and total change counts
+without writing files. Remove the flag to apply the edit; named ranges,
+structured references and external links still need the manual review below.
 
 The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
 
