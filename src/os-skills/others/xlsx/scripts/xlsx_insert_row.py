@@ -34,6 +34,12 @@ import sys
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
 
+# Keep direct scripts and file-based module loaders using the bundled helper.
+_SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIRECTORY not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIRECTORY)
+from xlsx_coordinates import col_number  # noqa: E402
+
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -61,13 +67,6 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
             fh.write("\n".join(lines) + "\n")
     except Exception:
         pass
-
-
-def col_number(s: str) -> int:
-    n = 0
-    for c in s.upper():
-        n = n * 26 + (ord(c) - 64)
-    return n
 
 
 def find_ws_path(work_dir: str, sheet_name: str | None) -> str:

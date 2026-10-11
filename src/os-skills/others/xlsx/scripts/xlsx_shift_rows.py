@@ -40,22 +40,11 @@ import xml.etree.ElementTree as ET
 import xml.dom.minidom
 
 
-def col_letter(n: int) -> str:
-    """Convert 1-based column number to Excel column letter(s)."""
-    r = ""
-    while n > 0:
-        n, rem = divmod(n - 1, 26)
-        r = chr(65 + rem) + r
-    return r
-
-
-def col_number(s: str) -> int:
-    """Convert Excel column letter(s) to 1-based column number."""
-    n = 0
-    for c in s.upper():
-        n = n * 26 + (ord(c) - 64)
-    return n
-
+# Keep direct scripts and file-based module loaders using the bundled helper.
+_SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIRECTORY not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIRECTORY)
+from xlsx_coordinates import col_letter, col_number  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Core shifting logic for formula strings
