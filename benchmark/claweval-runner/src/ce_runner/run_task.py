@@ -138,7 +138,7 @@ def discover_tasks(tasks_dir: str, tag: str = None, range_str: str = None,
     # Step 3: --filter substring (case-insensitive)
     if filter_str:
         filt = filter_str.lower()
-        task_dirs = [d for d in task_dirs if filt in d.lower()]
+        task_dirs = [d for d in task_dirs if filt in Path(d).name.lower()]
 
     # Step 4: --tag exact match on tags list
     if tag:
