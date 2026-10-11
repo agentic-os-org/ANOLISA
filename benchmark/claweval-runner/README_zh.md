@@ -71,6 +71,11 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 以下所有命令均假设使用 `uv run`（项目 venv 自动解析）。
 
+运行 `ce-runner batch --dry-run --prefix T --range 1-10 --trials 3` 可在评测前
+预览批量任务选择。它沿用正常 batch 的选择规则，输出任务目录名和请求的
+运行次数。该模式不需要模型/judge 凭据或运行中的 gateway，也不创建 trace
+输出。选择错误仍会报错；运行环境及 fixture 检查在实际评测时执行。
+
 > **除非已 export model/judge 环境变量，否则必须传 `--config`。** `run`/`batch` **不会**自动加载 `claw-eval/config.yaml`；请传 `--config claw-eval/config.yaml`（由 `scripts/configure_model.py` 写入），或 export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` 与 `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`。
 
 ```bash
@@ -112,6 +117,7 @@ ce-runner 支持三种任务前缀,对应不同执行模式:
 | `--chunk-size` | 4 | 每 chunk 的任务数(控制峰值内存;会自动提升到 --parallel) |
 | `--trace-prefix` | `openclaw` | trace 目录名前缀 |
 | `--skip-preflight` | false | 跳过 openclaw 插件 + docker 预检 |
+| `--dry-run` | false | 预览批量任务选择及请求的试验次数 |
 
 ## 输出
 

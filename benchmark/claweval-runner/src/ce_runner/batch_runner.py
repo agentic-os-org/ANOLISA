@@ -91,13 +91,6 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
             f"Adjusting chunk_size to {parallel}.")
         chunk_size = parallel
 
-    # Load config
-    cfg = load_config(config_path) if config_path else {}
-    judge_config = get_judge_config(cfg)
-    model_config = get_model_config(cfg)
-    ua_config = get_user_agent_config(cfg)
-    require_valid_config(config_path, judge_config, model_config)
-
     # Discover tasks
     tasks_file = getattr(args, "tasks_file", None)
     tasks_string = getattr(args, "tasks_string", None)
@@ -144,6 +137,19 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
         if not task_dirs:
             log("No tasks matched the given filters.")
             sys.exit(1)
+
+    if getattr(args, "dry_run", False):
+        log(f"Dry run: {len(task_dirs)} tasks x {trials} trials = {len(task_dirs) * trials} runs")
+        for task_dir in task_dirs:
+            log(f"  {os.path.basename(task_dir)}")
+        return
+
+    # Load config only after task selection so dry runs need no credentials.
+    cfg = load_config(config_path) if config_path else {}
+    judge_config = get_judge_config(cfg)
+    model_config = get_model_config(cfg)
+    ua_config = get_user_agent_config(cfg)
+    require_valid_config(config_path, judge_config, model_config)
 
     # Check gateway
     gateway_port = check_gateway(OPENCLAW_CONFIG)
