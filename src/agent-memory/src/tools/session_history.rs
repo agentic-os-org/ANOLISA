@@ -210,23 +210,64 @@ fn extract_body(content: &str) -> String {
 }
 
 fn parse_count_from_body(body: &str, keyword: &str) -> usize {
-    // Look for patterns like "42 tool calls" or "42 次工具调用"
+    // The count is anchored to the keyword, not "first number on the
+    // line": the summary generator writes
+    // "Session 持续约 15 分钟，共 42 次工具调用（…）" — the minutes come
+    // first, so a first-number scan reports the duration as the count.
+    // Take the number nearest the keyword occurrence ("42 次工具调用" /
+    // "42 tool calls"), before it first, then after it.
     for line in body.lines() {
-        if line.contains(keyword) || (keyword == "tool calls" && line.contains("次")) {
-            // Extract first number
-            let num: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = num.parse::<usize>() {
-                return n;
-            }
-            // Try to find number in the line
-            for word in line.split_whitespace() {
-                if let Ok(n) = word.parse::<usize>() {
-                    return n;
-                }
-            }
+        let needle = if keyword == "tool calls" && !line.contains(keyword) {
+            "次工具调用" // Chinese generator wording
+        } else {
+            keyword
+        };
+        let Some(pos) = line.find(needle) else {
+            continue;
+        };
+        if let Some(count) = last_number(&line[..pos]) {
+            return count;
+        }
+        if let Some(count) = first_number(&line[pos + needle.len()..]) {
+            return count;
         }
     }
     0
+}
+
+/// Last separator-delimited run of ASCII digits, as `usize`.
+fn last_number(text: &str) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            best = current.parse().ok();
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        best = current.parse().ok();
+    }
+    best
+}
+
+/// First run of ASCII digits, as `usize`.
+fn first_number(text: &str) -> Option<usize> {
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            return current.parse().ok();
+        }
+    }
+    if current.is_empty() {
+        None
+    } else {
+        current.parse().ok()
+    }
 }
 
 fn parse_list_from_body(body: &str, prefix: &str) -> Vec<String> {
@@ -279,5 +320,13 @@ mod tests {
     fn parse_count_returns_zero_when_not_found() {
         let body = "No tool calls mentioned here.";
         assert_eq!(parse_count_from_body(body, "tool calls"), 0);
+    }
+
+    #[test]
+    fn parse_count_generator_format_reports_calls_not_minutes() {
+        // Regression: the summary generator writes the duration before the
+        // call count, so the old first-number scan reported the minutes.
+        let body = "Session 持续约 15 分钟，共 42 次工具调用（40 成功，2 失败），使用工具类型: `mem_write`，总数据量 1234 bytes。";
+        assert_eq!(parse_count_from_body(body, "tool calls"), 42);
     }
 }
