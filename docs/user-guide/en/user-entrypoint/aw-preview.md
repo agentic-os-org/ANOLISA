@@ -42,6 +42,111 @@ install -d -m 700 "$AW_DEMO" "$AW_DEMO/workspace"
 
 For OpenClaw alone, replace `--qoder "$AW_QODER"` with `--node "$AW_NODE" --openclaw "$AW_OPENCLAW"`; supply the native settings and state options described in step 5 when launching. You can also provide both Agent entrypoints. No sec-core socket or Provider package is required. Empty `providers` and `events` mean no AW policy checks or per-tool AW audit; native permissions and existing Hooks/plugins still apply. AW still creates an instance and starts/reuses its shared service. Exit the Agent and stop that service with `aw stop --config "$AW_DEMO/aw-core.yaml"`.
 
+## Edit existing Provider and Hook configuration
+
+Use `aw-package config` as the configuration owner to view, validate and change
+an existing YAML or JSON file. These commands are offline: they do not execute
+Providers or Hooks, install native callbacks, start an Agent or reload a service.
+Exit active Agent sessions and stop the service using the original configuration
+before changing it, then run the Agent again with the updated file. The new
+configuration bytes select a new revision; an existing service does not adopt
+edits automatically.
+
+Every action requires `--config` with an absolute, symlink-free file path. Use an
+owned regular file without hard links, special permission bits or group/world
+write permissions; its parent must also be owned and not group/world writable.
+Unknown, duplicate or incomplete options are errors. Definition files can use
+absolute paths or paths relative to the current directory; each must be a
+regular file containing exactly one complete YAML/JSON object. Standard input is
+not supported. Input and expanded JSON are limited to 4 MiB and depth 32.
+Duplicate keys, non-string keys, YAML merge keys/custom tags, non-finite numbers
+and multiple documents are rejected. Unknown public fields are rejected while
+Provider-owned `config` keys remain opaque.
+
+| Command | Behavior |
+| --- | --- |
+| `aw-package config show --config ABS_FILE` | Print the complete working configuration as pretty JSON |
+| `aw-package config show --config ABS_FILE --provider NAME` | Print one Provider |
+| `aw-package config show --config ABS_FILE --event EVENT [--id ID]` | Print one event, or a step with its event-scoped ID |
+| `aw-package config validate --config ABS_FILE` | Check the complete configuration; print `Valid configuration` on success |
+| `aw-package config add-provider --config ABS_FILE --name NAME --definition FILE` | Add a complete Provider definition |
+| `aw-package config remove-provider --config ABS_FILE --name NAME` | Remove an unreferenced Provider |
+| `aw-package config add-event --config ABS_FILE --event EVENT --definition FILE` | Add an explicitly configured event |
+| `aw-package config add-hook --config ABS_FILE --event EVENT --definition FILE` | Append a complete step, whose `id` is in the definition |
+| `aw-package config remove-hook --config ABS_FILE --event EVENT --id ID` | Remove one event-scoped step |
+
+`show` intentionally includes private Provider values; choose where its output is
+displayed or saved. Provider and event selectors are mutually exclusive, and
+`--id` requires `--event`. A selected identity that does not exist is an error.
+`show` and `validate` leave the source file unchanged.
+
+Add operations preserve the file when an identical definition already exists;
+a different definition under the same name or event-scoped step ID is a conflict.
+Remove operations preserve the file when the identity is already absent. Successful
+mutations print `Updated configuration` or `Configuration unchanged`. Remove all
+referencing steps, including disabled steps, before removing their Provider.
+Removing an event's last step retains its event options and empty `steps` array.
+`add-hook` requires an existing event: `add-event` makes enablement explicit and
+never overrides an existing event's options.
+
+Each mutating command publishes one operation atomically. Several commands are
+separate publications, so earlier successful commands remain applied if a later
+command fails.
+
+For example, add a native before-tool Hook to the empty core configuration above.
+Replace `/opt/company/bin/tool-audit` with your own Hook executable, which must
+follow the selected Agent's native response contract.
+
+```bash
+cat > "$AW_DEMO/provider.yaml" <<'YAML'
+protocol: native-hook/v1alpha1
+transport:
+  type: stdio
+  location: agent
+  argv: [/opt/company/bin/tool-audit]
+timeout_ms: 1000
+max_output_bytes: 4096
+config: {}
+YAML
+cat > "$AW_DEMO/event.yaml" <<'YAML'
+enabled: true
+required: false
+steps: []
+YAML
+cat > "$AW_DEMO/hook.yaml" <<'YAML'
+id: company-before
+provider: company
+native: {}
+on_error: report
+YAML
+chmod 600 "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config add-provider --config "$AW_DEMO/aw-core.yaml" \
+  --name company --definition "$AW_DEMO/provider.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config add-event --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --definition "$AW_DEMO/event.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config add-hook --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --definition "$AW_DEMO/hook.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config show --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --id company-before
+"$AW_PREVIEW_PREFIX/bin/aw-package" config validate --config "$AW_DEMO/aw-core.yaml"
+"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-hook --config "$AW_DEMO/aw-core.yaml" \
+  --event tool.before --id company-before
+"$AW_PREVIEW_PREFIX/bin/aw-package" config remove-provider --config "$AW_DEMO/aw-core.yaml" \
+  --name company
+rm "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml" "$AW_DEMO/hook.yaml"
+```
+
+A real change atomically replaces the file with serialized YAML, retaining
+permission bits and unrelated values, but rewriting comments, formatting and key
+order. Extended attributes and ACLs are not preserved. A no-op retains exact bytes
+and inode. Validation errors, conflicts, outstanding references, lock contention
+and staging failures preserve the existing file. Concurrent changes cause a stale
+snapshot error rather than an automatic merge or retry. Other writers must honor
+the same file lock to avoid a race at publication. Save a copy before editing if
+you need the previous text for rollback; this is atomic publication rather than a
+power-loss durability guarantee. Passing validation establishes static references
+and field shape, not Provider admission or native effect adoption.
+
 ## 2. Optionally install and start sec-core
 
 Skip steps 2–5 for core-only use. For the security demo, install the matching extension into the core prefix first:

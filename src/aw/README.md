@@ -19,11 +19,16 @@ core; select `--component all` for the existing combined distribution.
 only true/false, with effects declared in YAML; AW supplies the Provider handshake
 and response correlation. See [boolean policy commands](../../docs/user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
 
+`aw-package config` views, validates and edits Providers and Hook steps in an
+existing YAML/JSON file. Edits are offline and preserve unrelated values; declare
+events explicitly before adding steps. See the [editing reference](../../docs/user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration).
+
 ## Available today
 
 | Capability | Availability |
 | --- | --- |
 | Validate one `aw.yaml` with named Providers and all 16 event names | ✅ |
+| View, validate, add or remove Providers and Hook steps in an existing file | ✅ Offline `aw-package config`; no service reload |
 | Start Qoder CLI 1.1.64 and connect before/after tool Hooks | ✅ Linux source build |
 | Run structured Providers before tools (`observe`/`block`) and after successful tools (`observe`) | ✅ |
 | Execute native Hook commands with unchanged callback input | ✅ Byte output and exit status returned to Qoder; rewrite chains and approval flows excluded |

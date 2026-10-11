@@ -15,11 +15,16 @@ AW core 可独立构建与初始化，无需 sec-core。`aw-build` 默认只构�
 布尔判断脚本只返回 true/false，effect 放在 YAML 中，AW 负责 Provider 握手
 和响应关联。见[布尔判断脚本](../../docs/user-guide/zh/user-entrypoint/aw.md#布尔判断脚本)。
 
+`aw-package config` 查看、校验和编辑已有 YAML/JSON 文件中的 Provider 与 Hook
+步骤。编辑离线完成并保留无关配置值；添加步骤前须显式声明事件。
+见[编辑参考](../../docs/user-guide/zh/user-entrypoint/aw-preview.md#编辑已有-provider-与-hook-配置)。
+
 ## 当前可用范围
 
 | 能力 | 可用状态 |
 | --- | --- |
 | 校验一份包含命名 Provider 和全部 16 个事件名的 `aw.yaml` | ✅ |
+| 查看、校验、增删已有文件中的 Provider 与 Hook 步骤 | ✅ 离线 `aw-package config`；不重载服务 |
 | 启动 Qoder CLI 1.1.64 并接通工具前后 Hook | ✅ Linux 源码构建 |
 | 工具前执行结构化 Provider 的 `observe`/`block`，工具成功后执行 `observe` | ✅ |
 | 执行回调输入保持不变的原生 Hook 命令 | ✅ 字节输出和退出状态交回 Qoder；不含重写链与审批流程 |
