@@ -93,6 +93,15 @@ class SkillLedgerActivationJob(BackgroundJob):
         return self._last_processed
 
     @property
+    def pending_count(self) -> int:
+        """Return the number of coalesced changes waiting for the debounce.
+
+        Feeds the daemon.health `queues.queued` metric: a skill-ledger
+        backlog is the only real queue in the daemon.
+        """
+        return len(self._pending)
+
+    @property
     def worker_pid(self) -> int | None:
         """Return the worker PID for diagnostics."""
         return self._worker_client.pid
