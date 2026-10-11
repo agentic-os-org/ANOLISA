@@ -347,6 +347,18 @@ impl GenAIBuilder {
                     meta.insert("operation_name".to_string(), "text_completion".to_string());
                 } else if http.path.contains("/api/v1/copilot/generate_copilot") {
                     meta.insert("operation_name".to_string(), "chat".to_string());
+                } else if http.path.contains("/v1/responses")
+                    || crate::parser::llm::is_dashscope_native_path(&http.path)
+                {
+                    // The Responses API (codex CLI) and the DashScope/Bailian
+                    // native generation endpoints are chat-shaped inference —
+                    // a message list in, answer text out — like the copilot
+                    // gateway above. Both are in the shared LLM path set that
+                    // decides a row is created at all (parser::llm::
+                    // is_llm_api_path), so leaving them unlabeled here stores
+                    // NULL in genai_events.operation_name while the iLogtail
+                    // exporter substitutes "chat" for the same call.
+                    meta.insert("operation_name".to_string(), "chat".to_string());
                 }
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
                 if let Some(ref cid) = conversation_id {
@@ -1358,6 +1370,51 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert_eq!(call.metadata.get("operation_name").unwrap(), "chat");
         assert_eq!(call.provider, "sysom");
+    }
+
+    /// The Responses API is in the shared LLM path set (its calls create rows
+    /// and are audited), but the operation_name derivation never learned it,
+    /// so a codex CLI call's row kept `genai_events.operation_name` NULL while
+    /// the iLogtail exporter substituted "chat" for the same call.
+    #[test]
+    fn test_build_llm_call_responses_path_operation_name() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-5","instructions":"Be terse.","input":[{"type":"message","role":"user","content":"hi"}]}"#.to_string();
+        for path in [
+            "/v1/responses",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
+        ] {
+            let http = make_http(path, Some(body.clone()), None);
+            let call = build_call(&builder, &[AnalysisResult::Http(http)])
+                .unwrap_or_else(|| panic!("{path}: a Responses call must build"));
+            assert_eq!(
+                call.metadata.get("operation_name").unwrap(),
+                "chat",
+                "{path}: a chat-shaped Responses call must be labeled"
+            );
+        }
+    }
+
+    /// The DashScope/Bailian native generation endpoints are the other
+    /// admitted path set members the derivation skipped: a native call row
+    /// also kept `operation_name` NULL.
+    #[test]
+    fn test_build_llm_call_dashscope_native_operation_name() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen3-max","input":{"messages":[{"role":"user","content":"hi"}]},"parameters":{"result_format":"message"}}"#.to_string();
+        for path in [
+            "/api/v1/services/aigc/text-generation/generation",
+            "/api/v1/services/aigc/multimodal-generation/generation",
+        ] {
+            let http = make_http(path, Some(body.clone()), None);
+            let call = build_call(&builder, &[AnalysisResult::Http(http)])
+                .unwrap_or_else(|| panic!("{path}: a native call must build"));
+            assert_eq!(
+                call.metadata.get("operation_name").unwrap(),
+                "chat",
+                "{path}: a chat-shaped native call must be labeled"
+            );
+        }
     }
 
     #[test]
