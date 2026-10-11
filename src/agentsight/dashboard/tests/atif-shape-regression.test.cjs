@@ -158,6 +158,37 @@ test('omitted default tool arguments render through the real step and tool compo
   assert.doesNotThrow(() => page.renderStep(value));
 });
 
+test('cached-only step metrics remain visible in the step card', () => {
+  const page = viewer();
+  for (const metrics of [
+    { cached_tokens: 123 },
+    { prompt_tokens: null, completion_tokens: null, cached_tokens: 123 },
+  ]) {
+    const value = step({ metrics });
+    const data = document({ steps: [value] });
+    assert.equal(page.parts.isAtifDocument(data), true, 'the partial metrics are valid ATIF');
+    page.import(data);
+    assert.equal(page.error(), undefined);
+    assert.ok(JSON.stringify(page.renderStep(value)).includes(page.t('atif.cacheLabel', { n: '123' })),
+      'cached-only metrics should render a cache badge');
+  }
+});
+
+test('cache badge keeps mixed metrics and omits zero or absent cache-only rows', () => {
+  const page = viewer();
+  for (const metrics of [undefined, {}, { cached_tokens: null }, { cached_tokens: 0 }]) {
+    const rendered = JSON.stringify(page.renderStep(step({ metrics })));
+    assert.ok(!rendered.includes('bg-yellow-50'), 'unknown or zero cache does not show a badge');
+    assert.ok(!rendered.includes('border-t border-gray-100'), 'empty metrics do not add a separator');
+  }
+  const rendered = JSON.stringify(page.renderStep(step({ metrics: {
+    prompt_tokens: 0, completion_tokens: 5, cached_tokens: 123,
+  } })));
+  assert.ok(rendered.includes(page.t('atif.inputLabel', { n: '0' })));
+  assert.ok(rendered.includes(page.t('atif.outputLabel', { n: '5' })));
+  assert.ok(rendered.includes(page.t('atif.cacheLabel', { n: '123' })));
+});
+
 test('malformed conversation responses become localized load errors', async () => {
   for (const locale of ['en-US', 'zh-CN']) {
     const page = viewer(locale);

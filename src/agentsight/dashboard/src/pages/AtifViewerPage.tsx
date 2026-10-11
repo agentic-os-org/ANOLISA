@@ -223,7 +223,8 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
   const hasObservation = observationResults.length > 0;
   const hasMetrics = !!step.metrics && (
     step.metrics.prompt_tokens != null ||
-    step.metrics.completion_tokens != null
+    step.metrics.completion_tokens != null ||
+    (step.metrics.cached_tokens != null && step.metrics.cached_tokens > 0)
   );
 
   return (
