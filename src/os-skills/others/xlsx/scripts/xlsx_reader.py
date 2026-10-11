@@ -27,7 +27,9 @@ from pathlib import Path
 # Format detection and loading
 # ---------------------------------------------------------------------------
 
-def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dict:
+def detect_and_load(
+    file_path: str, sheet_name_filter: str | None = None, header_row: int | None = None
+) -> dict:
     """
     Load file into {sheet_name: DataFrame} dict.
     CSV/TSV files are mapped to a single-key dict using the file stem as key.
@@ -49,7 +51,10 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
 
     if suffix in (".xlsx", ".xlsm"):
         target = sheet_name_filter if sheet_name_filter else None
-        result = pd.read_excel(file_path, sheet_name=target)
+        result = pd.read_excel(
+            file_path, sheet_name=target,
+            header=header_row - 1 if header_row is not None else 0,
+        )
         # pd.read_excel with sheet_name=None returns dict; with a name, returns DataFrame
         if isinstance(result, dict):
             return result
@@ -319,6 +324,16 @@ def render_report(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def positive_header_row(value: str) -> int:
+    try:
+        row = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--header-row must be a positive integer") from error
+    if row <= 0:
+        raise argparse.ArgumentTypeError("--header-row must be a positive integer")
+    return row
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Read and analyze Excel/CSV files without modifying them."
@@ -332,10 +347,16 @@ def main() -> None:
         "--quality", action="store_true",
         help="Run data quality audit only (skip stats)"
     )
+    parser.add_argument(
+        "--header-row", type=positive_header_row, default=None,
+        help="one-based Excel row containing column headers (default: 1)",
+    )
     args = parser.parse_args()
+    if args.header_row is not None and Path(args.file).suffix.lower() not in {".xlsx", ".xlsm"}:
+        parser.error("--header-row is only supported for Excel input (.xlsx/.xlsm)")
 
     try:
-        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet)
+        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet, header_row=args.header_row)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

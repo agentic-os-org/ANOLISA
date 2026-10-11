@@ -27,6 +27,16 @@ python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx --json          # machine-re
 
 Supported formats: `.xlsx`, `.xlsm`, `.csv`, `.tsv`. The script tries multiple encodings for CSV (utf-8-sig, gbk, utf-8, latin-1).
 
+For Excel exports with a title or blank preamble, `--header-row 3` uses Excel
+row 3 as the column headers and starts table data below it. The row must be a
+positive one-based number. The option supports `.xlsx` and `.xlsm`, applies to
+all loaded sheets (or the selected `--sheet`), and leaves source bytes intact.
+Omitting it keeps row 1; CSV/TSV reject this Excel-only option.
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py export.xlsx --header-row 3 --sheet Sales --json
+```
+
 ### Step 2 — Custom Analysis with pandas
 
 Load data and perform the analysis the user requests:

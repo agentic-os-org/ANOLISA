@@ -35,7 +35,8 @@ Handle the request directly. Do NOT spawn sub-agents. Always write the output fi
 ## READ — Analyze data (read `references/read-analyze.md` first)
 
 Start with `xlsx_reader.py` for structure discovery, then pandas for custom analysis.
-Never modify the source file.
+Never modify the source file. For Excel exports with title or blank preamble
+rows, use `xlsx_reader.py input.xlsx --header-row 3` to select the actual headers.
 
 **Formatting rule**: When the user specifies decimal places (e.g. "2 decimal places"), apply that format to ALL numeric values — use `f'{v:.2f}'` on every number. Never output `12875` when `12875.00` is required.
 
