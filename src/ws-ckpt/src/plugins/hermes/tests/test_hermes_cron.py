@@ -1,6 +1,12 @@
 """Tests for hermes cron module."""
 
+import json
+import os
+import shlex
+import subprocess
 from unittest.mock import MagicMock, patch, call
+
+import pytest
 
 from hermes.cron import (
     validate_cron_expr,
@@ -281,3 +287,104 @@ class TestListInstalled:
     @patch("hermes.cron._read_crontab", return_value=None)
     def test_read_failure(self, _):
         assert CrontabManager.list_installed("/ws") == []
+
+
+@pytest.mark.parametrize("workspace", ["/work/o'brien", "/work/o'brien tasks"])
+def test_generated_quote_workspace_round_trip(workspace):
+    assert _extract_workspace(_build_cron_line(workspace, "0 * * * *")) == workspace
+
+
+@pytest.mark.parametrize("workspace", ["/work/o'brien", "/work/o'brien tasks"])
+def test_quoted_workspace_schedule_lifecycle(workspace):
+    unrelated = _build_cron_line("/work/unrelated", "1 * * * *")
+    lines = ["# keep this comment", unrelated]
+
+    def write_lines(new_lines):
+        lines[:] = new_lines
+        return True
+
+    with (
+        patch.object(CrontabManager, "_with_lock", side_effect=lambda operation: operation()),
+        patch("hermes.cron._read_crontab", side_effect=lambda: list(lines)),
+        patch("hermes.cron._write_crontab", side_effect=write_lines),
+    ):
+        assert CrontabManager.sync(workspace, ["0 * * * *"])
+        assert CrontabManager.list_installed(workspace) == ["0 * * * *"]
+        assert CrontabManager.sync(workspace, ["5 4 * * *"])
+        assert CrontabManager.list_installed(workspace) == ["5 4 * * *"]
+        assert len(lines) == 3
+        assert CrontabManager.remove(workspace)
+        assert lines == ["# keep this comment", unrelated]
+
+
+def _cron_command_part(command):
+    # Independent crontab protocol oracle: cron processes percent escapes before
+    # the shell and stops at an unescaped percent, regardless of shell quotes.
+    result = []
+    escaped = False
+    for character in command:
+        if escaped:
+            if character == "%":
+                result.pop()
+            result.append(character)
+            escaped = False
+        elif character == "%":
+            break
+        else:
+            result.append(character)
+            escaped = character == "\\"
+    return "".join(result)
+
+
+@pytest.mark.parametrize("workspace", [
+    "/work/o'brien tasks",
+    "/work/100% done",
+    "/work/back\\%slash",
+    "/work/o'brien%%",
+])
+def test_generated_workspace_reaches_shell_as_one_literal_argument(tmp_path, workspace):
+    capture = tmp_path / "argv.json"
+    executable = tmp_path / "ws-ckpt"
+    executable.write_text(
+        "#!/usr/bin/python3\n"
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path(os.environ['WS_CKPT_CRON_TEST_CAPTURE']).write_text(json.dumps(sys.argv[1:]))\n"
+    )
+    executable.chmod(0o700)
+    line = _build_cron_line(workspace, "0 * * * *")
+    command = line.split(None, 5)[5]
+    command = command.replace("/usr/local/bin/ws-ckpt", shlex.quote(str(executable)), 1)
+    output = subprocess.run(
+        ["/bin/sh", "-c", _cron_command_part(command)],
+        env={**os.environ, "WS_CKPT_CRON_TEST_CAPTURE": str(capture)},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert output.returncode == 0, output.stderr
+    arguments = json.loads(capture.read_text())
+    assert arguments[:3] == ["checkpoint", "-w", workspace]
+    assert arguments[3] == "-s"
+    assert arguments[4].startswith("cron-") and arguments[4][5:].isdigit()
+    assert _extract_workspace(line) == workspace
+
+
+def test_workspace_matching_preserves_legacy_entries_and_unrelated_commands():
+    assert _extract_workspace('0 * * * * ws-ckpt checkpoint -w "/work/tasks here"') == "/work/tasks here"
+    assert _extract_workspace("@reboot ws-ckpt checkpoint -w /work/tasks") == "/work/tasks"
+    assert _extract_workspace("0 * * * * ws-ckpt checkpoint -w '/work/100% done'") == "/work/100% done"
+    assert _extract_workspace("0 * * * * ws-ckpt checkpoint -w '/unterminated") is None
+    assert _extract_workspace("# 0 * * * * ws-ckpt checkpoint -w '/work/tasks'") is None
+    assert _extract_workspace("0 * * * * echo ws-ckpt checkpoint -w '/work/tasks'") is None
+    assert _extract_workspace("0 * * * * ws-ckpt checkpoint -w /work/hash#name") == "/work/hash#name"
+    assert _extract_workspace(r"0 * * * * ws-ckpt checkpoint -w '/work/back\%slash'") == r"/work/back\%slash"
+
+
+def test_sync_removes_broken_legacy_backslash_percent_entry():
+    workspace = r"/work/back\%slash"
+    old_line = r"0 * * * * /usr/local/bin/ws-ckpt checkpoint -w '/work/back\%slash' -s old"
+    with (
+        patch.object(CrontabManager, "_with_lock", side_effect=lambda operation: operation()),
+        patch("hermes.cron._read_crontab", return_value=["# keep", old_line]),
+        patch("hermes.cron._write_crontab", return_value=True) as write,
+    ):
+        assert CrontabManager.sync(workspace, ["5 4 * * *"])
+        assert write.call_args.args[0] == ["# keep", _build_cron_line(workspace, "5 4 * * *")]
