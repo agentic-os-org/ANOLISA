@@ -9,6 +9,7 @@ from agent_sec_cli.correlation_context import (
     get_invocation_id,
 )
 from agent_sec_cli.daemon.errors import (
+    DaemonClientError,
     DaemonClientTimeoutError,
     DaemonProtocolError,
     DaemonTransportError,
@@ -16,12 +17,31 @@ from agent_sec_cli.daemon.errors import (
 from agent_sec_cli.daemon.protocol import (
     DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_TIMEOUT_MS,
+    MAX_TIMEOUT_MS,
     DaemonRequest,
     DaemonResponse,
     parse_response_line,
     serialize_request,
 )
 from agent_sec_cli.daemon.runtime import resolve_socket_path
+
+
+def _validate_client_timeout_ms(timeout_ms: int) -> int:
+    """Reject timeout values the wire protocol would reject.
+
+    Failing before a socket is opened keeps the error local instead of a
+    BadRequest round-trip after connecting to the daemon. Mirrors
+    ``_validate_timeout_ms`` on the server side, including the ceiling.
+    """
+    if (
+        not isinstance(timeout_ms, int)
+        or isinstance(timeout_ms, bool)
+        or timeout_ms <= 0
+    ):
+        raise DaemonClientError("timeout_ms must be a positive integer")
+    if timeout_ms > MAX_TIMEOUT_MS:
+        raise DaemonClientError(f"timeout_ms must not exceed {MAX_TIMEOUT_MS}")
+    return timeout_ms
 
 
 class DaemonClient:
@@ -34,7 +54,7 @@ class DaemonClient:
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         self.socket_path = resolve_socket_path(socket_path)
-        self.timeout_ms = timeout_ms
+        self.timeout_ms = _validate_client_timeout_ms(timeout_ms)
         self.max_response_bytes = max_response_bytes
 
     def call(
@@ -51,7 +71,13 @@ class DaemonClient:
         Callers must pass *trace_context* explicitly. Pass an empty dict
         ``{}`` when no caller correlation fields should be forwarded.
         """
-        effective_timeout_ms = timeout_ms or self.timeout_ms
+        # An explicit override of 0 must not silently become the client
+        # default (`or` would swallow it); only None means "use the default".
+        effective_timeout_ms = (
+            self.timeout_ms
+            if timeout_ms is None
+            else _validate_client_timeout_ms(timeout_ms)
+        )
         request = DaemonRequest(
             method=method,
             params={} if params is None else params,
