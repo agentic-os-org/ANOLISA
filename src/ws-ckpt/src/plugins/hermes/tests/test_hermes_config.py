@@ -1,6 +1,8 @@
 """Tests for hermes plugin config module."""
 
 import os
+import sys
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -21,6 +23,29 @@ class TestHermesPluginConfig:
 
 
 class TestLoadConfig:
+    @pytest.mark.parametrize("section", ["disabled", ["workspace"], 17, True])
+    def test_non_mapping_section_uses_defaults_and_environment(self, section):
+        module = ModuleType("hermes_cli.config")
+        module.load_config = lambda: {"plugins": {"ws-ckpt": section}}
+        module.cfg_get = lambda config, *keys, **_kwargs: config["plugins"]["ws-ckpt"]
+        with patch.dict(sys.modules, {"hermes_cli.config": module}), patch.dict(
+            os.environ, {"WS_CKPT_WORKSPACE": "/env/workspace"}, clear=True
+        ):
+            cfg = load_config()
+        assert cfg.workspace == "/env/workspace"
+        assert cfg.auto_checkpoint is False
+        assert cfg.cron_schedules == []
+
+    def test_mapping_section_is_preserved_by_real_reader(self):
+        module = ModuleType("hermes_cli.config")
+        section = {"workspace": "/yaml/workspace", "autoCheckpoint": True}
+        module.load_config = lambda: {"plugins": {"ws-ckpt": section}}
+        module.cfg_get = lambda config, *keys, **_kwargs: config["plugins"]["ws-ckpt"]
+        with patch.dict(sys.modules, {"hermes_cli.config": module}), patch.dict(os.environ, {}, clear=True):
+            cfg = load_config()
+        assert cfg.workspace == "/yaml/workspace"
+        assert cfg.auto_checkpoint is True
+
     @patch("hermes.config._read_yaml_config", return_value={})
     def test_defaults_no_env(self, _mock_yaml):
         with patch.dict(os.environ, {}, clear=True):

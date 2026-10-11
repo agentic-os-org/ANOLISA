@@ -24,7 +24,8 @@ def _read_yaml_config() -> dict:
         from hermes_cli.config import cfg_get, load_config as hermes_load_config
 
         config = hermes_load_config()
-        return cfg_get(config, "plugins", "ws-ckpt", default={}) or {}
+        section = cfg_get(config, "plugins", "ws-ckpt", default={})
+        return section if isinstance(section, dict) else {}
     except Exception:
         # hermes_cli not available (e.g. standalone testing) or config missing
         return {}
