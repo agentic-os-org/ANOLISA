@@ -23,6 +23,7 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from venv_paths import python_path
 
 
 # 配置
@@ -102,7 +103,7 @@ def check_freshness(directory: Path) -> tuple[bool | None, str]:
 
 def get_venv_python() -> Path:
     """获取虚拟环境的 Python 路径"""
-    return VENV_DIR / "bin" / "python"
+    return python_path(VENV_DIR)
 
 
 def check_venv() -> bool:
