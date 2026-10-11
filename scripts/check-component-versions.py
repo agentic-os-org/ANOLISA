@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -144,23 +145,32 @@ def check_generated_contracts_untracked(errors: list[str]) -> None:
             errors.append(f"{path}: generated component contract must not be tracked")
 
 
+def run_contract_check(
+    errors: list[str], label: str, check: Callable[..., None], *args: str
+) -> None:
+    """Keep one invalid input from hiding failures in independent contracts."""
+    try:
+        check(errors, *args)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        errors.append(f"{label}: {error}")
+
+
 def main() -> int:
     errors: list[str] = []
-    try:
-        for source, target in TOML_CONTRACTS:
-            check_equal(errors, source, target)
-        for source, template in VERSION_TEMPLATES:
-            check_template(errors, source, template)
+    for source, target in TOML_CONTRACTS:
+        run_contract_check(errors, f"{source} -> {target}", check_equal, source, target)
+    for source, template in VERSION_TEMPLATES:
+        run_contract_check(errors, f"{source} -> {template}", check_template, source, template)
 
-        agent_memory_version = read_toml_version("src/agent-memory/Cargo.toml")
-        for path in AGENT_MEMORY_JSON:
-            actual = read_json_version(path)
-            if actual != agent_memory_version:
-                errors.append(f"{path}: expected {agent_memory_version}, found {actual}")
-        check_agent_memory_lock(errors, agent_memory_version)
-        check_generated_contracts_untracked(errors)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        errors.append(str(error))
+    agent_memory_source = "src/agent-memory/Cargo.toml"
+    for path in AGENT_MEMORY_JSON:
+        run_contract_check(errors, path, check_equal, agent_memory_source, path)
+    run_contract_check(
+        errors,
+        "agent-memory package lock",
+        lambda errors: check_agent_memory_lock(errors, read_toml_version(agent_memory_source)),
+    )
+    run_contract_check(errors, "generated contracts", check_generated_contracts_untracked)
 
     if errors:
         print("Component version check failed:", file=sys.stderr)
