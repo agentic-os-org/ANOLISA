@@ -61,6 +61,14 @@ class InstanceRunLifecycle:
         if prepared is None:
             return self._finish_failed_prepare(instance, prepare_error)
 
+        try:
+            return self._run_prepared(prepared, thread_name)
+        except BaseException:
+            # Preparation has transferred ownership, including until the finalizer starts.
+            prepared.cleanup_after_abort()
+            raise
+
+    def _run_prepared(self, prepared: PreparedAgentRun, thread_name: str) -> InstanceResult:
         manifest_error = self._write_input_manifest(prepared)
         if manifest_error is not None:
             return self._finish_failed_manifest(prepared, manifest_error)
