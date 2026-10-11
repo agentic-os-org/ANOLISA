@@ -21,7 +21,11 @@ SKIP_PREFIXES = ("http://", "https://", "mailto:", "#", "<")
 
 def repo_root() -> Path:
     out = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
     )
     return Path(out.stdout.strip())
 
@@ -34,6 +38,7 @@ def files_to_check(root: Path) -> list[Path]:
         [
             "git",
             "ls-files",
+            "-z",
             "docs/**/*.md",
             ":(glob)docs/*.md",
             ":(glob)*.md",
@@ -42,10 +47,11 @@ def files_to_check(root: Path) -> list[Path]:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
         cwd=root,
     )
-    return [root / line for line in out.stdout.splitlines() if line]
+    return [root / path for path in out.stdout.split("\0") if path]
 
 
 def check_file(md: Path, root: Path) -> list[str]:
