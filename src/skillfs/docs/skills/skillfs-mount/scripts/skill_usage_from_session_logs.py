@@ -135,18 +135,36 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
                 except json.JSONDecodeError:
                     continue
 
+                # A non-object line (array/scalar) has no event fields; skip it
+                # instead of aborting the whole session at the first such line.
+                if not isinstance(data, dict):
+                    continue
+
                 ts = data.get("timestamp", "")
                 if ts:
                     session_date = parse_timestamp(ts)
 
                 message = data.get("message", {})
+                if not isinstance(message, dict):
+                    continue
                 content = message.get("content", [])
 
                 if isinstance(content, list):
                     for item in content:
+                        if not isinstance(item, dict):
+                            continue
                         if item.get("type") == "toolCall":
                             args = item.get("arguments", {})
+                            if not isinstance(args, dict):
+                                continue
                             command = args.get("command", "")
+
+                            # Only strings can be matched against skill paths;
+                            # a list/number/object command must not reach
+                            # re.search, which would abort the whole file and
+                            # drop every later valid skill call.
+                            if not isinstance(command, str):
+                                continue
 
                             skill_name = find_skill_in_command(command, skill_paths)
                             if not skill_name:
@@ -224,8 +242,6 @@ def print_report(results: dict, mode: str = "summary"):
     print("Skill Usage Report (session logs)")
     print("=" * 60)
 
-    total_calls = 0
-
     print("\nWorkspace mapping:")
     print("-" * 40)
     for agent_id, workspace in sorted(results["workspaces"].items()):
@@ -242,7 +258,6 @@ def print_report(results: dict, mode: str = "summary"):
             for skill_name in sorted(agent_stats.keys(), key=lambda x: agent_stats[x], reverse=True):
                 count = agent_stats[skill_name]
                 print(f"    {skill_name}: {count}")
-                total_calls += count
 
     if mode in ("date", "all"):
         print("\nBy date:")
@@ -265,6 +280,10 @@ def print_report(results: dict, mode: str = "summary"):
             print(f"    Calls: {session['calls']}")
             for skill_name, count in sorted(session["skills"].items(), key=lambda x: x[1], reverse=True):
                 print(f"      {skill_name}: {count}")
+
+    total_calls = sum(
+        sum(agent_stats.values()) for agent_stats in results["by_agent"].values()
+    )
 
     print("\n" + "=" * 60)
     print(f"Total skill calls: {total_calls}")
