@@ -1,0 +1,16 @@
+rule_id: shell-tls-bypass
+cwe_id: CWE-295
+desc_en: >-
+  Transfer tool or runtime disables TLS/SSL certificate verification
+  (curl -k/--insecure, wget --no-check-certificate,
+  NODE_TLS_REJECT_UNAUTHORIZED=0), exposing downloads and API calls to
+  man-in-the-middle attacks.
+desc_zh: >-
+  传输工具或运行时禁用了 TLS/SSL 证书验证（curl -k/--insecure、
+  wget --no-check-certificate、NODE_TLS_REJECT_UNAUTHORIZED=0），
+  使下载与 API 调用面临中间人攻击风险。
+regex: |-
+  \bcurl\b[^;|&\n]*(\s-k(\s|$)|\s--insecure\b)
+  |\bwget\b[^;|&\n]*--no-check-certificate\b
+  |\bNODE_TLS_REJECT_UNAUTHORIZED\s*=\s*0\b
+severity: warn
