@@ -198,6 +198,19 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+Inspect tagged batch selections with the offline inventory:
+
+```bash
+python scripts/list_tasks.py --prefix T --difficulty hard --tag general
+```
+
+`--tag` matches exact case-sensitive string membership in the task's YAML `tags`
+list, including inline/block lists, and combines with prefix/difficulty filters.
+It does not match substrings or scalar tag fields. Empty selectors fail with a
+usage error; no matches use the existing empty-inventory message. Tag filtering
+uses the component's PyYAML dependency; default listing remains dependency-free
+and preserves its metadata/grouping/order.
+
 ## Troubleshooting
 
 | Issue | Fix |

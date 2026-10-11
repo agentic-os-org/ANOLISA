@@ -198,6 +198,17 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+离线任务清单可用于检查按标签选择的批量任务：
+
+```bash
+python scripts/list_tasks.py --prefix T --difficulty hard --tag general
+```
+
+`--tag` 按任务 YAML `tags` 列表中的字符串做区分大小写的完整匹配，支持行内及
+块列表，并可与前缀、难度筛选组合。它不会匹配子字符串或标量 tags 字段。
+空选择值会产生用法错误；没有匹配项时使用既有的空清单提示。标签筛选使用组件
+已有的 PyYAML 依赖；默认列举仍不需要外部依赖，元数据、分组和顺序保持不变。
+
 ## 故障排查
 
 | 问题 | 修复 |
