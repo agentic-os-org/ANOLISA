@@ -252,10 +252,13 @@ pub(super) fn build_shell_handoff_request(
 
 pub(crate) fn trust_key_from_command(command: &str) -> Option<String> {
     let cmd = raw_bash_command(command);
-    if cmd.trim().is_empty() || cmd.contains('\0') {
+    if cmd.is_empty() || cmd.contains('\0') {
         return None;
     }
-    Some(cmd.split_whitespace().collect::<Vec<_>>().join(" "))
+    // The key must stay byte-identical to the command the user approved.
+    // Folding interior whitespace let `touch a\ntouch b` and `touch a touch b`
+    // share one key, so trusting either silently authorized running the other.
+    Some(cmd.to_string())
 }
 
 pub(crate) fn command_matches_trust_key(command: &str, trusted: &HashSet<String>) -> bool {

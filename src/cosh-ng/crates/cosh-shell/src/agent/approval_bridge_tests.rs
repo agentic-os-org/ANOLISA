@@ -950,6 +950,209 @@ fn auto_mode_preloaded_trust_key_does_not_auto_approve_high_risk() {
     assert!(state.control.shell_handoff().approved_is_empty());
 }
 
+/// A private per-test audit root that removes itself on drop.
+///
+/// `test_with_root` needs a real directory to open a segment writer in; without
+/// it every auto-approval degrades to `blocked_audit_required` and a test can no
+/// longer tell "the user was asked" from "the audit sink was missing". Bind this
+/// before the `InlineState` holding the recorder so the recorder drops first.
+struct TempAuditRoot(std::path::PathBuf);
+
+impl TempAuditRoot {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempAuditRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn unique_audit_root(label: &str) -> TempAuditRoot {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("create audit root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private audit root");
+    }
+    TempAuditRoot(root.canonicalize().expect("canonical audit root"))
+}
+
+#[test]
+fn trusted_single_line_command_does_not_auto_approve_a_multiline_command() {
+    // E01: a session trust key must stay bound to the command the user
+    // actually approved. Folding every whitespace run made the two-line
+    // command below share a key with the single-line `touch`, so trusting
+    // either one silently authorized running the other.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("e01-multiline");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    state.control.trust.trust_session_command(
+        crate::approval::handoff::trust_key_from_command("touch /tmp/staged touch /tmp/published")
+            .expect("trust key"),
+    );
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: "ctrl-1".to_string(),
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({ "command": "touch /tmp/staged\ntouch /tmp/published" }),
+            tool_use_id: "toolu-1".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "shell command".to_string(),
+        display_text: "shell command".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render multiline approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.approvals.active_panel_id.is_some());
+    assert!(state.control.shell_handoff().approved_is_empty());
+}
+
+#[test]
+fn trusted_command_does_not_auto_approve_a_different_quoted_argument() {
+    // Same defect through quoted whitespace: the two `sed` scripts below edit
+    // different text, but one folded key covered both.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("e01-quoted");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    state.control.trust.trust_session_command(
+        crate::approval::handoff::trust_key_from_command(r#"sed -i "s/a b/X/" notes.txt"#)
+            .expect("trust key"),
+    );
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: "ctrl-1".to_string(),
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({ "command": "sed -i \"s/a  b/X/\" notes.txt" }),
+            tool_use_id: "toolu-1".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "shell command".to_string(),
+        display_text: "shell command".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render quoted-argument approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.approvals.active_panel_id.is_some());
+    assert!(state.control.shell_handoff().approved_is_empty());
+}
+
+#[test]
+fn trusted_command_still_auto_approves_the_identical_command() {
+    // Positive control: binding the key to the exact command must not break
+    // the feature the trust key exists for.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let audit_root = unique_audit_root("e01-identical");
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+            audit_root.path(),
+        )),
+        ..InlineState::default()
+    };
+    state.control.trust.trust_session_command(
+        crate::approval::handoff::trust_key_from_command("touch /tmp/staged").expect("trust key"),
+    );
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: "ctrl-1".to_string(),
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({ "command": "touch /tmp/staged" }),
+            tool_use_id: "toolu-1".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "shell command".to_string(),
+        display_text: "shell command".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render identical-command approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved,
+        "execution_path={:?}",
+        state.approvals.requests[0].execution_path,
+    );
+    assert!(state.approvals.active_panel_id.is_none());
+}
+
 #[test]
 fn trust_mode_surfaces_hook_followup_approval_after_auto_approved_tool() {
     // #1920 regression: after the trust path auto-approves the shell

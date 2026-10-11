@@ -17,17 +17,46 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 #[test]
-fn trust_key_from_command_normalizes_full_command() {
+fn trust_key_from_command_keeps_the_approved_content_intact() {
     assert_eq!(
         trust_key_from_command("git status").as_deref(),
         Some("git status")
     );
-    assert_eq!(
-        trust_key_from_command("npm   test").as_deref(),
-        Some("npm test")
-    );
     assert_eq!(trust_key_from_command("ls").as_deref(), Some("ls"));
     assert_eq!(trust_key_from_command("git -v").as_deref(), Some("git -v"));
+    // Only the display prefix and surrounding whitespace are dropped. Interior
+    // whitespace is part of the command: collapsing it made two different
+    // commands share one approval.
+    assert_eq!(
+        trust_key_from_command("  git status  ").as_deref(),
+        Some("git status")
+    );
+    assert_ne!(
+        trust_key_from_command("npm   test").as_deref(),
+        trust_key_from_command("npm test").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command("touch a\ntouch b").as_deref(),
+        trust_key_from_command("touch a touch b").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command("touch a\ttouch b").as_deref(),
+        trust_key_from_command("touch a touch b").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command(r#"sed -i "s/a  b/X/" f"#).as_deref(),
+        trust_key_from_command(r#"sed -i "s/a b/X/" f"#).as_deref()
+    );
+    // Shell metas need no surrounding spaces, so the spaced and unspaced forms
+    // are different text and must not share a key either.
+    assert_ne!(
+        trust_key_from_command("echo a; touch /tmp/x").as_deref(),
+        trust_key_from_command("echo a;touch /tmp/x").as_deref()
+    );
+    assert_ne!(
+        trust_key_from_command("echo a | wc -l").as_deref(),
+        trust_key_from_command("echo a|wc -l").as_deref()
+    );
 }
 
 #[test]
