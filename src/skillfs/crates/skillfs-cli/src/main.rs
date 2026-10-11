@@ -3369,15 +3369,34 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
         return Ok(());
     }
 
+    // `--enabled-only` filters before the section header is printed. A tree
+    // where every skill is disabled is the filtered view's empty-result
+    // case and must print the explicit `No enabled skills found in ...`
+    // summary — the same contract the empty store follows — instead of the
+    // `Skills in <source>:` header followed by zero entries. The dangling
+    // header promised content the filtered view did not have, and a script
+    // parsing the output could not tell "no enabled skills" apart from a
+    // rendering failure.
+    let names: Vec<&str> = if enabled_only {
+        let enabled: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|&name| store.get(name).is_some_and(|entry| entry.metadata.enabled))
+            .collect();
+        if enabled.is_empty() {
+            println!("No enabled skills found in {}", source.display());
+            return Ok(());
+        }
+        enabled
+    } else {
+        names
+    };
+
     println!("Skills in {}:", source.display());
     println!();
 
     for name in names {
         if let Some(entry) = store.get(name) {
-            if enabled_only && !entry.metadata.enabled {
-                continue;
-            }
-
             let status_icon = match &entry.parse_status {
                 skillfs_core::ParseStatus::Ok => "✓",
                 skillfs_core::ParseStatus::Degraded(_) => "⚠",
