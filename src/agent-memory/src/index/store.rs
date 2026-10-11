@@ -231,6 +231,14 @@ impl BM25Store {
 
         match existing_rowid {
             Some(rowid) => {
+                // A vector describes the extracted body, so metadata-only
+                // refreshes keep it while changed content needs backfilling.
+                tx.execute(
+                    "DELETE FROM files_vec WHERE path = ?1 AND EXISTS (
+                        SELECT 1 FROM files_fts WHERE rowid = ?2 AND body <> ?3
+                     )",
+                    params![rel_path, rowid, body],
+                )?;
                 tx.execute(
                     "UPDATE files SET mtime_ms=?1, size=?2, indexed_at=?3, agent_id=COALESCE(agent_id, ?4) WHERE rowid=?5",
                     params![mtime_ms, size as i64, now, agent_id, rowid],
