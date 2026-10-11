@@ -127,24 +127,112 @@ if f then
 end
 
 %postun -p <lua>
--- Run it only if we are uninstalling
-if arg[2] == 0
+-- Run it only if we are uninstalling. In an rpm lua scriptlet the
+-- interpreter token "<lua>" occupies arg[1] and the first scriptlet
+-- argument ($1, the count of package instances left after the
+-- operation: 0 on final erase, 1 on upgrade) is arg[2]. rpm <= 4.17
+-- passes it as a STRING ("0"), while newer rpm prepends
+-- "arg[2] = tonumber(arg[2]);" to the scriptlet body, so compare
+-- through tonumber() to fire on final erase under both layouts.
+local shells = '%{_sysconfdir}/shells'
+local cosh = '%{_bindir}/cosh'
+if tonumber(arg[2]) == 0
 then
-  t={}
-  for line in io.lines("/etc/shells")
-  do
-    if line ~= "%{_bindir}/cosh"
-    then
-      table.insert(t,line)
+  -- Replacement-present protection (mirrors src/cosh-ng/cosh-ng.spec.in):
+  -- `yum swap copilot-shell cosh-ng` installs cosh-ng -- which re-owns
+  -- /usr/bin/cosh and registers the very same /etc/shells line -- before
+  -- this final-erase %postun runs, so dropping the line unconditionally
+  -- would delete a login shell that is still valid. Probing the path
+  -- directly is fail-safe: querying rpm from inside a scriptlet can fail
+  -- under the transaction lock, and an inconclusive probe must keep the
+  -- line, never drop it. posix comes from rpm's embedded lua; the io.open
+  -- fallback serves standalone interpreters without the extension.
+  local function executable(path)
+    if posix and posix.access then
+      return posix.access(path, 'x') == 0
+    end
+    local f = io.open(path, 'rb')
+    if f then f:close() end
+    return f ~= nil
+  end
+  if executable(cosh) then return end
+  -- Atomic rewrite protection (mirrors src/cosh-ng/cosh-ng.spec.in):
+  -- filter into a sibling temporary file and rename it over /etc/shells,
+  -- so an interrupted or failing write leaves the shared table intact
+  -- instead of truncated or partial. Mode and ownership carry over from
+  -- the original, an admin-managed symlink is followed so the link
+  -- relationship survives, and any failure removes the temporary file
+  -- and fails the scriptlet so the transaction surfaces it.
+  local function fail(msg)
+    io.stderr:write('error: copilot-shell: cannot update '..shells..
+                    ': '..msg..'\n')
+    error('copilot-shell: '..msg, 0)
+  end
+  local target = shells
+  if posix and posix.readlink then
+    for _ = 1, 40 do
+      local link = posix.readlink(target)
+      if type(link) ~= 'string' then break end
+      if link:sub(1, 1) ~= '/' then
+        link = (target:match('^(.*/)[^/]+$') or '/')..link
+      end
+      target = link
     end
   end
-
-  f = io.open("/etc/shells", "w+")
-  for n,line in pairs(t)
-  do
-    f:write(line.."\n")
+  local src = io.open(target, 'rb')
+  if not src then return end
+  local kept = {}
+  for line in src:lines() do
+    if line ~= cosh then kept[#kept + 1] = line end
   end
-  f:close()
+  src:close()
+  local pid = '0'
+  if posix and posix.getprocessid then
+    local info = posix.getprocessid()
+    if type(info) == 'table' and info.pid then pid = tostring(info.pid) end
+  end
+  local tmp = target..'.copilot-shell.'..pid..'.'..tostring(os.time())..'.tmp'
+  os.remove(tmp)
+  local stale = io.open(tmp, 'rb')
+  if stale then
+    stale:close()
+    fail('temporary file already exists: '..tmp)
+  end
+  local out = io.open(tmp, 'w')
+  if not out then fail('failed to create temporary file') end
+  for i = 1, #kept do
+    if not out:write(kept[i], '\n') then
+      out:close()
+      os.remove(tmp)
+      fail('failed to filter shell registration')
+    end
+  end
+  if not out:close() then
+    os.remove(tmp)
+    fail('failed to write temporary file')
+  end
+  if posix and posix.stat then
+    local st = posix.stat(target)
+    if st and st.mode and posix.chmod then
+      local ok, why = pcall(posix.chmod, tmp, st.mode)
+      if not ok or why == nil then
+        os.remove(tmp)
+        fail('failed to preserve file mode')
+      end
+    end
+    if st and posix.chown then
+      local ok, why = pcall(posix.chown, tmp, st.uid, st.gid)
+      if not ok or why == nil then
+        os.remove(tmp)
+        fail('failed to preserve file ownership')
+      end
+    end
+  end
+  local ok, why = os.rename(tmp, target)
+  if not ok then
+    os.remove(tmp)
+    fail('failed to replace file: '..tostring(why))
+  end
 end
 
 %changelog
