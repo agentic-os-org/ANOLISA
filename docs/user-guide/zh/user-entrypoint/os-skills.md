@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## PDF 表单字段分析
+
+通过 `--form-fields --format json` 提取已填写 PDF 表单中保存的值。可选的逐页 `form_fields` 列表包含每个选中页面上的 AcroForm 字段外观：
+
+```bash
+python3 SKILL_DIR/scripts/read_pdf.py -f application.pdf --format json --form-fields
+python3 SKILL_DIR/scripts/read_pdf.py -f application.pdf --format json --form-fields -p "1-2" --metadata
+```
+
+每条记录包含 `name`、`label`、`type`、`type_id`、保存的 `value`、`flags`、`rect` 和 `xref`。矩形用包含四个数值的 JSON 数组表示。选择字段还包含 `choices`；复选框和单选按钮在可用时包含 `button_states`。`Yes`、`Off` 等值保留为实际保存的状态，不根据页面文本猜测。签名字段包含 SDK 的 `signed` 状态，此状态不验证签名的有效性或可信性。
+
+逻辑字段可在多个位置或页面出现，因此每个外观保留为独立记录，归属于其页面。保留带点号的层级名称、Unicode 值、空白字段及选择项信息。没有字段的页面使用 `form_fields: []`。页面选择与文档元数据照常工作；省略此选项时保持默认文本和 JSON 输出不变。
+
+读取器在关闭文档前复制值，PDF 原文件字节保持不变。不会填写、重置字段，执行嵌入的 JavaScript，或从外观文本推断表单值。普通注释提取是独立视图，因为 widget 表示表单字段而非普通注释。此模式要求 JSON 及支持 widget、按钮状态的 PyMuPDF 后端。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

@@ -20,3 +20,10 @@ Options: `-p "1-5,7"` page range, `--format json` structured output, `--metadata
 Tables: `--tables --format json` adds a `tables` array to each selected page: `{"bbox": [x0,y0,x1,y1], "rows": [[cell, ...], ...]}` from PyMuPDF table detection; pages without ruled tables report `"tables": []`. Plain page text and the default schemas are unchanged; the flag is rejected for text output.
 
 Setup: `pip install PyMuPDF`
+
+Use `--form-fields` with `--format json` for stored AcroForm values and widget
+metadata on selected pages. Records preserve name/type/value/flags/rectangle,
+choice/button states and the SDK's signature status where applicable. Repeated
+appearances remain separate; empty pages use `form_fields: []`. Values are copied
+before document close without filling fields, executing JavaScript or modifying
+PDF bytes. Signature status is not cryptographic validation.
