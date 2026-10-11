@@ -46,8 +46,8 @@ for (const htmlFile of htmlFiles) {
 
   for (const match of html.matchAll(/<a\b[^>]*\shref="([^"]+)"/g)) {
     const href = match[1];
-    if (/^(?:https?:|mailto:|tel:|javascript:)/.test(href)) continue;
     const parsed = new URL(href, `${siteUrl}${currentPath}`);
+    if (parsed.origin !== new URL(siteUrl).origin) continue;
     const target = parsed.pathname === currentPath
       ? htmlFile
       : await targetFile(parsed.pathname);
