@@ -42,7 +42,7 @@ aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000] < operation.json\n\n\
 Qoder CLI 1.1.64: run accepts optional --native-settings.\n\
 OpenClaw 2026.9.6: run requires --native-settings and --native-state-dir.\n\
 QwenPaw 2.2.2b4: run requires QWENPAW_WORKING_DIR.\n\
-No current adapter supports install or --native-profile.\n\
+Hermes 952c941e: run and install require --native-profile; run requires the installed AW plugin.\n\
 install dispatches native Hook installation; it does not install AW or an Agent."
         );
         return Ok(cli::Exit::Code(0));

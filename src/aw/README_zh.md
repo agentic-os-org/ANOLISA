@@ -3,7 +3,7 @@
 [English](README.md)
 
 AW 为 Agent 策略提供统一配置和本地服务。在 Linux 上，它可以通过已验证的原生
-入口启动 Qoder CLI、OpenClaw 和 QwenPaw，运行外部 Provider，并独立于 Agent 会话保存
+入口启动 Qoder CLI、OpenClaw、QwenPaw 和 Hermes，运行外部 Provider，并独立于 Agent 会话保存
 执行元数据。原生调度与权限仍由框架负责，当前接口处于实验阶段。
 
 AW Preview提供核心包和Provider包，通过`aw-package`安装。当前包含sec-core Provider，
@@ -24,6 +24,7 @@ AW core 可独立构建与初始化，无需 sec-core。`aw-build` 默认只构�
 | 工具前执行结构化 Provider 的 `observe`/`block`，工具成功后执行 `observe` | ✅ |
 | 执行回调输入保持不变的原生 Hook 命令 | ✅ 字节输出和退出状态交回 Qoder；不含重写链与审批流程 |
 | 启动或复用独立服务，查询执行元数据 | ✅ |
+| 通过 AW 启动 Hermes | ✅ 显式安装原生插件后的本地 chat |
 | 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
 | 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动其余首批框架 | ❌ 相应 Adapter 独立交付 |
@@ -57,7 +58,7 @@ target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 
 `aw --help` 列出启动命令及 Adapter 专用参数。Qoder 的 `aw run` 支持
 `--native-settings`，拒绝 `--native-profile`、`--native-state-dir` 和 `aw install`。
-`install` 用于分派持久化原生 Hook 安装，当前版本没有支持它的 Adapter；它不安装
+`install` 用于分派持久化原生 Hook 安装，Hermes 支持此命令；它不安装
 AW 或 Agent 软件。完整命令及参数支持表见使用指南。
 升级前须用旧版 AW 停止旧 daemon；当前 CLI 会拒绝旧本地协议。升级步骤见使用指南。
 
@@ -90,6 +91,30 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
   --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
   -- --host 127.0.0.1 --port 8096
+```
+
+## 启动 Hermes
+
+使用无已跟踪文件修改的 Hermes 官方提交 `952c941e`，保留其原生模型配置。已有
+profile `.env` 必须是当前用户所有、组及其他用户不可写的普通文件。Agent 可执行文件必须是
+已安装的 Python console script，使用绝对 Python shebang；不支持 shell wrapper。
+AW 在 chat 开始前要求插件完成注册，并拒绝生效的 `HERMES_SAFE_MODE` 设置。安装
+保留初始备份和被置换的配置 inode；回退前核对这两份文件，并在安装期间停止
+原生配置写入。profile 的各级上级目录须防止其他用户替换路径；安装中断会清理
+其原生写入进程及暂存文件。安装或启动探测中断时，先输出错误再恢复信号退出状态。
+安装在探测或修改 profile 前拒绝配置中的不支持入口及选项；只配置执行文件的
+`argv` 可通过 `aw run --` 提供 `chat`。
+AW 在原生探测前拒绝 chat 的 `--help`/`-h`；查看帮助请直接运行 `hermes chat --help`。
+随附插件不匹配或缺少文件时，先停止 Hermes 会话，将 `plugins/aw-native-hooks` 移到 profile
+的 `plugins` 目录之外保存，再重新执行 `aw install`。
+[使用指南](../../docs/user-guide/zh/user-entrypoint/aw.md)说明必需的 profile 参数和
+工具生命周期范围。从 `src/aw` 执行：
+
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
 ```
 
 ## 接入与开发

@@ -21,7 +21,7 @@ use std::{
 };
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
-static CANCELLED: AtomicBool = AtomicBool::new(false);
+pub(super) static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn signal(value: libc::c_int) {
     SIGNAL.store(value, std::sync::atomic::Ordering::Release);
@@ -103,12 +103,16 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         cwd: cwd.clone(),
         environment: std::env::vars_os().collect::<BTreeMap<_, _>>(),
     };
-    let mut prepared = adapter.prepare(LaunchInput {
+    let prepared = adapter.prepare(LaunchInput {
         document: config.as_value().clone(),
         target: target.into(),
         flags: args.flags.clone(),
         command,
-    })?;
+    });
+    let mut prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return interrupted_error(error),
+    };
     if let Some(exit) = interrupted() {
         return Ok(exit);
     }
@@ -191,12 +195,20 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     executed
 }
 
-fn interrupted() -> Option<Exit> {
+pub(super) fn interrupted() -> Option<Exit> {
     let signal = SIGNAL.load(std::sync::atomic::Ordering::Acquire);
     (signal != 0).then_some(Exit::Signal(signal))
 }
 
-fn install_signals() -> Result<()> {
+pub(super) fn interrupted_error(error: Box<dyn std::error::Error>) -> Result<Exit> {
+    if let Some(exit) = interrupted() {
+        eprintln!("aw: {error}");
+        return Ok(exit);
+    }
+    Err(error)
+}
+
+pub(super) fn install_signals() -> Result<()> {
     // SAFETY: handlers only update a lock-free atomic; aw-exec owns child reaping.
     unsafe {
         let mut action = std::mem::zeroed::<libc::sigaction>();

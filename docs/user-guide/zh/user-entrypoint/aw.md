@@ -6,7 +6,8 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 中声明程序和事件后，AW 启动或复用本地服务，接通受支持的原生 Hook，并在 Agent
 会话结束后继续保存执行记录。
 
-当前 Linux 源码版本支持 Qoder CLI 1.1.64、OpenClaw 2026.9.6 和 QwenPaw 2.2.2b4 / AgentScope 2.0.8。
+当前 Linux 源码版本支持 Qoder CLI 1.1.64、OpenClaw 2026.9.6、
+QwenPaw 2.2.2b4 / AgentScope 2.0.8 和 Hermes 官方提交 `952c941e`。
 其他首批 Adapter 独立交付。AW 不安装 Agent，也不配置模型账号；继续使用框架
 原有的模型与认证配置。
 
@@ -26,6 +27,7 @@ AW 将工具策略和 Hook 命令接入 Agent，同时保留它原有的交互�
 | 工具前后执行原生脚本和命令 | ✅ 回调输入保持不变，转交字节输出与退出状态 |
 | 保留 Qoder 已有 Hook 及其调度 | ✅ 默认配置和显式传入的附加配置文件 |
 | 复用共享服务并持久保存执行元数据 | ✅ 按需启动或外部启动服务 |
+| 通过 AW 启动 Hermes | ✅ 显式安装原生插件后的本地 chat |
 | 通过 AW 启动 OpenClaw | ✅ 新 Gateway 中的 Agent 工具 Hook |
 | 通过 AW 启动 QwenPaw | ✅ 官方 App/API 入口 |
 | 启动其他首批框架 | ❌ 相应 Adapter 独立交付；QwenPaw 与 Qwen Code 分别识别 |
@@ -203,6 +205,68 @@ stderr 限 65,536 字节。argv 按字面传递，不插入隐式 shell。握手
 配置。Provider 与关联步骤一起移除；修改运行服务的文件不会触发重新加载。
 通用的已有 YAML 编辑不属于此命令。
 
+## 启动 Hermes
+
+使用官方 Hermes 提交 `952c941e741e922a9be8fc403c8944c6e96318bb`。安装与启动
+均拒绝已跟踪文件的已暂存或未暂存修改；重试前提交或 stash 本地修改，并恢复到
+固定提交。示例为
+`argv: [hermes, chat]`，请指向该安装的 Python console script，例如
+`/absolute/hermes/venv/bin/hermes`，且使用绝对 Python shebang。显式路径和 PATH
+查找均要求可执行普通文件；FIFO、目录及不可执行文件在原生探测前被拒绝。不支持 shell wrapper
+或 `python -m` 入口。AW 使用该解释器进入同一个原生 CLI 进程，保留参数与工作
+目录。原生 profile 加载决定生效的 `HERMES_SAFE_MODE`，包括 profile `.env` 的
+覆盖；AW 拒绝 safe mode，并在 chat 调度工具前要求插件完成注册。先通过 Hermes 初始化 profile
+与模型账号。`aw install` 是显式的一次性原生 AW 插件安装：启用前备份原始配置，
+保留未知配置字段，拒绝覆盖同名非 AW 插件。原生 YAML 写入器修改私有候选文件，
+AW 再与真实配置原子交换。命令报告初始字节备份 `backup` 与永久保留的
+`displaced` 文件（`<backup>.displaced`）；后者保留原 inode，包括已打开描述符
+后续写入的内容。安装与回退期间停止原生配置写入，恢复前核对两份恢复文件。
+写入器失败或发布前检测到冲突时，真实配置保持不变；在交换边界检测到冲突时，
+命令报错，候选文件已经发布，被置换内容保留以供核对。
+成功还要求删除配置暂存目录并同步其父目录。清理或同步失败会报告配置已发布
+及两份恢复文件的路径，不返回成功或自动回退。该交换不向忽略 AW 锁的
+写入器提供 compare-and-swap 保证。安装不会热加载或重启既有 Hermes 服务。
+规范化后的 profile 目录、配置及随附插件文件必须属于当前用户，且其他用户不可写。
+各级上级目录
+须属于当前用户或 root，并禁止组或其他用户写入；像 `/tmp` 这样以 sticky bit
+保护子目录的情况除外。已有 profile `.env` 同样必须是当前用户所有、组或其他用户不可写的普通文件
+（接受 0600 或 0644）。AW 在任何原生探测前检查它且不跟随符号链接，包括
+`--version`，因为导入 CLI 就会加载该文件。AW 拒绝不安全路径，不修改其权限。Ctrl-C 或 SIGTERM 会
+取消安装的原生探测及写入进程、删除暂存副本，并保留信号退出状态。
+安装与启动探测的错误会在信号退出前输出，包括无法确认进程组清理的错误。
+安装在探测或修改 profile 前按启动时相同的本地 chat 限制校验已配置的原生参数。
+仍支持只包含执行文件的 `argv`；此时在 `aw run` 的 `--` 后提供 `chat` 及其选项。
+chat 的 `--help`/`-h` 会在插件就绪前退出，因此 AW 会在原生探测或修改 profile 前
+拒绝配置参数及 `aw run` 追加参数中的这两个选项。查看原生帮助请直接运行
+`hermes chat --help`。`--query=--help` 这类字面量查询值仍受支持。
+
+AW 升级可能改变随附插件的字节内容。启动或安装报告插件不匹配或缺少文件时，先停止
+Hermes 会话与插件写入者，检查 `<profile>/plugins/aw-native-hooks`，并将该目录
+移到 `<profile>/plugins` 之外备份。重新执行相同的 `aw install` 命令安装匹配文件；
+保留的目录可用于检查或回退。
+
+当 `providers` 和 `events` 为空时，AW 注册零个回调并正常启动。已有原生 Hook
+仍会执行；AW 记录会话生命周期，不表示执行了每工具策略检查或工具审计。
+仍须先显式安装插件。
+
+后续 `aw run` 保留该 profile 的认证、历史与工作目录。原生 before/after 按 Hermes
+注册顺序执行，before 阻断不会跳过后续已注册的回调；post 也可观察被阻断和失败的
+尝试。AW 保留原生 Hook 返回解析和 Agent 自身审批，尚不支持通用 AW `ask`。
+当前入口为以 `--cli` 固定的本地 `chat`，不含原生 TUI、Gateway 或 ACP。
+请使用完整 chat 参数；不支持 profile/worktree/恢复会话切换与选项缩写。事件预算最多 55,000 ms，
+同时必须留在原生回调超时范围内。
+
+```bash
+target/debug/aw install --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+target/debug/aw run --config crates/aw-service/examples/aw.hermes.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile
+```
+
+[Hermes 中性示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.hermes.yaml)
+在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
+`aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
+
 ## 接入自己的程序
 
 `spec.providers` 中的每个命名对象描述一个程序，事件步骤通过 `provider` 引用
@@ -279,26 +343,26 @@ socket 停止相应服务；修改配置后的 auto 路径可能指向另一个�
 | --- | --- |
 | `aw validate --config FILE` | 检查语法和静态引用，不执行程序 |
 | `aw run --config FILE --agent TARGET [OPTIONS] -- ARGS` | 启动配置的 Agent 并接通受支持 Hook |
-| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 分派持久化原生 Hook 安装；当前没有支持它的 Adapter，Qoder、OpenClaw 和 QwenPaw 也不支持 |
+| `aw install --config FILE --agent TARGET [--native-profile PROFILE]` | 向已有 Hermes profile 显式安装原生插件；Qoder、OpenClaw 和 QwenPaw 不支持 |
 | `aw serve --config FILE --state-dir ABSOLUTE_DIR` | 在前台运行服务 |
 | `aw status --config FILE` 或 `aw status --socket ABSOLUTE_PATH` | 查看选定服务，不启动它 |
 | `aw stop --config FILE` 或 `aw stop --socket ABSOLUTE_PATH` | 请求正常关闭服务 |
 | `aw request --socket ABSOLUTE_PATH [--timeout-ms 1..60000]` | 从 stdin 读取一个开发者操作 JSON 对象，默认 5,000 毫秒 |
 
 `--agent TARGET` 选择 `spec.agents` 中的命名对象，其 `adapter` 字段选择实现。
-当前版本实现了 Qoder CLI 1.1.64、OpenClaw 2026.9.6 和 QwenPaw 2.2.2b4 / AgentScope 2.0.8 Adapter。`aw install` 校验配置后分派到对应
-Adapter；三者都使用临时启动配置，拒绝持久化安装。该命令不安装 AW 包
+当前版本实现了 Qoder CLI 1.1.64、OpenClaw 2026.9.6、QwenPaw 2.2.2b4 / AgentScope 2.0.8
+和 Hermes 官方提交 `952c941e` Adapter。`aw install` 校验配置后分派到对应 Adapter；
+Hermes 支持持久化插件安装，Qoder、OpenClaw 和 QwenPaw 拒绝此命令。该命令不安装 AW 包
 或 Agent 软件，不启动 Agent，也不配置模型凭据。`aw run` 不会隐式调用 `install`。
 
 | Adapter 专用参数 | 命令 | 当前支持情况 |
 | --- | --- | --- |
 | `--native-settings JSON_FILE` | `run` | Qoder：可选的附加 JSON 配置，与生成的 Hook 合并，原文件保持不变。OpenClaw：必填的现有原生 JSON 配置 |
-| `--native-profile PROFILE` | `run`、`install` | Adapter 的 profile 选择参数；当前没有 Adapter 接受。Qoder 的 `run` 拒绝此参数，也不支持 `install` |
+| `--native-profile PROFILE` | `run`、`install` | Hermes：`run` 和 `install` 必填的已有 profile 绝对路径。Qoder 和 OpenClaw 拒绝此参数 |
 | `--native-state-dir DIRECTORY` | `run` | OpenClaw：必填的原生状态目录绝对路径。Qoder 拒绝此参数，它不是 AW 服务的 `--state-dir` |
 
 公共命令解析器识别这些 Adapter 专用参数，不代表框架已经支持它们。QwenPaw 拒绝
-这些原生覆盖参数，使用 `QWENPAW_WORKING_DIR`。当前版本仍不
-支持 Hermes。受支持的 AW 参数放在 `--` 前，之后的参数
+这些原生覆盖参数，使用 `QWENPAW_WORKING_DIR`。受支持的 AW 参数放在 `--` 前，之后的参数
 按字面量交给 Agent；`install` 不接受 Agent 参数。用 `aw --help` 查看命令格式
 和当前支持范围。
 
