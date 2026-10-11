@@ -83,11 +83,12 @@ fn apply_locked(
 ) -> Result<ApplyOutcome> {
     let total = recommendations.len();
     let mut applied_recs: Vec<Recommendation> = Vec::new();
+    let mut applied = 0usize;
     let mut failed: Vec<ApplyFailure> = Vec::new();
     let mut clamped: Vec<ClampNote> = Vec::new();
     for (i, rec) in recommendations.iter().enumerate() {
         match apply_recordable(rec) {
-            Ok((applied, outcome)) => {
+            Ok((previous, outcome)) => {
                 if !quiet {
                     println!(
                         "    {} [{}/{}] {} → {}",
@@ -116,9 +117,17 @@ fn apply_locked(
                         effective: outcome.effective.clone(),
                     });
                 }
-                // The ledger and sysctl.d must describe live reality: record
-                // the value the kernel actually took, not the request (#4160).
-                applied_recs.push(applied);
+                // The write landed whether or not a pristine value exists.
+                applied += 1;
+                if let Some(previous) = previous {
+                    // The ledger and sysctl.d must describe live reality:
+                    // record the value the kernel actually took, not the
+                    // request (#4160). A param whose original could not be
+                    // read is applied but unrecordable — see apply_recordable.
+                    let mut applied_rec = rec_with_effective(rec, &outcome);
+                    applied_rec.current_value = previous;
+                    applied_recs.push(applied_rec);
+                }
             }
             Err(e) => {
                 failed.push(ApplyFailure {
@@ -149,12 +158,12 @@ fn apply_locked(
                 applied_recs.len()
             );
         }
-    } else if !quiet {
+    } else if applied == 0 && !quiet {
         println!();
         println!("  没有配置被成功应用");
     }
     Ok(ApplyOutcome {
-        applied: applied_recs.len(),
+        applied,
         failed,
         clamped,
     })
@@ -163,13 +172,19 @@ fn apply_locked(
 /// Apply a single recommendation with rollback recording and persistence, but
 /// without apply()'s progress output — used by `ktuner fix` so a single fix is
 /// just as reversible (and survives reboot) as `tune`. Returns the write
-/// outcome so `fix` can report the value the kernel actually took.
+/// outcome so `fix` can report the value the kernel actually took. A param
+/// whose original cannot be read (write-only tunable) applies without a
+/// rollback record, mirroring apply_import.
 pub fn apply_one(rec: &Recommendation) -> Result<WriteOutcome> {
     let guard = lock_ledger_at(ROLLBACK_PATH)?;
     load_rollback()?;
-    let (applied, outcome) = apply_recordable(rec)?;
-    save_rollback(&guard, std::slice::from_ref(&applied))?;
-    persist_from_rollback(&guard)?;
+    let (previous, outcome) = apply_recordable(rec)?;
+    if let Some(previous) = previous {
+        let mut applied = rec_with_effective(rec, &outcome);
+        applied.current_value = previous;
+        save_rollback(&guard, std::slice::from_ref(&applied))?;
+        persist_from_rollback(&guard)?;
+    }
     Ok(outcome)
 }
 
@@ -187,12 +202,19 @@ fn read_previous(param: &str) -> Result<String> {
         .to_string())
 }
 
-fn apply_recordable(rec: &Recommendation) -> Result<(Recommendation, WriteOutcome)> {
-    let previous = read_previous(&rec.param)?;
+// Write-only tunables (mode 0200, e.g. vm.drop_caches / vm.compact_memory)
+// deny the read but accept the write — write_and_verify documents that arm
+// and records the request as the effective value. A failed read therefore
+// means "no pristine value to restore", not "do not apply": failing here put
+// the read before the write and made every such param dead on arrival, while
+// apply_import kept an escape. Mirror apply_import instead: apply, report the
+// effective value, and keep the param out of the rollback ledger and
+// persistence — a previous that was never read must never be invented, or
+// rollback would write it back over the kernel.
+fn apply_recordable(rec: &Recommendation) -> Result<(Option<String>, WriteOutcome)> {
+    let previous = read_previous(&rec.param).ok();
     let outcome = write_and_verify(&rec.param, &rec.recommended_value)?;
-    let mut applied = rec_with_effective(rec, &outcome);
-    applied.current_value = previous;
-    Ok((applied, outcome))
+    Ok((previous, outcome))
 }
 
 /// The result of a verified write: the value now live in the kernel.
@@ -563,7 +585,7 @@ fn write_atomic_with(
 fn save_rollback(guard: &LedgerLock, recommendations: &[Recommendation]) -> Result<()> {
     merge_rollback_locked(
         guard,
-        ROLLBACK_PATH,
+        &guard.path,
         recommendations.iter().map(|r| {
             (
                 r.param.clone(),
@@ -628,7 +650,14 @@ where
 /// Chain rule: when `x.applied == y.previous`, `y` was recorded while the
 /// value `x` had applied was live, so `x` is the earlier record and the pair
 /// collapses to `x.previous` (the pristine original) with `y.applied` (the
-/// newest value), under `x`'s key. Records with no chain relation — the knob
+/// newest value), under `x`'s key. A pair where the reverse relation also
+/// holds (`y.applied == x.previous`) proves nothing: both readings of the
+/// pair are internally consistent (60 -> 10 -> 60 and 10 -> 60 -> 10), so the
+/// values alone cannot order the records; the pair falls through to the
+/// greatest-key rule instead of letting the key spelling decide which
+/// `previous` is the "pristine" one — collapsing it anyway recorded an
+/// intermediate value as the original and changed what a restore writes.
+/// Records with no chain relation — the knob
 /// was changed manually between the two ktuner runs — cannot be ordered, so
 /// the entry with the greatest key survives verbatim: that is exactly the
 /// record whose `previous` the key-order double write leaves in the kernel
@@ -649,12 +678,17 @@ fn heal_alias_duplicates(data: &mut RollbackData) {
         }
         keys.sort();
         // Collapse chain links first: x.applied == y.previous proves y was
-        // recorded after x, so x's previous is the older original.
+        // recorded after x, so x's previous is the older original — unless
+        // the reverse also holds, in which case both orderings of the pair
+        // are consistent and the greatest-key rule below decides it.
         loop {
             let mut chain: Option<(String, String)> = None;
             'pairs: for x in &keys {
                 for y in &keys {
-                    if x != y && data.entries[x].applied == data.entries[y].previous {
+                    if x != y
+                        && data.entries[x].applied == data.entries[y].previous
+                        && data.entries[y].applied != data.entries[x].previous
+                    {
                         chain = Some((x.clone(), y.clone()));
                         break 'pairs;
                     }
@@ -681,6 +715,11 @@ fn heal_alias_duplicates(data: &mut RollbackData) {
 /// released when the descriptor closes on drop; the file itself stays on
 /// disk (flock state belongs to the open descriptor, not the file).
 struct LedgerLock {
+    /// The ledger path this guard was taken for. Writers derive the file
+    /// they mutate from the lock they hold, so a guard taken over a private
+    /// fixture ledger (the unit tests) steers every write back to that
+    /// fixture instead of the production `ROLLBACK_PATH` constant.
+    path: String,
     _file: fs::File,
 }
 
@@ -727,7 +766,10 @@ fn lock_ledger_with(path: &str, operation: i32) -> Result<LedgerLock> {
             std::io::Error::last_os_error()
         ));
     }
-    Ok(LedgerLock { _file: file })
+    Ok(LedgerLock {
+        path: path.to_string(),
+        _file: file,
+    })
 }
 
 #[cfg(test)]
@@ -865,9 +907,11 @@ fn render_persistence(
 /// which is the single source of truth for everything ktuner has applied. This
 /// keeps persistence cumulative across runs (previously each run overwrote the
 /// files with only its own batch, silently dropping earlier params) and never
-/// persists a param that failed to apply (those are not in the record).
-fn persist_from_rollback(_guard: &LedgerLock) -> Result<()> {
-    let data = load_rollback()?;
+/// persists a param that failed to apply (those are not in the record). The
+/// record is read from the ledger the transaction's lock guards, so a fixture
+/// lock renders its own ledger and never the production one.
+fn persist_from_rollback(guard: &LedgerLock) -> Result<()> {
+    let data = load_rollback_from(&guard.path)?;
     let (sysctl_content, nonsysctl_script) = render_persistence(&data.entries);
 
     if let Some(sysctl_content) = sysctl_content {
@@ -961,8 +1005,14 @@ fn rollback_preview_at(path: &str) -> Result<Vec<(String, String, String)>> {
 /// BTreeMap order. A corrupt ledger is an error, never an empty list —
 /// silently treating a corrupt ledger as empty is how the original values
 /// get lost (cf. #3578).
+///
+/// Legacy duplicate spellings are healed first, so the preview describes the
+/// restore `rollback` will actually perform: `restore_entries` heals before
+/// restoring, and an unhealed preview would promise a second restore that
+/// never runs and report a `previous` the kernel will never receive.
 fn parse_rollback_entries(json: &str) -> Result<Vec<(String, String, String)>> {
-    let data: RollbackData = serde_json::from_str(json).context("解析 rollback 文件失败")?;
+    let mut data: RollbackData = serde_json::from_str(json).context("解析 rollback 文件失败")?;
+    heal_alias_duplicates(&mut data);
     Ok(data
         .entries
         .iter()
@@ -1031,12 +1081,25 @@ pub fn rollback_quiet() -> Result<RollbackOutcome> {
 }
 
 fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
+    restore_entries_with(data, quiet, &mut |path, value| fs::write(path, value))
+}
+
+/// `restore_entries` with the parameter write injectable. The kernel write is
+/// a parameter because a single write can move a DIFFERENT knob than the one
+/// addressed (the dirty pair's mutual clear), and that side effect has to be
+/// reproducible on plain files for the re-check below to be testable without
+/// a writable /proc/sys.
+fn restore_entries_with(
+    data: &RollbackData,
+    quiet: bool,
+    write_value: &mut dyn FnMut(&str, &str) -> std::io::Result<()>,
+) -> RollbackOutcome {
     // Heal first: a legacy ledger may hold two spellings of one kernel path,
     // and restoring both in key order would overwrite the pristine original
     // with the intermediate value the second spelling recorded.
     let mut data = data.clone();
     heal_alias_duplicates(&mut data);
-    let mut restored = 0;
+    let mut verified: Vec<&String> = Vec::new();
     let mut failed = 0;
     let mut skipped = 0;
     for (param, entry) in &data.entries {
@@ -1048,7 +1111,7 @@ fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
             continue;
         }
         if Path::new(&entry.path).exists() {
-            match fs::write(&entry.path, &entry.previous) {
+            match write_value(&entry.path, &entry.previous) {
                 Ok(()) => {
                     // Confirm the write with the same read-back the tune path
                     // uses (#5717): fs::write returning Ok only means the
@@ -1067,7 +1130,7 @@ fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
                                     entry.previous
                                 );
                             }
-                            restored += 1;
+                            verified.push(param);
                         }
                         ReadbackVerdict::Clamped { effective } => {
                             if !quiet {
@@ -1095,6 +1158,35 @@ fn restore_entries(data: &RollbackData, quiet: bool) -> RollbackOutcome {
                 println!("  {} {} : 路径不存在，跳过", "⊘".yellow(), param);
             }
             skipped += 1;
+        }
+    }
+
+    // Re-check every verified restore AFTER all writes ran. A per-write
+    // read-back only proves its own file held `previous` at that moment; a
+    // later write can move an earlier-restored knob behind its back — the
+    // kernel zeroes the vm.dirty_ratio <-> vm.dirty_bytes sibling on every
+    // changing write (mm/page-writeback.c dirty_ratio_handler /
+    // dirty_bytes_handler), and BTreeMap order restores the bytes knob of
+    // each pair first. A diverging re-read is a failure so rollback never
+    // reports Full (and deletes the ledger) while a recorded original is not
+    // the live value. Write-only tunables (read fails) stay verified: their
+    // read-back never held anything to diverge from.
+    let mut restored = verified.len();
+    for param in &verified {
+        let entry = &data.entries[*param];
+        if let ReadbackVerdict::Clamped { effective } =
+            readback_verdict(&entry.path, &entry.previous)
+        {
+            if !quiet {
+                println!(
+                    "  {} {} : 最终回读为 {effective}（期望 {}），已被后续写入覆盖，未恢复",
+                    "✗".red(),
+                    param,
+                    entry.previous
+                );
+            }
+            restored -= 1;
+            failed += 1;
         }
     }
 
@@ -1444,6 +1536,54 @@ mod tests {
         // Fresh install / post-rollback state: empty, not an error.
         let entries = parse_rollback_entries(r#"{"version":1,"entries":{}}"#).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn preview_heals_a_legacy_duplicate_spelling_ledger() {
+        // The same legacy ledger restore_entries heals: tune recorded
+        // vm.swappiness 60->10, a later import recorded vm/swappiness 10->5.
+        // The preview must describe the healed restore — one pending entry
+        // returning the pristine 60 — not promise a second restore (10) that
+        // rollback never performs.
+        let entries = parse_rollback_entries(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"5","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![(
+                "vm.swappiness".to_string(),
+                "5".to_string(),
+                "60".to_string()
+            )],
+            "preview must match the healed restore set: one knob, pristine previous, newest applied"
+        );
+    }
+
+    #[test]
+    fn preview_heals_unrelated_duplicates_to_the_last_write() {
+        // No chain relation: the survivor is the greatest key, exactly the
+        // record restore_entries writes today, so preview and restore agree
+        // on both the row count and the previous value that lands.
+        let entries = parse_rollback_entries(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"20","applied":"30","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![(
+                "vm/swappiness".to_string(),
+                "30".to_string(),
+                "20".to_string()
+            )],
+            "preview must keep the last-write record, matching restore_entries"
+        );
     }
 
     #[test]
@@ -2130,6 +2270,86 @@ mod tests {
     }
 
     #[test]
+    fn merge_keeps_a_bidirectional_duplicate_pair_unordered() {
+        // Both readings of this pair are internally consistent: tune recorded
+        // vm.swappiness 50 -> 100 and import recorded vm/swappiness 100 -> 50
+        // (or the other way around). x.applied == y.previous holds in BOTH
+        // directions, so the values cannot order the records — the chain
+        // collapse used to let the sorted-key iteration pick a direction
+        // anyway, recording the intermediate 50 as the "pristine" original.
+        // The pair must fall through to the greatest-key rule instead, exactly
+        // like the unrelated pair above.
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"50","applied":"100","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"100","applied":"50","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(data, []);
+        assert_eq!(data.entries.len(), 1, "one entry per knob");
+        let entry = &data.entries["vm/swappiness"];
+        assert_eq!(
+            entry.previous, "100",
+            "an unordered pair keeps the greatest key's record verbatim"
+        );
+        assert_eq!(entry.applied, "50", "last-write applied survives");
+    }
+
+    #[test]
+    fn rollback_restores_the_key_order_value_for_a_bidirectional_pair() {
+        // The user-visible contract of the greatest-key fallback: the healed
+        // restore writes exactly what today's un-healed key-order double
+        // write leaves in the kernel (both spellings restored in BTreeMap
+        // order, so the greatest key's previous — 100 — wins). Collapsing the
+        // bidirectional pair by iteration order instead restored the
+        // intermediate 50 while reporting Full and finalizing the ledger.
+        let dir = AtomicTestDir::new("rollback_bidirectional");
+        let path = dir.0.join("swappiness");
+        fs::write(&path, "50").unwrap(); // live value after both applies
+        let mut data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"50","applied":"100","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"100","applied":"50","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        for entry in data.entries.values_mut() {
+            entry.path = path.to_str().unwrap().to_string();
+        }
+        let outcome = restore_entries(&data, true);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "100",
+            "the healed restore must change no outcome: the key-order double write leaves 100"
+        );
+        assert_eq!(outcome.restored, 1, "one knob, one restore write");
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped, 0);
+    }
+
+    #[test]
+    fn merge_still_collapses_a_one_directional_chain_with_repeated_values() {
+        // Regression guard for the ambiguity check: a genuine chain whose
+        // second run re-applied the first run's value (60 -> 10, then 10 -> 10)
+        // is one-directional (10 == 10 forward, 10 != 60 backward), so it must
+        // keep collapsing to the pristine 60 — the reverse-match rejection
+        // must only bite when both directions hold.
+        let data: RollbackData = serde_json::from_str(
+            r#"{"version":1,"entries":{
+                "vm.swappiness":{"previous":"60","applied":"10","path":"/proc/sys/vm/swappiness"},
+                "vm/swappiness":{"previous":"10","applied":"10","path":"/proc/sys/vm/swappiness"}
+            }}"#,
+        )
+        .unwrap();
+        let data = merge_entries(data, []);
+        assert_eq!(data.entries.len(), 1, "one entry per knob");
+        let entry = &data.entries["vm.swappiness"];
+        assert_eq!(entry.previous, "60", "pristine value survives the heal");
+        assert_eq!(entry.applied, "10", "newest applied survives the heal");
+    }
+
+    #[test]
     fn test_restore_entries_preserves_guards_and_outcome_counts() {
         let dir = AtomicTestDir::new("rollback_outcome");
         let allowed = dir.0.join("allowed");
@@ -2209,6 +2429,118 @@ mod tests {
     }
 
     #[test]
+    fn restore_rechecks_every_param_after_all_writes_ran() {
+        // One restore write can move a DIFFERENT knob than the one addressed:
+        // the kernel zeroes the sibling of the dirty pair on every changing
+        // write (v6.6 mm/page-writeback.c dirty_ratio_handler /
+        // dirty_bytes_handler set the other to 0). BTreeMap order restores
+        // vm.dirty_bytes before vm.dirty_ratio, so the ratio write clears the
+        // bytes value that was already restored and verified — the per-write
+        // read-back cannot see it because each one runs before the next
+        // write. Scenario: ratio mode (20) tuned to 30, the operator then set
+        // vm.dirty_bytes manually and ktuner applied a new bytes value, so
+        // the ledger holds both knobs with non-zero originals. Only a
+        // re-check after ALL writes ran catches the cleared sibling and keeps
+        // the ledger instead of reporting Full and deleting it.
+        let dir = AtomicTestDir::new("restore_recheck_after_writes");
+        let ratio = dir.0.join("dirty_ratio");
+        let bytes = dir.0.join("dirty_bytes");
+        let ratio_path = ratio.to_str().unwrap().to_string();
+        let bytes_path = bytes.to_str().unwrap().to_string();
+        // Live state at rollback time: both knobs were tuned (30, 512MB).
+        fs::write(&ratio, "30").unwrap();
+        fs::write(&bytes, "536870912").unwrap();
+        let mut entries = BTreeMap::new();
+        for (param, previous, applied, path) in [
+            (
+                "vm.dirty_bytes",
+                "268435456",
+                "536870912",
+                bytes_path.clone(),
+            ),
+            ("vm.dirty_ratio", "20", "30", ratio_path.clone()),
+        ] {
+            entries.insert(
+                param.to_string(),
+                RollbackEntry {
+                    previous: previous.to_string(),
+                    applied: applied.to_string(),
+                    path,
+                },
+            );
+        }
+        // The kernel write, simulated on plain files: every changing write to
+        // one knob of the pair zeroes its sibling.
+        let mut kernel = |path: &str, value: &str| -> std::io::Result<()> {
+            fs::write(path, value)?;
+            if path == ratio_path {
+                fs::write(&bytes, "0")
+            } else if path == bytes_path {
+                fs::write(&ratio, "0")
+            } else {
+                Ok(())
+            }
+        };
+        let outcome = restore_entries_with(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+            &mut kernel,
+        );
+        assert_eq!(
+            fs::read_to_string(&ratio).unwrap(),
+            "20",
+            "the ratio side of the pair is restored"
+        );
+        assert_eq!(outcome.restored, 1, "only the ratio write holds");
+        assert_eq!(
+            outcome.failed, 1,
+            "the bytes knob was cleared by the ratio write and must count as failed"
+        );
+        assert_eq!(outcome.skipped, 0);
+        assert!(
+            !rollback_should_finalize(outcome.failed, outcome.skipped),
+            "a cleared sibling must keep the ledger for inspection"
+        );
+    }
+
+    #[test]
+    fn restore_recheck_passes_when_no_write_clobbers_a_sibling() {
+        // The re-check must not turn a healthy restore into a failure: two
+        // independent params, plain writes, both read back their previous.
+        let dir = AtomicTestDir::new("restore_recheck_healthy");
+        let mut entries = BTreeMap::new();
+        for (param, name) in [
+            ("vm.swappiness", "swappiness"),
+            ("net.core.somaxconn", "somaxconn"),
+        ] {
+            let path = dir.0.join(name);
+            fs::write(&path, "10").unwrap();
+            entries.insert(
+                param.to_string(),
+                RollbackEntry {
+                    previous: "10".to_string(),
+                    applied: "30".to_string(),
+                    path: path.to_str().unwrap().to_string(),
+                },
+            );
+        }
+        let outcome = restore_entries(
+            &RollbackData {
+                version: 1,
+                entries,
+            },
+            true,
+        );
+        assert_eq!(outcome.restored, 2);
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped, 0);
+        assert!(rollback_should_finalize(outcome.failed, outcome.skipped));
+    }
+
+    #[test]
     fn test_merge_keeps_original_previous_refreshes_applied() {
         let data = RollbackData {
             version: 1,
@@ -2281,6 +2613,86 @@ mod tests {
         unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_UN) };
         drop(second);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn fixture_guard_body() {
+        // The guard points at a private ledger OUTSIDE the mounted fixtures;
+        // the production constant is bind-mounted to an empty fixture here.
+        let guard_dir =
+            std::env::temp_dir().join(format!("ktuner-fixture-guard-{}", std::process::id()));
+        let guard_ledger = guard_dir.join("rollback.json");
+        let guard = lock_ledger_at(guard_ledger.to_str().unwrap()).unwrap();
+        let recs = [Recommendation {
+            param: "net.core.somaxconn".to_string(),
+            current_value: "stale gathered value".to_string(),
+            recommended_value: "65535".to_string(),
+            writable: true,
+            ..Default::default()
+        }];
+        let outcome = apply_locked(&recs, true, &guard).expect("fixture-guarded apply");
+        assert_eq!(outcome.applied, 1);
+        assert!(outcome.clamped.is_empty());
+        // The entry followed the LOCK, not the production constant: a
+        // fixture-guarded transaction publishes its ledger beside its own
+        // lockfile, which is the whole point of f56776d7c's fixture locks —
+        // otherwise a successful apply in a test would silently write
+        // /var/lib/ktuner/rollback.json.
+        let data = load_rollback_from(guard_ledger.to_str().unwrap()).unwrap();
+        let entry = &data.entries["net.core.somaxconn"];
+        assert_eq!(entry.previous, "1024");
+        assert_eq!(entry.applied, "65535");
+        assert!(
+            !Path::new(ROLLBACK_PATH).exists(),
+            "a fixture guard must not write the production ledger"
+        );
+        // Persistence rendered from the guard's own ledger into /etc (also a
+        // fixture under the mount namespace).
+        assert!(fs::read_to_string(SYSCTL_PERSIST_PATH)
+            .unwrap()
+            .contains("65535"));
+        let _ = fs::remove_dir_all(&guard_dir);
+    }
+
+    #[test]
+    #[ignore = "requires root and private mount namespaces; only fixture files are written"]
+    fn fixture_guard_keeps_the_ledger_private() {
+        if std::env::var_os("KTUNER_FIXTURE_CHILD").is_some() {
+            fixture_guard_body();
+            return;
+        }
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner-fixture-guard-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(dir.join("varlib")).unwrap();
+        fs::create_dir_all(dir.join("etc/sysctl.d")).unwrap();
+        fs::write(dir.join("somaxconn"), "1024").unwrap();
+        let before = fs::read_to_string("/proc/sys/net/core/somaxconn").unwrap();
+        let out = std::process::Command::new("unshare")
+            .env("KTUNER_FIXTURE_CHILD", "1")
+            .args(["--mount", "--propagation", "private", "sh", "-ec",
+                "mount --bind \"$1/varlib\" /var/lib; mount --bind \"$1/etc\" /etc; mount --bind \"$1/somaxconn\" /proc/sys/net/core/somaxconn; exec \"$2\" --exact tuner::tests::fixture_guard_keeps_the_ledger_private --ignored --nocapture",
+                "fixture-guard-test"])
+            .arg(&dir)
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string("/proc/sys/net/core/somaxconn").unwrap(),
+            before
+        );
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// Arm switch for `finalize_race_probe`, set only by the preview race

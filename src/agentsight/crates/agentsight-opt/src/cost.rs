@@ -805,20 +805,21 @@ fn trunc(s: &str, n: usize) -> String {
 /// Branch creation (`git checkout -b`/`-B`; `-B` folds to `-b` in the
 /// lowercase) discards nothing — it is forward progress, so it stays out
 /// even though it contains "git checkout".
+///
+/// Reading the stash is the same kind of no-op: `git stash list` and
+/// `git stash show` only report what is stashed, so they stay out too, while
+/// the forms that change the working tree (`git stash`, `pop`, `drop`, …)
+/// remain backtracks.
 fn is_backtrack_cmd(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
     let checkout = c.contains("git checkout") && !c.contains("git checkout -b");
-    [
-        "git reset",
-        "git revert",
-        "git stash",
-        "git restore",
-        "回退",
-        "撤销",
-    ]
-    .iter()
-    .any(|k| c.contains(k))
+    let stash =
+        c.contains("git stash") && !c.contains("git stash list") && !c.contains("git stash show");
+    ["git reset", "git revert", "git restore", "回退", "撤销"]
+        .iter()
+        .any(|k| c.contains(k))
         || checkout
+        || stash
 }
 
 // ---------------------------------------------------------------------------
@@ -2213,6 +2214,58 @@ mod tests {
         assert!(
             detour.facts.contains("0 处回退"),
             "branch creation must not count as a backtrack: {}",
+            detour.facts
+        );
+        assert!(
+            set.ledger.iter().all(|r| !r.backtrack),
+            "no ledger row may carry the BACKTRACK flag: {:?}",
+            set.ledger
+        );
+    }
+
+    /// Inspecting the stash (`git stash list` / `git stash show`) discards
+    /// nothing, exactly like creating a branch: the command reads what is
+    /// stashed instead of rewinding the working tree. The bare-substring match
+    /// still flagged it, so a turn that only looked at the stash counted as a
+    /// reversal in the ledger, the detour facts and the prevention ceiling.
+    #[test]
+    fn stash_inspection_is_not_a_backtrack() {
+        assert!(!is_backtrack_cmd("git stash list"));
+        assert!(!is_backtrack_cmd("git stash show -p stash@{0}"));
+        assert!(!is_backtrack_cmd("cd /repo && git stash list"));
+        assert!(!is_backtrack_cmd("git stash show --stat"));
+
+        // Stash forms that do change the working tree stay backtracks.
+        assert!(is_backtrack_cmd("git stash"));
+        assert!(is_backtrack_cmd("git stash pop"));
+        assert!(is_backtrack_cmd("git stash drop"));
+        assert!(is_backtrack_cmd("git stash push -m wip"));
+
+        // End to end: the ledger and the detour facts must not count a stash
+        // listing as a backtrack.
+        let mut steps = String::from(
+            r#"{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"start"}"#,
+        );
+        steps.push_str(
+            r#",{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+                "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"git stash list"}}],
+                "observation":{"results":[{"source_call_id":"c1","content":"stash@{0}: WIP on main"}]}}"#,
+        );
+        for id in 3..=6 {
+            steps.push_str(&format!(
+                r#",{{"step_id":{id},"source":"agent","timestamp":"2026-07-02T06:30:0{id}.000Z","message":"working"}}"#
+            ));
+        }
+        let t = traj(&format!("[{steps}]"));
+        let set = extract_waste_candidates(&t).unwrap();
+        let detour = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "detour")
+            .expect("detour fires on a 5-turn trajectory");
+        assert!(
+            detour.facts.contains("0 处回退"),
+            "a stash listing must not count as a backtrack: {}",
             detour.facts
         );
         assert!(

@@ -38,11 +38,21 @@ const BACKTRACK_KEYWORDS: &[&str] = &[
     "git reset",
     "git checkout --",
     "git revert",
-    "git stash",
     "git restore",
     "回退",
     "撤销",
 ];
+
+/// Whether a lowercase command is a reversal. `git stash` joins the list only
+/// when it changes the working tree: `git stash list` and `git stash show`
+/// inspect the stash and discard nothing, the same reason branch creation is
+/// not a backtrack for the cost ledger.
+fn is_backtrack_cmd(lc: &str) -> bool {
+    let stash = lc.contains("git stash")
+        && !lc.contains("git stash list")
+        && !lc.contains("git stash show");
+    BACKTRACK_KEYWORDS.iter().any(|k| lc.contains(k)) || stash
+}
 
 /// A Rust-computed inefficiency signal fed to the LLM.
 #[derive(Debug, Clone)]
@@ -154,7 +164,7 @@ impl ExperienceLibraryStrategy {
         // 3. Backtrack commands.
         for c in calls {
             let lc = c.cmd.to_lowercase();
-            if BACKTRACK_KEYWORDS.iter().any(|k| lc.contains(k)) {
+            if is_backtrack_cmd(&lc) {
                 signals.push(Signal {
                     id: format!("backtrack:{}", c.call_id),
                     desc: format!(
@@ -336,6 +346,30 @@ mod tests {
         let signals = ExperienceLibraryStrategy::compute_signals(&calls3);
         assert_eq!(signals.len(), 1);
         assert!(signals[0].id.starts_with("repeat_cluster:"));
+    }
+
+    /// Inspecting the stash discards nothing, so it must not raise the
+    /// backtrack signal — the same reason the branch-creation form
+    /// `git checkout -b` is absent from the keyword list.
+    #[test]
+    fn stash_inspection_is_not_a_backtrack_signal() {
+        let calls = vec![
+            make_call("Bash", "git stash list", 1.0, false),
+            make_call("Bash", "git stash show -p stash@{0}", 2.0, false),
+        ];
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            signals.iter().all(|s| !s.id.starts_with("backtrack:")),
+            "a stash listing is not a reversal: {:?}",
+            signals.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+
+        let reverting = vec![make_call("Bash", "git stash pop", 3.0, false)];
+        let signals = ExperienceLibraryStrategy::compute_signals(&reverting);
+        assert!(
+            signals.iter().any(|s| s.id.starts_with("backtrack:")),
+            "a stash pop still rewinds the working tree"
+        );
     }
 
     /// `cmd` is the arguments JSON truncated at 50 chars, so two edits of one

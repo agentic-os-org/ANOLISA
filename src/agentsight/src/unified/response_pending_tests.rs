@@ -285,7 +285,7 @@ const DRAIN_TOKENIZER_JSON: &str = r#"{
 /// template does.
 const DRAIN_TOKENIZER_CONFIG_JSON: &str = r#"{
   "tokenizer_class": "PreTrainedTokenizerFast",
-  "chat_template": "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "chat_template": "{% if tools %}{{ '<|tools|>' + (tools | tojson) + '<|/tools|>' }}{% endif %}{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
   "bos_token": "<|im_start|>",
   "eos_token": "<|im_end|>",
   "unk_token": "[UNK]",
@@ -391,4 +391,44 @@ fn drain_fallback_counts_every_request_shape() {
             "{path}: the drain fallback must count the request messages"
         );
     }
+}
+
+/// DashScope/Bailian native requests nest their tool definitions under
+/// `parameters` (the OpenAI-compatible spelling is top level). The live
+/// request parser reads both spellings; the drain fallback read only the top
+/// level, so a drained native call was estimated without the tool definitions
+/// the same request carries — and the chat template renders them.
+#[test]
+fn drain_fallback_counts_dashscope_native_parameter_tools() {
+    let tokenizer = drain_fixture_tokenizer();
+    let native_path = "/api/v1/services/aigc/text-generation/generation";
+    let with_tools = r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]},"parameters":{"result_format":"message","tools":[{"type":"function","function":{"name":"get_weather","description":"Look up the forecast for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}}"#;
+
+    // Walk the real drain so the fallback sees the captured request body.
+    let mut aggregator = drain_fixture(native_path, with_tools);
+    assert!(!crate::utils::procfs::proc_pid(PID).exists());
+    let drained = aggregator.drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
+    let (_, state) = drained.into_iter().next().unwrap();
+    let body = state
+        .pending_request()
+        .and_then(|r| r.json_body())
+        .expect("the native request body survives capture");
+    assert!(
+        body.get("parameters")
+            .and_then(|p| p.get("tools"))
+            .is_some(),
+        "the native tools live under parameters and must survive capture"
+    );
+
+    let counted = drain_request_input_tokens(&body, &tokenizer).expect("count");
+    let without_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]},"parameters":{"result_format":"message"}}"#,
+    )
+    .unwrap();
+    let baseline = drain_request_input_tokens(&without_tools, &tokenizer).expect("count");
+    assert!(
+        counted > baseline,
+        "the native tool definitions must reach the template: {counted} vs {baseline}"
+    );
 }

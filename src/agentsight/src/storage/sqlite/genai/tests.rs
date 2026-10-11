@@ -1677,6 +1677,104 @@ fn test_insert_pending_records_idle_origin_and_match_key() {
 }
 
 #[test]
+fn test_complete_pending_promotion_keeps_captured_request_evidence() {
+    // 710a01ec0 established the contract for the call-id UPDATE: the
+    // completing call's `input_messages`/`system_instructions` are `None`
+    // whenever the semantic parse produced no messages, and completing must
+    // not erase the request view `insert_pending` captured — "the request view
+    // is the only record of what the caller sent". The match-key UPDATE that
+    // promotes an idle-drain snapshot binds both columns raw, so it wiped
+    // them.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_promote_evidence_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let info = PendingCallInfo {
+        call_id: "idle-evidence".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-idle".to_string()),
+        session_id: Some("s-idle".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(r#"[{"role":"user","content":"captured evidence"}]"#.to_string()),
+        system_instructions: Some("captured system prompt".to_string()),
+        user_query: Some("hello".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-evidence".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+
+    // The completing call carries no parsed request messages.
+    let request = LLMRequest {
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        top_p: None,
+        top_k: None,
+        seed: None,
+        stop_sequences: None,
+        stream: true,
+        tools: None,
+        raw_body: None,
+    };
+    let mut call = LLMCall::new(
+        "real-response-id".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        request,
+        42,
+        "claude".to_string(),
+    );
+    call.metadata.insert(
+        "pending_match_key".to_string(),
+        "match-evidence".to_string(),
+    );
+    call.metadata
+        .insert("call_kind".to_string(), "main".to_string());
+
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (input_messages, system_instructions, status): (Option<String>, Option<String>, String) =
+        conn.query_row(
+            "SELECT input_messages, system_instructions, status FROM genai_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "complete");
+    assert_eq!(
+        input_messages.as_deref(),
+        Some(r#"[{"role":"user","content":"captured evidence"}]"#),
+        "promotion must not erase the captured request view"
+    );
+    assert_eq!(
+        system_instructions.as_deref(),
+        Some("captured system prompt"),
+        "promotion must not erase the captured system prompt"
+    );
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     let path =
         std::env::temp_dir().join(format!("test_genai_idle_promote_{}.db", std::process::id()));

@@ -102,6 +102,25 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+// The viewer renders rounds through the shared round model that was extracted
+// into src/utils/roundModel.ts; the page module cannot be instantiated without
+// it, so every behavioural case in this file failed at setup with
+// "unexpected require from src/pages/AtifViewerPage.tsx: ../utils/roundModel".
+// Transpiled from source (its only imports are `import type`, erased) so the
+// page still renders through the real model rather than a hand-written stand-in.
+const roundModel = (() => {
+  const module = { exports: {} };
+  const fn = new Function('require', 'module', 'exports', transpile('src/utils/roundModel.ts'));
+  fn(
+    (name) => {
+      throw new Error(`roundModel must not require anything at runtime: ${name}`);
+    },
+    module,
+    module.exports,
+  );
+  return module.exports;
+})();
+
 // Captures FileReader instances so tests resolve reads by hand.
 class FakeFileReader {
   constructor() {
@@ -139,6 +158,7 @@ function renderViewerPage() {
       useI18n: () => ({ t: (key) => key }),
       useLocaleTag: () => 'en',
     },
+    '../utils/roundModel': roundModel,
     '../utils/apiClient': { ...stubs },
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': componentStub('CausalAttributionPanel'),
