@@ -111,7 +111,8 @@ pub use provisioner::{
     ManualDependency, ProvisionOutcome, ProvisionPlan, ProvisionStrategy, ProvisionablePackage,
     UnresolvableDependency,
 };
-pub use proxy::env_proxy_for;
+pub use proxy::agent_for;
+pub use proxy::resolve_redirect;
 pub use register::{
     ConsentState, HistoryAction, HistoryEntry, RegisterRecord, RegisterSource, RegisterState,
     RegistrationManager, SubscriptionError, current_operator, generate_link_id, require_root,
