@@ -63,7 +63,21 @@ fn parse_baggage(baggage: &str) -> Option<Vec<KeyValue>> {
     let mut values = Vec::new();
     for member in members {
         let mut sections = member.split(';');
-        let (key, value) = sections.next()?.split_once('=')?;
+        // A member without `key=value` — an empty list member such as a trailing
+        // comma, or a bare token — cannot define an allowlisted key, so it is
+        // skipped rather than dropping every other member with it.
+        let Some((key, value)) = sections.next().and_then(|kv| kv.split_once('=')) else {
+            continue;
+        };
+        let key = key.trim_matches([' ', '\t']);
+        // Only the five allowlisted keys are consumed. A syntactically invalid
+        // foreign member carries no signal about the allowlisted members and
+        // must not strip their attribution: the W3C Baggage specification
+        // removes invalid entries individually, and the OpenTelemetry SDK's
+        // own BaggagePropagator skips them per member.
+        if !FIELDS.iter().any(|(allowed, _, _)| *allowed == key) {
+            continue;
+        }
         for property in sections {
             let (key, value) = property.trim_matches([' ', '\t']).split_once('=').map_or(
                 (property.trim_matches([' ', '\t']), None),
@@ -78,7 +92,6 @@ fn parse_baggage(baggage: &str) -> Option<Vec<KeyValue>> {
                 return None;
             }
         }
-        let key = key.trim_matches([' ', '\t']);
         if !valid_key(key) {
             return None;
         }
@@ -86,17 +99,15 @@ fn parse_baggage(baggage: &str) -> Option<Vec<KeyValue>> {
         if !valid_value(raw) {
             return None;
         }
-        if FIELDS.iter().any(|(allowed, _, _)| *allowed == key) {
-            let decoded = percent_encoding::percent_decode_str(raw)
-                .decode_utf8()
-                .ok()?;
-            if !seen.insert(key) {
-                return None;
-            }
-            // Preserve metadata's significant whitespace. V1 trace-context
-            // normalization happens once at its own ingress, before propagation.
-            values.push(KeyValue::new(key.to_owned(), bounded(&decoded)));
+        let decoded = percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .ok()?;
+        if !seen.insert(key) {
+            return None;
         }
+        // Preserve metadata's significant whitespace. V1 trace-context
+        // normalization happens once at its own ingress, before propagation.
+        values.push(KeyValue::new(key.to_owned(), bounded(&decoded)));
     }
     Some(values)
 }
