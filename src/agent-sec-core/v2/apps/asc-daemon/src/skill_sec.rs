@@ -14,6 +14,7 @@ use asc_daemon_core::{ActionService, PeerCredentials};
 use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read as _};
 use std::os::unix::fs::MetadataExt as _;
@@ -40,9 +41,34 @@ fn default_state() -> PathBuf {
     PathBuf::from("/var/lib/agent-sec/skillsec")
 }
 
+/// Environment toggle arming per-skill ownership isolation.
+///
+/// Deliberately not a `skillsec.json` key: `Settings` denies unknown fields
+/// and the RPM marks the file `%config(noreplace)`, so a persisted key would
+/// keep a downgraded daemon from starting. Older daemons ignore this variable
+/// entirely, which defines the rollback behavior: a downgrade silently falls
+/// back to the phase-one access contract instead of failing to boot.
+pub(super) const REQUIRE_OWNERSHIP_ENV: &str = "AGENT_SEC_SKILLSEC_REQUIRE_OWNERSHIP";
+
+/// Parses [`REQUIRE_OWNERSHIP_ENV`]: unset or `false` keeps the phase-one
+/// access contract, `true` arms isolation, anything else is a startup error
+/// rather than a silently disarmed deployment.
+///
+/// # Errors
+/// Returns [`StartupError::InvalidOwnershipToggle`] for any other value.
+pub(super) fn require_ownership_from_env(value: Option<&OsStr>) -> Result<bool, StartupError> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == OsStr::new("false") => Ok(false),
+        Some(value) if value == OsStr::new("true") => Ok(true),
+        Some(_) => Err(StartupError::InvalidOwnershipToggle),
+    }
+}
+
 pub(super) fn start(
     config: Option<&Path>,
-) -> Result<(Arc<SkillSecService>, Option<SkillFsConfig>), StartupError> {
+    require_ownership: bool,
+) -> Result<(Arc<SkillSecService>, Option<SkillFsConfig>, bool), StartupError> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(StartupError::RootRequired);
     }
@@ -77,7 +103,7 @@ pub(super) fn start(
         },
         ScannerRegistry::new(settings.scanners, settings.parsers)?,
     )?);
-    Ok((service, settings.skillfs))
+    Ok((service, settings.skillfs, require_ownership))
 }
 
 fn read_settings(path: &Path) -> Result<Settings, StartupError> {
@@ -153,6 +179,8 @@ pub(super) enum StartupError {
     Recovery(String),
     #[error("unsafe SkillSec configuration or private state path")]
     UnsafePath,
+    #[error("invalid AGENT_SEC_SKILLSEC_REQUIRE_OWNERSHIP value: expected true or false")]
+    InvalidOwnershipToggle,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("invalid SkillSec system configuration: {0}")]

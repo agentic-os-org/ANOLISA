@@ -16,7 +16,6 @@ path = "src/main.rs"
 asc-action-types = { workspace = true }
 asc-capability-prompt-scan = { workspace = true }
 asc-model-client = { workspace = true }
-dirs = { workspace = true }
 rustix = { workspace = true }
 asc-observability = { workspace = true, features = ["runtime"] }
 tracing.workspace = true

@@ -266,9 +266,12 @@ consumer fields, results and exit codes remain migration acceptance requirements
    retained, including for earlier V2 records. Rotation must withdraw old activation before trust
    is rebuilt by scanning, signing and activating again. Rotation is not implemented by the
    batch-one key initialization API.
-4. **Authorization:** every local caller may operate every managed Skill. Managed-directory
-   configuration bounds the managed set; it is not an ownership ACL. User isolation is an explicit
-   TODO. Arbitrary bytes cannot be submitted to a generic signing endpoint.
+4. **Authorization:** every local caller may operate every managed Skill by default.
+   Managed-directory configuration bounds the managed set; it is not an ownership ACL. The
+   former user-isolation TODO now exists as an opt-in deployment mode: the environment
+   variable `AGENT_SEC_SKILLSEC_REQUIRE_OWNERSHIP=true` restricts non-root callers to the
+   Skills they own (see "Daemon, CLI and audit boundary in batch five"). Arbitrary bytes
+   cannot be submitted to a generic signing endpoint.
 5. **Runtime:** one root daemon is the sole writer; the Rust CLI calls the daemon and does not
    invoke Python Ledger or execute a local fallback. Agent Hooks remain unchanged in this PR.
 
@@ -494,22 +497,50 @@ The Executor rejects caller paths outside configured patterns or authenticated S
 before physical resolution and business side effects. All commands share this boundary, including
 analyze, export, background work and ordinary startup reconcile. Aggregate discovery combines
 configured patterns and still-authorized registration; caller discovery does not expand authority.
-One out-of-range caller path rejects the whole batch before processing any Skill. Empty
-`check/scan --all` remains an execution failure without creating keys. Caller discovery is bounded
-to 1024 roots. Registration is operational history, never an authorization source. Status uses the
-current configuration and authorized history independently of caller HOME. Configured mount trees
-are not walked through FUSE; authenticated notifications and the existing registry supply their roots.
+One out-of-range caller path rejects the whole batch before processing any Skill; aggregate
+members supplied by the daemon's own discovery are filtered, not rejected, so the distinction
+between explicitly forbidden targets and automatically discovered aggregate members is preserved.
+Empty `check/scan --all` remains an execution failure without creating keys. Caller discovery is
+bounded to 1024 roots. Registration is operational history, never an authorization source. Status
+uses the current configuration and authorized history independently of caller HOME. Configured
+mount trees are not walked through FUSE; authenticated notifications and the existing registry
+supply their roots.
+
+Optional per-skill ownership isolation is armed by the `AGENT_SEC_SKILLSEC_REQUIRE_OWNERSHIP`
+environment variable. It is deliberately not a `skillsec.json` key: `Settings` denies unknown
+fields and the RPM marks the file `%config(noreplace)`, so a persisted key would keep a
+downgraded daemon from starting, while older daemons ignore the variable and a rollback
+silently falls back to the phase-one access contract. Unset or `false` keeps that contract;
+any other value is a startup error rather than a silently disarmed deployment. When armed:
+
+- Operate authority (init, scan, certify, analyze, audit, decide, export, activate,
+  reconcile, rotate-keys) requires owning the Skill: the directory's filesystem owner for
+  ordinary managed directories, or the uid an authenticated SkillFS mount is bound to — one
+  mount is one authorization domain. Both checks fail closed when the owner cannot be
+  established. Root and daemon-owned background work stay unrestricted.
+- Query authority (check, show) additionally covers the supported shared layout: root-owned
+  system Skills in administrator-managed locations, whose content every local user can
+  already read. Consumers such as the Codex hook therefore keep receiving verdicts instead
+  of a PermissionDenied that would make them fail open. Findings-bearing reads (scan,
+  audit, export) stay owner-only.
+- Aggregate discovery returns only the caller's Skills and prunes foreign-owned subtrees
+  during traversal, so a foreign user's non-UTF-8 entries or over-deep trees cannot abort
+  another caller's aggregate.
+- Authorization binds to the resolved object: direct directories are pinned by
+  `(device, inode)` at resolution and every privileged open re-verifies the pin after lock
+  waits, so a caller with parent rename rights cannot substitute another owner's directory
+  between the authorization and the operation.
+
+The CLI sends no client-side directory expansion for aggregates. `scan/check --all` and
+baseline `init` requests carry no discovered roots; the daemon's discovery against its
+configured patterns supplies the batch, so an unmanaged or root-owned conventional
+directory can no longer reject the whole batch before the caller's Skills are processed.
+Explicit paths and `init --skill-dir` roots remain exact caller-named targets, and
+hidden/snapshot directory filtering remains in effect daemon-side.
 
 Root must restore a removed scope before a new rotation can withdraw its historical exposure.
 An already authorized private rotation intent can still finish withdrawal after reconfiguration;
 this exception only permits root rotation recovery, not a new baseline scan outside current scope.
-
-The shared CLI discovery includes direct Skill children of `$XDG_DATA_HOME/anolisa/skills`.
-It follows the installer's syntax rules: unset/empty/relative overrides or raw `.`/`..` segments
-fall back to `$HOME/.local/share/anolisa/skills`; a valid but absent directory is simply skipped.
-An unset or empty `HOME` resolves through the CLI user's system account home directory.
-Only the CLI reads this caller environment. `init --no-baseline` and explicit-path requests bypass
-discovery, and hidden/snapshot directory filtering remains in effect.
 
 Rotation takes the service generation write lock, records a private intent, and withdraws every
 registered exposure before replacing the key. A pending rollback must first reconcile. A failed
@@ -567,7 +598,7 @@ mode `0755` plus socket mode `0666`. It verifies ancestor ownership, symlinks, w
 endpoint type/owner and the connected kernel UID before the HMAC handshake. The HMAC key remains
 an owner-only `0600` regular file. Public socket access does not grant administrative key rotation
 or change PAP authorization. All local users may operate managed Skills under the phase-one
-access contract.
+access contract unless the deployment arms per-skill ownership isolation.
 
 The root-owned `--skillsec-config` file accepts the optional binding below. Paths must be
 absolute and normalized. One mount's canonical/live roots may be identical for an ordinary

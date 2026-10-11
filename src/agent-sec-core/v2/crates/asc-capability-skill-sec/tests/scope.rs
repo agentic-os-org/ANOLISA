@@ -127,8 +127,9 @@ fn discovery_preserves_v1_pattern_depth_hidden_filter_dedup_and_dynamic_children
     ] {
         let executor = SkillSecExecutor::new(service(&base, &patterns));
         // Startup and RPC share discovery, including configured but unregistered Skills.
+        // Root discovery is the daemon-owned startup shape and stays unfiltered.
         let discovered = executor
-            .discover(Instant::now() + Duration::from_secs(10))
+            .discover(0, Instant::now() + Duration::from_secs(10))
             .unwrap();
         assert_eq!(
             discovered

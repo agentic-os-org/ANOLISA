@@ -5,12 +5,14 @@ use crate::ledger::storage::{Directory, missing};
 use crate::{ManagedSkillDir, SkillIdentity, SkillSecError, check_deadline, io_error};
 use rustix::fs::{AtFlags, FileType, statat};
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Instant;
 
 pub(crate) fn discover(
     pattern: &ManagedSkillDir,
     deadline: Instant,
     mounted: impl Fn(&SkillIdentity) -> bool,
+    prune: impl Fn(&Path) -> bool,
 ) -> Result<BTreeSet<SkillIdentity>, SkillSecError> {
     check_deadline(deadline)?;
     let mut found = BTreeSet::new();
@@ -40,11 +42,18 @@ pub(crate) fn discover(
             check_deadline(deadline)?;
             if !name.starts_with('.') && entry_type(&directory, &name)? == Some(FileType::Directory)
             {
-                if mounted(&SkillIdentity::new(directory.path.join(&name))?) {
+                let path = directory.path.join(&name);
+                if mounted(&SkillIdentity::new(&path)?) {
+                    continue;
+                }
+                // Prune foreign subtrees before descending: with per-skill
+                // ownership isolation a foreign user's non-UTF-8 entries or
+                // over-deep trees must not abort another caller's aggregate.
+                if prune(&path) {
                     continue;
                 }
                 // Reopen with no-follow traversal when visited instead of retaining unbounded FDs.
-                pending.push((directory.path.join(name), depth + 1));
+                pending.push((path, depth + 1));
             }
         }
     }
