@@ -16,7 +16,7 @@ use fuser::{
 use skillfs_core::os_adapter::OsAdapterStage;
 use skillfs_core::transform::{DirectiveStage, TransformPipeline};
 use skillfs_core::{SharedSkillStore, env::EnvironmentProfile, views::ViewsConfig};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::handles::HandleManager;
 use crate::inode::InodeManager;
@@ -160,12 +160,30 @@ impl SkillFs {
         store: SharedSkillStore,
         in_place: bool,
     ) -> Self {
+        // The embedder-facing constructor keeps its infallible contract:
+        // a present-but-unloadable views config logs at error level and
+        // proceeds without views (managed mounts are the ones that must
+        // refuse; they validate before construction and hand the parsed
+        // snapshot down through `new_with_pipeline`).
+        let views = match ViewsConfig::load_checked(&source) {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                error!(
+                    source = %source.display(),
+                    %error,
+                    "skillfs-views.toml exists but could not be read or parsed; \
+                     managed mounts refuse this file, continuing without views"
+                );
+                None
+            }
+        };
         Self::new_with_pipeline(
             mountpoint,
             source,
             store,
             in_place,
             TransformPipeline::directive_only(EnvironmentProfile::detect()),
+            views,
         )
     }
 
@@ -181,9 +199,17 @@ impl SkillFs {
         store: SharedSkillStore,
         in_place: bool,
         transform_pipeline: TransformPipeline,
+        views: Option<ViewsConfig>,
     ) -> Self {
-        // Load views config from the source directory if present.
-        let views_config = ViewsConfig::load(&source);
+        // The caller hands in the views snapshot it validated: managed
+        // mounts load the config exactly ONCE (`load_views_config` in
+        // `mount_inner`) and carry the parsed result here, so no second
+        // read of `skillfs-views.toml` can race a truncation or
+        // replacement between validation and construction and fall back
+        // to the unrestricted no-views behavior. `SkillFs::new` keeps
+        // the infallible embedder contract by loading above and logging
+        // (never panicking) on a corrupt file.
+        let views_config = views;
         if views_config.is_some() {
             info!("loaded skillfs-views.toml from {}", source.display());
         }
@@ -1000,5 +1026,59 @@ impl Filesystem for SkillFs {
 
     fn removexattr(&mut self, req: &Request, ino: u64, name: &std::ffi::OsStr, reply: ReplyEmpty) {
         self.removexattr_impl(req, ino, name, reply)
+    }
+}
+
+#[cfg(test)]
+mod views_snapshot_tests {
+    use super::*;
+    use skillfs_core::store::SkillStore;
+
+    /// The managed-mount race the snapshot carry closes: a views config
+    /// that was valid when the mount validated it, then truncated or
+    /// replaced before `SkillFs` was constructed, must NOT fall back to
+    /// the unrestricted no-views behavior. The validated snapshot is
+    /// handed down, so the on-disk corruption after validation cannot
+    /// widen the view.
+    #[test]
+    fn validated_views_snapshot_survives_a_post_validation_corruption() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        std::fs::write(
+            source.path().join("skillfs-views.toml"),
+            "[[view]]\nname = \"major\"\ndefault = true\nskills = [\"alpha\"]\n",
+        )
+        .expect("seed restrictive config");
+        let views = ViewsConfig::load_checked(source.path())
+            .expect("validation must pass on the intact file")
+            .expect("the seeded config is present");
+        assert_eq!(
+            views.default_skills(),
+            vec!["alpha".to_string()],
+            "fixture: the default view is restricted to alpha"
+        );
+
+        // The attacker step: corrupt the file AFTER validation.
+        std::fs::write(source.path().join("skillfs-views.toml"), "[[view]\nbroken")
+            .expect("corrupt the config");
+
+        let store: SharedSkillStore =
+            std::sync::Arc::new(parking_lot::RwLock::new(SkillStore::new()));
+        let fs = SkillFs::new_with_pipeline(
+            source.path().join("mnt"),
+            source.path().to_path_buf(),
+            store,
+            false,
+            TransformPipeline::empty(),
+            Some(views),
+        );
+        let carried = fs
+            .views_config
+            .as_ref()
+            .expect("the validated snapshot must be carried into the filesystem");
+        assert_eq!(
+            carried.default_skills(),
+            vec!["alpha".to_string()],
+            "the carried snapshot still restricts the default view to alpha — no re-read, no widening"
+        );
     }
 }

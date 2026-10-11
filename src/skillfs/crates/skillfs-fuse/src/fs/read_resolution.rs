@@ -578,6 +578,7 @@ mod tests {
             store,
             false,
             TransformPipeline::empty(),
+            None,
         )
         .with_active_resolver(Arc::new(resolver))
     }
@@ -703,6 +704,7 @@ mod tests {
             store,
             false,
             TransformPipeline::empty(),
+            None,
         )
         .with_active_resolver(resolver.clone());
 
@@ -742,6 +744,7 @@ mod tests {
             store,
             false,
             TransformPipeline::empty(),
+            None,
         )
         .with_active_resolver(resolver.clone());
 

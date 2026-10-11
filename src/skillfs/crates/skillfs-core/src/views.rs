@@ -106,8 +106,52 @@ impl ViewsConfig {
     ///
     /// Returns `None` if the file does not exist or fails to parse.
     pub fn load(source_dir: &Path) -> Option<Self> {
+        match Self::load_checked(source_dir) {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                warn!("failed to load skillfs-views.toml: {error}");
+                None
+            }
+        }
+    }
+
+    /// Load from `<source_dir>/skillfs-views.toml`, distinguishing an
+    /// absent file from one that is present but unreadable or
+    /// unparseable.
+    ///
+    /// * `Ok(None)` — no views config: the directory entry is genuinely
+    ///   MISSING (checked no-follow, so a dangling symlink does not pass),
+    ///   or the file is TOML-empty with content (comments/whitespace only,
+    ///   which carries no assignments); callers may treat every store
+    ///   skill as default-view.
+    /// * `Ok(Some(cfg))` — parsed config.
+    /// * `Err(error)` — the entry exists but could not be read (dangling
+    ///   symlink, permissions), is zero bytes (the truncation shape), is
+    ///   not valid TOML, or is non-empty TOML that does not shape into a
+    ///   `ViewsConfig`. Visibility-gating callers must REFUSE on this
+    ///   arm rather than fall back to the no-views behavior: treating a
+    ///   corrupt allowlist as absent silently widens the default view
+    ///   to every store skill. `skillfs classify` already refuses this
+    ///   file fail-closed; `mount` does the same through this check.
+    pub fn load_checked(source_dir: &Path) -> std::io::Result<Option<Self>> {
         let path = source_dir.join("skillfs-views.toml");
-        let content = std::fs::read_to_string(&path).ok()?;
+        // Reserve the absent case for a genuinely MISSING directory entry.
+        // Reading a dangling `skillfs-views.toml` symlink also fails with
+        // NotFound (the read follows the link), and treating that as absent
+        // would mount with no views — fail-open — exactly like a deleted
+        // file. `symlink_metadata` sees the entry itself, so only a truly
+        // missing entry maps to Ok(None); every other present-but-unreadable
+        // entry (dangling symlink, EACCES, ...) refuses below.
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
+        // The entry itself was just confirmed present, so ANY read
+        // failure — NotFound (a dangling symlink; the read follows the
+        // link), EACCES, ... — is a present-but-unreadable config: it
+        // must refuse, never read as absent and widen the view.
+        let content = std::fs::read_to_string(&path)?;
         match toml::from_str::<ViewsConfig>(&content) {
             Ok(cfg) => {
                 let default_views = cfg.views.iter().filter(|view| view.default).count();
@@ -119,11 +163,35 @@ impl ViewsConfig {
                          secondary views"
                     );
                 }
-                Some(cfg)
+                Ok(Some(cfg))
             }
             Err(e) => {
-                warn!("failed to parse skillfs-views.toml: {e}");
-                None
+                // A file with no tables or keys at all (a lone comment)
+                // holds no view assignments either way; mounts have always
+                // served it as "no views" (install_inbox_tests pins this),
+                // so treat it exactly like an absent file and leave it
+                // untouched. A ZERO-BYTE file is different: a hand-author
+                // writes a comment or removes the file, while truncation
+                // produces exactly zero bytes — and truncating a
+                // restrictive config to nothing is the silent-widening
+                // attack, so it must refuse. Anything non-empty that fails
+                // to parse or shape into a `ViewsConfig` is a corrupt
+                // allowlist and must surface.
+                if content.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "skillfs-views.toml is empty (truncated?) — fix or remove it",
+                    ));
+                }
+                if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(&content) {
+                    if table.is_empty() {
+                        return Ok(None);
+                    }
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("failed to parse skillfs-views.toml: {e}"),
+                ))
             }
         }
     }
@@ -579,6 +647,89 @@ mod tests {
     fn test_load_missing_file() {
         let dir = TempDir::new().unwrap();
         assert!(ViewsConfig::load(dir.path()).is_none());
+    }
+
+    #[test]
+    fn load_checked_distinguishes_absent_from_corrupt() {
+        // Absent: Ok(None) — callers may treat every skill as default.
+        let dir = TempDir::new().unwrap();
+        assert!(ViewsConfig::load_checked(dir.path()).unwrap().is_none());
+
+        // Valid: Ok(Some) round-trip.
+        make_config().save(dir.path()).unwrap();
+        let loaded = ViewsConfig::load_checked(dir.path())
+            .unwrap()
+            .expect("valid config loads");
+        assert_eq!(loaded.default_skills(), vec!["github", "notion"]);
+
+        // Present but unparseable: Err — never a silent Ok(None), so
+        // visibility-gating callers can refuse instead of widening the
+        // default view to every store skill.
+        std::fs::write(
+            dir.path().join("skillfs-views.toml"),
+            "[[view]\nname = \"major\"\n",
+        )
+        .unwrap();
+        let error = ViewsConfig::load_checked(dir.path())
+            .expect_err("a corrupt config must be an error, not absent");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("failed to parse"),
+            "error names the parse failure: {error}"
+        );
+
+        // A TOML-empty file (comments/whitespace only) carries no view
+        // assignments either way: mounts have always served it as "no
+        // views" (install_inbox_tests pins this), so it stays Ok(None)
+        // instead of refusing.
+        std::fs::write(dir.path().join("skillfs-views.toml"), "# views\n").unwrap();
+        assert!(
+            ViewsConfig::load_checked(dir.path()).unwrap().is_none(),
+            "a comments-only config is absent-equivalent, not corrupt"
+        );
+
+        // Non-empty TOML that is not a ViewsConfig shape is still a
+        // corrupt allowlist and must surface, not widen the view.
+        std::fs::write(dir.path().join("skillfs-views.toml"), "view = 5\n").unwrap();
+        assert!(
+            ViewsConfig::load_checked(dir.path()).is_err(),
+            "a misshapen non-empty config must refuse, not act as no-views"
+        );
+    }
+
+    #[test]
+    fn load_checked_refuses_a_zero_byte_file() {
+        let dir = TempDir::new().unwrap();
+        make_config().save(dir.path()).unwrap();
+        // Truncate the restrictive allowlist to nothing: a zero-byte file
+        // is never a hand-authored "no views" marker (a human writes a
+        // comment or removes the file), and serving it as no-views would
+        // silently widen the default view to every store skill.
+        std::fs::write(dir.path().join("skillfs-views.toml"), "").unwrap();
+        let error = ViewsConfig::load_checked(dir.path())
+            .expect_err("a zero-byte config is the truncation shape, not absent");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("truncated"),
+            "the refusal names the truncation risk: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_checked_refuses_a_dangling_symlink() {
+        let dir = TempDir::new().unwrap();
+        // A dangling symlink entry is PRESENT but unreadable; reading it
+        // fails NotFound exactly like a missing file, so the absent case
+        // must be reserved for a genuinely missing directory entry.
+        std::os::unix::fs::symlink(
+            dir.path().join("elsewhere.toml"),
+            dir.path().join("skillfs-views.toml"),
+        )
+        .unwrap();
+        let error = ViewsConfig::load_checked(dir.path())
+            .expect_err("a dangling symlink config is present-but-unreadable, not absent");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
