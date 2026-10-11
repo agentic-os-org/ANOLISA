@@ -458,6 +458,80 @@ mod tests {
     }
 
     #[test]
+    fn exec_interior_star_pattern_warns_as_never_matching() {
+        // An interior '*' cannot be expressed by the comm matcher (exact or
+        // prefix on the basename); the lowering keeps the star in the literal
+        // and the engine matches that literal byte-exactly. No ordinary
+        // process name contains a literal '*', so the rule can never fire —
+        // the same silent dead-matcher class the endpoint (five-octet) and
+        // path (mid-star) warnings cover for their kinds.
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block exec "py*env" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("py*env") && w.contains("never match")),
+            "interior-star exec pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+        // Pin the lowered matcher: the literal keeps the star, matched exactly.
+        let cfg: CConfig = unsafe { std::ptr::read_unaligned(c.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        assert_eq!(cfg.rules[0].m, M_EXACT);
+        let lit = cfg.rules[0].target.split(|b| *b == 0).next().unwrap_or(&[]);
+        assert_eq!(lit, b"py*env");
+    }
+
+    #[test]
+    fn exec_star_suffix_and_basename_patterns_do_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            source P = exec "python*"
+            rule r:
+              block exec "**/git" if P
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "prefix and basename exec patterns must not warn: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn exec_interior_star_warns_on_every_exec_surface() {
+        // The same dead-literal lowering exists on the other three exec
+        // surfaces: a source pattern, an `after exec` gate pattern, and a
+        // `since exec` invalidator pattern.
+        let pol = crate::dsl::parse::parse(
+            r#"
+            source BAD = exec "no*de"
+            rule r:
+              block exec "bash" if true unless after exec "gre*p" since exec "py*env" "run"
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        for pat in ["no*de", "gre*p", "py*env"] {
+            assert!(
+                c.warnings
+                    .iter()
+                    .any(|w| w.contains(pat) && w.contains("never match")),
+                "exec surface pattern '{pat}' must warn: {:?}",
+                c.warnings
+            );
+        }
+    }
+
+    #[test]
     fn exec_wildcard_patterns_match_any_comm() {
         assert_eq!(lower_exec("*"), (M_ANY, String::new()));
         assert_eq!(lower_exec("**"), (M_ANY, String::new()));
@@ -919,6 +993,7 @@ struct Ctx {
     endpoint_resolutions: HashMap<String, Vec<String>>,
     endpoint_cond_warned: std::collections::HashSet<String>,
     path_warned: std::collections::HashSet<String>,
+    exec_star_warned: std::collections::HashSet<String>,
     warnings: Vec<String>,
 }
 impl Ctx {
@@ -1078,7 +1153,9 @@ impl Ctx {
     /// never warn here.
     fn lower_target_warned(&mut self, op: u8, kind: Kind, pat: &str) -> (u8, String) {
         let lowered = lower_target(op, kind, pat);
-        if op != OP_EXEC && op != OP_CONNECT && op != OP_RECV {
+        if op == OP_EXEC {
+            self.warn_dead_exec_star(pat, &lowered);
+        } else if op != OP_CONNECT && op != OP_RECV {
             self.warn_absolute_mid_star(pat, &lowered);
         }
         lowered
@@ -1096,6 +1173,25 @@ impl Ctx {
             ));
         }
     }
+
+    /// Warn once per pattern when an exec pattern's lowering keeps a literal
+    /// `*` inside its matcher literal: the comm matcher only expresses
+    /// exact/prefix/any, so an interior (or doubled) star is not consumed as
+    /// a glob and the engine ends up matching the star byte-exactly. No
+    /// ordinary process name contains a literal `*`, so the lowered rule can
+    /// never match — the exec-kind twin of the endpoint match-nothing and
+    /// path widening warnings.
+    fn warn_dead_exec_star(&mut self, pat: &str, lowered: &(u8, String)) {
+        if lowered.1.contains('*') && self.exec_star_warned.insert(pat.to_string()) {
+            self.warnings.push(format!(
+                "exec pattern '{pat}' lowers to a match on the literal '{}' with an \
+                 unconsumed '*' (the comm matcher cannot express interior stars and \
+                 matches its literal byte-exactly), and no ordinary process name \
+                 contains '*', so the rule can never match",
+                lowered.1
+            ));
+        }
+    }
     /// Returns (gate bit, gate slot index). The index is what the engine uses to
     /// look up the gate's epoch for staleness; the bit is the v1 latching mask.
     fn gate_bit(
@@ -1106,7 +1202,9 @@ impl Ctx {
     ) -> Result<(u64, u32), String> {
         let (low_op, m, lit) = match gate_op {
             Op::Exec => {
-                let (m, l) = lower_exec(pat);
+                let lowered = lower_exec(pat);
+                self.warn_dead_exec_star(pat, &lowered);
+                let (m, l) = lowered;
                 (OP_EXEC, m, l)
             }
             Op::Read | Op::Open => {
@@ -1164,7 +1262,9 @@ impl Ctx {
         arg: Option<&str>,
     ) -> Result<u64, String> {
         let (m, lit) = if op == OP_EXEC {
-            lower_exec(pat)
+            let lowered = lower_exec(pat);
+            self.warn_dead_exec_star(pat, &lowered);
+            lowered
         } else {
             self.lower_target_warned(op, kind, pat)
         };
@@ -1423,6 +1523,7 @@ pub fn compile_with_labels(
         endpoint_resolutions: HashMap::new(),
         endpoint_cond_warned: std::collections::HashSet::new(),
         path_warned: std::collections::HashSet::new(),
+        exec_star_warned: std::collections::HashSet::new(),
         warnings: Vec::new(),
     };
     for name in &sorted_labels {
@@ -1436,7 +1537,9 @@ pub fn compile_with_labels(
         let bit = ctx.label_bit(&s.label)?;
         let (op, m, lit, ipv4, ipv4_mask) = match s.kind {
             Kind::Exec => {
-                let (m, lit) = lower_exec(&s.pattern);
+                let lowered = lower_exec(&s.pattern);
+                ctx.warn_dead_exec_star(&s.pattern, &lowered);
+                let (m, lit) = lowered;
                 (OP_EXEC, m, lit, 0, 0)
             }
             Kind::File => {
