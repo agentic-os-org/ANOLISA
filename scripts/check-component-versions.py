@@ -60,7 +60,7 @@ GENERATED_CONTRACTS = (
 
 def read_text(path: str) -> str:
     try:
-        return (ROOT / path).read_text()
+        return (ROOT / path).read_text(encoding="utf-8")
     except FileNotFoundError:
         raise ValueError(f"{path}: contract file not found in repository") from None
 
