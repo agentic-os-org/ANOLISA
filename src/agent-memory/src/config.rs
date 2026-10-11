@@ -147,7 +147,18 @@ pub struct ConsolidationConfig {
     /// Enable conflict detection during fact write. Default: true.
     #[serde(default = "default_true")]
     pub conflict_detection: bool,
-    /// BM25 score threshold for conflict detection. Default: -2.0.
+    /// BM25 similarity threshold for conflict detection: an existing fact is
+    /// superseded only when the match is *at least this strong*. The value is
+    /// on FTS5's `bm25()` scale — negative, and more negative is more similar
+    /// — so lower is stricter: `-2.0` flags near-duplicates, `-0.5` also flags
+    /// loose topical overlap. Only rows under `facts/` are eligible; a memory
+    /// file a fact was derived from is never superseded. Default: -2.0.
+    ///
+    /// `bm25()` is relative to the whole index, so in a namespace too small
+    /// for its IDF term to separate anything it carries no signal and this
+    /// threshold cannot fire. An existing fact whose content the new one fully
+    /// restates is superseded regardless of it; the threshold decides the
+    /// borderline rows.
     #[serde(default = "default_conflict_threshold")]
     pub conflict_bm25_threshold: f64,
     /// Trigger incremental consolidation every N tool calls (0 = disabled).
