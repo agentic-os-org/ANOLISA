@@ -116,7 +116,7 @@ ce-runner supports three task prefixes with different execution modes:
 ## Output
 
 ```
-claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
+claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>-<unique-suffix>/
 ├── <task_id>_xxxx.jsonl   # Converted trace
 ├── batch_results.json     # Per-trial results
 └── batch_summary.json     # Aggregate summary
