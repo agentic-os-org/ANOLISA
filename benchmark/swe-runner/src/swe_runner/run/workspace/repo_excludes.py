@@ -34,7 +34,9 @@ def install_repo_exclude_rules(repo_dir: Path, *, instance_id: str) -> None:
     upstream repository's tracked ``.gitignore``.
     """
     info_dir = repo_dir / ".git" / "info"
-    if not (repo_dir / ".git").exists():
+    # git worktree/submodule 布局中 .git 是文件（gitdir: ...）：
+    # exists() 同样为 True，但 info 目录无法建在文件之下——按非标准仓库跳过
+    if not (repo_dir / ".git").is_dir():
         logger.debug(
             "REPO_EXCLUDE_SKIP_NON_REPO instance=%s work_dir=%s",
             instance_id,
