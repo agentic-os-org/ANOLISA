@@ -39,6 +39,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -253,6 +254,111 @@ def build_table(data, reports: dict | None = None):
     return rows
 
 
+def build_difficulty_table(data: list) -> list[list[str]]:
+    """Aggregate eligible trials with separate evidence denominators per difficulty."""
+    if not isinstance(data, list):
+        raise ValueError("batch results must be a JSON array")
+
+    def number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        try:
+            result = float(value)
+        except OverflowError:
+            return None
+        return result if math.isfinite(result) and result >= 0 else None
+
+    def mean(values: list[float]) -> str:
+        if not values:
+            return ""
+        largest = max(values)
+        # Normalize before summing so a cohort of large finite durations stays finite.
+        value = (
+            largest * (math.fsum(item / largest for item in values) / len(values))
+            if largest
+            else 0
+        )
+        return format(value, ".12g")
+
+    groups = {}
+    for index, task in enumerate(data):
+        if not isinstance(task, dict):
+            raise ValueError(f"task {index} must be an object")
+        difficulty = task.get("difficulty")
+        if difficulty is None or difficulty == "":
+            difficulty = "unknown"
+        if not isinstance(difficulty, str):
+            raise ValueError(f"task {index} difficulty must be a string")
+        trials = task.get("trials", [])
+        if not isinstance(trials, list):
+            raise ValueError(f"task {index} trials must be an array")
+        group = groups.setdefault(
+            difficulty,
+            {
+                "tasks": 0,
+                "trials": 0,
+                "errors": 0,
+                "evaluated": 0,
+                "passed": 0,
+                "scores": [],
+                "times": [],
+            },
+        )
+        group["tasks"] += 1
+        for trial_index, trial in enumerate(trials):
+            if not isinstance(trial, dict):
+                raise ValueError(f"task {index} trial {trial_index} must be an object")
+            group["trials"] += 1
+            if trial.get("error"):
+                group["errors"] += 1
+                continue
+            passed = trial.get("passed")
+            if isinstance(passed, bool):
+                group["evaluated"] += 1
+                group["passed"] += passed
+            score = number(trial.get("task_score"))
+            if score is not None:
+                group["scores"].append(score)
+            wall_time = number(trial.get("wall_time_s"))
+            if wall_time is not None:
+                group["times"].append(wall_time)
+
+    rows = [
+        [
+            "Difficulty",
+            "Tasks",
+            "Trials",
+            "Error Trials",
+            "Evaluated Trials",
+            "Passed Trials",
+            "Pass Rate",
+            "Scored Trials",
+            "Mean Score",
+            "Timed Trials",
+            "Mean Wall(s)",
+        ]
+    ]
+    for difficulty, group in sorted(groups.items()):
+        rows.append(
+            [
+                difficulty,
+                str(group["tasks"]),
+                str(group["trials"]),
+                str(group["errors"]),
+                str(group["evaluated"]),
+                str(group["passed"]),
+                format(group["passed"] / group["evaluated"], ".12g")
+                if group["evaluated"]
+                else "",
+                str(len(group["scores"])),
+                mean(group["scores"]),
+                str(len(group["times"])),
+                mean(group["times"]),
+            ]
+        )
+    return rows
+
+
 def col_widths(rows):
     widths = [0] * len(rows[0])
     for row in rows:
@@ -297,20 +403,37 @@ def main():
                         help="Output format (default: table)")
     parser.add_argument("-o", "--output", default=None,
                         help="Output file path (default: stdout)")
+    parser.add_argument("--group-by", choices=["task", "difficulty"], default="task",
+                        help="Row grouping (default: task); difficulty summarizes eligible trials")
     args = parser.parse_args()
+
+    if args.group_by == "difficulty":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
 
     input_file = resolve_input(args)
     print(f"Reading: {input_file}", file=sys.stderr)
 
-    reports = load_reports(args.report_dir)
+    reports = load_reports(args.report_dir) if args.group_by == "task" else {}
     if reports:
         print(f"Loaded {len(reports)} trial reports from: {args.report_dir}", file=sys.stderr)
 
-    data = load_data(input_file)
-    rows = build_table(data, reports)
+    if args.group_by == "difficulty":
+        try:
+            data = json.loads(input_file.read_text(encoding="utf-8-sig"))
+            rows = build_difficulty_table(data)
+        except (OSError, UnicodeError, ValueError) as exc:
+            print(f"Error: invalid grouped results {input_file}: {exc}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        data = load_data(input_file)
+        rows = build_table(data, reports)
 
     if args.format == "csv":
         output = render_csv(rows)
+    elif args.group_by == "difficulty":
+        output = render_table(rows)
     else:
         output = render_table(rows)
         # Summary stats for table mode
@@ -325,7 +448,7 @@ def main():
         output += f"Trials: {total_trials} total, {passed_trials} passed ({passed_trials/total_trials*100:.1f}%)\n"
 
     if args.output:
-        with open(args.output, "w") as f:
+        with open(args.output, "w", encoding="utf-8" if args.group_by == "difficulty" else None) as f:
             f.write(output)
         print(f"Written to {args.output}")
     else:
