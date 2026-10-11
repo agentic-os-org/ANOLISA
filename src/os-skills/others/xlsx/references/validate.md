@@ -285,7 +285,12 @@ which libreoffice || which soffice
 libreoffice --version
 ```
 
-If neither command returns a path, LibreOffice is not installed. Record "Tier 2: SKIPPED — LibreOffice not available" in the report and proceed to delivery with Tier 1 results only.
+For Windows, use `python SKILL_DIR/scripts/libreoffice_recalc.py --check`. The
+helper also searches `LibreOffice/program/` under `ProgramW6432`, `ProgramFiles`
+and `ProgramFiles(x86)`, preferring the console launcher `soffice.com` over
+`soffice.exe`. A standard installation does not need to be added to PATH.
+
+If the helper cannot find LibreOffice, record "Tier 2: SKIPPED — LibreOffice not available" in the report and proceed to delivery with Tier 1 results only.
 
 ### Install LibreOffice (if permitted in the environment)
 
@@ -301,7 +306,10 @@ sudo apt-get install -y libreoffice
 
 ### Run headless recalculation
 
-Use the dedicated recalculation script. It handles binary discovery across macOS and Linux, works from a temporary copy of the input (preserving the original), and provides structured output and exit codes compatible with the validation pipeline.
+Use the dedicated recalculation script. It handles binary discovery across macOS,
+Linux and Windows, works from a temporary copy of the input (preserving the
+original), and provides structured output and exit codes compatible with the
+validation pipeline.
 
 ```bash
 # Check LibreOffice availability first

@@ -49,6 +49,12 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## XLSX Validation
+
+The XLSX recalculation helper discovers standard Windows LibreOffice installations,
+as well as macOS and PATH binaries. See the
+[XLSX validation guide](../../docs/user-guide/en/user-entrypoint/os-skills.md#xlsx-dynamic-validation).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

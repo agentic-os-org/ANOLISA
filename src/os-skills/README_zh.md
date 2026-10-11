@@ -46,6 +46,12 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## XLSX 验证
+
+XLSX 重算工具可发现 Windows 的标准 LibreOffice 安装位置，以及 macOS 和
+PATH 中的程序。详见
+[XLSX 验证指南](../../docs/user-guide/zh/user-entrypoint/os-skills.md#xlsx-动态验证)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：

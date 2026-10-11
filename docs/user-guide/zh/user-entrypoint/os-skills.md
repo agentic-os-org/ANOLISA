@@ -84,6 +84,22 @@ confirm_destructive = true
 
 ---
 
+## XLSX 动态验证
+
+`xlsx` 技能使用 LibreOffice 动态重算公式。将 `SKILL_DIR` 替换为已安装的
+`xlsx` 技能目录，检查可用性：
+
+```bash
+python SKILL_DIR/scripts/libreoffice_recalc.py --check
+```
+
+工具先检查 macOS 应用目录和 PATH。在 Windows 上，随后依次检查
+`ProgramW6432`、`ProgramFiles` 和 `ProgramFiles(x86)` 下的
+`LibreOffice/program/`，在每个安装目录中优先使用 `soffice.com`，再尝试
+`soffice.exe`。标准 Windows 安装无需修改 PATH。自定义安装可将程序目录加入 PATH。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)
