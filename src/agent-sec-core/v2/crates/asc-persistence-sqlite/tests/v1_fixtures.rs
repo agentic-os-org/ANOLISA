@@ -26,7 +26,7 @@ use asc_persistence_sqlite::security_events::{
     EventFilters, SECURITY_EVENTS_TABLES, SecurityEventsMigrator, SqliteEventReader,
 };
 use asc_security_events::{SECURITY_EVENTS_SQLITE_SCHEMA_VERSION, SecurityEvent};
-use asc_sqlite_kernel::{SchemaMigrator, SqliteStore, TableSpec};
+use asc_sqlite_kernel::{KernelError, SchemaMigrator, SqliteStore, TableSpec};
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
@@ -349,4 +349,108 @@ fn an_observability_fixture_keeps_its_only_revision() {
         .expect("store not disabled");
 
     assert_eq!(projected, expected("observability_v1", "expected"));
+}
+
+/// The v2 system store converges a v1-shaped observability database in place:
+/// the `owner` column appears, every v1 row survives and the revision moves to
+/// the system schema version (#6605 phase 5).
+#[test]
+fn the_system_spec_converges_a_v1_shaped_observability_database() {
+    use asc_persistence_sqlite::observability::{
+        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION, SYSTEM_OBSERVABILITY_TABLES,
+    };
+
+    let (_dir, path) = staged("observability_v1");
+    let before = count_observability_rows(&path);
+
+    let store = SqliteStore::new(
+        &path,
+        false,
+        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION,
+        SYSTEM_OBSERVABILITY_TABLES,
+        None,
+        "[observability]",
+    )
+    .expect("store");
+    store
+        .with_connection(true, |_| Ok(()))
+        .expect("open and converge");
+
+    let store = SqliteStore::new(
+        &path,
+        true,
+        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION,
+        SYSTEM_OBSERVABILITY_TABLES,
+        None,
+        "[observability]",
+    )
+    .expect("reopen read-only");
+    let (owner_column, version, rows) = store
+        .with_connection(false, |conn| {
+            let columns = columns_of(conn, "observability_events");
+            let owner = columns
+                .iter()
+                .find(|column| column["name"] == "owner")
+                .cloned();
+            let version: u32 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(KernelError::from)?;
+            let rows: u32 = conn
+                .query_row("SELECT COUNT(*) FROM observability_events", [], |row| {
+                    row.get(0)
+                })
+                .map_err(KernelError::from)?;
+            Ok((owner, version, rows))
+        })
+        .expect("connection")
+        .expect("store not disabled");
+
+    assert_eq!(version, SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION);
+    assert_eq!(rows, before, "convergence must not lose v1 rows");
+    let owner = owner_column.expect("the owner column must converge");
+    assert_eq!(owner["type"], "INTEGER");
+    assert_eq!(owner["dflt_value"], serde_json::Value::Null);
+}
+
+/// A fresh system store carries the owner column from its first write on.
+#[test]
+fn a_fresh_system_observability_store_creates_the_owner_column() {
+    use asc_persistence_sqlite::observability::{
+        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION, SYSTEM_OBSERVABILITY_TABLES,
+    };
+
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("system-observability.db");
+    let store = SqliteStore::new(
+        &path,
+        false,
+        SYSTEM_OBSERVABILITY_SQLITE_SCHEMA_VERSION,
+        SYSTEM_OBSERVABILITY_TABLES,
+        None,
+        "[observability]",
+    )
+    .expect("store");
+    let columns = store
+        .with_connection(true, |conn| Ok(columns_of(conn, "observability_events")))
+        .expect("connection")
+        .expect("store not disabled");
+
+    let names: Vec<&str> = columns
+        .iter()
+        .filter_map(|column| column["name"].as_str())
+        .collect();
+    assert_eq!(
+        names.last().copied(),
+        Some("owner"),
+        "owner converges in as the last column: {names:?}"
+    );
+    assert_eq!(names.len(), 11, "the ten v1 columns plus owner");
+}
+
+fn count_observability_rows(path: &Path) -> u32 {
+    let conn = Connection::open(path).expect("open fixture");
+    conn.query_row("SELECT COUNT(*) FROM observability_events", [], |row| {
+        row.get(0)
+    })
+    .expect("count")
 }
