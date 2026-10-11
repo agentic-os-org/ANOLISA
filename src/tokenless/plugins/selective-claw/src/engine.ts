@@ -246,9 +246,10 @@ export class SelectiveContextEngine implements ContextEngine {
     found: number;
     turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
   } {
+    const requestedTurns = [...new Set(turnSeqs)];
     const cache = this.turnMessagesCache.get(sessionId);
     const turnMap = new Map<number, Array<{ role: string; content: string }>>();
-    for (const seq of turnSeqs) {
+    for (const seq of requestedTurns) {
       const messages = cache?.get(seq);
       if (messages) {
         turnMap.set(seq, messages.map((message) => ({
@@ -258,7 +259,7 @@ export class SelectiveContextEngine implements ContextEngine {
       }
     }
 
-    const missingTurns = turnSeqs.filter((seq) => !turnMap.has(seq));
+    const missingTurns = requestedTurns.filter((seq) => !turnMap.has(seq));
     const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
     for (const m of storeMessages) {
       const arr = turnMap.get(m.turnSeq) ?? [];
@@ -266,7 +267,7 @@ export class SelectiveContextEngine implements ContextEngine {
       turnMap.set(m.turnSeq, arr);
     }
 
-    const result = turnSeqs
+    const result = requestedTurns
       .filter((ts) => turnMap.has(ts))
       .map((ts) => ({ turnSeq: ts, messages: turnMap.get(ts)! }));
 

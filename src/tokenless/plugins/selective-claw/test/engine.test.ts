@@ -11,6 +11,30 @@ describe("SelectiveContextEngine", () => {
   let db: DatabaseSync;
   let engine: SelectiveContextEngine;
 
+  it.each(["stored", "cached", "mixed"])("expands repeated IDs once from %s turns", async (source) => {
+    const messages: AgentMessage[] = [
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "first answer" },
+      { role: "user", content: "second question" },
+      { role: "assistant", content: "second answer" },
+    ];
+    if (source === "cached") {
+      await engine.assemble({ sessionId: "s1", messages });
+    } else if (source === "mixed") {
+      await engine.assemble({ sessionId: "s1", messages: messages.slice(0, 2) });
+      for (const message of messages.slice(2)) await engine.ingest({ sessionId: "s1", message });
+    } else {
+      for (const message of messages) await engine.ingest({ sessionId: "s1", message });
+    }
+    const turnIds = [2, 1, 2, 999, 1];
+    const result = engine.expandTurns("s1", turnIds);
+    expect(result.found).toBe(2);
+    expect(result.turns.map((turn) => turn.turnSeq)).toEqual([2, 1]);
+    expect(result.turns[0].messages.map((message) => message.content)).toEqual(["second question", "second answer"]);
+    expect(result.turns[1].messages.map((message) => message.content)).toEqual(["first question", "first answer"]);
+    expect(turnIds).toEqual([2, 1, 2, 999, 1]);
+  });
+
   beforeEach(() => {
     db = createConnection(":memory:");
     engine = new SelectiveContextEngine(db, {
