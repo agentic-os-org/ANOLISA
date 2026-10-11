@@ -399,6 +399,9 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+多个 recorder 并发记录同一实例时会独占创建不同的 `traceN.json` 文件；
+即使其他写入者选择了相同编号，也不会覆盖已有 trace。
+
 分析已有 trace：
 
 ```bash
