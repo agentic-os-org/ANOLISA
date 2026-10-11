@@ -108,8 +108,12 @@ stage-raw: ## Stage one raw payload into DESTDIR
 test-raw-package: ## Validate Linux and macOS raw package assembly
 	@bash scripts/test-package-raw.sh
 
+.PHONY: test-scripts
+test-scripts: ## Run the scripts/ Python test suites (recursive discovery)
+	cd $(CURDIR) && python3 -m pytest scripts -q
+
 .PHONY: test
-test: test-rpm-packaging test-raw-package ## Run unit tests (fast, no coverage)
+test: test-rpm-packaging test-raw-package test-scripts ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
 
 .PHONY: bench
