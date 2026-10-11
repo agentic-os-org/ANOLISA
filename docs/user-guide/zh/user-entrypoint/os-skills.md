@@ -84,6 +84,26 @@ confirm_destructive = true
 
 ---
 
+## 内核构建参数检查
+
+选择构建方式前，可以先查看内核构建脚本的用法：
+
+```bash
+bash SKILL_DIR/scripts/build-kernel.sh --help
+bash SKILL_DIR/scripts/build-kernel.sh upstream 6.12.9 4 defconfig
+```
+
+将 `SKILL_DIR` 替换为已安装的 `devops/kernel-dev` 目录。Upstream 和 SRPM 构建
+要求并行任务数为正整数，默认值为 CPU 核心数。Upstream 的配置名称必须是
+`defconfig`、`tinyconfig`、`menuconfig` 或 `current`。无效的构建方式、任务数、
+Upstream 配置名称或安装方式选择值，会在系统检查和软件包安装之前被拒绝。
+安装方式选择值仍为 `upstream` 和 `srpm`。
+
+`help`、`--help`、`-h` 和 `status` 不执行构建架构检测或依赖安装。
+实际构建仍然要求支持的 Linux 构建环境和既有权限。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

@@ -36,7 +36,7 @@
 
 ### 开发运维
 - **github** — GitHub 工作流与集成
-- **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
+- **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）；安装依赖前校验构建参数，查看帮助或状态不要求构建环境
 - **sysom-agentsight** — 系统诊断工具
 - **sysom-diagnosis** — SysOM 诊断与调优
 
