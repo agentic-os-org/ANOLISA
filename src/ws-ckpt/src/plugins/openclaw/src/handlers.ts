@@ -444,6 +444,12 @@ export async function handleConfig(
       if (!value) {
         return { text: "workspace requires a path value", isError: true };
       }
+      if (/[\n\r]/.test(value)) {
+        // The workspace path is interpolated into crontab lines; a line
+        // break would install everything after it as an independent cron
+        // entry (see cron.ts buildCronLine).
+        return { text: "workspace must be a single-line path without line breaks", isError: true };
+      }
       const oldWs = pluginState.resolvedConfig.workspace;
       pluginState.resolvedConfig.workspace = value;
       const schedules = pluginState.resolvedConfig.cronSchedules ?? [];

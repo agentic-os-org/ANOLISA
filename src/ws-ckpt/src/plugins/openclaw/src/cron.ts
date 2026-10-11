@@ -4,9 +4,14 @@ import { join } from "path";
 import { runCrontab } from "./commands.js";
 
 const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
+const LINE_BREAK_RE = /[\n\r]/;
 const LOCK_DIR = join(tmpdir(), "ws-ckpt-cron.lock");
 
 export function validateCronExpr(expr: string): boolean {
+  // A crontab is line-based: an expression carrying a line break would
+  // split into a second entry when written, so reject it up front — the
+  // field regex above cannot, because \s also matches newlines.
+  if (LINE_BREAK_RE.test(expr)) return false;
   return CRON_RE.test(expr.trim());
 }
 
@@ -19,6 +24,16 @@ function shellQuote(s: string): string {
 }
 
 function buildCronLine(workspace: string, schedule: string): string {
+  // Crontab parses line by line, so shell quoting alone cannot make an
+  // interpolated value safe: a workspace path carrying a line break
+  // would split the entry and install everything after the break as an
+  // independent, attacker-chosen cron line. Refuse instead of quoting.
+  if (LINE_BREAK_RE.test(workspace)) {
+    throw new Error("workspace path must not contain line breaks");
+  }
+  if (LINE_BREAK_RE.test(schedule)) {
+    throw new Error("cron schedule must not contain line breaks");
+  }
   return (
     `${schedule} /usr/local/bin/ws-ckpt checkpoint -w ${shellQuote(workspace)}` +
     ` -s "cron-$(date +\\%s)"` +
@@ -123,6 +138,11 @@ export function parseSchedulesUpdate(value: string, current: string[]): ParseRes
 export class CrontabManager {
   static async sync(workspace: string, schedules: string[]): Promise<boolean> {
     return withLock(async () => {
+      // Fail closed: never touch the crontab when an interpolated value
+      // could split a line (see buildCronLine).
+      if (LINE_BREAK_RE.test(workspace) || schedules.some((s) => LINE_BREAK_RE.test(s))) {
+        return false;
+      }
       const lines = await readCrontab();
       if (lines === null) return false;
       const kept = lines.filter((l) => !matchesWorkspace(l, workspace));
