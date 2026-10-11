@@ -4756,20 +4756,64 @@ fn eval_tcp_limit_output_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
     if !info.param_exists(path) {
         return 1;
     }
-    let current = read_sysctl_u64(path);
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
-    if max_speed >= 10000 && current < 524288 {
-        recs.push(Recommendation {
-            param: "net.ipv4.tcp_limit_output_bytes".to_string(),
-            current_value: current.to_string(),
-            recommended_value: "1048576".to_string(),
-            reason: "万兆网络下 TCP 输出限制过低，限制了单连接吞吐量".to_string(),
-            confidence: Confidence::Medium,
-            category: Category::Performance,
-            writable: true,
-        });
+    if let Some(rec) = tcp_limit_output_bytes_recommendation(
+        read_sysctl_u64(path),
+        max_speed,
+        &info.kernel_version,
+    ) {
+        recs.push(rec);
     }
     1
+}
+
+/// Emit the `net.ipv4.tcp_limit_output_bytes` recommendation for an
+/// already-read value.
+///
+/// Split out from the file probe so the version-dependent target is testable
+/// on any host.
+///
+/// The kernel default moved from 1 MB (16 * 65536) to 4 MB in Linux 6.16
+/// (`net/ipv4/tcp_ipv4.c` sets `4 << 20` from v6.16 on): the upstream commit
+/// is "tcp: increase tcp_limit_output_bytes default value to 4MB", whose
+/// message notes that the default had last changed in 2018 and that "modern
+/// NIC speeds got a 4x increase since then". The fixed 1 MB target now sits
+/// at a quarter of the default of every 6.16+ kernel, so the advice asks an
+/// administrator who is under it to settle at that quarter. Track the
+/// kernel's own default instead; the 1 MB target stays on the kernels whose
+/// default is still that. Only the 6.16+ target *is* the kernel default --
+/// 5.10 through 6.15 ship the 1 MB target and 4.19 ships 256 KB -- so the
+/// reason names a default on that path and a recommendation on the other.
+/// The rule keeps its own trigger of firing below half the target, so a
+/// kernel whose default did not move keeps the previous threshold, output
+/// and silence.
+fn tcp_limit_output_bytes_recommendation(
+    current: u64,
+    max_net_speed_mbps: u64,
+    kernel_version: &str,
+) -> Option<Recommendation> {
+    if max_net_speed_mbps < 10000 {
+        return None;
+    }
+    let on_6_16_or_later = kernel_at_least(kernel_version, 6, 16);
+    let target = if on_6_16_or_later { 4194304 } else { 1048576 };
+    if current >= target / 2 {
+        return None;
+    }
+    let note = if on_6_16_or_later {
+        format!("内核默认 {target}")
+    } else {
+        format!("建议提高到 {target}")
+    };
+    Some(Recommendation {
+        param: "net.ipv4.tcp_limit_output_bytes".to_string(),
+        current_value: current.to_string(),
+        recommended_value: target.to_string(),
+        reason: format!("万兆网络下 TCP 输出限制 {current} 偏低（{note}），限制了单连接吞吐量"),
+        confidence: Confidence::Medium,
+        category: Category::Performance,
+        writable: true,
+    })
 }
 
 fn eval_dev_weight(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
@@ -12107,6 +12151,75 @@ mod tests {
             rec.is_none(),
             "Should not recommend tcp_limit_output_bytes for 1G network"
         );
+    }
+
+    #[test]
+    fn tcp_limit_output_bytes_recommendation_tracks_the_kernel_default() {
+        // Kernels whose default is at most 1 MB keep the 1 MB target, and the
+        // rule keeps its own trigger: half the target, exactly the previous
+        // 512 KB threshold, so those kernels produce what they produced
+        // before this change.
+        for version in ["4.19.0", "5.10.0", "6.6.0", "6.15.0", "custom-kernel"] {
+            let rec = tcp_limit_output_bytes_recommendation(262144, 10000, version)
+                .expect("10GbE with a value under the target is worth raising");
+            assert_eq!(rec.recommended_value, "1048576", "kernel {version}");
+            assert_eq!(rec.current_value, "262144");
+            assert_eq!(rec.param, "net.ipv4.tcp_limit_output_bytes");
+        }
+        assert!(tcp_limit_output_bytes_recommendation(524287, 10000, "6.15.0").is_some());
+        assert!(tcp_limit_output_bytes_recommendation(524288, 10000, "6.15.0").is_none());
+        assert!(tcp_limit_output_bytes_recommendation(1048576, 10000, "6.15.0").is_none());
+        // Linux 6.16 raised the default to 4 MB, so 1 MB is a quarter of what
+        // the kernel ships and must not be the target any more; the trigger
+        // moves with the target, to half of 4 MB.
+        assert_eq!(
+            tcp_limit_output_bytes_recommendation(262144, 10000, "6.16.0")
+                .expect("256 KB is below the new default too")
+                .recommended_value,
+            "4194304"
+        );
+        // 1 MB and 1.5 MB are below the new trigger and get the new target.
+        assert_eq!(
+            tcp_limit_output_bytes_recommendation(1048576, 10000, "7.3.0-rc6")
+                .expect("1 MB is below half the 6.16 default of 4 MB")
+                .recommended_value,
+            "4194304"
+        );
+        assert!(tcp_limit_output_bytes_recommendation(2097151, 10000, "7.3.0-rc6").is_some());
+        assert!(tcp_limit_output_bytes_recommendation(2097152, 10000, "7.3.0-rc6").is_none());
+        assert!(tcp_limit_output_bytes_recommendation(4194304, 10000, "7.3.0-rc6").is_none());
+        // The rule stays silent below 10GbE on any kernel.
+        assert!(tcp_limit_output_bytes_recommendation(262144, 1000, "7.3.0-rc6").is_none());
+        assert!(tcp_limit_output_bytes_recommendation(262144, 1000, "6.15.0").is_none());
+    }
+
+    #[test]
+    fn tcp_limit_output_bytes_reason_names_a_default_only_where_the_target_is_one() {
+        // 6.16 raised the default to 4 MB and the target follows it, so the
+        // modern reason may name the default. The 1 MB kept for older kernels
+        // is only the default of 5.x through 6.15 -- 4.19 ships 256 KB -- so
+        // that path names the recommendation instead of a default.
+        let modern = tcp_limit_output_bytes_recommendation(262144, 10000, "7.3.0-rc6")
+            .expect("below the target");
+        assert!(
+            modern.reason.contains("内核默认 4194304"),
+            "6.16+ target is the kernel default: {}",
+            modern.reason
+        );
+        for version in ["4.19.0", "5.10.0", "6.15.0", "custom-kernel"] {
+            let legacy = tcp_limit_output_bytes_recommendation(262144, 10000, version)
+                .expect("below the target");
+            assert!(
+                !legacy.reason.contains("内核默认"),
+                "kernel {version}: the 1 MB target is not a default everywhere: {}",
+                legacy.reason
+            );
+            assert!(
+                legacy.reason.contains("1048576"),
+                "kernel {version}: the target stays visible in the reason: {}",
+                legacy.reason
+            );
+        }
     }
 
     #[test]
