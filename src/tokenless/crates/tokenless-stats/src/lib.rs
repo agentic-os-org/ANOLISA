@@ -43,5 +43,21 @@ pub use sls::{SlsRecord, SlsWriter};
 
 pub use trace::TraceContext;
 
+/// Best-effort stderr warning whose own write failure cannot fail the
+/// command. `eprintln!` panics when writing to stderr fails (a full
+/// filesystem behind redirected logs, a closed descriptor), which would
+/// turn a fail-soft stats or SLS warning into a process failure — the
+/// stats layer must stay invisible to the compression and retrieval
+/// results. The write errors are discarded: there is no fallback channel
+/// to report a failed warning on, and failing the command here is
+/// exactly the regression to avoid.
+pub(crate) fn warn_stats(message: &str) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(message.as_bytes());
+    let _ = stderr.write_all(b"\n");
+    let _ = stderr.flush();
+}
+
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

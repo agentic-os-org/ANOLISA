@@ -12,6 +12,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::key::compute_key;
 use crate::store::{MAX_GENERATION, StashError, StashStore, StashWrite};
+use crate::warn_soft;
 
 /// Default time-to-live for an entry: 1 hour. A retrieve window of an hour
 /// comfortably covers a typical agent session's compress→retrieve round trip.
@@ -136,9 +137,9 @@ impl SqliteStore {
     /// the fail-soft policy in `tokenless-stats::recorder::StatsRecorder`.
     fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|poisoned| {
-            eprintln!(
+            warn_soft(&format!(
                 "[tokenless-ccr] WARNING: sqlite mutex poisoned by a previous panic; recovering: {poisoned}"
-            );
+            ));
             self.conn.clear_poison();
             poisoned.into_inner()
         })
@@ -258,7 +259,9 @@ impl StashStore for SqliteStore {
         // `SqliteCcrStore::get`. Best-effort — a purge failure must not block
         // the lookup; it falls through to the SELECT below.
         if let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64]) {
-            eprintln!("[tokenless-ccr] WARNING: stash lazy-purge failed: {e}");
+            warn_soft(&format!(
+                "[tokenless-ccr] WARNING: stash lazy-purge failed: {e}"
+            ));
         }
         match conn.query_row(
             "SELECT payload FROM stash WHERE hash = ? AND expires_at >= ?",
@@ -753,5 +756,39 @@ mod tests {
             store_b.retrieve(&second.key).unwrap(),
             Some("payload".into())
         );
+    }
+
+    /// A stash warning must not be able to fail the command when stderr
+    /// itself cannot be written (a full filesystem behind redirected
+    /// logs, a closed descriptor). `eprintln!` panics on that shape,
+    /// turning the fail-soft warning into a process failure while the
+    /// compression result is fine; `warn_soft` must survive it. Redirect
+    /// fd 2 to /dev/full, call the helper, restore, and assert the call
+    /// returned — a panicking write makes this test fail.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn warn_soft_survives_an_unwritable_stderr() {
+        use std::os::unix::io::AsRawFd;
+
+        let dev_full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("open /dev/full");
+        let saved = unsafe { libc::dup(2) };
+        assert!(saved >= 0, "dup stderr");
+        unsafe {
+            libc::dup2(dev_full.as_raw_fd(), 2);
+        }
+        // The helper's whole contract: no panic, the write error is
+        // discarded.
+        warn_soft("[tokenless-ccr] WARNING: simulated stderr failure");
+        // Restore before any assert can print.
+        let restored = unsafe { libc::dup2(saved, 2) };
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        assert!(restored >= 0, "restore stderr");
+        unsafe {
+            libc::close(saved);
+        }
+        drop(dev_full);
     }
 }

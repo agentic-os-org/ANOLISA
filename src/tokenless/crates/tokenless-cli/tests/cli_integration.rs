@@ -2592,3 +2592,217 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
         assert_eq!(retrieved.stdout, html.as_bytes());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Fail-soft warnings must survive an unwritable stderr (fd 2 → /dev/full)
+// ─────────────────────────────────────────────────────────────────────
+// `eprintln!` panics when writing to stderr fails (a full filesystem
+// behind redirected logs, a closed descriptor). Every warning emitted on
+// a fail-soft path inside the stats, SLS and stash libraries must
+// instead discard its own write error: the stats layer stays invisible
+// to the compression and retrieval results.
+
+/// Open /dev/full for a child's stderr: every write fails with ENOSPC,
+/// the production shape of "stderr cannot be written".
+#[cfg(target_os = "linux")]
+fn dev_full() -> std::fs::File {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full")
+}
+
+/// A compressible response: dropping the debug/trace fields yields token
+/// savings, so the stats/SLS recording tail of the command runs.
+#[cfg(target_os = "linux")]
+const COMPRESSIBLE_RESPONSE: &str =
+    r#"{"data":"value","debug":"remove","trace":"remove","empty_field":""}"#;
+
+#[test]
+#[cfg(target_os = "linux")]
+fn invalid_sls_path_warning_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let home = get_home_dir();
+    assert!(!home.is_empty());
+    // A path under the home directory is outside the /var/log/ and /tmp/
+    // allow-list, so the SLS writer rejects it and warns on stderr.
+    let rejected = std::path::Path::new(&home).join(".tokenless-sls-rejected.jsonl");
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_SLS_ENABLED", "1")
+        .env("TOKENLESS_SLS_PATH", &rejected)
+        .args(["compress-response"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(dev_full()))
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(COMPRESSIBLE_RESPONSE.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "rejecting TOKENLESS_SLS_PATH must not kill the compression (exit {})",
+        output.status.code().unwrap_or(-1)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result.get("data").is_some());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn sls_write_error_warning_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    // An existing directory passes SLS path validation and the existence
+    // check, but cannot be opened for append: the write-error warning.
+    let directory = tempfile::tempdir().unwrap();
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_SLS_ENABLED", "1")
+        .env("TOKENLESS_SLS_PATH", directory.path())
+        .args(["compress-response"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(dev_full()))
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(COMPRESSIBLE_RESPONSE.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the SLS write-error warning must not kill the compression (exit {})",
+        output.status.code().unwrap_or(-1)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result.get("data").is_some());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn corrupt_stats_warnings_survive_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    // One valid row through the real recorder (this also creates the
+    // schema the CLI's open-time migration expects):
+    StatsRecorder::new(&stats_db)
+        .unwrap()
+        .record(&StatsRecord::new(
+            OperationType::CompressResponse,
+            "cli".to_string(),
+            10,
+            5,
+            6,
+            3,
+        ))
+        .unwrap();
+    // A timestamp that does not parse exercises the now()-substitution
+    // warning; an unknown operation makes a row itself corrupt and
+    // exercises the skip warning.
+    let conn = rusqlite::Connection::open(&stats_db).unwrap();
+    conn.execute("UPDATE stats SET timestamp = 'not-a-timestamp'", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO stats (
+            timestamp, timestamp_ns, operation, agent_id,
+            before_chars, before_tokens, after_chars, after_tokens
+        ) VALUES ('2026-01-01T00:00:00+00:00', 0, 'not-an-operation', 'cli', 10, 5, 6, 3)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut command = fixture.command();
+    command
+        .env("TOKENLESS_STATS_DB", &stats_db)
+        .args(["stats", "list"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(dev_full()));
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "corrupt-row warnings must not kill `stats list` (exit {})",
+        output.status.code().unwrap_or(-1)
+    );
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !listing.trim().is_empty(),
+        "the recovered row must still be listed"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn stash_purge_warning_survives_an_unwritable_stderr() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stash_db = fixture.data_dir.join("stash-no-purge.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    // A real stash table whose rows cannot be deleted (a BEFORE DELETE
+    // trigger that aborts): the store opens cleanly — none of its
+    // open-time statements delete — but the lazy-purge sweep on every
+    // retrieve fails, while the retrieve SELECT keeps working.
+    let payload = "stash-purge-payload";
+    let hash = tokenless_ccr::compute_key(payload.as_bytes());
+    let conn = rusqlite::Connection::open(&stash_db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE stash (
+             hash TEXT PRIMARY KEY,
+             payload TEXT NOT NULL,
+             expires_at INTEGER NOT NULL,
+             generation INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE stash_metadata(
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             last_generation INTEGER NOT NULL CHECK(last_generation >= 0));
+         CREATE TRIGGER block_lazy_purge BEFORE DELETE ON stash
+         BEGIN SELECT RAISE(ABORT, 'lazy purge blocked'); END;
+         INSERT INTO stash(hash, payload, expires_at, generation)
+         VALUES ('{hash}', '{payload}', 9999999999, 0);
+         INSERT INTO stash(hash, payload, expires_at, generation)
+         VALUES ('bbbbbbbbbbbbbbbbbbbbbbbb', 'expired-payload', 0, 0);"
+    ))
+    .unwrap();
+    drop(conn);
+
+    let mut command = fixture.command();
+    command
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", &hash])
+        .arg("--stash-db")
+        .arg(&stash_db)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(dev_full()));
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "the stash lazy-purge warning must not kill the retrieval (exit {})",
+        output.status.code().unwrap_or(-1)
+    );
+    assert_eq!(output.stdout.as_slice(), payload.as_bytes());
+}

@@ -36,3 +36,19 @@ pub use marker::{
 pub use recovery::{recovery_hashes, recovery_instruction, truncation_suffix_for};
 pub use store::{StashError, StashStore, StashWrite};
 pub use tokenless_protocol::RecoveryMethod;
+
+/// Best-effort stderr warning whose own write failure cannot fail the
+/// command. `eprintln!` panics when writing to stderr fails (a full
+/// filesystem behind redirected logs, a closed descriptor), which would
+/// turn a fail-soft stash warning into a process failure — the stash
+/// layer must stay invisible to the compression and retrieval results.
+/// The write errors are discarded: there is no fallback channel to
+/// report a failed warning on, and failing the command here is exactly
+/// the regression to avoid.
+pub(crate) fn warn_soft(message: &str) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(message.as_bytes());
+    let _ = stderr.write_all(b"\n");
+    let _ = stderr.flush();
+}

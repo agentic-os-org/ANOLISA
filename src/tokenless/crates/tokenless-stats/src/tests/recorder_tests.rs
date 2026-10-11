@@ -1186,3 +1186,37 @@ fn clear_empties_the_attribution_tables() {
         .unwrap();
     assert_eq!(artifacts, 0);
 }
+
+/// A stats or SLS warning must not be able to fail the command when
+/// stderr itself cannot be written (a full filesystem behind redirected
+/// logs, a closed descriptor). `eprintln!` panics on that shape, turning
+/// the fail-soft warning into a process failure while the compression
+/// output is fine; `warn_stats` must survive it. Redirect fd 2 to
+/// /dev/full, call the helper, restore, and assert the call returned —
+/// a panicking write makes this test fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn warn_stats_survives_an_unwritable_stderr() {
+    use std::os::unix::io::AsRawFd;
+
+    let dev_full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let saved = unsafe { libc::dup(2) };
+    assert!(saved >= 0, "dup stderr");
+    unsafe {
+        libc::dup2(dev_full.as_raw_fd(), 2);
+    }
+    // The helper's whole contract: no panic, the write error is
+    // discarded.
+    crate::warn_stats("[tokenless-stats] WARNING: simulated stderr failure");
+    // Restore before any assert can print.
+    let restored = unsafe { libc::dup2(saved, 2) };
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    assert!(restored >= 0, "restore stderr");
+    unsafe {
+        libc::close(saved);
+    }
+    drop(dev_full);
+}
