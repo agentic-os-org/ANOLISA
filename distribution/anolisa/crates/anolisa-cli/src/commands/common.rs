@@ -1080,35 +1080,146 @@ fn redact_url_runs(text: &str, url: &str) -> String {
 }
 
 /// Keeps only scheme and authority because paths and queries may carry secrets.
+///
+/// Fail-closed: a credential with an unencoded '/', '?', or '#' ends the
+/// authority early (`https://ci:secret-token/@mirror.invalid/…` leaves
+/// `ci:secret-token` where a host belongs), so an authority is shown only
+/// when it parses as an unambiguous host or `host:port` — and, when an `@`
+/// follows the cut, only when the parser provably did not sever a
+/// `user[:password]` span (see [`could_be_severed_credential`]). Anything
+/// else is `None` and callers report an opaque label.
 pub(crate) fn endpoint_without_credentials(url: &str) -> Option<String> {
     let sep = url.find("://")?;
     let remainder = &url[sep + 3..];
     let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let (authority, tail) = remainder.split_at(authority_end);
-    if tail.contains('@') {
+    let authority = &remainder[..authority_end];
+    let tail = &remainder[authority_end..];
+    let (host, stripped_userinfo) = match authority.rfind('@') {
+        Some(at) => (&authority[at + 1..], true),
+        None => (authority, false),
+    };
+    if !parses_as_host(host) {
         return None;
     }
-    let host = match authority.rfind('@') {
-        Some(at) => &authority[at + 1..],
-        None => authority,
-    };
-    if host.is_empty() {
+    if could_be_severed_credential(tail, stripped_userinfo) {
         return None;
     }
     Some(format!("{}{host}", &url[..sep + 3]))
 }
 
+/// True when a fragment that already reads as a legal endpoint could still
+/// be a severed credential — and must be withheld.
+///
+/// An unencoded '/', '?', or '#' inside a credential ends the authority at
+/// that separator, and an `@` later in the URL is what the remainder of that
+/// credential was attached to: `https://ci:1234/@mirror.invalid/…` cuts the
+/// authority to `ci:1234` — exactly a `host:port`, because the password is
+/// numeric — and `https://secret-token/@mirror.invalid/…` cuts it to a
+/// colon-free `secret-token`, because userinfo can be a bare username.
+/// A colon in the fragment therefore cannot be the test: username-only
+/// credentials never carry one, and nothing that survives the truncation
+/// (colon or not, numeric or not) is evidence the fragment is a host. The
+/// fragment's shape plays no part in the decision.
+///
+/// The one witness that clears the ambiguity is an `@` stripped from *inside*
+/// the extracted authority (`stripped_userinfo`): the cut then fell past a
+/// complete `user[:password]@host` span, so the parser consumed the whole
+/// authority and a later `@` is path or query content. Without that witness
+/// — an authority with no `@` of its own ahead of a tail that has one — the
+/// trailing `@` cannot be told apart from a severed username, and the URL
+/// fails closed. That is deliberately broad: a scoped-package path on a
+/// userinfo-free mirror (`https://npm.example/@scope/repo`) is
+/// indistinguishable from a severed username and withholds too, while the
+/// same scoped path under real userinfo (`https://ci@npm.example/@scope/…`)
+/// keeps its label.
+fn could_be_severed_credential(tail: &str, stripped_userinfo: bool) -> bool {
+    !stripped_userinfo && tail.contains('@')
+}
+
+/// True when `candidate` can only be read as a host or `host:port` — never as
+/// a truncated `user:password` credential.
+///
+/// An unencoded separator inside a password leaves the rest of the credential
+/// in the port position (`ci:secret-token`), and a password that is itself
+/// hostname-shaped is indistinguishable from a host, so validation is on the
+/// parts a credential cannot share with a legal endpoint: a non-bracketed
+/// host carries at most one ':' and only as a numeric u16 port, and an IPv6
+/// literal must sit in brackets with at most a port behind them.
+fn parses_as_host(candidate: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    if let Some(bracketed) = candidate.strip_prefix('[') {
+        let Some(close) = bracketed.find(']') else {
+            return false;
+        };
+        let after = &bracketed[close + 1..];
+        return match after.strip_prefix(':') {
+            Some(port) => is_valid_port(port),
+            None => after.is_empty(),
+        };
+    }
+    match candidate.split_once(':') {
+        Some((host, port)) => !host.is_empty() && is_valid_port(port),
+        None => true,
+    }
+}
+
+/// A port is a non-empty run of ASCII digits that fits a u16.
+fn is_valid_port(port: &str) -> bool {
+    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+}
+
 /// Repository URL as it may appear in user-facing text: the scheme and
 /// authority of an http(s) location, with credentials, path, and query
-/// dropped. A `file://` location keeps its path — it has no authority to
-/// hide and the tree it names is what operators need to see — while an
-/// http(s) URL whose authority cannot be isolated is reported as an opaque
+/// dropped. A `file://` location keeps its path — it has no secrets to
+/// hide there and the tree it names is what operators need to see — but
+/// its authority's userinfo is stripped the same way, since
+/// `validate_base_url` accepts a credentialed file rest. An http(s) URL
+/// whose authority cannot be isolated is reported as an opaque
 /// `<repository>`.
 pub(crate) fn repository_url_label(url: &str) -> String {
     if url.starts_with("http://") || url.starts_with("https://") {
         endpoint_without_credentials(url).unwrap_or_else(|| "<repository>".to_string())
+    } else if url.starts_with("file://") {
+        file_url_without_userinfo(url)
     } else {
         url.to_string()
+    }
+}
+
+/// Strips `user[:pass]@` from a `file://` URL's authority while keeping its
+/// path, so the label stays useful without echoing credentials. A file
+/// authority is held to the same host[:port] test as an http(s) one — an
+/// empty authority names a local tree and stays verbatim, but a non-empty
+/// rest that cannot be read as a host is withheld rather than echoed.
+fn file_url_without_userinfo(url: &str) -> String {
+    let Some(sep) = url.find("://") else {
+        return url.to_string();
+    };
+    let remainder = &url[sep + 3..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let tail = &remainder[authority_end..];
+    match authority.rfind('@') {
+        // No authority at all (`file:///srv/…`) or a host-shaped one with no
+        // severed-credential ambiguity behind it: the location is already
+        // safe to show in full.
+        None if authority.is_empty()
+            || (parses_as_host(authority) && !could_be_severed_credential(tail, false)) =>
+        {
+            url.to_string()
+        }
+        // A rest that could hide a `user:password` cannot be labelled safely.
+        None => "<repository>".to_string(),
+        // Userinfo with no host after it cannot be labelled safely.
+        Some(at) if !parses_as_host(&authority[at + 1..]) => "<repository>".to_string(),
+        Some(at) => format!(
+            "{}{}{}",
+            &url[..sep + 3],
+            &authority[at + 1..],
+            &remainder[authority_end..]
+        ),
     }
 }
 
@@ -1120,6 +1231,270 @@ mod tests {
     use anolisa_core::state::{InstalledObject, ObjectStatus, Ownership, SubscriptionScope};
 
     use crate::commands::state_view::{ScopedStateRoot, StateScope, UnavailableStateRoot};
+
+    /// A `file://` authority can carry userinfo just like an http(s) one —
+    /// `validate_base_url` accepts any non-empty file rest — so a label that
+    /// echoes it leaks the credential into user-facing text.
+    #[test]
+    fn repository_url_label_does_not_echo_file_url_userinfo() {
+        let label = repository_url_label("file://deploy:secret-token@nas.example/share/repo");
+        assert_ne!(
+            label, "file://deploy:secret-token@nas.example/share/repo",
+            "a file URL's userinfo must not be echoed: got `{label}`"
+        );
+        assert_eq!(label, "file://nas.example/share/repo");
+    }
+
+    /// Scoped-package-style paths put the `@` only in the path — and that is
+    /// exactly the shape a severed username-only credential leaves behind
+    /// (`https://secret-token/@mirror.invalid/…`): a colon-free authority
+    /// ahead of an `@` in the tail. Nothing distinguishes the two, so both
+    /// fail closed; the witness that keeps a scoped path labelable is real
+    /// userinfo in the authority, which proves the parser consumed the whole
+    /// authority before the path began.
+    #[test]
+    fn repository_url_label_fails_closed_when_only_the_path_has_an_at() {
+        assert_eq!(
+            repository_url_label("https://npm.example/@scope/repo/v1/index.toml"),
+            "<repository>",
+            "an `@` in the tail without an authority `@` to witness a complete \
+             userinfo span is indistinguishable from a severed username"
+        );
+        assert_eq!(
+            repository_url_label("file://nas.example/share/@scope/repo"),
+            "<repository>",
+            "the file label carries the same ambiguity and fails closed too"
+        );
+        // The witness: real userinfo inside the authority means the cut fell
+        // past a complete `user[:password]@host` span, so the later `@` is
+        // path content and the host keeps its label.
+        assert_eq!(
+            repository_url_label("https://ci@npm.example/@scope/repo/v1/index.toml"),
+            "https://npm.example"
+        );
+        assert_eq!(
+            repository_url_label("file://ci@nas.example/share/@scope/repo"),
+            "file://nas.example/share/@scope/repo"
+        );
+    }
+
+    /// A password with an unencoded '/', '?', or '#' ends the authority
+    /// early, so the truncated credential sits where a host[:port] belongs
+    /// (`https://ci:secret-token/@mirror.invalid/…` parses the authority as
+    /// `ci:secret-token`). Dropping the path-wide `@` rejection must not let
+    /// that shape through: the authority is shown only when it reads as a
+    /// legal host or host:port, and the whole password — and any recognizable
+    /// prefix of it — must be absent from the label.
+    #[test]
+    fn repository_url_label_fails_closed_on_separator_passwords() {
+        for url in [
+            "https://ci:secret-token/@mirror.invalid/release.toml",
+            "https://ci:secret-token?@mirror.invalid/release.toml",
+            "https://ci:secret-token#@mirror.invalid/release.toml",
+        ] {
+            let label = repository_url_label(url);
+            assert_eq!(
+                label, "<repository>",
+                "an authority that cannot be read as a host must stay opaque: {url}"
+            );
+            assert!(
+                !label.contains("secret-token"),
+                "the full password leaked into the label for {url}: {label}"
+            );
+            assert!(
+                !label.contains("secret") && !label.contains("token"),
+                "a recognizable password prefix leaked into the label for {url}: {label}"
+            );
+        }
+    }
+
+    /// Host:port and IPv6 forms stay labelable: the added authority check
+    /// narrows only to shapes a credential can hide in, so an ordinary
+    /// endpoint with a port keeps its label.
+    #[test]
+    fn repository_url_label_keeps_host_port_and_ipv6_shapes() {
+        assert_eq!(
+            repository_url_label("https://mirror.invalid:8080/release.toml"),
+            "https://mirror.invalid:8080"
+        );
+        assert_eq!(
+            repository_url_label("https://[2001:db8::1]/release.toml"),
+            "https://[2001:db8::1]"
+        );
+        assert_eq!(
+            repository_url_label("https://[2001:db8::1]:8443/release.toml"),
+            "https://[2001:db8::1]:8443"
+        );
+        // Ports must be numeric u16 values; a password-shaped "port" fails
+        // closed just like the separator cases.
+        assert_eq!(
+            repository_url_label("https://mirror.invalid:notaport/release.toml"),
+            "<repository>"
+        );
+        assert_eq!(
+            repository_url_label("https://mirror.invalid:99999/release.toml"),
+            "<repository>"
+        );
+    }
+
+    /// A numeric password truncated at an unencoded separator is shaped
+    /// exactly like a legal `host:port` — `https://ci:1234/@mirror.invalid/…`
+    /// cuts the authority to `ci:1234` — so the fragment's shape cannot clear
+    /// the ambiguity a trailing `@` introduces and the label must stay
+    /// opaque: username and password both disappear. An ordinary
+    /// `host:port` in front of an `@`-scoped path carries the same
+    /// ambiguity (the "port" is indistinguishable from a severed password
+    /// prefix) and withholds too.
+    #[test]
+    fn repository_url_label_fails_closed_on_numeric_separator_passwords() {
+        for url in [
+            "https://ci:1234/@mirror.invalid/release.toml",
+            "https://ci:1234?@mirror.invalid/release.toml",
+            "https://ci:1234#@mirror.invalid/release.toml",
+            "https://mirror.invalid:8080/@scope/repo/index.toml",
+        ] {
+            let label = repository_url_label(url);
+            assert_eq!(
+                label, "<repository>",
+                "an authority whose tail carries an '@' must stay opaque: {url}"
+            );
+            assert!(
+                !label.contains("1234") && !label.contains("8080") && !label.contains("ci:1234"),
+                "the numeric password leaked into the label for {url}: {label}"
+            );
+        }
+    }
+
+    /// Username-only userinfo carries no colon, so the severed fragment reads
+    /// as a bare host (`https://secret-token/@mirror.invalid/…` cuts the
+    /// authority to `secret-token`): the presence or absence of a colon in
+    /// what remains cannot be the disambiguator, and the label must stay
+    /// opaque for the same reason the colon-bearing shapes do.
+    #[test]
+    fn repository_url_label_fails_closed_on_username_only_tokens() {
+        for url in [
+            "https://secret-token/@mirror.invalid/release.toml",
+            "https://secret-token?@mirror.invalid/release.toml",
+            "https://secret-token#@mirror.invalid/release.toml",
+        ] {
+            let label = repository_url_label(url);
+            assert_eq!(
+                label, "<repository>",
+                "a username-only token cut off by a separator must stay opaque: {url}"
+            );
+            assert!(
+                !label.contains("secret-token")
+                    && !label.contains("secret")
+                    && !label.contains("token"),
+                "the username-only token leaked into the label for {url}: {label}"
+            );
+        }
+    }
+
+    /// The same username-only shape against a `file://` rest: the token reads
+    /// as the file authority's host and the raw label would echo the whole
+    /// URL — token included — verbatim into raw-backend error messages.
+    #[test]
+    fn repository_url_label_fails_closed_on_username_only_tokens_in_file_rests() {
+        for url in [
+            "file://deploy-token/@nas.example/share/repo",
+            "file://deploy-token?@nas.example/share/repo",
+            "file://deploy-token#@nas.example/share/repo",
+        ] {
+            let label = repository_url_label(url);
+            assert_eq!(
+                label, "<repository>",
+                "a file rest cut off by a separator must stay opaque: {url}"
+            );
+            assert!(
+                !label.contains("deploy-token")
+                    && !label.contains("deploy")
+                    && !label.contains("token"),
+                "the username-only token leaked into the file label for {url}: {label}"
+            );
+        }
+    }
+
+    /// The same separator trick against a `file://` rest: a numeric
+    /// `deploy:1234` reads as `host:port`, so the raw label withholds the
+    /// whole URL instead of echoing the severed credential verbatim into
+    /// raw-backend error messages.
+    #[test]
+    fn repository_url_label_fails_closed_on_numeric_separator_passwords_in_file_rests() {
+        for url in [
+            "file://deploy:1234/@nas.example/share/repo",
+            "file://deploy:1234?@nas.example/share/repo",
+            "file://deploy:1234#@nas.example/share/repo",
+        ] {
+            let label = repository_url_label(url);
+            assert_eq!(
+                label, "<repository>",
+                "a file rest whose tail carries an '@' must stay opaque: {url}"
+            );
+            assert!(
+                !label.contains("1234") && !label.contains("deploy"),
+                "the numeric password leaked into the file label for {url}: {label}"
+            );
+        }
+        // Covered shapes kept: no authority means a local tree, and a
+        // colon-free host names a remote one; both stay verbatim.
+        assert_eq!(
+            repository_url_label("file:///srv/anolisa/repo"),
+            "file:///srv/anolisa/repo"
+        );
+        assert_eq!(
+            repository_url_label("file://nas.example/share/repo"),
+            "file://nas.example/share/repo"
+        );
+    }
+
+    /// The same separator trick against a `file://` rest: a non-empty file
+    /// authority that cannot be read as a host is withheld rather than
+    /// echoed, while a userinfo-free local path keeps its verbatim label.
+    #[test]
+    fn repository_url_label_fails_closed_on_separator_passwords_in_file_rests() {
+        for url in [
+            "file://deploy:secret-token/@nas.example/share/repo",
+            "file://deploy:secret-token?@nas.example/share/repo",
+            "file://deploy:secret-token#@nas.example/share/repo",
+        ] {
+            let label = repository_url_label(url);
+            assert_eq!(
+                label, "<repository>",
+                "a file rest that cannot be read as a host must stay opaque: {url}"
+            );
+            assert!(
+                !label.contains("secret-token") && !label.contains("secret"),
+                "the password leaked into the file label for {url}: {label}"
+            );
+        }
+        // Covered shape kept: no authority means a local tree, shown in full.
+        assert_eq!(
+            repository_url_label("file:///srv/anolisa/repo"),
+            "file:///srv/anolisa/repo"
+        );
+    }
+
+    /// The shapes "fix(anolisa): redact raw repository URLs" (9b019aab5)
+    /// covered keep their labels: http(s) userinfo reduced to scheme and
+    /// authority, an http(s) authority that cannot be isolated reported as an
+    /// opaque `<repository>`, and a userinfo-free `file://` path kept intact.
+    #[test]
+    fn repository_url_label_keeps_covered_shapes() {
+        assert_eq!(
+            repository_url_label("https://user:secret@repo.example.internal/private/v1/index.toml"),
+            "https://repo.example.internal"
+        );
+        assert_eq!(
+            repository_url_label("http://user@repo.example.internal:8080/v1"),
+            "http://repo.example.internal:8080"
+        );
+        assert_eq!(repository_url_label("https://"), "<repository>");
+        assert_eq!(
+            repository_url_label("file:///srv/anolisa/repo"),
+            "file:///srv/anolisa/repo"
+        );
+    }
 
     #[test]
     fn remediation_commands_preserve_the_explicit_scope() {
