@@ -120,7 +120,12 @@ def _ensure_docker_host_for_rootless_context(
         return
 
     docker_config = docker_config or Path.home() / ".docker" / "config.json"
-    rootless_socket = rootless_socket or Path(f"/run/user/{os.getuid()}/docker.sock")
+    # os.getuid 在原生 Windows 等平台不存在：默认 socket 探测按平台跳过，
+    # 而不是 AttributeError 打断每次 evaluate 调用
+    if rootless_socket is None:
+        if not hasattr(os, "getuid"):
+            return
+        rootless_socket = Path(f"/run/user/{os.getuid()}/docker.sock")
 
     try:
         config = json.loads(docker_config.read_text())
