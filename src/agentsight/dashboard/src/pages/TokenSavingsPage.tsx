@@ -7,6 +7,7 @@ import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
 import { downloadSavingsCsv } from '../utils/savingsCsv';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
+import { CopyButton } from '../components/CopyButton';
 import { SessionIdHelp } from '../components/SessionIdHelp';
 import { compoundedSavingsRate } from '../utils/savings';
 import { useI18n, useLocaleTag } from '../i18n';
@@ -45,52 +46,6 @@ const InfoTooltip: React.FC<{ text: string }> = ({ text }) => {
 
 function shortId(id: string, len = 16): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
-}
-
-/** Copy button with a brief "Copied" feedback */
-const CopyButton: React.FC<{ text: string }> = ({ text }) => {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleCopy = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const done = () => {
-      setCopied(true);
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => setCopied(false), 1500);
-    };
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-    } else {
-      fallbackCopy(text, done);
-    }
-  };
-  return (
-    <button
-      onClick={handleCopy}
-      className={`flex-shrink-0 px-1.5 py-0.5 rounded text-xs transition-colors ${
-        copied
-          ? 'bg-green-100 text-green-600'
-          : 'bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-gray-700'
-      }`}
-      title={t('common.copyFullId')}
-    >
-      {copied ? t('common.copied') : t('common.copy')}
-    </button>
-  );
-};
-
-function fallbackCopy(text: string, done: () => void) {
-  const el = document.createElement('textarea');
-  el.value = text;
-  el.style.position = 'fixed';
-  el.style.opacity = '0';
-  document.body.appendChild(el);
-  el.focus();
-  el.select();
-  try { document.execCommand('copy'); } catch {}
-  document.body.removeChild(el);
-  done();
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -422,7 +377,7 @@ const SessionRow: React.FC<{
             >
               {shortId(session.session_id, 20)}
             </span>
-            <CopyButton text={session.session_id} />
+            <CopyButton text={session.session_id} showIcon={false} />
           </div>
         </td>
         <td className="px-4 lg:px-6 py-4 text-sm text-gray-700">

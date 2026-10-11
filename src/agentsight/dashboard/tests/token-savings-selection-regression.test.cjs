@@ -218,6 +218,7 @@ function makeHarness() {
     '../utils/savingsCsv': { downloadSavingsCsv: (rows) => downloads.push(rows) },
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
+    '../components/CopyButton': componentStub('CopyButton'),
     '../i18n': {
       useI18n: () => ({ t: (key) => key }),
       useLocaleTag: () => 'en',

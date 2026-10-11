@@ -27,6 +27,7 @@ try {
       'react-jsx',
       '--esModuleInterop',
       'src/utils/apiClient.ts',
+      'src/utils/clipboard.ts',
       'src/utils/containmentLifecycle.ts',
       'src/utils/datetime.ts',
       'src/utils/accuracyAttribution.ts',
@@ -49,10 +50,11 @@ try {
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/clipboard-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
+      AGENTSIGHT_CLIPBOARD_BUILD: join(outputDir, 'utils', 'clipboard.js'),
       AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD: join(outputDir, 'utils', 'containmentLifecycle.js'),
       AGENTSIGHT_DATETIME_BUILD: join(outputDir, 'utils', 'datetime.js'),
       AGENTSIGHT_ACCURACY_ATTRIBUTION_BUILD: join(outputDir, 'utils', 'accuracyAttribution.js'),

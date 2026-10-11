@@ -139,6 +139,7 @@ function loadPageModule(relativePath, moduleStubs, driver) {
   const requireStub = (name) => {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
+    if (name === '../utils/clipboard') return loadPageModule('src/utils/clipboard.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
@@ -1162,6 +1163,7 @@ test('conversation list: the Query button must use the selected end time, not no
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
     '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../components/CopyButton': componentStub('CopyButton'),
     '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
     '../utils/datetime': { formatNsPadded: (ns) => String(ns) },
     '../utils/timeseriesBuckets': {
