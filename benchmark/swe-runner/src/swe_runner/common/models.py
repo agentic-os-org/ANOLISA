@@ -16,11 +16,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SWEInstance(BaseModel):
@@ -119,6 +120,17 @@ class AgentConfig(BaseModel):
         return self
 
 
+def _parse_slice_range(value: str) -> tuple[int, int | None]:
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise ValueError("slice_range must use start:end syntax (for example, '0:5' or '10:')")
+    start_text, end_text = (part.strip() for part in parts)
+    try:
+        return (int(start_text) if start_text else 0, int(end_text) if end_text else None)
+    except ValueError as exc:
+        raise ValueError("slice_range bounds must be integers or omitted") from exc
+
+
 class DatasetConfig(BaseModel):
     """Dataset loading configuration."""
 
@@ -131,7 +143,24 @@ class DatasetConfig(BaseModel):
     slice_range: str | None = Field(default=None, description="Slice string (e.g., '0:5')")
     instance_ids: list[str] | None = Field(default=None, description="Specific instance IDs to run")
 
-    def get_slice(self) -> tuple[int, int] | None:
+    @field_validator("slice_range")
+    @classmethod
+    def validate_slice_range(cls, value: str | None) -> str | None:
+        if value is not None:
+            _parse_slice_range(value)
+        return value
+
+    @field_validator("filter_regex")
+    @classmethod
+    def validate_filter_regex(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError(f"Invalid instance filter regular expression: {exc}") from exc
+        return value
+
+    def get_slice(self) -> tuple[int, int | None] | None:
         """Parse slice_range string to (start, end) tuple.
 
         Returns:
@@ -139,22 +168,14 @@ class DatasetConfig(BaseModel):
 
         Examples:
             "0:5" -> (0, 5)
-            "10:" -> (10, -1)
+            "10:" -> (10, None)
             ":5" -> (0, 5)
             None -> None
         """
         if self.slice_range is None:
             return None
 
-        parts = self.slice_range.split(":")
-        if len(parts) != 2:
-            return None
-
-        start_str, end_str = parts
-        start = int(start_str) if start_str else 0
-        end = int(end_str) if end_str else -1
-
-        return (start, end)
+        return _parse_slice_range(self.slice_range)
 
 
 class OutputConfig(BaseModel):

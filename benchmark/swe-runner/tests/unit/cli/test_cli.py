@@ -17,12 +17,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from pytest_mock import MockerFixture
-from typer.testing import CliRunner
-
 from swe_runner.agents import AgentEnvironmentError
 from swe_runner.cli import app
 from swe_runner.run.io.report import RunReport
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -53,6 +53,17 @@ def test_main_help_does_not_show_extract_traces():
 def test_run_requires_agent():
     result = runner.invoke(app, ["run"])
     assert result.exit_code != 0
+
+
+@pytest.mark.parametrize(("option", "value"), [("--slice", "0:1:2"), ("--slice", "0:end"), ("--filter", "[")])
+def test_run_rejects_invalid_selection_before_session(option: str, value: str) -> None:
+    with patch("swe_runner.cli_commands.RunSession") as session:
+        result = runner.invoke(app, ["run", "--agent", "cosh", option, value])
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert "slice_range" in result.output or "filter_regex" in result.output
+    session.assert_not_called()
 
 
 def test_run_invalid_agent():

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from swe_runner.common.dataset_registry import DATASET_MAPPING, get_dataset_name
 from swe_runner.common.models import DatasetConfig, SWEInstance
 from swe_runner.run.dataset import (
@@ -110,6 +111,13 @@ class TestLoadDataset:
 
 
 class TestFilterInstances:
+    @pytest.mark.parametrize("value", ["0:-1", "-2:", ":", ":-2", "10:", "2:1"])
+    def test_filter_slice_matches_python_bounds(self, value: str) -> None:
+        instances = _mock_instances()
+        start, end = value.split(":")
+        expected = instances[int(start) if start else 0 : int(end) if end else None]
+        assert filter_instances(instances, DatasetConfig(slice_range=value)) == expected
+
     def test_filter_by_instance_ids(self):
         instances = _mock_instances()
         config = DatasetConfig(instance_ids=["django__django-11179", "flask__flask-4992"])
