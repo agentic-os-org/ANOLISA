@@ -117,6 +117,7 @@ KNOWN_VIOLATIONS = [
 
 USE_RE = re.compile(r"use\s+crate::(\w+)")
 PATH_RE = re.compile(r"crate::(\w+)::")
+GROUP_START_RE = re.compile(r"use\s+crate::\{")
 CFG_TEST_RE = re.compile(r"#\[cfg\(test\)\]")
 MOD_RE = re.compile(r"\bmod\s+\w+")
 
@@ -145,11 +146,52 @@ def is_test_file(rel_path: Path) -> bool:
     return False
 
 
+def parse_grouped_import(text: str):
+    """Parse the body of a `use crate::{...}` group.
+
+    ``text`` is everything after the opening `use crate::{`. Returns
+    ``(modules, closed)`` where ``modules`` holds the first identifier of each
+    top-level item (the module actually imported, matching what the simple
+    `use crate::x::y;` form yields) and ``closed`` reports whether the group's
+    closing brace is present in ``text`` — a multi-line group is continued
+    across lines until it is.
+    """
+    items = []
+    current = []
+    depth = 0
+    for ch in text:
+        if ch == "{":
+            depth += 1
+            current.append(ch)
+        elif ch == "}":
+            if depth == 0:
+                break
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    else:
+        # The closing brace has not been seen yet.
+        return [], False
+    items.append("".join(current))
+
+    modules = []
+    for item in items:
+        m = re.match(r"\s*(\w+)", item)
+        if m and m.group(1) not in ("self", "super", "crate"):
+            modules.append(m.group(1))
+    return modules, True
+
+
 def extract_imports(text: str):
     """Yield (line_no, target_module) tuples for crate-internal imports.
 
-    Skips imports inside `#[cfg(test)] mod ... { ... }` blocks using a simple
-    brace-depth tracker.
+    Recognises the simple `use crate::x::y;` form and brace groups
+    (`use crate::{x, y};`), including multi-line groups. Skips imports inside
+    `#[cfg(test)] mod ... { ... }` blocks using a simple brace-depth tracker.
 
     Limitations:
       - Only recognises `#[cfg(test)]` followed by `mod <name> {` with the
@@ -162,6 +204,9 @@ def extract_imports(text: str):
     test_block_depth = 0  # brace depth at which the test block was opened
     depth = 0
     pending_cfg_test = False
+    # Body of a multi-line `use crate::{...}` group being accumulated.
+    group_body = None
+    group_line_no = 0
 
     for idx, line in enumerate(lines, start=1):
         # Skip comment lines (line comments and doc comments).
@@ -190,10 +235,27 @@ def extract_imports(text: str):
 
         # Process imports if not inside a test block.
         if not in_test_block:
-            for m in USE_RE.finditer(line):
-                yield idx, m.group(1)
-            for m in PATH_RE.finditer(line):
-                yield idx, m.group(1)
+            if group_body is not None:
+                group_body += "\n" + line
+                modules, closed = parse_grouped_import(group_body)
+                if closed:
+                    for module in modules:
+                        yield group_line_no, module
+                    group_body = None
+            else:
+                for m in USE_RE.finditer(line):
+                    yield idx, m.group(1)
+                for m in PATH_RE.finditer(line):
+                    yield idx, m.group(1)
+                for m in GROUP_START_RE.finditer(line):
+                    body = line[m.end():]
+                    modules, closed = parse_grouped_import(body)
+                    if closed:
+                        for module in modules:
+                            yield idx, module
+                    else:
+                        group_body = body
+                        group_line_no = idx
 
         depth = new_depth
 

@@ -14,7 +14,7 @@ OpenClaw 和 Hermes；本次交付使用合成夹具，不新增原生接入的�
 | `aw-config` | 解析一份配置，检查结构和静态引用 |
 | `aw-provider` | 校验协议消息、关联响应，并依据调用方提供的 Provider 和 Adapter 证据检查配置步骤 |
 | `aw-contracts` / `aw-core` | 通过可信 Host 和 Journal 校验、执行已有能力模型 |
-| 后续有界 Host | 执行 Provider 命令，限制时间和输出，处理取消，采集执行证据 |
+| `aw-host` | 执行 Provider 命令，限制时间和输出，处理取消，返回可关联的调用报告 |
 | 后续 Adapter 与服务 | 认证原生能力，注册回调，转换效果，管理绑定并审计原生采用情况 |
 
 配置字段保持不变。`spec.providers` 中的命名对象选择 `aw-provider/v1alpha1`、
@@ -29,7 +29,8 @@ OpenClaw 和 Hermes；本次交付使用合成夹具，不新增原生接入的�
 
 执行约定为每个方法启动一个进程：调用方按配置的 argv 启动程序，将一个 UTF-8
 JSON 对象写入 stdin 后关闭 stdin。Provider 仅在 stdout 返回一个 JSON 对象，
-诊断写入 stderr；不隐式执行 shell 展开。D1b 定义并校验消息，进程运行器另行交付。
+诊断写入 stderr；不隐式执行 shell 展开。`aw-provider` 定义并校验消息，
+[本地 Provider Host](provider-host_zh.md) 通过 `aw-exec` 执行交互。
 
 策略阻断是成功结果，进程退出码必须为零。非零退出码表示执行失败，不论 stdout
 内容是什么。JSON 非法、消息超限、身份不匹配和效果不合法都属于失败，不是策略判断。
@@ -124,6 +125,10 @@ Provider 错误产生协议错误，协议检查器不会将其转成成功的 `
 
 ## 离线准入
 
+`admission::preflight(config, target, capabilities)` 根据受支持的模型和可信 Adapter
+能力检查已启用的配置需求，不执行发现或启动进程。Host 在启动任何 Provider 前运行
+预检。返回的步骤仍是候选项；预检不证明 Provider 支持这些需求。
+
 `admission::admit` 接收已通过静态检查的 `aw_config::Configuration`、目标 ID、
 调用方信任的 `AdapterCapabilities`，以及按配置 Provider ID 绑定的证据。每项
 Provider 证据包括已检查的描述和私有配置校验结果。Adapter 证据包含 Adapter、
@@ -135,7 +140,7 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 当前传输模型要求 `stdio` 和 `location: agent`。禁用事件和步骤不要求发现证据。
 准入保留单个事件内的步骤顺序，不调度不同事件，也不选择串行或并行执行。
 
-| 请求 | D1b 结果 |
+| 请求 | 准入结果 |
 | --- | --- |
 | `tool.before`：`observe`、`block` | 所选操作和 Adapter 均支持全部请求效果时通过 |
 | `tool.after`：`observe` | 双方均支持时通过 |
@@ -152,9 +157,9 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 Provider 可以在自身操作中检查工具名和参数。词表中存在 `permission.request`，
 不表示任何具体框架或入口都具备交互式审批界面。
 
-超时、事件预算和输出限制仍是后续 Host 的执行义务。离线准入无法落实耗时限制、
-进程回收、原生串并行调度、失败处理或整事件期限。因此，准入通过只是建立可运行绑定
-的前置条件之一。
+`aw-host` 在本地执行时落实超时、事件预算和输出限制。离线准入本身无法落实耗时
+限制、进程回收、原生调度或失败处理。因此，准入通过只是建立可运行原生绑定的
+前置条件之一。
 
 ## 与 Core 和安全执行的关系
 
@@ -170,9 +175,9 @@ Host 生成的 `provider-receipt-v1`。回执的 `denied` 表示能力执行不�
 不表示成功得出的安全判断：成功的安全检查即使拒绝命令，也应产生 `verdict: "deny"`
 输出及 `produced` 回执。
 
-D2 在把这些通用操作接入 Core 前，需要显式评审并版本化原生 Hook 能力模型。
-Host 负责认证 Provider 身份、执行传输、校验候选效果、转换所选模型，并为 Core 和
-Journal 产生关联的执行证据。既有安全模型继续保持更强的最终分发要求。框架是否
+把这些通用操作接入 Core，仍需要显式评审并版本化原生 Hook 能力模型，以及已认证的
+Provider 身份。`aw-host` 执行传输并校验候选效果，不转换 Core 模型，也不为 Core 和
+Journal 生成证据。既有安全模型继续保持更强的最终分发要求。框架是否
 采用效果仍需要原生回读；Provider 响应或已经写入 Journal 的调用都不能单独证明采用。
 
 ## 独立 stdio 示例
@@ -204,12 +209,12 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 
 ## 与 sec-core 联合交付
 
-sec-core 可以在 AW 进程运行器完成前，依据 Schema 实现三个协议方法和私有策略
-配置。内置规则、自定义策略计算和特定工具安全判断的含义由 sec-core 负责。
+sec-core 可以依据 Schema 实现三个协议方法和私有策略配置，并使用本地 Host 进行
+协议集成。内置规则、自定义策略计算和特定工具安全判断的含义由 sec-core 负责。
 CLI 包装程序可以连接独立管理的 sec-core 服务，但必须将扫描结果转换为已声明的
 Provider 效果，并区分扫描失败与成功的策略阻断。
 
-AW 本阶段交付协议校验和准入，后续增加有界 Host、服务生命周期、可信 Adapter
+AW 提供协议校验、准入和本地有界 Host，后续增加服务生命周期、可信 Adapter
 能力、原生 Hook 转换及审计接线。最终 `security.violation` 编排和 sec-core 的
 协作属于后续执行保障设计；本阶段不宣称提供最后一道不可绕过的安全检查。
 

@@ -7,6 +7,7 @@ const {
   enforcementSupportsContainment,
   enforcementSupportsMode,
   enforcementViolationTotal,
+  fetchAgentProtectionPreview,
   fetchContainmentPlan,
   fetchInterruptionStats,
   fetchLatencyMetrics,
@@ -99,6 +100,22 @@ function securityCaseDetail() {
     containment: null,
   };
 }
+
+test('fetchAgentProtectionPreview rejects a body that is not a preview', async () => {
+  // The macOS local viewer has no enforcement routes, so its `/api/*` catch-all
+  // answers this GET with `200 []`. The caller stores `preview.source_paths`
+  // (undefined) as its source list and the protection dialog then throws while
+  // rendering it, which React turns into a blank page rather than an error.
+  global.fetch = async () => new Response(JSON.stringify([]), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+
+  await assert.rejects(
+    () => fetchAgentProtectionPreview(4242),
+    /protection preview is unavailable/,
+  );
+});
 
 test('fetchSecurityCase rejects a non-2xx state envelope before returning it', async () => {
   global.fetch = async () => new Response(JSON.stringify({

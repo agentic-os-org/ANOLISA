@@ -136,16 +136,22 @@ fn extract_frontmatter(content: &str) -> (String, String) {
         return (String::new(), content.to_string());
     }
 
-    // Find the first line of `rest` that is exactly `---` (trailing
-    // whitespace tolerated, leading whitespace not — an indented `---` is
-    // content). A line that merely *starts* with `---` (`----`, `---text`)
-    // must NOT close the frontmatter: the previous prefix match landed the
-    // body slice mid-line and leaked the remainder (a stray `-`, a space,
-    // or the text) into the body.
+    // Find the first line of `rest` that closes the frontmatter: a run of
+    // three or more dashes and nothing else (trailing whitespace
+    // tolerated, leading whitespace not — an indented `---` is content).
+    // The exact `---` closer is the canonical form; a longer all-dash run
+    // (`----`, `-----` — a Markdown thematic break) also closes when the
+    // opener was an exact `---`, which legacy authors used and which the
+    // exact-line rule silently degraded (the yaml block fell into the
+    // body and the first-paragraph description fallback smeared it into
+    // the served description). A line that merely *starts* with dashes
+    // (`---text`) is content and never closes — that is the mid-line leak
+    // the exact-line rule fixed, and an all-dash run can never leak one.
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
         let bare = line.strip_suffix('\n').unwrap_or(line);
-        if bare.trim_end() == "---" {
+        let trimmed = bare.trim_end();
+        if trimmed.len() >= 3 && trimmed.chars().all(|c| c == '-') {
             // yaml spans from the start of `rest` to this line, minus the
             // newline that terminates the last yaml line (byte-compatible
             // with the previous `after_open[len..close_pos]` region).
@@ -242,22 +248,41 @@ pub(crate) fn is_kebab_case(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
+/// CommonMark ATX heading: at most three spaces of indentation, then
+/// 1–6 `#`s, followed by a space/tab or the end of the line. Anything
+/// else that merely starts with `#` — `#hashtag`, seven or more `#`s, or
+/// a deeper-indented line — is ordinary content, not a heading.
+fn is_atx_heading(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let hashes = rest.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+    match rest[hashes..].chars().next() {
+        None => true,
+        Some(c) => c == ' ' || c == '\t',
+    }
+}
+
 fn extract_first_paragraph(body: &str) -> String {
-    let trimmed = body.trim_start();
-    // Skip leading heading
-    let content = if trimmed.starts_with('#') {
-        trimmed
-            .find('\n')
-            .map(|pos| trimmed[pos + 1..].trim_start())
-            .unwrap_or("")
-    } else {
-        trimmed
-    };
     // Take the first non-empty paragraph. A paragraph ends at a blank
     // line; `lines()` strips the terminator of either convention, so a
-    // CRLF file yields the same paragraph as an LF one.
+    // CRLF file yields the same paragraph as an LF one. Leading heading
+    // lines are not paragraphs: skip every one of them before the
+    // paragraph starts, otherwise a document whose body begins with a
+    // title plus a subtitle reports the subtitle's markup ("## Subtitle")
+    // as the description. The heading check runs on the raw line, before
+    // any trim discards indentation, so `#`-led ordinary text keeps its
+    // place as the description.
     let mut paragraph = String::new();
-    for line in content.lines() {
+    for line in body.lines() {
+        if paragraph.is_empty() && is_atx_heading(line) {
+            continue;
+        }
         let line = line.trim();
         if line.is_empty() {
             if !paragraph.is_empty() {
@@ -284,8 +309,23 @@ fn split_sections(
     let mut sections = std::collections::HashMap::new();
     let mut current_name: Option<String> = None;
     let mut current_content = String::new();
+    // Fenced code blocks are examples, not contract text: a `## Parameters`
+    // heading (or a parameter-shaped bullet) inside a fence must neither open
+    // a section nor feed structured extraction. Track the open fence so its
+    // lines stay out of `sections` until the matching closing fence.
+    let mut open_fence: Option<(char, usize)> = None;
 
     for line in body.lines() {
+        if let Some((fence_char, fence_len)) = open_fence {
+            if is_fence_close(line, fence_char, fence_len) {
+                open_fence = None;
+            }
+            continue;
+        }
+        if let Some(fence) = fence_open(line) {
+            open_fence = Some(fence);
+            continue;
+        }
         if let Some(heading) = line.strip_prefix("## ") {
             if let Some(name) = current_name.take() {
                 record_section(&mut sections, name, current_content, issues);
@@ -303,6 +343,45 @@ fn split_sections(
     }
 
     sections
+}
+
+/// Opening fence of a markdown code block: three or more backticks or
+/// tildes, indented by at most three spaces (CommonMark), optionally
+/// followed by an info string. Returns the fence character and length so
+/// the matching closing fence can be recognized. Per CommonMark the info
+/// string of a backtick fence may not contain a backtick — such a line is
+/// inline code, not a fence — while a tilde fence's info string may.
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let fence_char = rest.chars().next()?;
+    if fence_char != '`' && fence_char != '~' {
+        return None;
+    }
+    let fence_len = rest.chars().take_while(|c| *c == fence_char).count();
+    if fence_len < 3 {
+        return None;
+    }
+    if fence_char == '`' && rest[fence_len..].contains('`') {
+        return None;
+    }
+    Some((fence_char, fence_len))
+}
+
+/// Closing fence: indented by at most three spaces, the same character
+/// repeated at least as many times as the opening fence, followed only by
+/// whitespace (CommonMark).
+fn is_fence_close(line: &str, fence_char: char, fence_len: usize) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let count = rest.chars().take_while(|c| *c == fence_char).count();
+    count >= fence_len && rest[count..].trim().is_empty()
 }
 
 /// Section names that feed structured extraction. Only these form the
@@ -594,6 +673,41 @@ Search the web.
         assert_eq!(entry.metadata.description, "Search the web");
         assert!(!entry.body.contains("---"));
         assert!(entry.parse_status.is_ok());
+    }
+
+    #[test]
+    fn test_parse_thematic_break_closes_exact_opener() {
+        // A longer all-dash run (`----`, `-----`) is a valid Markdown
+        // thematic break, and legacy authors closed frontmatter with it.
+        // The exact-closer rule silently degraded those files into the
+        // body (the yaml block then smeared into the description
+        // fallback), so the closer accepts any all-dash run of >= 3
+        // dashes — while the opener stays exact and a `---text` line
+        // still never closes.
+        let content = "---\nname: legacy\ndescription: ok\n----\nBody.\n";
+        let entry = parse_skill_md(content, "dir-name");
+        assert_eq!(entry.metadata.name, "legacy");
+        assert_eq!(entry.metadata.description, "ok");
+        assert_eq!(entry.body, "Body.\n");
+        assert!(entry.parse_status.is_ok());
+
+        // Five dashes with CRLF and a trailing space behave the same.
+        let crlf = "---\r\nname: five\r\ndescription: ok\r\n----- \r\nBody\r\n";
+        let entry = parse_skill_md(crlf, "dir-name");
+        assert_eq!(entry.metadata.description, "ok");
+        assert_eq!(entry.body, "Body\r\n");
+        assert!(entry.parse_status.is_ok());
+
+        // A thematic-break OPENER still never opens frontmatter (the
+        // yaml inside the body is not honored).
+        let opener = parse_skill_md("----\n---\nname: never\n---\nBody\n", "dir-name");
+        assert!(opener.parse_status.is_degraded());
+        assert_ne!(opener.metadata.name, "never");
+
+        // `---text` is content, not a closer: bare-opener shape.
+        let text = parse_skill_md("---\nname: x\n---text\nBody\n", "dir-name");
+        assert!(text.parse_status.is_degraded());
+        assert_ne!(text.metadata.name, "x");
     }
 
     #[test]
@@ -1082,24 +1196,29 @@ Body.
     }
 
     #[test]
-    fn test_closer_requires_exact_fence_line() {
-        // A typo'd 4-dash closer is not a fence: the old prefix match
-        // landed the body slice on the fourth dash and parsed the skill
-        // as Ok with a stray `-` line leaking into the body.
+    fn test_closer_accepts_dash_run_after_exact_opener() {
+        // A longer all-dash closer (`----`, `-----`) is a Markdown
+        // thematic break legacy authors used to close frontmatter; the
+        // exact-line rule silently degraded those files into the body
+        // (the yaml block then smeared into the description fallback),
+        // so the closer accepts any all-dash run. The mid-line leak the
+        // old prefix match allowed stays fixed: a `---text` line never
+        // closes (pinned in test_parse_thematic_break_closes_exact_opener).
         let content = "---\nname: demo\ndescription: d\n----\n\n# Body\n";
 
         let entry = parse_skill_md(content, "demo");
 
         assert!(
-            entry.parse_status.is_degraded(),
-            "a frontmatter block closed by `----` is unclosed, not Ok: {:?}",
+            entry.parse_status.is_ok(),
+            "a thematic-break closer after an exact opener closes: {:?}",
             entry.parse_status
         );
-        assert!(
-            entry.body.contains("name: demo") && entry.body.contains("# Body"),
-            "the whole file must be the body when no exact closer exists: {:?}",
+        assert_eq!(
+            entry.body, "\n# Body\n",
+            "the closer line itself must not leak into the body: {:?}",
             entry.body
         );
+        assert_eq!(entry.metadata.description, "d");
     }
 
     #[test]

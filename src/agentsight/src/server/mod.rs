@@ -685,6 +685,18 @@ fn path_extractor_config() -> web::PathConfig {
         .error_handler(|error, _req| extractor_error(format!("invalid path parameter: {error}")))
 }
 
+/// Builds the typed query extractor config registered on the server `App`.
+///
+/// `web::Query`'s default rejection is a `text/plain` serde message, so a
+/// mistyped query parameter was the one extractor failure that answered with a
+/// body no API consumer can parse — `?limit=abc` on a list route returned
+/// `Query deserialize error: invalid digit found in string` while the same
+/// mistake in a request body or a path got the `{"error":{...}}` envelope.
+fn query_extractor_config() -> web::QueryConfig {
+    web::QueryConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid query parameter: {error}")))
+}
+
 /// Wraps an extractor failure into a 400 response with the shared envelope.
 fn extractor_error(message: String) -> actix_web::Error {
     let response = system_audit::error_response(
@@ -1167,6 +1179,7 @@ pub async fn run_server(
             .app_data(database_manager_data.clone())
             .app_data(json_extractor_config())
             .app_data(path_extractor_config())
+            .app_data(query_extractor_config())
             .configure(configure_routes)
     })
     .bind((host, port))
@@ -1271,8 +1284,8 @@ mod tests {
     use super::auth::DashboardAuth;
     use super::{
         AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes,
-        json_extractor_config, path_extractor_config, private_state_dir, serve_frontend,
-        serve_frontend_root,
+        json_extractor_config, path_extractor_config, private_state_dir, query_extractor_config,
+        serve_frontend, serve_frontend_root,
     };
     use crate::config::{ServerAuthConfig, StorageConfig};
 
@@ -1369,6 +1382,94 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn audit_read_filters_reject_unknown_closed_set_tokens() {
+        // `status` / `event_type` / `result` each have a closed set of writers
+        // (`risk_status`, `EventMetadata::from_event`), so a typo can never
+        // match a row: answering an empty 200 made it indistinguishable from a
+        // genuinely empty result.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/cases?status=oepn",
+            "/api/audit/events?event_type=file_actions",
+            "/api/audit/events?result=bloked",
+            "/api/audit/summary?event_type=file_actions",
+            "/api/audit/sessions?result=bloked",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Valid tokens still filter; the in-memory store is simply empty.
+        for uri in [
+            "/api/audit/cases?status=open",
+            "/api/audit/events?event_type=file_action",
+            "/api/audit/events?result=blocked",
+            "/api/audit/summary?event_type=file_action",
+            "/api/audit/sessions?result=blocked",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn audit_cases_reject_event_filters_they_cannot_apply() {
+        // `/audit/cases` reads the correlated `risk_cases` table, and its store
+        // query takes only `agent_id`, `status` and `blocked`. The event-level
+        // fields are shared through `AuditQuery`, so they were accepted and
+        // dropped: `/api/audit/cases?event_type=file_action` answered every case
+        // with a 200, indistinguishable from a filtered result.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/cases?event_type=file_action",
+            "/api/audit/cases?result=blocked",
+            "/api/audit/cases?policy_id=policy-1",
+            "/api/audit/cases?session_id=session-1",
+            "/api/audit/cases?binding_id=00000000-0000-0000-0000-000000000001",
+            "/api/audit/cases?start_ns=1000&end_ns=2000",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: serde_json::Value = awtest::read_body_json(response).await;
+            let message = body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                message.contains("/api/audit/events"),
+                "{uri} must point at the endpoint that applies the filter, got: {message}"
+            );
+        }
+
+        // Controls: the filters the case query does apply still answer 200.
+        for uri in [
+            "/api/audit/cases?status=open",
+            "/api/audit/cases?agent_id=agent-1",
+            "/api/audit/cases?blocked=true",
+            "/api/audit/cases?limit=10&offset=0",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
     }
 
     #[actix_web::test]
@@ -1547,6 +1648,29 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_bad_request_envelope(response, "invalid path parameter").await;
+    }
+
+    #[actix_web::test]
+    async fn query_extractor_errors_return_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .app_data(query_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        // Without the QueryConfig handler actix answers `text/plain` with the
+        // raw serde message, so a client that parses the shared error envelope
+        // (and reads `error.code`) loses the reason for the 400.
+        let request = awtest::TestRequest::get()
+            .uri("/api/interruptions?limit=abc")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid query parameter").await;
     }
 
     #[actix_web::test]

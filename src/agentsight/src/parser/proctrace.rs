@@ -35,6 +35,12 @@ pub struct ParsedProcEvent {
     pub ptid: u32,
     /// Process name
     pub comm: String,
+    /// Executable path the probe reported for an exec event, when it read one.
+    ///
+    /// Distinct from [`Self::comm`], which is the 16-byte task name: the audit
+    /// record's `filename` and the chrome-trace `filename` argument both mean
+    /// "the executable that ran", so they need the path.
+    pub filename: Option<String>,
     /// Timestamp in nanoseconds
     pub timestamp_ns: u64,
     /// Command arguments (for exec events)
@@ -52,7 +58,7 @@ impl ProcTraceParser {
         match event {
             VariableEvent::Exec {
                 header,
-                filename: _,
+                filename,
                 args,
             } => Some(ParsedProcEvent {
                 event_type: ProcEventType::Exec,
@@ -61,6 +67,7 @@ impl ProcTraceParser {
                 ppid: header.ppid,
                 ptid: header.ptid,
                 comm: event.comm_str(),
+                filename: Some(filename.clone()).filter(|s| !s.is_empty()),
                 timestamp_ns: header.timestamp_ns,
                 args: Some(args.clone()).filter(|s| !s.is_empty()),
                 stdout_data: None,
@@ -85,6 +92,7 @@ impl ProcTraceParser {
                     ppid: header.ppid,
                     ptid: header.ptid,
                     comm: event.comm_str(),
+                    filename: None,
                     timestamp_ns: header.timestamp_ns,
                     args: None,
                     stdout_data,
@@ -98,6 +106,7 @@ impl ProcTraceParser {
                 ppid: header.ppid,
                 ptid: header.ptid,
                 comm: event.comm_str(),
+                filename: None,
                 timestamp_ns: header.timestamp_ns,
                 args: None,
                 stdout_data: None,
@@ -300,6 +309,7 @@ mod tests {
             ppid: 0,
             ptid: 0,
             comm: "proc".to_string(),
+            filename: None,
             timestamp_ns: 0,
             args: None,
             stdout_data: Some(data.to_string()),

@@ -644,18 +644,24 @@ impl InterruptionStore {
     ///
     /// Companion to the GenAI store's retroactive session fix-up: a call that
     /// escaped the session-resolution deferral window has its interruptions
-    /// already persisted with a NULL `session_id`, so repairing only
+    /// already persisted with a placeholder `session_id`, so repairing only
     /// `genai_events` would leave them unattributable forever.
     ///
-    /// Only NULL rows are touched — an already-attributed interruption keeps
-    /// whatever id it was detected with.
+    /// Two placeholder shapes reach this table, and the *second* is the common
+    /// one for the calls this exists for: `NULL` when the resolver had nothing,
+    /// and the 32-hex `IdResolver` fallback a deferred call carries in its
+    /// metadata (which the detector copies verbatim into the row). Matching only
+    /// `NULL` therefore made the repair a no-op for the very case it was written
+    /// for — the interruption stayed on a phantom session id while the call
+    /// moved to the real one. An interruption already carrying a real id keeps
+    /// it.
     ///
     /// # Errors
     ///
     /// Returns an error when the connection mutex is poisoned (surfaced rather
     /// than recovered, so the caller can retry on a later fix-up attempt) or
     /// the UPDATE fails.
-    pub fn backfill_null_session_id(
+    pub fn backfill_placeholder_session_id(
         &self,
         call_id: &str,
         session_id: &str,
@@ -664,10 +670,15 @@ impl InterruptionStore {
             .conn
             .lock()
             .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        // The second shape is the same one `GenAIStore::update_fallback_session_id`
+        // recognises, so the two stores stay in step.
         let updated = conn.execute(
             "UPDATE interruption_events
              SET session_id = ?2
-             WHERE call_id = ?1 AND session_id IS NULL",
+             WHERE call_id = ?1
+               AND (session_id IS NULL
+                    OR (length(session_id) = 32
+                        AND session_id NOT GLOB '*[^0-9a-f]*'))",
             params![call_id, session_id],
         )?;
         Ok(updated)
@@ -1524,10 +1535,10 @@ mod tests {
         assert_eq!(empty_rows.iter().map(|s| s.count).sum::<i64>(), 2);
     }
 
-    // ── backfill_null_session_id (retroactive fix-up companion) ───────────────
+    // ── backfill_placeholder_session_id (retroactive fix-up companion) ────────
 
     #[test]
-    fn backfill_null_session_id_only_touches_null_rows_of_the_call() {
+    fn backfill_placeholder_session_id_only_touches_placeholder_rows_of_the_call() {
         let store = temp_store();
 
         let mut orphan = make_event("conv-bf", InterruptionType::SseTruncated);
@@ -1549,7 +1560,7 @@ mod tests {
         store.insert(&other_call).unwrap();
 
         let updated = store
-            .backfill_null_session_id("call-1", "sess-resolved")
+            .backfill_placeholder_session_id("call-1", "sess-resolved")
             .unwrap();
         assert_eq!(updated, 1, "only the NULL row of call-1 may be updated");
 
@@ -1570,8 +1581,41 @@ mod tests {
         );
     }
 
+    /// The *second* placeholder shape is the one the calls this fix-up exists
+    /// for actually carry: a deferred call's metadata holds the 32-hex
+    /// `IdResolver` fallback, which the detector copies verbatim into the
+    /// interruption row. Matching only `NULL` repaired nothing for them, leaving
+    /// the interruption attributed to a phantom session while the call itself
+    /// moved to the real one.
     #[test]
-    fn backfill_null_session_id_unknown_call_updates_nothing() {
+    fn backfill_placeholder_session_id_repairs_the_id_resolver_fallback_shape() {
+        let store = temp_store();
+        let fallback = "0123456789abcdef0123456789abcdef";
+
+        let mut hashed = make_event("conv-bf-hash", InterruptionType::SseTruncated);
+        hashed.interruption_id = "int-bf-hash".to_string();
+        hashed.session_id = Some(fallback.to_string());
+        hashed.call_id = Some("call-hash".to_string());
+        store.insert(&hashed).unwrap();
+
+        let updated = store
+            .backfill_placeholder_session_id("call-hash", "sess-real")
+            .unwrap();
+
+        assert_eq!(updated, 1, "the fallback shape is a placeholder too");
+        assert_eq!(
+            store
+                .get_by_id("int-bf-hash")
+                .unwrap()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("sess-real")
+        );
+    }
+
+    #[test]
+    fn backfill_placeholder_session_id_unknown_call_updates_nothing() {
         let store = temp_store();
         let mut e = make_event("conv-bf-none", InterruptionType::EmptyResponse);
         e.interruption_id = "int-bf-none".to_string();
@@ -1580,7 +1624,7 @@ mod tests {
         store.insert(&e).unwrap();
 
         let updated = store
-            .backfill_null_session_id("no-such-call", "sess-resolved")
+            .backfill_placeholder_session_id("no-such-call", "sess-resolved")
             .unwrap();
         assert_eq!(updated, 0);
     }

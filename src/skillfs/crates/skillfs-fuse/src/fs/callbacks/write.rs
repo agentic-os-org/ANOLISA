@@ -13,7 +13,7 @@ use crate::handles::open_options_from_flags;
 use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
-use crate::sys::{errno, fstatat_leaf, openat_leaf};
+use crate::sys::{errno, fchownat_leaf, fstatat_leaf, openat_leaf, utimensat_leaf};
 
 impl SkillFs {
     pub(in crate::fs) fn write_impl(
@@ -98,6 +98,64 @@ impl SkillFs {
         if let Some(errno) = self.enforce_skill_meta(&path_type, SkillEventKind::Write, req, None) {
             reply.error(errno);
             return;
+        }
+
+        // I4/H3: hidden-skill write gate. An fd opened while the skill
+        // resolved `current` keeps its inode -> path mapping after the
+        // ledger flips the skill to `hidden`, so the write dispatches
+        // with a live mapping and must be refused here exactly like
+        // every other mutating callback — and like the #5183 xattr
+        // gate, which rejects `fsetxattr` on the very same stale fd
+        // with ENOENT. Without this arm the fd kept a mutation channel
+        // into the hidden skill's live source. The open-after-unlink
+        // branch above deliberately skips this gate: POSIX keeps a raw
+        // fd writable until last close, and the unlink already passed
+        // the protection gates when it dropped the mapping.
+        {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
+                _ => false,
+            };
+            if reject {
+                // Audit the rejection with the `hidden_skill` class the
+                // xattr gate established (#5183): a stale-fd write probe
+                // against a hidden skill must leave the same
+                // `Rejected` trace as `fsetxattr` on the same fd.
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Write,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
+                reply.error(libc::ENOENT);
+                return;
+            }
         }
 
         debug!(ino, offset, len = data.len(), "write");
@@ -440,9 +498,21 @@ impl SkillFs {
 
         debug!(parent, name = %name.to_string_lossy(), ?physical, "create");
 
-        // skill-discover namespace is read-only
+        // skill-discover namespace is read-only. Emit the
+        // `Rejected`/`EROFS` record the `symlink`/`link` gates
+        // (link.rs) already leave for the same namespace so `create`
+        // probes against the read-only tree are audited too.
         if let PathType::Passthrough { ref skill_name, .. } = path_type {
             if is_skill_discover_path(skill_name) {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::EROFS),
+                    None,
+                    Some("class=skill_discover".to_string()),
+                );
                 reply.error(libc::EROFS);
                 return;
             }
@@ -723,6 +793,44 @@ impl SkillFs {
             return;
         }
 
+        // I4/H3: reject FIFO creation inside a hidden skill unless the
+        // path matches the post-publish grace whitelist — the same gate
+        // `create`/`symlink`/`link` apply. The kernel keeps the skill
+        // directory's dentries warm across a ledger flip, so without
+        // this arm a stale dentry let `mkfifo` inject a new entry into a
+        // hidden skill whose content is otherwise unreachable.
+        {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                _ => false,
+            };
+            if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
+                reply.error(libc::ENOENT);
+                return;
+            }
+        }
+
         let physical = match self.resolve_physical_path(&path_str) {
             Some(p) => p,
             None => {
@@ -884,6 +992,19 @@ impl SkillFs {
                     return;
                 }
                 if self.should_reject_hidden_write(skill_name, None) {
+                    // Audit the rejection with the `hidden_skill` class the
+                    // xattr gate established (#5183) so a hidden skill's
+                    // metadata probes leave a trace — the same convention
+                    // the other mutating callbacks follow.
+                    self.emit_op_event_with_detail(
+                        req,
+                        &path_type,
+                        SkillEventKind::Metadata,
+                        SkillEventAction::Rejected,
+                        Some(libc::ENOENT),
+                        None,
+                        Some("class=hidden_skill".to_string()),
+                    );
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -1028,6 +1149,19 @@ impl SkillFs {
                 _ => false,
             };
             if reject {
+                // Audit the rejection with the `hidden_skill` class the
+                // xattr gate established (#5183) so a hidden skill's
+                // chmod/chown/truncate/utimens probes leave a trace — the
+                // same convention the other mutating callbacks follow.
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Metadata,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -1043,6 +1177,46 @@ impl SkillFs {
         };
 
         debug!(ino, ?size, ?mode, ?uid, ?gid, ?physical, "setattr");
+
+        // A setattr delivered on a symlink inode comes from a no-follow
+        // syscall (lchown / lutimes / fchmodat2 with AT_SYMLINK_NOFOLLOW).
+        // chown(2) and utimensat(..., 0) would follow the link and mutate
+        // whatever it points at — possibly outside the skill tree — instead
+        // of the link itself. Detect the link once and use the no-follow
+        // syscall/flag for every branch below. A physical path beyond
+        // PATH_MAX defeats path-based typing; fall back to the parent-fd
+        // leaf stat so such a file is still typed no-follow and routed
+        // through the *at syscalls below, while any other stat error
+        // keeps its errno.
+        let long_path;
+        let is_symlink = match std::fs::symlink_metadata(&physical) {
+            Ok(m) => {
+                long_path = false;
+                m.file_type().is_symlink()
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, false) {
+                        Ok(st) => {
+                            long_path = true;
+                            st.st_mode & libc::S_IFMT == libc::S_IFLNK
+                        }
+                        Err(e2) => {
+                            reply.error(errno(&e2));
+                            return;
+                        }
+                    },
+                    Err(_) => {
+                        reply.error(errno(&e));
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                reply.error(errno(&e));
+                return;
+            }
+        };
 
         // 1. Handle size (truncate) — preserve existing logic
         if let Some(new_size) = size {
@@ -1134,6 +1308,14 @@ impl SkillFs {
 
         // 2. Handle mode (chmod)
         if let Some(new_mode) = mode {
+            // Linux does not support changing a symlink's own mode; only
+            // fchmodat2(AT_SYMLINK_NOFOLLOW) delivers mode here for a link,
+            // and the kernel answers EOPNOTSUPP for it. set_permissions
+            // would silently chmod the target instead.
+            if is_symlink {
+                reply.error(libc::EOPNOTSUPP);
+                return;
+            }
             let perms = std::fs::Permissions::from_mode(new_mode);
             if let Err(e) = std::fs::set_permissions(&physical, perms) {
                 reply.error(errno(&e));
@@ -1155,9 +1337,29 @@ impl SkillFs {
             // -1 means "don't change" — on Linux (uid_t)-1 == u32::MAX
             let new_uid = uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
             let new_gid = gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
-            let ret = unsafe { libc::chown(c_path.as_ptr(), new_uid, new_gid) };
-            if ret != 0 {
-                let e = std::io::Error::last_os_error();
+            let chown_result = if long_path {
+                // chown(2)/lchown(2) cannot name a path beyond PATH_MAX;
+                // reach the leaf through the open parent directory,
+                // preserving the no-follow choice above.
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => {
+                        fchownat_leaf(&parent_fd, &leaf, new_uid, new_gid, !is_symlink).map(|_| 0)
+                    }
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                let ret = if is_symlink {
+                    unsafe { libc::lchown(c_path.as_ptr(), new_uid, new_gid) }
+                } else {
+                    unsafe { libc::chown(c_path.as_ptr(), new_uid, new_gid) }
+                };
+                if ret != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(0)
+                }
+            };
+            if let Err(e) = chown_result {
                 reply.error(errno(&e));
                 return;
             }
@@ -1243,10 +1445,32 @@ impl SkillFs {
             };
 
             let times = [atime_spec, mtime_spec];
-            let ret =
-                unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-            if ret != 0 {
-                let e = std::io::Error::last_os_error();
+            let utimensat_result = if long_path {
+                // utimensat cannot name a path beyond PATH_MAX; reach the
+                // leaf through the open parent directory, preserving the
+                // no-follow choice.
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => utimensat_leaf(&parent_fd, &leaf, &times, is_symlink),
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                // Same as chown above: times set through a no-follow syscall
+                // belong to the link, not to its target.
+                let flags = if is_symlink {
+                    libc::AT_SYMLINK_NOFOLLOW
+                } else {
+                    0
+                };
+                let ret = unsafe {
+                    libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), flags)
+                };
+                if ret != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            };
+            if let Err(e) = utimensat_result {
                 reply.error(errno(&e));
                 return;
             }
@@ -1260,11 +1484,15 @@ impl SkillFs {
         // `ENAMETOOLONG` here, and the kernel would surface that errno to
         // the caller while keeping the stale attr cache (`stat` after the
         // failed reply would still report the pre-truncate size).
-        let final_attr: std::io::Result<FileAttr> = match std::fs::metadata(&physical) {
+        let final_attr: std::io::Result<FileAttr> = match if is_symlink {
+            std::fs::symlink_metadata(&physical)
+        } else {
+            std::fs::metadata(&physical)
+        } {
             Ok(meta) => Ok(file_attr_from_metadata(&meta)),
             Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
                 match self.open_parent_dir_for(&path) {
-                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, true) {
+                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, !is_symlink) {
                         Ok(st) => Ok(file_attr_from_stat(&st)),
                         Err(e2) => Err(e2),
                     },

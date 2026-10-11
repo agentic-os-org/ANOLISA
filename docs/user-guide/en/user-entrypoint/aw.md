@@ -9,8 +9,8 @@ QwenPaw, Qoder CLI, OpenClaw and Hermes.
 
 The goal is to distribute AW with an `aw.yaml` file, reuse that policy when
 switching Agents, and keep deployment status and audit records in one service.
-The current version lets you prepare and check the configuration. Agent startup
-and policy execution are still being built.
+The current version lets you check configuration and run a local Provider Host
+example from source. Agent startup and native policy integration are still being built.
 
 ## Available today
 
@@ -22,9 +22,10 @@ this configuration. Earlier experiments do not establish support in this version
 | Start from a configuration template | ✅ Available | Starter and full examples are included |
 | Check field names, types and Provider references | ✅ Available | The offline checker reports configuration errors |
 | Declare any of the 16 event names | ✅ Available | Recognizing a name does not connect its native Hook |
+| Try a local Provider with synthetic tool events | ✅ Source example | The Host runs discovery, private-configuration validation and bounded invocation; no Agent is launched |
 | Start or attach an Agent through AW | ❌ Planned | The daemon and product CLI are not available yet |
 | Run Providers before and after native tools | ❌ Planned | Each framework needs its adapter and effect validation |
-| Apply sec-core rules to block tools or redact results | ❌ Planned | Requires Provider execution and proof that the Agent uses the response |
+| Apply sec-core rules to block tools or redact results | ❌ Planned | Requires a sec-core Provider, supported effects and proof that the Agent uses the response |
 | View applied policy and persistent audit records | ❌ Planned | The service will maintain these records |
 | Install AW and generate a default configuration | ❌ Planned | The starter file is copied manually today |
 | Request user approval or enforce policy below native Hooks | ❌ Later work | Active `ask` steps are currently rejected; OS enforcement is not provided |
@@ -33,6 +34,10 @@ All four first-release Agent IDs are accepted in configuration. Runtime
 integration remains ❌ for each in this version. QwenPaw is a separate target
 from Qwen Code. Runtime support will be documented by Agent version and operation
 as adapters are delivered.
+
+Developers can run the [local Provider Host example](../../../../src/aw/docs/design/provider-host.md#local-example)
+on Linux. It returns candidate effects and execution failures; it does not install
+Hooks, activate Agent protection or write persistent audit records.
 
 ## Start with a small configuration
 
@@ -127,13 +132,15 @@ a name, specify its command and put its own settings in `config`.
 An event step refers to that name through `provider` and selects an `operation`.
 In the [full example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-config/examples/aw.yaml),
 `business-before` refers to the `business` Provider, while the final tool-before
-check refers to `security`. Steps run in their configured order once the execution
-service is available. Provider invocation remains ❌ in the current version.
+check refers to `security`. Native step scheduling remains part of the future
+Agent integration. Local invocation is available through the separate Host example;
+running Providers around real Agent tools remains ❌ in the current version.
 
 The full example shows all 16 event names and a disabled result-redaction step.
 Its business executable and sec-core command are illustrative. Replace them with
-real implementations when the Provider protocol and runtime are delivered.
-Changing `enabled` today changes the configuration being checked, without
+real implementations when integrating with an Agent. The full example includes
+capabilities outside the current Host's supported tool events and is not its
+runnable template. Changing `enabled` changes the configuration being checked, without
 installing a Hook or activating protection.
 
 ## Use the configuration with an Agent

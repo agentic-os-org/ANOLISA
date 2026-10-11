@@ -99,17 +99,31 @@ def missing_python_modules() -> list[str]:
 def run_check(
     command: list[str], cwd: Path, log_path: Path, checks: list[dict[str, object]]
 ) -> int:
-    """Run one check, append its durable record, and return its exit code."""
+    """Run one check, append its durable record, and return its exit code.
+
+    A check that cannot be launched at all (a missing ``rustup``/``cargo`` is the
+    canonical case for this runner) is recorded as a failure instead of raising:
+    the exception would escape before the record is appended, so the run died
+    with a traceback, published no report (``write_report`` runs only after the
+    first check) and skipped every later gate.
+    """
     started = time.time()
     with log_path.open("w", encoding="utf-8") as log:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            returncode = result.returncode
+        except OSError as error:
+            # 127 is the shell's "command not found"; any launch failure is a
+            # failed check, and the reason belongs in its log for the report.
+            log.write(f"failed to launch {shlex.join(command)}: {error}\n")
+            returncode = 127
     checks.append(
         {
             "command": shlex.join(command),
@@ -117,10 +131,10 @@ def run_check(
             "log": log_path.name,
             "started_at_unix": started,
             "duration_seconds": time.time() - started,
-            "exit_code": result.returncode,
+            "exit_code": returncode,
         }
     )
-    return result.returncode
+    return returncode
 
 
 def write_report(

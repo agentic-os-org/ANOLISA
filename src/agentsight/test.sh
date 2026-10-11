@@ -11,6 +11,7 @@ MODE="${1:-all}"
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 print_header() {
@@ -29,8 +30,16 @@ DASHBOARD_TESTS=0
 RUST_COVERAGE=""
 RUST_TESTS=0
 
+# 前端套件以 node:test 编写，并通过 dashboard/package.json 的 npm scripts 串联。
+# 这里曾调用 vitest，但它不是本包的依赖（只有 package-lock.json 里残留着一条记录），
+# 命令替换的 "command not found" 在 set -e 下直接终止脚本，前端一个用例都没跑，
+# 后端的 tarpaulin 分支也因此永远不会执行。
+DASHBOARD_SUITES="test:api-client test:i18n test:navigation test:stale-load \
+test:round-model test:token-savings-selection test:agent-sessions-subagent-count \
+test:product-branding test:agent-health-notifier"
+
 run_dashboard() {
-  print_header "Dashboard 前端单测覆盖率 (vitest + v8)"
+  print_header "Dashboard 前端单测 (node:test)"
 
   cd "$ROOT_DIR/dashboard"
 
@@ -39,20 +48,35 @@ run_dashboard() {
     npm install --silent
   fi
 
-  echo "运行测试并收集覆盖率..."
+  echo "运行测试..."
   echo ""
-  VITEST_OUTPUT=$(node_modules/.bin/vitest run --coverage 2>/dev/null)
-  echo "$VITEST_OUTPUT" | grep -v "^$"
+  local output=""
+  local failures=""
+  local suite
+  for suite in $DASHBOARD_SUITES; do
+    local result
+    if result=$(npm run --silent "$suite" 2>&1); then
+      :
+    else
+      failures="${failures} ${suite}"
+    fi
+    output="${output}${result}"$'\n'
+  done
+  echo "$output"
 
-  # 提取 test case 数量 (匹配 "Tests  XX passed" 或 "XX passed")
-  DASHBOARD_TESTS=$(echo "$VITEST_OUTPUT" | grep -oP '(?:Tests\s+)?(\d+) passed' | grep -oP '\d+' | tail -1)
-  [ -z "$DASHBOARD_TESTS" ] && DASHBOARD_TESTS=0
+  # node:test 的汇总行形如 "ℹ pass 16"
+  DASHBOARD_TESTS=$(echo "$output" | grep -oP '^\s*ℹ pass \K\d+' | awk '{s+=$1} END {print s+0}')
+  # `[ -z x ] && x=0` is an AND list whose failure status aborts the script
+  # under `set -e`, so it only survives while the variable is empty.
+  if [ -z "$DASHBOARD_TESTS" ]; then
+    DASHBOARD_TESTS=0
+  fi
 
-  # 提取覆盖率 (匹配 All files 行的百分比数字)
-  DASHBOARD_COVERAGE=$(echo "$VITEST_OUTPUT" | grep "All files" | grep -oP '\d+\.?\d*' | head -1)
-  if [ -n "$DASHBOARD_COVERAGE" ]; then
-    DASHBOARD_COVERAGE="${DASHBOARD_COVERAGE}%"
+  if [ -n "$failures" ]; then
+    echo -e "${RED}失败的前端套件:${failures}${NC}"
+    DASHBOARD_COVERAGE="N/A"
   else
+    # 前端没有配置覆盖率工具。如实报告，而不是让一个已删除的运行器给出数字。
     DASHBOARD_COVERAGE="N/A"
   fi
 
@@ -139,29 +163,34 @@ run_rust() {
       "src/analyzer/message/openai.rs" \
       "src/analyzer/message/anthropic.rs" \
       "src/lib.rs" \
-    2>&1)
+    2>&1 || true)
 
   END_TIME=$(date +%s)
   ELAPSED=$((END_TIME - START_TIME))
 
   # 提取 test case 数量 (tarpaulin 输出中的 "running X tests" 累加)
   RUST_TESTS=$(echo "$OUTPUT" | grep -oP 'running \K\d+(?= tests?)' | awk '{s+=$1} END {print s}')
-  [ -z "$RUST_TESTS" ] && RUST_TESTS=0
+  if [ -z "$RUST_TESTS" ]; then
+    RUST_TESTS=0
+  fi
 
   # 提取覆盖率：优先从 tarpaulin 汇总行解析 (格式: "XX.XX% coverage, COVERED/TOTAL lines covered")
-  TARP_SUMMARY=$(echo "$OUTPUT" | grep -oP '\d+\.\d+% coverage, \d+/\d+ lines covered')
+  # 每次命令替换都以 `|| true` 收尾：grep 无匹配时退出码为 1，赋值因此失败，
+  # 而 `set -e` 会把整段脚本带走——覆盖率输出与预期格式不同（tarpaulin 失败、
+  # 版本升级、本就没有覆盖率数字）时，脚本会静默中止。
+  TARP_SUMMARY=$(echo "$OUTPUT" | grep -oP '\d+\.\d+% coverage, \d+/\d+ lines covered' || true)
   if [ -n "$TARP_SUMMARY" ]; then
-    RATE=$(echo "$TARP_SUMMARY" | grep -oP '^\d+\.\d+')
-    COVERED=$(echo "$TARP_SUMMARY" | grep -oP '\d+(?=/\d+ lines)')
-    TOTAL=$(echo "$TARP_SUMMARY" | grep -oP '(?<=/)\d+(?= lines)')
+    RATE=$(echo "$TARP_SUMMARY" | grep -oP '^\d+\.\d+' || true)
+    COVERED=$(echo "$TARP_SUMMARY" | grep -oP '\d+(?=/\d+ lines)' || true)
+    TOTAL=$(echo "$TARP_SUMMARY" | grep -oP '(?<=/)\d+(?= lines)' || true)
     RUST_COVERAGE="${RATE}%"
     echo ""
     echo -e "${GREEN}Rust 覆盖率: ${COVERED}/${TOTAL} = ${RATE}%${NC}"
     echo -e "${GREEN}Rust test cases: ${RUST_TESTS}${NC}"
   else
     # 回退：从逐文件行累加 (兼容 "|| src/" 和 "src/" 两种格式)
-    COVERED=$(echo "$OUTPUT" | grep -E '(^|\|\| )src/' | grep -oP '\d+(?=/\d+)' | awk '{s+=$1} END {print s}')
-    TOTAL=$(echo "$OUTPUT" | grep -E '(^|\|\| )src/' | grep -oP '(?<=/)\d+' | awk '{s+=$1} END {print s}')
+    COVERED=$(echo "$OUTPUT" | grep -E '(^|\|\| )src/' | grep -oP '\d+(?=/\d+)' | awk '{s+=$1} END {print s}' || true)
+    TOTAL=$(echo "$OUTPUT" | grep -E '(^|\|\| )src/' | grep -oP '(?<=/)\d+' | awk '{s+=$1} END {print s}' || true)
     if [ -n "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
       RATE=$(awk "BEGIN {printf \"%.2f\", ($COVERED/$TOTAL)*100}")
       RUST_COVERAGE="${RATE}%"
@@ -190,8 +219,8 @@ run_all() {
   TOTAL_TESTS=$((DASHBOARD_TESTS + RUST_TESTS))
 
   # 计算加权平均覆盖率
-  D_RATE=$(echo "$DASHBOARD_COVERAGE" | grep -oP '\d+\.?\d*')
-  R_RATE=$(echo "$RUST_COVERAGE" | grep -oP '\d+\.?\d*')
+  D_RATE=$(echo "$DASHBOARD_COVERAGE" | grep -oP '\d+\.?\d*' || true)
+  R_RATE=$(echo "$RUST_COVERAGE" | grep -oP '\d+\.?\d*' || true)
   if [ -n "$D_RATE" ] && [ -n "$R_RATE" ]; then
     TOTAL_COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($D_RATE * $DASHBOARD_TESTS + $R_RATE * $RUST_TESTS) / ($DASHBOARD_TESTS + $RUST_TESTS)}")
     TOTAL_COVERAGE="${TOTAL_COVERAGE}%"

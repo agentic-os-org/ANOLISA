@@ -21,7 +21,7 @@
 //! ```
 
 use crate::aggregator::AggregatedResult;
-use crate::analyzer::token::extract_response_content;
+use crate::analyzer::token::merge_response_output_text;
 use crate::parser::sse::{ParsedSseEvent, SSEParser};
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
@@ -234,28 +234,10 @@ pub fn count_response_tokens(
     let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut per_block: Vec<OutputTokenCount> = Vec::new();
 
-    // Accumulate content from all SSE chunks
-    let mut all_content = String::new();
-    let mut all_reasoning = String::new();
-    let mut all_tool_calls = Vec::new();
-
-    for chunk in response_jsons {
-        if let Some((content, reasoning, tool_calls)) = extract_response_content(Some(chunk)) {
-            if !content.is_empty() {
-                all_content.push_str(&content);
-            }
-            if let Some(r) = reasoning {
-                if !r.is_empty() {
-                    all_reasoning.push_str(&r);
-                }
-            }
-            for tc in tool_calls {
-                if !tc.is_empty() {
-                    all_tool_calls.push(tc);
-                }
-            }
-        }
-    }
+    // Accumulate content from all SSE chunks. The shared merge counts each
+    // delta once and reads the Responses closing events only as a fallback,
+    // so a complete capture is not counted two or three times.
+    let (all_content, all_reasoning, all_tool_calls) = merge_response_output_text(response_jsons);
 
     let mut has_content = false;
 
@@ -534,20 +516,27 @@ impl Analyzer {
                             .iter()
                             .filter_map(|event| parser.parse_json(event))
                             .fold(None, merge_usage);
-                        token_result = usage.map(|usage| {
-                            TokenRecord::new(
-                                http_record.pid,
-                                http_record.comm.clone(),
-                                usage.provider.to_string(),
-                                usage.input_tokens,
-                                usage.output_tokens,
-                            )
-                            .with_model(usage.model.clone().unwrap_or_default())
-                            .with_cache_tokens(
-                                usage.cache_creation_input_tokens.unwrap_or(0),
-                                usage.cache_read_input_tokens.unwrap_or(0),
-                            )
-                        });
+                        token_result = usage
+                            .map(|usage| {
+                                TokenRecord::new(
+                                    http_record.pid,
+                                    http_record.comm.clone(),
+                                    usage.provider.to_string(),
+                                    usage.input_tokens,
+                                    usage.output_tokens,
+                                )
+                                .with_model(usage.model.clone().unwrap_or_default())
+                                .with_cache_tokens(
+                                    usage.cache_creation_input_tokens.unwrap_or(0),
+                                    usage.cache_read_input_tokens.unwrap_or(0),
+                                )
+                            })
+                            // This site runs only because the primary
+                            // extraction already returned `None`, and both
+                            // extractors refuse an all-zero usage. Without the
+                            // same guard a zero-placeholder stream reappears
+                            // here as a bogus zero row in the token database.
+                            .filter(|record| record.total_tokens() > 0);
                     }
                 }
             }
@@ -716,32 +705,45 @@ impl Analyzer {
             .filter_map(|e| self.token.parse_event(e))
             .fold(None, merge_usage);
 
-        if usage.is_none() {
-            // Fallback: OpenAI Responses API embeds usage in a final
-            // `response.completed` event whose `data:` field routinely
-            // exceeds a single TLS record. The aggregator buffers the
-            // raw continuation bytes; re-parse them with the legacy
-            // SSEParser (which concatenates multi-line data fields)
-            // and merge all events. If reassembled events still don't
-            // yield usage, fall back to a partial-scan over the raw
-            // buffer text.
-            if let Some(extra) = continuation_bytes {
-                let text = String::from_utf8_lossy(extra);
-                let reassembled = SSEParser::parse_stream(&text);
-                usage = reassembled
-                    .events
-                    .iter()
-                    .filter_map(|e| self.token.parse_data(&e.data))
-                    .fold(None, merge_usage);
+        // The continuation buffer holds the bytes of events a TLS record split,
+        // and a split event produces no `ParsedSseEvent` of its own. Its usage
+        // therefore has to be merged into what the events yielded, not used
+        // only as a replacement for "nothing at all": Anthropic splits its
+        // counters across events (`message_start` carries input plus the cache
+        // counters and a placeholder `output_tokens` of 1, the terminal
+        // `message_delta` carries the real output count), so a split that lands
+        // on the terminal event left the placeholder in place while the bytes
+        // that would correct it sat unread in the same call. `merge_usage` takes
+        // the max of each cumulative counter, so folding the reassembled events
+        // in can only raise a counter, never lose one.
+        if let Some(extra) = continuation_bytes {
+            // Re-parse with the legacy SSEParser, which concatenates
+            // multi-line `data:` fields — what the OpenAI Responses API's
+            // final `response.completed` event needs when its payload exceeds
+            // a single record.
+            let text = String::from_utf8_lossy(extra);
+            let reassembled = SSEParser::parse_stream(&text);
+            let from_reassembled = reassembled
+                .events
+                .iter()
+                .filter_map(|e| self.token.parse_data(&e.data))
+                .fold(None, merge_usage);
+            if let Some(from_reassembled) = from_reassembled {
+                usage = merge_usage(usage, from_reassembled);
+            }
+            if usage.is_none() {
+                // Last resort: a regex-free scan over the raw buffer text. It
+                // reads the number after a usage field name in arbitrary text,
+                // so it only runs when nothing parseable was recovered — over a
+                // stream that already produced exact counters it could only add
+                // noise.
+                usage = self.token.parse_data(&text);
                 if usage.is_none() {
-                    usage = self.token.parse_data(&text);
-                    if usage.is_none() {
-                        log::debug!(
-                            "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
-                            extra.len(),
-                            reassembled.events.len(),
-                        );
-                    }
+                    log::debug!(
+                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                        extra.len(),
+                        reassembled.events.len(),
+                    );
                 }
             }
         }
@@ -931,31 +933,12 @@ impl Analyzer {
             0
         };
 
-        // Count output tokens from SSE events content
+        // Count output tokens from SSE events content. The shared merge counts
+        // each delta once and reads the Responses closing events only as a
+        // fallback, so a complete capture is not counted two or three times.
         let output_tokens = {
-            let mut all_content = String::new();
-            let mut all_reasoning = String::new();
-            let mut all_tool_calls = Vec::new();
-
-            for chunk in &sse_chunks {
-                if let Some((content, reasoning, tool_calls)) =
-                    extract_response_content(Some(chunk))
-                {
-                    if !content.is_empty() {
-                        all_content.push_str(&content);
-                    }
-                    if let Some(r) = reasoning {
-                        if !r.is_empty() {
-                            all_reasoning.push_str(&r);
-                        }
-                    }
-                    for tc in tool_calls {
-                        if !tc.is_empty() {
-                            all_tool_calls.push(tc);
-                        }
-                    }
-                }
-            }
+            let (all_content, all_reasoning, all_tool_calls) =
+                merge_response_output_text(&sse_chunks);
 
             let mut total = 0u64;
 
@@ -1702,6 +1685,40 @@ mod tests {
         assert_eq!(record.provider, "anthropic");
     }
 
+    /// The h2 SSE fallback runs exactly when the primary extraction returned
+    /// `None`, so it must apply the same all-zero guard as
+    /// `extract_token_from_sse` and `extract_token_from_json_body`. A stream
+    /// whose only parseable usage is zeroed (a proxy's zero-placeholder
+    /// `message_start` plus an aborted terminal `message_delta`) was rejected by
+    /// the primary extraction and then re-created here, leaving a bogus
+    /// zero-token row in the token database.
+    #[test]
+    fn http2_sse_zero_usage_does_not_produce_a_token_record() {
+        let analyzer = Analyzer::new();
+        let request_body = br#"{"model":"claude-sonnet-4-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}"#;
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,",
+            "\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+            "\"usage\":{\"output_tokens\":0}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let stream = build_http2_stream(
+            "/v1/messages",
+            request_body,
+            body.as_bytes().to_vec(),
+            "text/event-stream",
+        );
+
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+        assert!(
+            !results
+                .iter()
+                .any(|result| matches!(result, AnalysisResult::Token(_))),
+            "an all-zero h2 SSE usage must not yield a TokenRecord: {results:?}"
+        );
+    }
+
     #[test]
     fn first_output_timestamp_propagates_from_http2_to_latency_metrics() {
         use crate::genai::{GenAIBuilder, GenAISemanticEvent};
@@ -2073,6 +2090,49 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         assert_eq!(record.output_tokens, 42);
         assert_eq!(record.cache_creation_tokens, Some(5678));
         assert_eq!(record.cache_read_tokens, Some(90));
+    }
+
+    /// Anthropic splits its counters across events, and the terminal one can be
+    /// split by a TLS record — in which case it produces no `ParsedSseEvent` and
+    /// its bytes exist only in the continuation buffer. That buffer used to be
+    /// consulted only when *no* event yielded usage, so the terminal event's
+    /// real count was invisible whenever the earlier `message_start` had already
+    /// supplied the placeholder `output_tokens: 1`.
+    #[test]
+    fn a_split_terminal_usage_event_is_merged_into_the_partial_counters() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
+        )];
+        // The tail of the terminal event, as the aggregator buffered it: the
+        // parser keeps no cross-read remainder, so these bytes arrive as RawData.
+        let continuation = b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("the split terminal event must still produce a record");
+
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
+    }
+
+    #[test]
+    fn a_continuation_buffer_cannot_lower_the_event_counters() {
+        // The merge takes the max of each counter, so a continuation buffer
+        // whose text mentions a smaller count leaves the exact value in place.
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":42}}",
+        )];
+        let continuation =
+            b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
+
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("the event usage must be kept");
+
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
     }
 
     #[test]

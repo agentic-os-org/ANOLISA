@@ -49,7 +49,11 @@ def measure(atif_json):
 
 def classify(m, max_agent_len):
     """Bucket one trajectory. Mirrors the rule in §5.2 of the design."""
-    if m["n_steps"] <= 1 or m["max_agent_len"] == 0:
+    # Mirrors `reuse::triage::classify` in src/reuse/triage.rs: only a
+    # trajectory with neither agent text nor tool calls recorded nothing.
+    # Tool-only transcripts are work (71 steps / 84 calls / zero agent text in
+    # the corpus the Rust comment documents), not emptiness.
+    if m["n_steps"] <= 1 or (m["max_agent_len"] == 0 and m["n_tool_calls"] == 0):
         return "empty"
     # More than one user turn means the topic was carried forward, which the
     # design treats as evidence of value regardless of the other inputs.

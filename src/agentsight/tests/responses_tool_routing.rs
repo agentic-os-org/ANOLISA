@@ -25,6 +25,19 @@ fn done(index: u64, suffix: &str, args: &str) -> Value {
         "item_id":format!("fc_{suffix}"), "arguments":args})
 }
 
+fn item_done(index: u64, suffix: &str, args: &str) -> Value {
+    json!({"type":"response.output_item.done", "output_index":index,
+        "item":{"type":"function_call", "id":format!("fc_{suffix}"),
+            "call_id":format!("call_{suffix}"), "name":format!("tool_{suffix}"),
+            "arguments":args}})
+}
+
+fn message_item_done(index: u64) -> Value {
+    json!({"type":"response.output_item.done", "output_index":index,
+        "item":{"type":"message", "id":format!("msg_{index}"),
+            "content":[{"type":"output_text", "text":"hello"}]}})
+}
+
 fn parsed_calls(chunks: &[Value]) -> Vec<(String, String, Value)> {
     let parsed = MessageParser::new()
         .parse_by_path("/v1/responses", None, Some(&Value::Array(chunks.to_vec())))
@@ -340,4 +353,58 @@ fn too_many_calls_are_bounded_without_mutating_an_earlier_call() {
     assert_eq!(calls.len(), 256);
     assert!(calls.iter().all(|(_, _, args)| args == &json!({})));
     assert_eq!(drained_calls(&chunks), calls);
+}
+
+#[test]
+fn item_done_recovers_a_call_from_a_mid_stream_capture() {
+    // The capture started after output_item.added and before the arguments
+    // events; response.output_item.done carries the complete call. The token
+    // extractor already recovers text items from this event, so the message
+    // parsers must recover the tool call too.
+    check(
+        vec![
+            item_done(0, "a", "{\"a\":1}"),
+            item_done(1, "b", "{\"b\":2}"),
+            json!({"type":"response.completed", "response":{
+                "id":"resp_fixture", "model":"fixture-model",
+                "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}),
+        ],
+        vec![
+            ("call_a", "tool_a", json!({"a":1})),
+            ("call_b", "tool_b", json!({"b":2})),
+        ],
+    );
+}
+
+#[test]
+fn item_done_supersedes_partial_deltas_with_authoritative_arguments() {
+    // added carried empty arguments, the deltas were cut mid-JSON, and the
+    // stream ended without function_call_arguments.done: the done item is the
+    // only complete arguments record.
+    check(
+        vec![
+            added(0, "a"),
+            delta(0, "a", "{\"a\":"),
+            item_done(0, "a", "{\"a\":1}"),
+        ],
+        vec![("call_a", "tool_a", json!({"a":1}))],
+    );
+}
+
+#[test]
+fn item_done_for_non_call_items_and_contradicted_identity_is_ignored() {
+    // A message item's done event must not register a call, and a done item
+    // whose identity contradicts a known call (reusing output_index 0 under
+    // a different item id) must not be recorded against it.
+    check(
+        vec![
+            added(0, "a"),
+            delta(0, "a", "{\"a\":1}"),
+            message_item_done(3),
+            json!({"type":"response.output_item.done", "output_index":0,
+                "item":{"type":"function_call", "id":"fc_b",
+                    "call_id":"call_b", "name":"tool_b", "arguments":"garbage"}}),
+        ],
+        vec![("call_a", "tool_a", json!({"a":1}))],
+    );
 }

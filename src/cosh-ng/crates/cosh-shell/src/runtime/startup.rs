@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use nix::pty::Winsize;
 use wait_timeout::ChildExt;
 
+use self::probe_outcome::record_probe_outcome;
 use crate::diagnostics::health::{
     record_startup_health_recommendations, HealthFindingCategory, HealthScanReport, HealthSeverity,
 };
@@ -31,6 +32,7 @@ use crate::runtime::invocation::{
 };
 use crate::runtime::prelude::*;
 use crate::runtime::state::PendingInputGhostBinding;
+use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
 
 const LOGO_LINES: &[&str] = &[
     "  ██████╗  ██████╗  ███████╗ ██╗  ██╗",
@@ -59,6 +61,7 @@ const BOOTSTRAP_PATH_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 mod bash_capability;
 mod descendants;
+mod probe_outcome;
 mod recommendations;
 pub(crate) use bash_capability::{exported_bash_functions_posix_compatible, resolve_bash_for_r2};
 #[cfg(test)]
@@ -540,6 +543,7 @@ pub(crate) fn bootstrap_process_path_from_shell(
     shell_kind: &RawShellKind,
     login: bool,
     winsize: &Winsize,
+    effects: &LoginEffectGuard,
 ) {
     let enabled = std::env::var("COSH_SHELL_BOOTSTRAP_PATH").as_deref() != Ok("0");
     let Some((shell, probes)) = bootstrap_path_probe_plan(shell_kind, login, enabled) else {
@@ -548,10 +552,12 @@ pub(crate) fn bootstrap_process_path_from_shell(
 
     let mut discovered = Vec::with_capacity(probes.len());
     for probe in probes {
-        // Each probe runs in its own child; PATH is the sole value
-        // imported into cosh-shell, and probe failures remain independently visible.
+        // Each child imports only PATH; probe failures stay independently visible.
         let command = bootstrap_path_command(shell, probe.flags);
-        match run_bootstrap_path_probe(command, BOOTSTRAP_PATH_PROBE_TIMEOUT, probe.io, winsize) {
+        let outcome =
+            run_bootstrap_path_probe(command, BOOTSTRAP_PATH_PROBE_TIMEOUT, probe.io, winsize);
+        record_probe_outcome(effects, LoginEffectSource::PathBootstrapProbe, &outcome);
+        match outcome {
             Ok(path) => discovered.push(Some(path)),
             Err(error) => {
                 eprintln!(
@@ -567,11 +573,7 @@ pub(crate) fn bootstrap_process_path_from_shell(
     }
 
     let current = std::env::var("PATH").unwrap_or_default();
-    // The interactive login probe can execute arbitrary login-profile side
-    // effects. It is intentionally separate from the managed non-login Bash;
-    // only login-specific PATH additions are merged around their base PATH anchors.
-    // The managed shell still sources .bashrc and establishes its final
-    // interactive ordering itself.
+    // Import login-specific additions around base anchors; the managed shell owns final ordering.
     let merged = merge_bootstrap_paths(shell_kind, login, &discovered, &current);
     if merged != current {
         std::env::set_var("PATH", merged);
@@ -632,9 +634,8 @@ pub(crate) fn passthrough_raw_non_interactive(args: &[String]) -> Option<i32> {
         );
         return passthrough_non_interactive(&forwarded);
     }
-    // `raw` is an explicit TUI request, so the remaining `-c` candidate is
-    // classified on argv shape alone (terminals assumed): piped drivers
-    // must never be diverted away from an interactive session.
+    // `raw` is an explicit TUI request, so classify argv with terminals assumed;
+    // piped drivers must never be diverted away from an interactive session.
     let argv0 = OsString::from(args[0].as_str());
     match classify_invocation(&argv0, &normalized, true, true, true) {
         Invocation::ExecShell(plan) => Some(exec_shell(plan)),

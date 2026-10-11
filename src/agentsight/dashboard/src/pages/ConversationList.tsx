@@ -858,7 +858,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     try {
       const [sessData, tsData, intData, iStats, iSessionCounts, iConvCounts, savingsResp] = await Promise.all([
       fetchSessions(startNs, endNs).then((data) =>
-        agent ? data.filter((s) => s.agent_name === agent) : data
+        agent
+          ? data.filter((s) => (s.agent_name ?? '').toLowerCase() === agent.toLowerCase())
+          : data
       ),
       fetchTimeseries(startNs, endNs, agent),
       fetchInterruptionCount(startNs, endNs, agent).catch(() => null),

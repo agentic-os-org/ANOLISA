@@ -83,7 +83,7 @@ jobs:
     runs-on: >-
       ${{ github.repository == 'agentic-os-org/ANOLISA' &&
       'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

@@ -376,6 +376,70 @@ fn hidden_hardlink_into_hidden_skill_is_rejected() {
     );
 }
 
+/// `mknod` (FIFO-only in SkillFS) is the last path-based mutator without
+/// the hidden gate: warm dentries keep the skill directory resolvable
+/// after the ledger flip, so a FIFO could be injected into a hidden
+/// skill even though `create`/`symlink`/`link` all answer `ENOENT`.
+#[test]
+fn hidden_fifo_mknod_is_rejected() {
+    if !common::fuse_available() {
+        eprintln!("SKIP hidden_fifo_mknod_is_rejected: FUSE not available");
+        return;
+    }
+    let fx = FlipMount::new_current("hidden-skill");
+    warm_dentries(&fx, "hidden-skill");
+    fx.flip_hidden("hidden-skill");
+
+    let dst = fx.skill("hidden-skill").join("new-fifo");
+    use std::os::unix::ffi::OsStrExt as _;
+    let c_path = std::ffi::CString::new(dst.as_os_str().as_bytes()).expect("fifo path");
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    let err = std::io::Error::last_os_error();
+    assert_eq!(
+        rc, -1,
+        "mkfifo into a hidden skill must be rejected (errno {err})"
+    );
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "hidden FIFO mknod must be ENOENT, got {err:?}"
+    );
+    assert!(
+        !fx.source_skill("hidden-skill").join("new-fifo").exists(),
+        "no physical FIFO may appear inside the hidden skill"
+    );
+}
+
+/// Control: FIFO creation on a skill that resolves current keeps
+/// working, so the added gate cannot overreach.
+#[test]
+fn current_skill_fifo_mknod_still_works() {
+    if !common::fuse_available() {
+        eprintln!("SKIP current_skill_fifo_mknod_still_works: FUSE not available");
+        return;
+    }
+    let fx = FlipMount::new_current("live-skill");
+    warm_dentries(&fx, "live-skill");
+
+    let dst = fx.skill("live-skill").join("live-fifo");
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::FileTypeExt as _;
+    let c_path = std::ffi::CString::new(dst.as_os_str().as_bytes()).expect("fifo path");
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(
+        rc,
+        0,
+        "mkfifo on a current skill must stay allowed (T2 surface), errno={}",
+        std::io::Error::last_os_error()
+    );
+    let meta = std::fs::symlink_metadata(fx.source_skill("live-skill").join("live-fifo"))
+        .expect("physical FIFO");
+    assert!(
+        meta.file_type().is_fifo(),
+        "the created entry must be a FIFO"
+    );
+}
+
 #[test]
 fn current_skill_mutations_still_passthrough() {
     if !common::fuse_available() {

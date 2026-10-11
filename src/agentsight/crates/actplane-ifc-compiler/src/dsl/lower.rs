@@ -242,7 +242,14 @@ fn absolute_path_discards_after_star(pat: &str, lowered: &(u8, String)) -> bool 
     let Some(idx) = pat.find('*') else {
         return false;
     };
-    pat[idx + 1..].contains('/') && lowered.0 == M_PREFIX && lowered.1 == pat[..idx]
+    // Everything after the first `*` is dropped when the lowered matcher is a
+    // prefix on the part before it, so the widening warning must fire whenever
+    // the dropped tail carries substance — not only when a `/` follows the
+    // star. `/tmp/*secret` drops "secret" and `/*secret` drops "secret" while
+    // lowering to the prefix "/", which matches every absolute path. A pure
+    // trailing glob (`/tmp/**`, `/tmp/*`) drops only stars (or nothing) and
+    // stays warning-free.
+    !pat[idx + 1..].trim_matches('*').is_empty() && lowered.0 == M_PREFIX && lowered.1 == pat[..idx]
 }
 
 #[cfg(test)]
@@ -366,6 +373,68 @@ mod tests {
         let target = cfg.rules[0].target;
         let lit = target.split(|b| *b == 0).next().unwrap_or(&[]);
         assert_eq!(lit, b"/tmp/");
+    }
+
+    #[test]
+    fn absolute_star_suffix_without_slash_widens_with_warning() {
+        // `/*secret` and `/tmp/*secret` discard everything after the first `*`
+        // (the lowered matcher is a prefix on "/" resp. "/tmp/"), so every
+        // absolute path under the prefix matches — wider than the authored
+        // glob. The widening check used to fire only when a `/` followed the
+        // star, which missed this (wider) no-slash case entirely: a
+        // `block write file "/*secret"` clause silently installs a block on
+        // every absolute path.
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block write file "/*secret" if true
+              because "x"
+            rule r2:
+              block write file "/tmp/*secret" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("'/*secret'") && w.contains("wider")),
+            "root single-star pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+        assert!(
+            c.warnings.iter().any(|w| w.contains("'/tmp/*secret'")),
+            "a mid-star pattern without a slash after the star must warn like /tmp/*/secret does: {:?}",
+            c.warnings
+        );
+        // Pin the lowered matcher: still a PREFIX on the part before the star.
+        let cfg: CConfig = unsafe { std::ptr::read_unaligned(c.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 2);
+        assert_eq!(cfg.rules[0].m, M_PREFIX);
+        let lit = cfg.rules[0].target.split(|b| *b == 0).next().unwrap_or(&[]);
+        assert_eq!(lit, b"/");
+    }
+
+    #[test]
+    fn absolute_trailing_star_globs_stay_warning_free() {
+        // "/tmp/**" discards only the trailing glob stars and "/tmp/*"
+        // discards nothing after the star: neither may warn.
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block write file "/tmp/**" if true
+              because "x"
+            rule r2:
+              block write file "/tmp/*" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "trailing-star globs must not warn: {:?}",
+            c.warnings
+        );
     }
 
     #[test]

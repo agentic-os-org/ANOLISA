@@ -355,14 +355,23 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::OnceLock;
 
-/// Chrome trace output file path (includes date and time to minute)
+/// Chrome trace output file path (includes date and time to minute, plus pid).
+///
+/// The name carries the process id as well as the minute. Two `agentsight
+/// trace` processes started in the same working directory within the same
+/// minute used to resolve to the same name, and `init_trace_file`'s
+/// `File::create` truncated the first one's trace — an entire run's events were
+/// lost purely because of the clock. The comma bookkeeping in
+/// `append_trace_event` is per-process too, so the two writers then produced
+/// adjacent JSON objects with no separator, leaving `agentsight analyze-chatml
+/// --chrome-trace` with a file it cannot parse.
 fn trace_file_path() -> &'static std::path::PathBuf {
     static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let datetime = chrono::Local::now().format("%Y-%m-%d_%H-%M");
         std::env::current_dir()
             .unwrap_or_default()
-            .join(format!("trace-{datetime}.json"))
+            .join(format!("trace-{datetime}-{}.json", std::process::id()))
     })
 }
 
@@ -581,5 +590,29 @@ mod tests {
         let e = ChromeTraceEvent::instant("t", "c", 1, 1, 0).with_trace_args(&EmptyTraceArgs);
         // Empty object should not be set
         assert!(e.args.is_none());
+    }
+
+    #[test]
+    fn trace_file_path_is_scoped_to_the_writing_process() {
+        // A same-minute second `agentsight trace` in the same directory used to
+        // resolve to the same file, so its `File::create` truncated the first
+        // process's trace and the two writers then interleaved objects without
+        // a separating comma.
+        let path = trace_file_path();
+        let name = path
+            .file_name()
+            .expect("the trace path has a file name")
+            .to_string_lossy()
+            .into_owned();
+        let expected = regex::Regex::new(r"^trace-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d+\.json$")
+            .expect("the pattern is valid");
+        assert!(
+            expected.is_match(&name),
+            "the trace file name must be scoped to this process, got {name:?}"
+        );
+        assert!(
+            name.ends_with(&format!("-{}.json", std::process::id())),
+            "the trace file name must carry this process id, got {name:?}"
+        );
     }
 }

@@ -31,14 +31,18 @@ fn weight(recommendation: &serde_json::Value) -> usize {
 }
 
 #[test]
-fn predicted_score_is_the_score_after_applying_the_shown_recommendations() {
+fn predicted_score_is_the_score_after_the_plan_runs() {
     // `score` is `100 - penalty` floored at 30 (rules::EvalResult::score), and
-    // the user guide says it "predicts the score after tuning". Deriving the
-    // prediction as `score + shown weight` counted the floor as a gain: once the
-    // penalty exceeds 70 the score is pinned at 30, so adding the shown weight
-    // promises points the remaining findings still keep off the board (on a
-    // 66-finding host, `check --conservative` promised 72 while applying those
-    // recommendations still lands on the floor, 30).
+    // the user guide says the field "predicts the score after tuning". Tuning
+    // is the plan: `tune` writes only the entries without a `skip_reason` (an
+    // unwritable knob, or a runtime-dangerous one `fix` refuses too), so both
+    // the findings outside the shown view AND the skipped entries keep their
+    // penalty. Deriving the prediction as `score + shown weight` counted the
+    // floor as a gain (on a 66-finding host, `check --conservative` promised
+    // 72 while applying those recommendations still lands on the floor, 30);
+    // counting the whole shown view counted the points the plan never
+    // delivers (on a read-only-/proc/sys host it promised the tuned score
+    // while `tune` answered "blocked, applied 0").
     let full = check(&[]);
     let all = full["recommendations"]
         .as_array()
@@ -71,16 +75,23 @@ fn predicted_score_is_the_score_after_applying_the_shown_recommendations() {
             })
             .map(weight)
             .sum();
-        // The same arithmetic `score` uses, with the shown recommendations
-        // applied: only the hidden findings still cost points.
-        let expected = 100usize.saturating_sub(hidden_penalty).max(30);
+        let skipped_penalty: usize = shown
+            .iter()
+            .filter(|r| r.get("skip_reason").is_some())
+            .map(weight)
+            .sum();
+        // The same arithmetic `score` uses, with the plan's entries applied:
+        // the hidden findings and the skipped entries still cost points.
+        let expected = 100usize
+            .saturating_sub(hidden_penalty + skipped_penalty)
+            .max(30);
         let predicted = filtered["predicted_score"]
             .as_u64()
             .expect("check must print predicted_score") as usize;
         assert!(
             predicted <= expected,
-            "check {view:?} predicted {predicted} but applying the shown recommendations \
-             leaves {hidden_penalty} points of penalty, so the score after tuning is {expected} \
+            "check {view:?} predicted {predicted} but the plan leaves {hidden_penalty} hidden + \
+             {skipped_penalty} skipped points of penalty, so the score after tuning is {expected} \
              (score {} is floored at 30): {filtered}",
             filtered["score"],
         );

@@ -127,6 +127,14 @@ impl ResponseSessionMapper {
             }
         };
 
+        // Recorded before the buffer is inspected: the association comes from
+        // the filename, and it is the only way an agent whose rollout embeds
+        // no `response_id` (e.g. Codex CLI) is attributed to a session, so a
+        // write this process made must not be dropped because its buffer
+        // happens to be undecodable (a line split inside a multi-byte
+        // character). Only the id extraction below needs valid UTF-8.
+        self.pid_map.put(event.pid, session_id.clone());
+
         let text = match std::str::from_utf8(&event.buf) {
             Ok(s) => s,
             Err(e) => {
@@ -152,11 +160,6 @@ impl ResponseSessionMapper {
                 self.map.put(response_id, session_id.clone());
             }
         }
-
-        // Always record the pid → session_id association so agents whose
-        // rollout file does not embed an LLM response_id (e.g. Codex CLI)
-        // can still resolve the session via their writing pid.
-        self.pid_map.put(event.pid, session_id);
     }
 
     /// Look up sessionId by responseId.
@@ -269,6 +272,36 @@ mod tests {
             "/root/.codex/sessions/2026/06/24/rollout-2026-06-24T20-08-10-019ef987-dbc1-7663-81b0-589cbe5e47e8.jsonl",
         );
         assert_eq!(id.as_deref(), Some("019ef987-dbc1-7663-81b0-589cbe5e47e8"));
+    }
+
+    /// The pid → session pair comes from the *filename*, so the buffer's
+    /// encoding must not decide whether it is recorded: `process_filewrite`
+    /// documents the association as unconditional ("Always record the pid →
+    /// session_id association"), for agents whose rollout never embeds an LLM
+    /// response_id. A write whose buffer is not valid UTF-8 — a line split
+    /// inside a multi-byte character, or one stray byte in a large rollout —
+    /// returned early and dropped the pair with it.
+    #[test]
+    fn a_non_utf8_write_still_records_the_pid_session_pair() {
+        let mut mapper = ResponseSessionMapper::new();
+        let session = "019ef987-dbc1-7663-81b0-589cbe5e47e8";
+        let event = FileWriteEvent {
+            pid: 4242,
+            tid: 4242,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "codex".to_string(),
+            filename: format!(
+                "/root/.codex/sessions/2026/06/24/rollout-2026-06-24T20-08-10-{session}.jsonl"
+            ),
+            cgroup_id: 0,
+            // The tail of a multi-byte character: not valid UTF-8, while the
+            // filename still names the session.
+            buf: vec![b'{', b'"', 0xE4, 0xB8],
+        };
+        mapper.process_filewrite(&event);
+        assert_eq!(mapper.get_session_by_pid(4242), Some(session));
     }
 
     #[test]

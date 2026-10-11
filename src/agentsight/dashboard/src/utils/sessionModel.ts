@@ -52,6 +52,10 @@ export function mergeSessions(
 
   // Count subagents per parent session. A subagent's session_id follows the
   // composite form "<parent>:subagent:<child>"; tally by the parent prefix.
+  // A Codex parent captured only by eBPF is keyed by the bare trailing UUID
+  // while its children carry the full rollout stem, so tally under that alias
+  // too (same alias the row merge below uses) — an eBPF-only parent row must
+  // still show its child count.
   const subagentCount = new Map<string, number>();
   for (const t of logRows) {
     if (!t.is_subagent) continue;
@@ -59,6 +63,10 @@ export function mergeSessions(
     if (idx > 0) {
       const parent = t.session_id.slice(0, idx);
       subagentCount.set(parent, (subagentCount.get(parent) ?? 0) + 1);
+      const parentUuid = TRAILING_UUID_RE.exec(parent)?.[1];
+      if (parentUuid && parentUuid !== parent) {
+        subagentCount.set(parentUuid, (subagentCount.get(parentUuid) ?? 0) + 1);
+      }
     }
   }
 
@@ -87,7 +95,19 @@ export function mergeSessions(
     if (t.is_subagent) {
       const idx = t.session_id.indexOf(':subagent:');
       const parentId = idx > 0 ? t.session_id.slice(0, idx) : null;
-      if (parentId && (byId.has(parentId) || logSessionIds.has(parentId))) {
+      // Resolve the parent through the trailing-UUID alias as well: a Codex
+      // parent captured only by eBPF sits in `byId` under the bare UUID while
+      // the child's composite id carries the full rollout stem. Without the
+      // alias the child survives as a stray orphan row next to its parent.
+      const parentUuid = parentId ? TRAILING_UUID_RE.exec(parentId)?.[1] : undefined;
+      const parentKnown =
+        !!parentId &&
+        (byId.has(parentId) ||
+          logSessionIds.has(parentId) ||
+          (!!parentUuid &&
+            parentUuid !== parentId &&
+            (byId.has(parentUuid) || logSessionIds.has(parentUuid))));
+      if (parentKnown) {
         continue;
       }
     }

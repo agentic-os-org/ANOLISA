@@ -17,6 +17,7 @@ toml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+libc = { workspace = true }
 parking_lot = { workspace = true }
 notify = { version = "7", features = ["macos_kqueue"] }
 regex = "1"

@@ -693,6 +693,70 @@ def test_recovery_window_starts_after_fractional_phase_origin() -> None:
     )
 
 
+def test_recovery_evidence_rejects_malformed_references_and_summaries(
+    tmp_path: Path,
+) -> None:
+    """A boolean or non-finite recovery reference is missing evidence, not a
+    threshold; a phase artifact without a summary object is missing evidence,
+    not a crash."""
+
+    call = 0
+
+    def phases_with(stable_summary: object) -> dict[str, object]:
+        nonlocal call
+        call += 1
+        phases = {}
+        for label in campaign_evidence.RECOVERY_PHASES:
+            run_path = tmp_path / f"run{call}" / label / "run-result.json"
+            run = {
+                "summary": stable_summary if label == "stable" else summary(),
+                "started_at_unix": 0,
+                "evaluation": {"verdict": "FAIL" if label == "overload" else "PASS"},
+            }
+            phases[label] = (run_path, run)
+            if label == "recover":
+                write_recovery_artifacts(run_path)
+        return phases
+
+    settings = {"tolerance_ratio": 0.1, "recovery_window_seconds": 2}
+
+    # A boolean effective_qps reference is an int subclass: gating at
+    # float(True) == 1.0 QPS lets every real sample count as recovered and
+    # the run passes without any usable reference.
+    boolean_reference = summary()
+    boolean_reference["effective_qps"] = True
+    outcome = campaign_evidence.recovery_outcome(
+        phases_with(boolean_reference), settings, thresholds()
+    )
+    assert outcome["verdict"] == "INCONCLUSIVE"
+    assert "effective_qps" in outcome["missing"]
+
+    # A non-finite latency reference with lower-is-better compares every
+    # sample against an infinite threshold — equally unusable.
+    infinite_reference = summary()
+    infinite_reference["latency_ms"] = {"p99": float("inf")}
+    outcome = campaign_evidence.recovery_outcome(
+        phases_with(infinite_reference), settings, thresholds()
+    )
+    assert outcome["verdict"] == "INCONCLUSIVE"
+    assert "latency_p99_ms" in outcome["missing"]
+
+    # A stable artifact whose summary is absent carries no evidence for any
+    # specification; the gates must report missing instead of raising.
+    phases = phases_with(summary())
+    del phases["stable"][1]["summary"]  # type: ignore[index]
+    outcome = campaign_evidence.recovery_outcome(phases, settings, thresholds())
+    assert outcome["verdict"] == "INCONCLUSIVE"
+    for name in ("effective_qps", "latency_p99_ms", "rss_mb"):
+        assert name in outcome["missing"]
+
+    # Control: with healthy references the same evidence passes.
+    outcome = campaign_evidence.recovery_outcome(
+        phases_with(summary()), settings, thresholds()
+    )
+    assert outcome["verdict"] == "PASS"
+
+
 def test_fault_evidence_classifies_malformed_artifacts(tmp_path: Path) -> None:
     """Unusable fault artifact shapes and counters report missing evidence."""
 
@@ -976,6 +1040,60 @@ def test_load_samples_skip_unusable_jsonl_records(
     measurement.mkdir()
     write_k6_jsonl(measurement, records)
     assert campaign_evidence.load_samples(tmp_path / "run") == expected
+
+
+def test_campaign_audit_classifies_malformed_confirmation_evidence() -> None:
+    """Unusable capacity confirmation shapes are incomplete evidence, never a
+    crash — and a string entry must not pass through str.count's substring
+    semantics as three passes."""
+    campaign = {
+        "capacity": {"qps_resolution": 50, "confirm_repetitions": 3},
+        "matrix": {"qps": [], "repetitions": 3},
+        "soak": {"duration_seconds": 14400, "warmup_seconds": 600},
+        "recovery": {
+            "repetitions": 3,
+            "stable_seconds": 600,
+            "overload_seconds": 300,
+            "recover_seconds": 900,
+        },
+        "fault": {"duration_seconds": 300, "warmup_seconds": 180},
+    }
+
+    def capacities_with(confirmation: object) -> dict[str, object]:
+        return {
+            version: {
+                "maximum_sustainable_qps": 100,
+                "first_failed_qps": 150,
+                "safety_limit_reached": False,
+                "boundary_confirmed": True,
+                "confirmation": confirmation,
+            }
+            for version in campaign_evidence.VERSIONS
+        }
+
+    for confirmation in (
+        "confirmed",
+        {"100": {"runs": 3}, "150": ["FAIL"] * 3},
+        {"100": 3, "150": ["FAIL"] * 3},
+        {"100": "PASSPASSPASS", "150": ["FAIL"] * 3},
+    ):
+        issues = campaign_evidence.audit_campaign(
+            campaign, [], capacities_with(confirmation), {}, {}, {}
+        )
+        assert any(
+            "pass confirmation is incomplete" in issue for issue in issues
+        ), f"{confirmation!r} must read as incomplete pass evidence"
+
+    # Control: complete confirmation evidence raises no capacity issue.
+    issues = campaign_evidence.audit_campaign(
+        campaign,
+        [],
+        capacities_with({"100": ["PASS"] * 3, "150": ["FAIL"] * 3}),
+        {},
+        {},
+        {},
+    )
+    assert not any("capacity" in issue for issue in issues)
 
 
 def test_campaign_audit_rejects_partial_evidence() -> None:

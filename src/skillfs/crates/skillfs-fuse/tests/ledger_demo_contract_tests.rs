@@ -20,6 +20,7 @@
 //! These tests are pure-Rust: they do not require `/dev/fuse`,
 //! `fusermount3`, or root.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -238,19 +239,19 @@ fn decision_command_appends_scan_and_resolve_argv() {
     assert_eq!(
         prefix.build_scan_args(skill_dir),
         vec![
-            "skill-ledger".to_string(),
-            "scan".to_string(),
-            "/srv/skills/demo-weather".to_string(),
-            "--json".to_string(),
+            OsString::from("skill-ledger"),
+            OsString::from("scan"),
+            OsString::from("/srv/skills/demo-weather"),
+            OsString::from("--json"),
         ]
     );
     assert_eq!(
         prefix.build_resolve_args(skill_dir),
         vec![
-            "skill-ledger".to_string(),
-            "resolve".to_string(),
-            "/srv/skills/demo-weather".to_string(),
-            "--json".to_string(),
+            OsString::from("skill-ledger"),
+            OsString::from("resolve"),
+            OsString::from("/srv/skills/demo-weather"),
+            OsString::from("--json"),
         ]
     );
 
@@ -258,17 +259,17 @@ fn decision_command_appends_scan_and_resolve_argv() {
     assert_eq!(
         single.build_scan_args(skill_dir),
         vec![
-            "scan".to_string(),
-            "/srv/skills/demo-weather".to_string(),
-            "--json".to_string(),
+            OsString::from("scan"),
+            OsString::from("/srv/skills/demo-weather"),
+            OsString::from("--json"),
         ]
     );
     assert_eq!(
         single.build_resolve_args(skill_dir),
         vec![
-            "resolve".to_string(),
-            "/srv/skills/demo-weather".to_string(),
-            "--json".to_string(),
+            OsString::from("resolve"),
+            OsString::from("/srv/skills/demo-weather"),
+            OsString::from("--json"),
         ]
     );
 }

@@ -90,6 +90,50 @@ test('parent lookup reads a large orphan window linearly', () => {
   assert.ok(rowReads <= length * 6, `read ${rowReads} rows for ${length} inputs`);
 });
 
+test('an eBPF-only parent hides and counts its aliased log-side children', () => {
+  // A Codex parent captured only by eBPF is keyed by the bare trailing UUID
+  // while its log-collected children carry the full rollout stem in their
+  // composite ids. The parent IS present, so the children must fold into it
+  // (no stray orphan rows) and its badge must show their count.
+  const uuid = '00000000-0000-0000-0000-000000000123';
+  const stem = `rollout-2026-10-02T09-30-00-${uuid}`;
+  const children = [
+    logged(`${stem}:subagent:c1`, { is_subagent: true }),
+    logged(`${stem}:subagent:c2`, { is_subagent: true }),
+  ];
+  const result = merge([captured(uuid)], children);
+  assert.equal(result.length, 1, 'both children must fold into the aliased parent');
+  assert.equal(result[0].session_id, uuid);
+  assert.deepEqual(result[0].sources, ['ebpf']);
+  assert.equal(result[0].subagent_count, 2, 'the eBPF-only parent shows its child count');
+});
+
+test('an aliased parent present in both sources counts its children once', () => {
+  // Both sources hold the parent (eBPF bare UUID, log rollout stem) plus one
+  // child: the alias tallies and the merged-branch carry-over must agree, not
+  // double-count.
+  const uuid = '00000000-0000-0000-0000-000000000456';
+  const stem = `rollout-2026-10-03T11-00-00-${uuid}`;
+  const result = merge([captured(uuid)], [
+    logged(stem),
+    logged(`${stem}:subagent:c1`, { is_subagent: true }),
+  ]);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].sources, ['ebpf', 'log']);
+  assert.equal(result[0].subagent_count, 1);
+});
+
+test('an aliased orphan child without any parent row stays visible', () => {
+  // The alias resolution must not swallow genuine orphans: no parent row in
+  // either source means the child stays reachable as its own row.
+  const uuid = '00000000-0000-0000-0000-000000000789';
+  const stem = `rollout-2026-10-04T12-00-00-${uuid}`;
+  const child = logged(`${stem}:subagent:c1`, { is_subagent: true });
+  const result = merge([], [child]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].session_id, child.session_id);
+});
+
 test('the production page keeps its public model export and consumes the same function', () => {
   const page = {};
   runInNewContext(readFileSync(process.env.AGENTSIGHT_SESSION_PAGE_BUILD, 'utf8'), {

@@ -2165,6 +2165,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// A `reuse.db` read failure must not be served as "the filter matched
+    /// nothing". `unwrap_or_default()` collapsed a store error into an empty
+    /// label set, which then read backwards in every branch: `label=good`
+    /// answered "no such trajectories", `human_backed=true` answered the same,
+    /// and `exclude_label=useless` *failed open* — it removed nothing and
+    /// returned exactly the trajectories the caller asked to keep out. The 400
+    /// path for typos exists for the same reason ("a typo used to be dropped
+    /// silently"), so a failing store must be a 500 like the other store
+    /// failures in this handler.
+    #[actix_web::test]
+    async fn trajectory_label_filter_reports_a_store_failure_instead_of_failing_open() {
+        let db = unique_handler_db("label-store-error");
+        let tstore = TrajectoryStore::new_with_path(&db).unwrap();
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-label-store-error");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        // Make every label query fail the way a missing/renamed table or an I/O
+        // error would, on the same database file the store keeps open.
+        let canonical = std::fs::canonicalize(&label_dir).unwrap();
+        let conn = rusqlite::Connection::open(canonical.join(crate::config::REUSE_DB_NAME))
+            .expect("open reuse.db");
+        conn.execute("DROP TABLE session_labels", [])
+            .expect("drop label table");
+
+        let data =
+            test_app_state_with_trajectory_and_reuse(Some(Arc::new(tstore)), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/trajectories?exclude_label=useless",
+            "/api/trajectories?label=good",
+            "/api/trajectories?human_backed=false",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{uri} must report the store failure, not filter on an empty label set"
+            );
+        }
+    }
+
     #[actix_web::test]
     async fn trajectory_label_filter_keeps_matches_beyond_the_newest_limit_window() {
         let db = unique_handler_db("label-filter-window");
@@ -2956,6 +3008,56 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// The 400 that rejects a row-level filter names the endpoint the caller
+    /// actually used.
+    ///
+    /// The four aggregates hand the shared rejection helper a hard-coded route,
+    /// and each of those literals named a *different* aggregate: `stats` said
+    /// "GET /api/interruptions/count accepts only ...". The sentence is the
+    /// caller's only instruction for fixing the request, so it has to name the
+    /// endpoint that produced it.
+    #[actix_web::test]
+    async fn interruption_aggregate_rejections_name_their_own_endpoint() {
+        let interruption_path = unique_handler_db("interruptions-reject-endpoint");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_count)
+                .service(interruption_stats)
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        let window = "start_ns=0&end_ns=9223372036854775807";
+        for route in [
+            "/interruptions/count",
+            "/interruptions/stats",
+            "/interruptions/session-counts",
+            "/interruptions/conversation-counts",
+        ] {
+            let resp = awtest::call_service(
+                &app,
+                awtest::TestRequest::get()
+                    .uri(&format!("{route}?{window}&severity=critical"))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{route}");
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            let message = body["message"].as_str().unwrap_or_default();
+            assert!(
+                message.starts_with(&format!("GET /api{route} accepts only")),
+                "{route} must name itself in its rejection, got: {message}"
+            );
+        }
+
+        cleanup_db(&interruption_path);
+    }
+
     /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
     /// makes the default 24 h start wrap into a huge positive bound. The query
     /// then runs on an inverted (always empty) window and still answers 200,
@@ -3597,6 +3699,110 @@ mod tests {
         )
         .await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn agent_health_delete_survives_a_poisoned_store_lock() {
+        // A panic in any thread that holds the health-store lock poisons it.
+        // The acknowledge (delete) and restart endpoints are the recovery
+        // actions for exactly that kind of trouble, so they must keep
+        // answering afterwards — the same recovery `get_agent_process_health`
+        // and the containment planner already apply to this lock.
+        let state = test_app_state(0);
+        let poison = Arc::clone(&state.health_store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.write().unwrap();
+            panic!("poison the health store");
+        })
+        .join();
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(state)
+                .route("/agent-health/{pid}", web::delete().to(delete_agent_health)),
+        )
+        .await;
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::delete()
+                .uri("/agent-health/9999")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "a poisoned lock must not panic the acknowledge endpoint"
+        );
+    }
+
+    #[actix_web::test]
+    async fn agent_health_restart_survives_a_poisoned_store_lock() {
+        // End-to-end restart while the lock is poisoned: the handler reads
+        // the recorded command, signals the live process and clears the
+        // entry, all behind the same recovered guard.
+        let state = test_app_state(0);
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn a disposable sleep");
+        let pid = child.id();
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).expect("child exe link");
+        let exe = exe.to_string_lossy();
+        let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe).to_string();
+        {
+            let mut store = state.health_store.write().unwrap();
+            store.update(
+                pid,
+                crate::health::AgentHealthStatus {
+                    pid,
+                    agent_name: "Sleepy".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: exe,
+                    workspace_path: None,
+                    ports: vec![],
+                    status: crate::health::store::AgentHealthState::Offline,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd: Some(vec!["/bin/true".to_string()]),
+                    offline_since: Some(1),
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+        }
+        let poison = Arc::clone(&state.health_store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.write().unwrap();
+            panic!("poison the health store");
+        })
+        .join();
+
+        let app =
+            awtest::init_service(App::new().app_data(state).service(restart_agent_health)).await;
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(&format!("/agent-health/{pid}/restart"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a poisoned lock must not panic the restart endpoint"
+        );
+        let body = service_response_json(resp).await;
+        assert_eq!(body["ok"], true);
+        assert_ne!(
+            body["new_pid"].as_u64(),
+            Some(pid as u64),
+            "the replacement process must be a new pid"
+        );
+        // The handler signalled the child; reap it so no zombie is left.
+        let _ = child.wait();
     }
 
     #[actix_web::test]
@@ -4432,7 +4638,11 @@ pub async fn delete_agent_health(
     path: web::Path<u32>,
 ) -> impl Responder {
     let pid = path.into_inner();
-    let removed = data.health_store.write().unwrap().remove_by_pid(pid);
+    let removed = data
+        .health_store
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove_by_pid(pid);
     if removed {
         HttpResponse::Ok().json(serde_json::json!({"ok": true}))
     } else {
@@ -4451,7 +4661,7 @@ pub async fn restart_agent_health(
     let pid = path.into_inner();
 
     let (restart_cmd, recorded_exe) = {
-        let store = data.health_store.read().unwrap();
+        let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
         match store.all_agents().into_iter().find(|a| a.pid == pid) {
             Some(agent) => (agent.restart_cmd.clone(), agent.exe_path.clone()),
             None => (None, String::new()),
@@ -4507,7 +4717,10 @@ pub async fn restart_agent_health(
         Ok(child) => {
             let new_pid = child.id();
             log::info!("Restarted agent pid={pid} -> new pid={new_pid}, cmd={cmd:?}");
-            data.health_store.write().unwrap().remove_by_pid(pid);
+            data.health_store
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove_by_pid(pid);
             HttpResponse::Ok().json(serde_json::json!({
                 "ok": true,
                 "new_pid": new_pid,
@@ -4793,10 +5006,9 @@ pub async fn interruption_count(
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
-    if let Some(response) = reject_unsupported_interruption_filters(
-        &query,
-        "GET /api/interruptions/conversation-counts",
-    ) {
+    if let Some(response) =
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/count")
+    {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -4858,7 +5070,7 @@ pub async fn interruption_stats(
         return response;
     }
     if let Some(response) =
-        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/count")
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/stats")
     {
         return response;
     }
@@ -4896,7 +5108,7 @@ pub async fn interruption_session_counts(
         return response;
     }
     if let Some(response) =
-        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/stats")
+        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/session-counts")
     {
         return response;
     }
@@ -4978,9 +5190,10 @@ pub async fn interruption_conversation_counts(
     if let Some(response) = reject_inverted_window(query.start_ns, query.end_ns) {
         return response;
     }
-    if let Some(response) =
-        reject_unsupported_interruption_filters(&query, "GET /api/interruptions/session-counts")
-    {
+    if let Some(response) = reject_unsupported_interruption_filters(
+        &query,
+        "GET /api/interruptions/conversation-counts",
+    ) {
         return response;
     }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
@@ -5217,6 +5430,17 @@ fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
     query.label.is_some() || query.exclude_label.is_some() || query.human_backed.is_some()
 }
 
+/// A `reuse.db` read failure while resolving label filters.
+///
+/// Collapsing it into an empty label set is not a safe default: `label=good`
+/// would answer "no such trajectories", and `exclude_label` would fail open and
+/// serve the very rows the caller asked to keep out. The caller cannot tell
+/// either outcome from a filter that genuinely matched nothing, so the failure
+/// is reported as a 500 like the other store failures in this handler.
+fn reuse_store_failure(error: impl std::fmt::Display) -> HttpResponse {
+    HttpResponse::InternalServerError().json(json!({"error": error.to_string()}))
+}
+
 /// Applies the reuse-label query parameters to trajectory summary rows.
 ///
 /// The label lives in `reuse.db`, the summary in `trajectories.db`; rather
@@ -5270,20 +5494,16 @@ fn filter_rows_by_reuse_labels(
         }
         return Ok(());
     };
-    let keep: Option<std::collections::HashSet<String>> = requested.map(|parsed| {
-        labels
-            .sessions_with_labels(&parsed)
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    });
-    let drop: Option<std::collections::HashSet<String>> = excluded.map(|parsed| {
-        labels
-            .sessions_with_labels(&parsed)
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    });
+    let keep: Option<std::collections::HashSet<String>> = requested
+        .map(|parsed| labels.sessions_with_labels(&parsed))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|ids| ids.into_iter().collect());
+    let drop: Option<std::collections::HashSet<String>> = excluded
+        .map(|parsed| labels.sessions_with_labels(&parsed))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|ids| ids.into_iter().collect());
     // `human_backed` is a tri-state filter: absent keeps every row, `true`
     // keeps only human-settled rows, and `false` keeps only rows no person has
     // settled — including never-triaged rows, which have no label row at all.
@@ -5291,15 +5511,17 @@ fn filter_rows_by_reuse_labels(
     // answer with every trajectory, which the caller cannot tell from a filter
     // that matched everything.
     let human_backed = query.human_backed;
-    let settled: Option<std::collections::HashSet<String>> = human_backed.map(|_| {
-        labels
-            .list_labels(&crate::reuse::LabelFilter::default())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|l| l.is_human_backed())
-            .map(|l| l.session_id)
-            .collect()
-    });
+    let settled: Option<std::collections::HashSet<String>> = human_backed
+        .map(|_| labels.list_labels(&crate::reuse::LabelFilter::default()))
+        .transpose()
+        .map_err(reuse_store_failure)?
+        .map(|labels| {
+            labels
+                .into_iter()
+                .filter(|l| l.is_human_backed())
+                .map(|l| l.session_id)
+                .collect::<std::collections::HashSet<String>>()
+        });
     rows.retain(|row| {
         let id = row.session_id.as_str();
         keep.as_ref().is_none_or(|set| set.contains(id))

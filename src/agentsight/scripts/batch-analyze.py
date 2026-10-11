@@ -103,9 +103,14 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    parsed = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # json.loads also accepts scalars and arrays; only objects
+                # carry event fields, so anything else is skipped exactly like
+                # a decode error instead of aborting the whole batch.
+                if isinstance(parsed, dict):
+                    entries.append(parsed)
     except OSError:
         return None
 

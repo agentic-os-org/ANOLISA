@@ -298,17 +298,39 @@ pub fn build_index(doc: &AtifTrajectory, round: Range<usize>) -> GroundingIndex 
 const EVIDENCE_DIGEST_LIMIT: usize = 12_000;
 
 /// Flatten the pool into text, newest entries first so a cap trims the oldest.
+///
+/// The budget is a byte budget — that is what the prompt costs, and what the
+/// constant documents — so each entry's text is cut by bytes, on a character
+/// boundary. Cutting `remaining` *characters* instead let a CJK observation
+/// spend three bytes per character and push the digest to roughly three times
+/// the limit, on a call that is paid for by the byte.
 fn digest_pool(pool: &[EvidenceEntry]) -> String {
     let mut out = String::new();
     for entry in pool.iter().rev() {
-        if out.len() >= EVIDENCE_DIGEST_LIMIT {
+        let header = format!("[step{}] ", entry.step_id);
+        // The header and the terminating newline come out of the same budget as
+        // the text, so a digest never overshoots by its own framing.
+        let Some(budget) = EVIDENCE_DIGEST_LIMIT.checked_sub(out.len() + header.len() + 1) else {
             break;
-        }
-        let remaining = EVIDENCE_DIGEST_LIMIT - out.len();
-        let take: String = entry.haystack.chars().take(remaining).collect();
-        out.push_str(&format!("[step{}] {}\n", entry.step_id, take));
+        };
+        out.push_str(&header);
+        out.push_str(truncate_bytes(&entry.haystack, budget));
+        out.push('\n');
     }
     out
+}
+
+/// Longest prefix of `text` that fits in `max_bytes`, cut on a character
+/// boundary.
+fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Classify every tool call in `steps`, correlating results by call id.

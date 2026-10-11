@@ -292,7 +292,11 @@ impl ProcessIdentityResolver for LinuxProcCommResolver {
     fn resolve_identity(&self, pid: u32) -> Option<ProcessIdentity> {
         use std::os::unix::fs::MetadataExt;
         let tgid = read_tgid_from_status(&Self::status_path(pid))?;
-        let comm = read_comm_file(&Self::comm_path(tgid))?;
+        // comm is log-only in exe mode, and in comm mode an empty string
+        // can never equal a configured name. A raw-byte comm (non-UTF-8
+        // executable name, or a UTF-8 name the kernel truncated to 15
+        // bytes mid-character) must not fail the whole identity lookup.
+        let comm = read_comm_file(&Self::comm_path(tgid)).unwrap_or_default();
         let starttime = read_starttime_from_stat(&Self::stat_path(tgid));
         let exe_path = std::fs::read_link(Self::exe_symlink_path(tgid)).ok();
         let exe_file_id = exe_path.as_ref().and_then(|p| {
@@ -320,10 +324,15 @@ impl ProcessIdentityResolver for LinuxProcCommResolver {
 /// return the TGID it advertises. `None` on missing file, missing
 /// line, malformed integer, or empty file.
 ///
+/// The `Name:` line of the same file can carry raw (non-UTF-8) bytes,
+/// so the contents are decoded lossily: the parsed `Tgid:` field is
+/// ASCII and unaffected.
+///
 /// Public so tests can drive the parser against a temporary file
 /// without involving `/proc`.
 pub fn read_tgid_from_status(path: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     parse_tgid_from_status_text(&text)
 }
 
@@ -345,8 +354,13 @@ fn parse_tgid_from_status_text(text: &str) -> Option<u32> {
 /// skip past the closing `)` and then count fields from there.
 /// Field 22 (1-indexed) is starttime in clock ticks since boot.
 /// Returns `None` on missing file, parse error, or zombie state.
+///
+/// The comm field can carry raw (non-UTF-8) bytes, so the contents are
+/// decoded lossily: the numeric fields around it are ASCII and keep
+/// their positions.
 pub fn read_starttime_from_stat(path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     parse_starttime_from_stat_text(&text)
 }
 
@@ -803,6 +817,22 @@ PPid:\t1
         assert_eq!(read_tgid_from_status(&path), Some(101));
     }
 
+    /// The kernel allows raw bytes in a process name and echoes them in
+    /// the `Name:` line of `/proc/<pid>/status`; the `Tgid:` line the
+    /// parser extracts stays ASCII, so a decode accident in `Name:`
+    /// must not defeat identity resolution.
+    #[test]
+    fn read_tgid_from_status_survives_a_non_utf8_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status");
+        std::fs::write(&path, b"Name:\tledger\xff\nTgid:\t42\nPid:\t42\n").unwrap();
+        assert_eq!(
+            read_tgid_from_status(&path),
+            Some(42),
+            "a non-UTF-8 Name: line must not defeat the Tgid: parse"
+        );
+    }
+
     /// The current process's own pid is always resolvable on Linux,
     /// so the live resolver should at least produce *some* name. We do
     /// not pin the value — different test runners (`cargo test`,
@@ -858,6 +888,26 @@ PPid:\t1
         let path = dir.path().join("stat");
         std::fs::write(&path, "100 (test) S 1 100 100 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n").unwrap();
         assert_eq!(read_starttime_from_stat(&path), Some(42));
+    }
+
+    /// `/proc/<tgid>/stat` wraps `comm` (field 2) in parentheses, and the
+    /// kernel lets those bytes be non-UTF-8. The fields around it are
+    /// ASCII and keep their positions, so decoding the whole file must
+    /// not turn starttime resolution into `None`.
+    #[test]
+    fn read_starttime_from_stat_survives_a_non_utf8_comm() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stat");
+        std::fs::write(
+            &path,
+            b"4242 (ledger\xa0) S 7 4242 4242 0 -1 4194560 100 0 0 0 10 5 0 0 20 0 1 0 99999 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_starttime_from_stat(&path),
+            Some(99999),
+            "a non-UTF-8 comm must not defeat the starttime parse"
+        );
     }
 
     #[test]
@@ -1093,5 +1143,88 @@ PPid:\t1
             identity.exe_file_id.is_some(),
             "exe_file_id must be populated"
         );
+    }
+
+    /// A ledger writer can be exec'ed from a raw-byte path: the kernel
+    /// lets the basename carry non-UTF-8 bytes and copies it into `comm`,
+    /// so the `Name:` line of `/proc/<pid>/status` and `/proc/<tgid>/comm`
+    /// both fail strict UTF-8 decoding. The configured executable still
+    /// has to be admitted by the exe gate, and the comm gate must keep
+    /// denying the undecodable name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_resolver_survives_a_non_utf8_comm() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join(std::ffi::OsStr::from_bytes(b"ledgerw\xff"));
+        std::fs::copy("/bin/sleep", &exe).expect("copy sleep");
+        let exe_canon = std::fs::canonicalize(&exe).expect("canonicalize copy");
+        let mut child = std::process::Command::new(&exe)
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn writer");
+        let pid = child.id();
+
+        // `Command::spawn` may return before the kernel publishes the new
+        // image's comm; poll the raw bytes with a bounded deadline so the
+        // assertions cannot observe the parent's UTF-8 comm.
+        let comm_path = LinuxProcCommResolver::comm_path(pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::fs::read(&comm_path).is_ok_and(|bytes| bytes == b"ledgerw\xff\n") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{comm_path:?} never showed the raw-byte comm: {:?}",
+                std::fs::read(&comm_path)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let resolver = LinuxProcCommResolver::new();
+        let identity = resolver.resolve_identity(pid);
+        let identity = match identity {
+            Some(id) => id,
+            None => {
+                child.kill().ok();
+                child.wait().ok();
+                panic!("a non-UTF-8 comm must not defeat identity resolution");
+            }
+        };
+
+        // exe mode: the configured executable still passes unchanged.
+        let fid = identity.exe_file_id.expect("file id for the exec'ed copy");
+        let cfg = TrustedWriterConfig::with_executable(exe_canon, fid);
+        let d = evaluate_trusted_writer(&cfg, pid, &resolver);
+        assert!(
+            d.is_allowed(),
+            "the configured executable must still be allowed, got {d:?}"
+        );
+
+        // comm mode: the undecodable name can never equal the configured
+        // one, so the compatibility gate keeps denying.
+        let cfg = TrustedWriterConfig::with_process_name("ledgerw");
+        let d = evaluate_trusted_writer(&cfg, pid, &resolver);
+        assert!(
+            !d.is_allowed(),
+            "comm mode must keep denying an undecodable comm, got {d:?}"
+        );
+
+        // exe mode with a different configured binary: still denied even
+        // though identity resolution now succeeds.
+        let cfg = TrustedWriterConfig::with_executable(
+            PathBuf::from("/nonexistent/other-binary"),
+            FileId { dev: 0, ino: 0 },
+        );
+        let d = evaluate_trusted_writer(&cfg, pid, &resolver);
+        assert!(!d.is_allowed());
+        assert_eq!(d.audit_label(), "trusted_writer_exe_mismatch");
+
+        child.kill().ok();
+        child.wait().ok();
     }
 }

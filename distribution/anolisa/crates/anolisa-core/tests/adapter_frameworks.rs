@@ -826,6 +826,85 @@ fn apply_hermes_env(guard: &EnvGuard, world: &World, fake_bin: &Path) -> PathBuf
     hermes_home
 }
 
+/// Install a second raw-owned component into an already staged world, with
+/// its own contract declaring one adapter, so cross-component framework
+/// state can be exercised. Returns the second component's resource root.
+fn add_component(
+    world: &World,
+    name: &str,
+    framework: &str,
+    adapter_type: &str,
+    dest: &str,
+    stage_bundle: impl Fn(&Path),
+) -> PathBuf {
+    let resource_root = PathBuf::from(
+        dest.replace("{datadir}", &world.layout.datadir.to_string_lossy())
+            .replace("{component}", name),
+    );
+    std::fs::create_dir_all(&resource_root).expect("second resource root");
+    stage_bundle(&resource_root);
+
+    let manifest_path = world
+        .layout
+        .state_dir
+        .join("component-manifests")
+        .join(name)
+        .join("component.toml");
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).expect("manifest dir");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"[component]
+name = "{name}"
+version = "0.6.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "{framework}"
+adapter_type = "{adapter_type}"
+plugin_id = "{name}"
+dest = "{dest}"
+"#
+        ),
+    )
+    .expect("second contract");
+
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = anolisa_core::state_store::StateStore::load(
+        &state_path,
+        anolisa_platform::privilege::effective_uid(),
+    )
+    .expect("load fixture state");
+    let mut installation = state
+        .find(anolisa_core::state::ObjectKind::Component, COMPONENT)
+        .expect("fixture component")
+        .clone();
+    installation.name = name.to_string();
+    let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+        panic!("fixture component must be raw-owned");
+    };
+    artifact.files = fixture_package_files(&resource_root)
+        .into_iter()
+        .map(|file| OwnedFile {
+            path: PathBuf::from(file.path),
+            owner: FileOwner::Anolisa,
+            sha256: file.digest,
+            kind: match file.kind {
+                PackageFileKind::Symlink => OwnedFileKind::Symlink,
+                _ => OwnedFileKind::File,
+            },
+            referent: file.link_target.map(PathBuf::from),
+            mode: None,
+            capabilities: Vec::new(),
+        })
+        .collect();
+    state.upsert(installation);
+    state.save(&state_path).expect("save fixture state");
+    resource_root
+}
+
 /// Fake `codex` CLI: appends each argv line to `$FAKE_CODEX_LOG` and keeps
 /// marketplace/plugin registries under `$FAKE_CODEX_STATE` so `list`
 /// reflects prior `add`/`remove` calls.
@@ -908,7 +987,10 @@ fn apply_codex_env(guard: &EnvGuard, world: &World, fake_bin: &Path) -> (PathBuf
     guard.set("XDG_DATA_HOME", &xdg);
     guard.set("FAKE_CODEX_LOG", &log);
     guard.set("FAKE_CODEX_STATE", &state);
-    let marketplace_root = xdg.join("anolisa").join("codex-marketplace");
+    let marketplace_root = xdg
+        .join("anolisa")
+        .join("codex-marketplaces")
+        .join("anolisa-tokenless");
     (log, marketplace_root)
 }
 
@@ -994,6 +1076,106 @@ fn codex_enable_records_argv_and_builds_marketplace() {
             .any(|l| l == "plugin marketplace remove anolisa-tokenless"),
         "disable must run `plugin marketplace remove`: {log_text}"
     );
+}
+
+fn codex_marketplace_root(outcome: EnableOutcome) -> PathBuf {
+    let EnableOutcome::Enabled(claim) = outcome else {
+        panic!("expected enabled");
+    };
+    claim
+        .resources
+        .iter()
+        .find_map(|r| match &r.kind {
+            ClaimResourceKind::ExternalPath { path } => Some(path.clone()),
+            _ => None,
+        })
+        .expect("marketplace dir resource")
+}
+
+fn marketplace_name_in(root: &Path) -> String {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".agents/plugins/marketplace.json"))
+            .expect("marketplace manifest"),
+    )
+    .expect("manifest json");
+    manifest["name"]
+        .as_str()
+        .expect("manifest name")
+        .to_string()
+}
+
+/// Two components enabled for Codex must not share a marketplace root: Codex
+/// keys a local marketplace by its directory and reads the name from the one
+/// manifest there, so a shared root lets the second enable overwrite the
+/// first marketplace and either disable delete the other's files.
+#[test]
+fn codex_components_keep_separate_marketplaces() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let sec_root = add_component(
+        &world,
+        "sec-core",
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        |root| {
+            std::fs::create_dir_all(root.join(".codex-plugin")).expect("codex-plugin");
+            std::fs::write(
+                root.join(".codex-plugin/plugin.json"),
+                br#"{"name":"sec-core"}"#,
+            )
+            .expect("plugin.json");
+        },
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    let manager = world.manager();
+
+    let tokenless_root = codex_marketplace_root(
+        manager
+            .enable(COMPONENT, Some("codex"), false)
+            .expect("enable tokenless"),
+    );
+    let sec_market_root = codex_marketplace_root(
+        manager
+            .enable("sec-core", Some("codex"), false)
+            .expect("enable sec-core"),
+    );
+    assert_ne!(
+        tokenless_root, sec_market_root,
+        "marketplace roots must differ"
+    );
+    assert!(!tokenless_root.starts_with(&sec_market_root));
+    assert!(!sec_market_root.starts_with(&tokenless_root));
+    assert_eq!(marketplace_name_in(&tokenless_root), "anolisa-tokenless");
+    assert_eq!(marketplace_name_in(&sec_market_root), "anolisa-sec-core");
+    assert_eq!(
+        std::fs::read_link(tokenless_root.join(COMPONENT)).expect("tokenless symlink"),
+        world.resource_root
+    );
+    assert_eq!(
+        std::fs::read_link(sec_market_root.join("sec-core")).expect("sec-core symlink"),
+        sec_root
+    );
+
+    let disabled = manager
+        .disable("sec-core", Some("codex"), false)
+        .expect("disable sec-core");
+    assert!(disabled.claim_removed);
+    assert!(!sec_market_root.exists(), "sec-core marketplace removed");
+    // Disabling one component leaves the other's marketplace untouched.
+    assert_eq!(marketplace_name_in(&tokenless_root), "anolisa-tokenless");
+    assert_eq!(
+        std::fs::read_link(tokenless_root.join(COMPONENT)).expect("tokenless symlink"),
+        world.resource_root
+    );
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
 }
 
 #[test]

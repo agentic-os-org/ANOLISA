@@ -43,7 +43,24 @@ enum Commands {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // README's JSON output contract: "Errors go to stderr as JSON." A usage
+    // error fires before any command runs, so parsing must not exit through
+    // clap's own plain-text renderer — an agent reading stderr JSON (the
+    // documented shape) has to be able to read this one too. `--help` and
+    // `--version` are not errors: clap keeps rendering them on stdout with
+    // exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if e.use_stderr() => {
+            let out = json!({ "error": e.to_string().trim_end() });
+            eprintln!("{}", serde_json::to_string_pretty(&out).unwrap());
+            std::process::exit(e.exit_code());
+        }
+        Err(e) => {
+            print!("{e}");
+            std::process::exit(e.exit_code());
+        }
+    };
     let result = match cli.command {
         Commands::Check {
             category: cat,
@@ -88,12 +105,7 @@ fn cmd_check(cat: Option<String>, conservative: bool) -> Result<i32> {
 
     let score = eval.score();
     let counts = category::RecCounts::from_recs(&recs);
-    // What `score` would report once this view has been applied. Not
-    // `score + shown weight`: `score` is floored at 30, so adding the shown
-    // weight counts that floor as a gain and promises points the untouched
-    // findings still keep off the board (on a 66-finding host,
-    // `--conservative` promised 72 while applying it lands on the floor, 30).
-    let predicted_score = eval.score_after_applying(&recs);
+    let predicted_score = predicted_score(&eval, &recs);
 
     let recs_json: Vec<serde_json::Value> = recs.iter().map(rec_json).collect();
 
@@ -145,6 +157,26 @@ fn skip_reason(rec: &Recommendation) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// What `score` would report once this environment's plan has run: the
+/// penalty of everything the plan leaves, i.e. the findings outside `view`
+/// plus the entries `skip_reason` says no write path will take. Not
+/// `score + shown weight`: `score` is floored at 30, so adding the shown
+/// weight counts that floor as a gain and promises points the untouched
+/// findings still keep off the board (on a 66-finding host, `--conservative`
+/// promised 72 while applying it lands on the floor, 30). And not the whole
+/// view either, which is the same promise one step further out: counting the
+/// skipped entries predicted a score `tune` cannot deliver — on a container
+/// whose /proc/sys is read-only every entry is skipped and `check` reported
+/// the tuned score while the plan answered "blocked, applied 0".
+fn predicted_score(eval: &rules::EvalResult, view: &[Recommendation]) -> usize {
+    let applicable: Vec<Recommendation> = view
+        .iter()
+        .filter(|rec| skip_reason(rec).is_none())
+        .cloned()
+        .collect();
+    eval.score_after_applying(&applicable)
 }
 
 /// The `would_skip` payload: every in-scope recommendation a real run would
@@ -230,21 +262,26 @@ fn dry_run_output(in_scope: &[Recommendation], applicable: &[Recommendation]) ->
 
 /// Extend a short-circuit body with the keys a `--dry-run` caller reads.
 ///
-/// `--dry-run` answers with `dry_run`, `would_apply` and `would_skip` on every
-/// host: the short-circuit shapes predate the flag, so a host where every
-/// recommendation was filtered out answered with none of them and a script
-/// could not tell that invocation from a non-dry-run one — it read
-/// `would_apply`, found nothing and had no way to distinguish "nothing to
-/// plan" from "the flag was ignored". `would_apply` is empty here because
-/// nothing is applicable, `would_skip` lists everything in scope, and `status`
-/// keeps the short-circuit vocabulary (`optimal` / `blocked`).
+/// `--dry-run` answers with `dry_run`, `would_apply`, `would_skip` and
+/// `blocked` on every host: the short-circuit shapes predate the flag, so a
+/// host where every recommendation was filtered out answered with none of
+/// them and a script could not tell that invocation from a non-dry-run one —
+/// it read `would_apply`, found nothing and had no way to distinguish
+/// "nothing to plan" from "the flag was ignored". `would_apply` is empty here
+/// because nothing is applicable, `would_skip` lists everything in scope,
+/// `blocked` stays its length (the count the planned shape reports, and the
+/// sum of the short-circuit's `blocked_unwritable` /
+/// `blocked_runtime_dangerous` partitions), and `status` keeps the
+/// short-circuit vocabulary (`optimal` / `blocked`).
 fn dry_run_preview(mut body: serde_json::Value, in_scope: &[Recommendation]) -> serde_json::Value {
     if let Some(object) = body.as_object_mut() {
         object.insert("dry_run".to_string(), json!(true));
         object
             .entry("would_apply".to_string())
             .or_insert_with(|| json!([]));
-        object.insert("would_skip".to_string(), json!(would_skip_json(in_scope)));
+        let would_skip = would_skip_json(in_scope);
+        object.insert("blocked".to_string(), json!(would_skip.len()));
+        object.insert("would_skip".to_string(), json!(would_skip));
     }
     body
 }
@@ -409,18 +446,22 @@ fn cmd_fix(param: &str) -> Result<i32> {
             "parameter {param} is dangerous to write at runtime, persist to /etc/sysctl.d instead"
         );
     }
-    let fix_outcome = tuner::apply_one(rec)?;
+    let fix = tuner::apply_one(rec)?;
     let (_, eval_after) = gather()?;
     let mut output = json!({
         "fixed": param,
-        "previous": rec.current_value,
+        // The original the ledger recorded under the transaction lock — the
+        // value `ktuner rollback` restores. The gathered rec.current_value
+        // can be stale (the knob moved between gather and apply), and
+        // reporting it here contradicted the ledger and `rollback --list`.
+        "previous": fix.recorded_previous,
         // What the kernel actually took — equals the recommendation unless
         // the kernel clamped/normalized the write (#4160).
-        "applied": fix_outcome.effective,
+        "applied": fix.outcome.effective,
         "score_after": eval_after.score(),
         "remaining": eval_after.recommendations.len(),
     });
-    if fix_outcome.clamped {
+    if fix.outcome.clamped {
         output["requested"] = json!(rec.recommended_value);
         output["note"] = json!("内核实际生效值与推荐值不同（已按实际生效值记录并持久化，可回滚）");
     }
@@ -442,6 +483,23 @@ fn cmd_why(param: &str) -> Result<i32> {
     })?;
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(code)
+}
+
+/// The value a parameter currently holds, read the way every other consumer
+/// reads it. sysfs option lists (`block/*/scheduler`, `transparent_hugepage/*`)
+/// render every choice and bracket the ACTIVE one, so the value is that
+/// token — the same reading the rules store as a recommendation's `current`,
+/// the ledger records as an original, and `classify_readback` verifies a
+/// write against. Publishing the whole line here flipped the format of
+/// `current` exactly when the recommendation disappeared (the system became
+/// optimal), so an agent polling `why` saw `"madvise"` turn into
+/// `"always [madvise] never"`.
+fn active_value(value: &str) -> &str {
+    let trimmed = value.trim();
+    trimmed
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix('[').and_then(|t| t.strip_suffix(']')))
+        .unwrap_or(trimmed)
 }
 
 fn why_with(
@@ -476,7 +534,8 @@ fn why_with(
     let path = tuner::param_to_path(&normalized);
     match read_current(&path) {
         Ok(Some(val)) => {
-            let output = json!({ "param": normalized, "current": val.trim(), "status": "optimal" });
+            let output =
+                json!({ "param": normalized, "current": active_value(&val), "status": "optimal" });
             Ok((output, 0))
         }
         Ok(None) => anyhow::bail!("parameter not found: {param}"),
@@ -997,6 +1056,10 @@ mod tests {
             preview["would_skip"],
             json!([{ "param": "vm.swappiness", "reason": "unwritable" }])
         );
+        // `blocked` stays the skip-list count on every dry-run shape, the way
+        // the planned shape already reports it: a script reading the key must
+        // not see it vanish exactly on the host where everything is blocked.
+        assert_eq!(preview["blocked"], json!(1));
         // The short-circuit vocabulary and its counts are untouched.
         assert_eq!(preview["status"], json!("blocked"));
         assert_eq!(preview["recommendations"], json!(1));
@@ -1009,6 +1072,7 @@ mod tests {
         assert_eq!(preview["dry_run"], json!(true));
         assert_eq!(preview["would_apply"], json!([]));
         assert_eq!(preview["would_skip"], json!([]));
+        assert_eq!(preview["blocked"], json!(0));
         assert_eq!(preview["status"], json!("optimal"));
     }
 
@@ -1080,6 +1144,35 @@ mod tests {
         assert!(
             entries[2].get("skip_reason").is_none(),
             "an entry the plan writes carries no skip reason"
+        );
+    }
+
+    #[test]
+    fn predicted_score_ignores_the_entries_the_plan_skips() {
+        // The prediction is the score after TUNING, and tuning here is the
+        // plan: `tune` skips vm.nr_hugepages (runtime-dangerous) and every
+        // unwritable entry, `fix` refuses both. Counting them promised points
+        // no write path delivers — on a container whose /proc/sys is
+        // read-only, `check` reported the fully tuned score while
+        // `tune --dry-run` answered "blocked" and a real tune applied 0.
+        let view = vec![
+            rec("vm.nr_hugepages", true), // writable but runtime-dangerous
+            rec("vm.swappiness", false),  // unwritable
+            rec("fs.file-max", true),     // applicable: the only plan entry
+        ];
+        let eval = evaluation(view.clone());
+        // Only fs.file-max's penalty (3) comes off: the two skipped entries
+        // keep theirs, so the plan reaches 94, not 100.
+        assert_eq!(predicted_score(&eval, &view), 94);
+
+        // A fully blocked plan delivers nothing, so the prediction is the
+        // score the host already has — never the tuned score.
+        let blocked = vec![rec("vm.swappiness", false), rec("vm.nr_hugepages", true)];
+        let eval = evaluation(blocked.clone());
+        assert_eq!(predicted_score(&eval, &blocked), eval.score());
+        assert!(
+            predicted_score(&eval, &blocked) < 100,
+            "a blocked plan must not promise the tuned score"
         );
     }
 
@@ -1177,21 +1270,29 @@ mod tests {
     #[test]
     fn why_reads_sysfs_fallback_without_rewriting_identity() {
         let eval = evaluation(Vec::new());
-        for (param, path, value) in [
+        // The fallback reports the VALUE, not the file's rendering: the
+        // parameter is bracketed option lists, and `current` must be the
+        // active option — the format `check`, a recommendation's `current`
+        // and the ledger's recorded original all use, so the field does not
+        // flip when the recommendation disappears.
+        for (param, path, value, active) in [
             (
                 "transparent_hugepage/enabled",
                 "/sys/kernel/mm/transparent_hugepage/enabled",
                 "always [madvise] never\n",
+                "madvise",
             ),
             (
                 "transparent_hugepage/defrag",
                 "/sys/kernel/mm/transparent_hugepage/defrag",
                 "always defer defer+madvise [madvise] never\n",
+                "madvise",
             ),
             (
                 "block/Disk.0/scheduler",
                 "/sys/block/Disk.0/queue/scheduler",
                 "[none] mq-deadline\n",
+                "none",
             ),
         ] {
             let current = CurrentFile::new(value);
@@ -1201,7 +1302,7 @@ mod tests {
             assert_eq!(code, 0);
             assert_eq!(
                 output,
-                json!({ "param": param, "current": value.trim(), "status": "optimal" })
+                json!({ "param": param, "current": active, "status": "optimal" })
             );
         }
     }

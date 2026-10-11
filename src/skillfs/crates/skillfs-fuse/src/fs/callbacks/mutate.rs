@@ -9,11 +9,12 @@ use skillfs_core::{parser, store::adopt_directory_name};
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::{PathType, is_skill_discover_path};
+use crate::path::{PathType, is_hermes_management_path, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{
-    errno, mkdirat_leaf, open_dir_path, rename_noreplace, renameat2_leaf, unlinkat_leaf,
+    errno, fstatat_leaf, mkdirat_leaf, open_dir_path, rename_noreplace, renameat2_leaf,
+    unlinkat_leaf,
 };
 
 /// Which source directory a skill-dir rename addresses, and therefore
@@ -81,7 +82,9 @@ impl SkillFs {
         // write/open/setattr/symlink/link guards (write.rs) so `mkdir`
         // cannot create (or inject a store placeholder for) the reserved
         // virtual name or mutate its physical backing tree.
-        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+        if let Some(errno) =
+            self.enforce_skill_discover_readonly(req, &path_type, SkillEventKind::Create)
+        {
             reply.error(errno);
             return;
         }
@@ -322,7 +325,9 @@ impl SkillFs {
         // write/open/setattr/symlink/link guards (write.rs) so `unlink`
         // cannot delete the physical backing tree through the virtual
         // view.
-        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+        if let Some(errno) =
+            self.enforce_skill_discover_readonly(req, &path_type, SkillEventKind::Delete)
+        {
             reply.error(errno);
             return;
         }
@@ -526,7 +531,9 @@ impl SkillFs {
         // write/open/setattr/symlink/link guards (write.rs) so `rmdir`
         // cannot delete the physical backing tree through the virtual
         // view.
-        if let Some(errno) = enforce_skill_discover_readonly(&path_type) {
+        if let Some(errno) =
+            self.enforce_skill_discover_readonly(req, &path_type, SkillEventKind::Delete)
+        {
             reply.error(errno);
             return;
         }
@@ -760,11 +767,15 @@ impl SkillFs {
         // read-only namespace, and answering it with EXDEV would make
         // `mv` fall back to copy+unlink against the read-only side,
         // leaving a partial target behind.
-        if let Some(errno) = enforce_skill_discover_readonly(&old_path_type) {
+        if let Some(errno) =
+            self.enforce_skill_discover_readonly(req, &old_path_type, SkillEventKind::Rename)
+        {
             reply.error(errno);
             return;
         }
-        if let Some(errno) = enforce_skill_discover_readonly(&new_path_type) {
+        if let Some(errno) =
+            self.enforce_skill_discover_readonly(req, &new_path_type, SkillEventKind::Rename)
+        {
             reply.error(errno);
             return;
         }
@@ -971,9 +982,11 @@ impl SkillFs {
         // is renamed to a skill directory, validate the target name
         // against sensitive namespaces and invalid skill name shapes.
         // Flat layout: SkillDir → SkillDir.
-        // Hermes layout: NestedSkillDir → NestedSkillDir (same category),
-        // and top-level staging roots classified by NAME (see the H3 arm
-        // below for why the type pairs alone cannot enumerate them).
+        // Hermes layout: NestedSkillDir → NestedSkillDir (any category
+        // pair — the guard is the old side's leaf name, not the scope),
+        // and staging roots in EITHER scope heading for a top-level
+        // target, classified by NAME (see the H3 arm below for why the
+        // type pairs alone cannot enumerate them).
         let is_staging_rename = if let Some(ref matcher) = self.staging_matcher {
             match (&old_path_type, &new_path_type) {
                 (
@@ -1008,17 +1021,23 @@ impl SkillFs {
                     }
                     true
                 }
-                // H3: Hermes intra-category staging rename.
+                // H3: Hermes nested staging rename, any category pair.
+                // The staging contract is keyed on the old side's leaf
+                // name, so an intra-category move and a cross-category
+                // move must be validated identically: requiring
+                // old_cat == new_cat let `mv /apple/.openclaw-install-stage-x
+                // /banana/.skill-meta` bypass the target validation
+                // entirely.
                 (
                     PathType::NestedSkillDir {
-                        category: old_cat,
                         skill_name: old_skill,
+                        ..
                     },
                     PathType::NestedSkillDir {
-                        category: new_cat,
                         skill_name: new_skill,
+                        ..
                     },
-                ) if old_cat == new_cat && matcher.is_staging_root(old_skill) => {
+                ) if matcher.is_staging_root(old_skill) => {
                     if !crate::security::install::is_valid_staging_rename_target(new_skill, matcher)
                     {
                         warn!(
@@ -1049,26 +1068,45 @@ impl SkillFs {
                 // SKILL.md yet — an interrupted install) and as a SkillDir
                 // once the manifest has been written. The rename target
                 // parses as a CategoryDir (non-in-place mount, or a name
-                // that already exists as a directory) or as a HermesMeta
+                // that already exists as a directory), as a HermesMeta
                 // (in-place mount, fresh name: the depth-1 in-place
                 // rewrite classifies not-yet-existing entries as
-                // top-level files). A (SkillDir, SkillDir) pair is already
-                // validated by the flat arm above, so this arm observes
-                // every other combination. Without it the validation — and
-                // the install-completion notify below — could be bypassed
-                // by choosing the mount mode or the manifest timing: a
-                // top-level staging rename onto `.skill-meta` silently
-                // succeeded, and a completed install never notified.
+                // top-level files), or as a NestedSkillDir (root →
+                // category scope crossing: `/.openclaw-install-stage-x` →
+                // `/apple/<name>`). A (SkillDir, SkillDir) pair is already
+                // validated by the flat arm above and a nested → nested
+                // pair by the arm above this one, so this arm observes
+                // every other combination — including the category → root
+                // crossing, where the SOURCE parses as a NestedSkillDir
+                // under one of the three top-level target shapes:
+                // `mv /apple/.openclaw-install-stage-x /.skill-meta`
+                // matched no arm and let a sensitive name land at the
+                // root, while a valid category → root completion never
+                // received its install-complete signal. The staging
+                // contract follows the old side's leaf name whatever
+                // scope it lives in, so the nested source is validated
+                // against the bare top-level target name and notified
+                // with the bare top-level skill id (the notify match
+                // below already keys CategoryDir/HermesMeta/SkillDir
+                // targets on the bare name).
                 (
                     PathType::SkillDir {
                         skill_name: old_name,
                     }
-                    | PathType::CategoryDir { category: old_name },
+                    | PathType::CategoryDir { category: old_name }
+                    | PathType::NestedSkillDir {
+                        skill_name: old_name,
+                        ..
+                    },
                     PathType::SkillDir {
                         skill_name: new_name,
                     }
                     | PathType::CategoryDir { category: new_name }
-                    | PathType::HermesMeta { name: new_name },
+                    | PathType::HermesMeta { name: new_name }
+                    | PathType::NestedSkillDir {
+                        skill_name: new_name,
+                        ..
+                    },
                 ) if self.skill_layout == crate::path::SkillLayout::Hermes
                     && matcher.is_staging_root(old_name) =>
                 {
@@ -1163,6 +1201,20 @@ impl SkillFs {
             "rename"
         );
 
+        // POSIX rename(2) over hard links to the same backing object is a
+        // successful no-op: both directory entries survive. Detect it by
+        // object identity BEFORE the physical rename (the old path is gone
+        // afterwards in every other case), because the post-rename inode
+        // surgery below would otherwise evict the replaced name's mapping
+        // even though that path is still live.
+        let hardlink_noop = match (
+            backing_object_identity(&old_physical),
+            backing_object_identity(&new_physical),
+        ) {
+            (Some(old_id), Some(new_id)) => old_id == new_id,
+            _ => false,
+        };
+
         let rename_result = if no_replace {
             rename_noreplace(&old_physical, &new_physical)
         } else {
@@ -1199,6 +1251,28 @@ impl SkillFs {
 
         match rename_result {
             Ok(()) => {
+                if hardlink_noop {
+                    // Same backing object: the physical rename was a no-op
+                    // and both directory entries still resolve. Record the
+                    // syscall for the audit trail and leave the inode map,
+                    // store, staging notify, and mutation observe untouched
+                    // — nothing on disk moved.
+                    debug!(
+                        old = %old_path, new = %new_path,
+                        "rename: same-object hard link, mappings untouched"
+                    );
+                    self.emit_event(
+                        SkillEvent::new(SkillEventKind::Rename)
+                            .with_optional_skill_name(event_skill)
+                            .with_optional_relative_path(event_relative)
+                            .with_action(SkillEventAction::Allowed)
+                            .with_caller(req.uid(), req.gid())
+                            .with_detail(new_path.clone()),
+                    );
+                    reply.ok();
+                    return;
+                }
+
                 // Update inode mappings.
                 self.inodes.rename_path(&old_path, &new_path);
 
@@ -1311,7 +1385,8 @@ impl SkillFs {
                         PathType::SkillDir {
                             skill_name: new_name,
                         } => Some(new_name.clone()),
-                        // H3: Hermes intra-category staging rename.
+                        // H3: Hermes nested staging rename — intra- or
+                        // cross-category (the root → category completion).
                         PathType::NestedSkillDir {
                             category,
                             skill_name,
@@ -1320,7 +1395,9 @@ impl SkillFs {
                         // top-level skill id is the bare name, whether the
                         // target parsed as a category, as a HermesMeta
                         // (in-place fresh name), or as an existing
-                        // top-level Skill. Matches
+                        // top-level Skill, and whether the staging root
+                        // came from the mount root or from a category
+                        // (the category → root completion). Matches
                         // enumerate_hermes_top_level_skills and the
                         // resolver key used for mixed-layout skills.
                         PathType::CategoryDir { category } => Some(category.clone()),
@@ -1458,6 +1535,63 @@ impl SkillFs {
                     if let Some((new_skill, new_rel, is_inbox)) = &new_skill_path {
                         observe_pair(self, new_skill, new_rel.as_deref(), *is_inbox);
                     }
+                    // H3: a Hermes category rename moves the source directory
+                    // of every nested skill inside it, so each moved skill
+                    // gets the same old/new refresh pair a direct skill
+                    // rename emits. Without these the resolver keeps only the
+                    // pre-rename ids and the moved skills read as hidden. The
+                    // leaf set is unchanged by the rename, so enumerating the
+                    // landed directory yields exactly the moved skills.
+                    if let (
+                        PathType::CategoryDir {
+                            category: old_category,
+                        },
+                        PathType::CategoryDir {
+                            category: new_category,
+                        }
+                        | PathType::HermesMeta { name: new_category },
+                    ) = (&old_type, &new_type)
+                    {
+                        // A management name (`.hub`, `.bundled_manifest`,
+                        // `.no-bundled-skills`) is never a Skill container:
+                        // renaming a category onto one leaves the skills in
+                        // a management path, which takes no part in
+                        // notify/activation. The same holds for any other
+                        // dot-prefixed name: the resolver refuses dot
+                        // components, the store loader skips them, and the
+                        // listing hides them, so they are managed/reserved
+                        // locations, not Skill containers.
+                        //
+                        // Both sides are judged independently. A hidden
+                        // source still registers its leaves in a visible
+                        // target, a hidden target only drops the visible
+                        // source's old ids, and two hidden categories
+                        // refresh nothing at all — no id is ever minted for
+                        // or cleared from a namespace the daemon does not
+                        // manage.
+                        let old_is_notifiable = !is_hermes_management_path(old_category)
+                            && !old_category.starts_with('.');
+                        let new_is_notifiable = !is_hermes_management_path(new_category)
+                            && !new_category.starts_with('.');
+                        if old_is_notifiable || new_is_notifiable {
+                            for leaf in Self::hermes_category_skill_leaves(&new_physical) {
+                                if old_is_notifiable {
+                                    self.observe_mutation(
+                                        &Self::hermes_skill_id(old_category, &leaf),
+                                        None,
+                                        MutationKind::Rename,
+                                    );
+                                }
+                                if new_is_notifiable {
+                                    self.observe_mutation(
+                                        &Self::hermes_skill_id(new_category, &leaf),
+                                        None,
+                                        MutationKind::Rename,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
                 self.emit_event(
                     SkillEvent::new(SkillEventKind::Rename)
@@ -1487,6 +1621,35 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+
+    /// Leaf names of the real nested skills directly under a Hermes category.
+    ///
+    /// A leaf counts only when it is a directory (no symlink following) with
+    /// a regular `SKILL.md`, mirroring [`Self::hermes_nested_is_skill`]:
+    /// plain category children (`docs/`, `README.md`) carry no skill
+    /// semantics and must not produce skill-id refreshes. Dot-prefixed
+    /// leaves are managed/reserved locations — the store loader skips them
+    /// and the category listing hides them — so they are never managed
+    /// Skills and are skipped here too.
+    fn hermes_category_skill_leaves(category_dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(category_dir) else {
+            return Vec::new();
+        };
+        let mut leaves: Vec<String> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|file_type| file_type.is_dir())
+                    .unwrap_or(false)
+                    && skillfs_core::store::has_regular_skill_md(&entry.path())
+            })
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+            .filter(|leaf| !leaf.starts_with('.'))
+            .collect();
+        leaves.sort();
+        leaves
     }
 
     /// Synchronously refresh the store after a skill-directory rename.
@@ -1588,25 +1751,82 @@ impl SkillFs {
                 .unwrap_or(false)
         })
     }
+    /// `EROFS` gate for the always-read-only `skill-discover` virtual
+    /// namespace on the namespace-mutation callbacks, mirroring the guard
+    /// `write.rs` already applies to `write`/`create`/`setattr` and
+    /// `link.rs` to `symlink`/`link`. `resolve_physical_path` maps every
+    /// skill-discover FUSE path onto `source/skill-discover/...`, so an
+    /// unguarded mkdir/unlink/rmdir/rename would mutate that physical tree
+    /// through the read-only virtual view.
+    ///
+    /// Every rejection leaves a `Rejected`/`EROFS` audit record tagged
+    /// `class=skill_discover` — the label the `symlink`/`link` gates in
+    /// `link.rs` already emit for the same namespace — so
+    /// mkdir/unlink/rmdir/rename probes against the read-only tree are
+    /// visible to audit consumers instead of failing silently.
+    fn enforce_skill_discover_readonly(
+        &self,
+        req: &Request,
+        path_type: &PathType,
+        kind: SkillEventKind,
+    ) -> Option<i32> {
+        match path_type {
+            PathType::SkillMd { skill_name }
+            | PathType::SkillDir { skill_name }
+            | PathType::Passthrough { skill_name, .. }
+                if is_skill_discover_path(skill_name) =>
+            {
+                self.emit_op_event_with_detail(
+                    req,
+                    path_type,
+                    kind,
+                    SkillEventAction::Rejected,
+                    Some(libc::EROFS),
+                    None,
+                    Some("class=skill_discover".to_string()),
+                );
+                Some(libc::EROFS)
+            }
+            _ => None,
+        }
+    }
 }
 
-/// `EROFS` gate for the always-read-only `skill-discover` virtual
-/// namespace on the namespace-mutation callbacks, mirroring the guard
-/// `write.rs` already applies to `write`/`create`/`setattr` and
-/// `link.rs` to `symlink`/`link`. `resolve_physical_path` maps every
-/// skill-discover FUSE path onto `source/skill-discover/...`, so an
-/// unguarded mkdir/unlink/rmdir/rename would mutate that physical tree
-/// through the read-only virtual view.
-fn enforce_skill_discover_readonly(path_type: &PathType) -> Option<i32> {
-    match path_type {
-        PathType::SkillMd { skill_name }
-        | PathType::SkillDir { skill_name }
-        | PathType::Passthrough { skill_name, .. }
-            if is_skill_discover_path(skill_name) =>
-        {
-            Some(libc::EROFS)
+/// `(dev, ino)` identity of a physical path, with the long-path fallback.
+///
+/// rename(2) over hard links to one object is a POSIX no-op: both names
+/// survive and the kernel reports success, so the inode-map surgery that
+/// a real replacement needs must not run. The kernel's VFS short-circuits
+/// same-inode renames before they reach FUSE, but SkillFS assigns
+/// per-path FUSE inodes to hard links, so a rename whose two names hold
+/// *distinct* FUSE inodes CAN reach this daemon with a single backing
+/// object — the caller must recognize it by identity, and the old path is
+/// gone after the rename, so the probe runs before it.
+///
+/// When the leaf's absolute path exceeds `PATH_MAX`, the plain
+/// `symlink_metadata` fails with `ENAMETOOLONG` even though the parent
+/// directory still opens and `fstatat` with just the leaf component
+/// succeeds — the same shape the rename fallback in `rename_impl` relies
+/// on for the physical rename itself. The identity probe must take that
+/// same shape: without the fallback, a same-object rename whose paths
+/// exceed `PATH_MAX` was misclassified as a replace (the metadata error
+/// fell into "different objects"), the physical rename then succeeded
+/// through the dirfd fallback as a POSIX no-op, and the inode surgery
+/// evicted a still-live alias's mapping.
+fn backing_object_identity(physical: &Path) -> Option<(u64, u64)> {
+    match std::fs::symlink_metadata(physical) {
+        Ok(meta) => {
+            use std::os::unix::fs::MetadataExt;
+            Some((meta.dev(), meta.ino()))
         }
-        _ => None,
+        Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+            let parent = physical.parent()?;
+            let leaf = physical.file_name()?;
+            let dir = open_dir_path(parent).ok()?;
+            let st = fstatat_leaf(&dir, leaf, false).ok()?;
+            Some((st.st_dev as u64, st.st_ino as u64))
+        }
+        Err(_) => None,
     }
 }
 
@@ -1700,5 +1920,142 @@ mod tests {
             "placeholder must merge the directory-name issue, got {:?}",
             entry.parse_status
         );
+    }
+
+    #[test]
+    fn same_backing_object_is_detected_for_hard_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::hard_link(&a, &b).expect("hard link a b");
+
+        let a_id = backing_object_identity(&a).expect("identity a");
+        let b_id = backing_object_identity(&b).expect("identity b");
+        assert!(a_id == b_id, "two names for one object must be recognized");
+    }
+
+    #[test]
+    fn distinct_objects_are_not_confused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let d = dir.path().join("d");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::write(&b, b"y").expect("file b");
+        std::fs::create_dir(&d).expect("dir d");
+
+        let a_id = backing_object_identity(&a).expect("identity a");
+        let b_id = backing_object_identity(&b).expect("identity b");
+        let d_id = backing_object_identity(&d).expect("identity d");
+        assert!(a_id != b_id);
+        assert!(a_id != d_id);
+    }
+
+    #[test]
+    fn a_replaced_file_is_not_the_same_object() {
+        // The ordinary replacement case: rename over an unrelated file
+        // must NOT be treated as a no-op.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("file a");
+        std::fs::write(&b, b"y").expect("file b");
+        let a_id = backing_object_identity(&a).expect("identity a");
+        let b_id = backing_object_identity(&b).expect("identity b");
+        assert!(a_id != b_id);
+    }
+
+    /// Build a directory chain whose leaf files push the absolute path
+    /// past `PATH_MAX` while the deepest directory itself stays openable,
+    /// the exact shape the rename fallback and (now) the identity probe
+    /// must handle via parent-dir fds.
+    fn deep_dir_with_overlong_leaves(root: &Path) -> (std::path::PathBuf, String, String) {
+        let mut deep = root.to_path_buf();
+        loop {
+            let next = deep.join("d".repeat(200));
+            // Descend as deep as the directory path itself allows; the
+            // ~240-char leaves then push the file paths past PATH_MAX.
+            if next.as_os_str().len() >= libc::PATH_MAX as usize {
+                break;
+            }
+            std::fs::create_dir(&next).expect("deep mkdir");
+            deep = next;
+        }
+        let leaf_a = "s".repeat(240);
+        let leaf_b = "l".repeat(240);
+        assert!(
+            deep.join(&leaf_a).as_os_str().len() >= libc::PATH_MAX as usize,
+            "the leaf's absolute path must exceed PATH_MAX"
+        );
+        assert!(
+            deep.as_os_str().len() < libc::PATH_MAX as usize,
+            "the deepest directory must stay openable by absolute path"
+        );
+        (deep, leaf_a, leaf_b)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn identity_survives_beyond_path_max() {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deep, leaf_a, leaf_b) = deep_dir_with_overlong_leaves(dir.path());
+
+        // Create the file and its hard-link alias through the parent dir
+        // fd: the absolute paths cannot be used for that (ENAMETOOLONG).
+        let parent = open_dir_path(&deep).expect("open deep parent");
+        {
+            let mut f = crate::sys::openat_leaf(
+                &parent,
+                std::ffi::OsStr::new(&leaf_a),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+                0o644,
+            )
+            .expect("create leaf a via dirfd");
+            f.write_all(b"shared").expect("write leaf a");
+        }
+        let ca = crate::sys::cstring_from_os_str(std::ffi::OsStr::new(&leaf_a)).unwrap();
+        let cb = crate::sys::cstring_from_os_str(std::ffi::OsStr::new(&leaf_b)).unwrap();
+        let rc = unsafe {
+            libc::linkat(
+                parent.as_raw_fd(),
+                ca.as_ptr(),
+                parent.as_raw_fd(),
+                cb.as_ptr(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "linkat through the dirfd must succeed");
+
+        // Sanity: the plain absolute paths really are beyond PATH_MAX —
+        // this is the condition that used to blind the identity probe.
+        assert!(std::fs::symlink_metadata(deep.join(&leaf_a)).is_err());
+        assert!(std::fs::symlink_metadata(deep.join(&leaf_b)).is_err());
+
+        // The dirfd fallback recognizes both names as one object.
+        let a_id = backing_object_identity(&deep.join(&leaf_a))
+            .expect("identity beyond PATH_MAX for leaf a");
+        let b_id = backing_object_identity(&deep.join(&leaf_b))
+            .expect("identity beyond PATH_MAX for leaf b");
+        assert_eq!(a_id, b_id, "the alias pair must share one identity");
+
+        // And a distinct deep file is still distinguished.
+        let leaf_c = "c".repeat(240);
+        {
+            let mut f = crate::sys::openat_leaf(
+                &parent,
+                std::ffi::OsStr::new(&leaf_c),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+                0o644,
+            )
+            .expect("create leaf c via dirfd");
+            f.write_all(b"other").expect("write leaf c");
+        }
+        let c_id = backing_object_identity(&deep.join(&leaf_c))
+            .expect("identity beyond PATH_MAX for leaf c");
+        assert_ne!(a_id, c_id);
     }
 }

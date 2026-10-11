@@ -178,8 +178,8 @@ function renderViewerPage() {
   // Sanity: the hook-slot map must match the page's real hook order.
   assert.equal(driver.slots[3] !== undefined && 'setter' in driver.slots[3], true,
     'slot 3 must be the doc state');
-  assert.equal(typeof driver.slots[12].value.current, 'number',
-    'slot 12 must be the load request-id ref');
+  assert.equal(typeof driver.slots[13].value.current, 'number',
+    'slot 13 must be the load request-id ref');
   return {
     calls, driver, rendered, urlParams,
     handleLoad: rendered.callbacks[3],
@@ -206,6 +206,7 @@ function loadPageModule(relativePath, moduleStubs, driver) {
   const requireStub = (name) => {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
+    if (name === '../utils/trajectoryTextFilter') return loadPageModule('src/utils/trajectoryTextFilter.ts', moduleStubs, driver);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);

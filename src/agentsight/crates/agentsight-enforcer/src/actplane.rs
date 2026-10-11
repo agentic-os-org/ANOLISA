@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -670,31 +671,7 @@ fn spawn_poller(
         if let Err(error) = engine.run(&stop, move |raw| {
             let active = callback_state.bindings().get(&raw.domain_id).cloned();
             if let Some(active) = active {
-                callback_state
-                    .events
-                    .publish(convert_violation(raw.clone(), &active));
-                if raw.op == 3
-                    && raw.provenance.is_some()
-                    && let Some(policy) = active.credential_policy.as_ref()
-                {
-                    let label = active
-                        .label_names
-                        .get(&raw.matched_label)
-                        .cloned()
-                        .unwrap_or_else(|| format!("label-0x{:x}", raw.matched_label));
-                    match convert_security_events(raw, &active, policy, &label) {
-                        Ok(events) => {
-                            for event in events {
-                                callback_state.security_events.publish(event);
-                            }
-                        }
-                        Err(error) => {
-                            let message = format!("normalize ActPlane evidence: {error}");
-                            log::error!("{message}");
-                            *callback_state.runtime_error() = Some(message);
-                        }
-                    }
-                }
+                publish_raw_violation(raw, &active, &callback_state);
             }
         }) {
             let message = format!("violation poller stopped: {error}");
@@ -702,6 +679,40 @@ fn spawn_poller(
             *state.runtime_error() = Some(message);
         }
     })
+}
+
+/// Publishes one kernel event on both streams under a single identity.
+///
+/// `/api/enforcement/violations` resolves a violation's case through the
+/// evidence ids stored in `risk_evidence_links`, so the raw violation and its
+/// normalized sink evidence must carry the same `event_id`.
+fn publish_raw_violation(raw: Violation, active: &ActiveBinding, state: &RuntimeState) {
+    let event_id = Uuid::new_v4();
+    state
+        .events
+        .publish(convert_violation(raw.clone(), active, event_id));
+    if raw.op == 3
+        && raw.provenance.is_some()
+        && let Some(policy) = active.credential_policy.as_ref()
+    {
+        let label = active
+            .label_names
+            .get(&raw.matched_label)
+            .cloned()
+            .unwrap_or_else(|| format!("label-0x{:x}", raw.matched_label));
+        match convert_security_events(raw, active, policy, &label, event_id) {
+            Ok(events) => {
+                for event in events {
+                    state.security_events.publish(event);
+                }
+            }
+            Err(error) => {
+                let message = format!("normalize ActPlane evidence: {error}");
+                log::error!("{message}");
+                *state.runtime_error() = Some(message);
+            }
+        }
+    }
 }
 
 fn domain_id(binding_id: Uuid) -> u32 {
@@ -818,10 +829,13 @@ fn unsupported_runtime_handoff(source: &Binding) -> ReplaceOutcome {
 /// Translates the stable credential-exfiltration model into pinned ActPlane DSL.
 ///
 /// The current ActPlane endpoint-condition ABI can represent one trusted target
-/// per rule. Observe and audit policies use notify rules plus adapter-side TTL
-/// and `public_ipv4` filtering. Enforce mode emits a `block` rule with an
-/// `expires` clause so the pinned ABI honours taint TTL directly, and requires
-/// at least one trusted endpoint to avoid blocking all outbound connections.
+/// per rule, so more than one is rejected. Observe and audit policies use notify
+/// rules plus adapter-side TTL and `public_ipv4` filtering.
+///
+/// Enforce mode is rejected by design: the pinned kernel `block ... endpoint "*"`
+/// rule cannot tell a public destination from a private one, so it would deny
+/// loopback and RFC1918 traffic before userspace could classify it. Compilation
+/// fails closed until the ABI can express public-only scope.
 ///
 /// # Errors
 ///
@@ -920,6 +934,7 @@ fn convert_security_events(
     active: &ActiveBinding,
     policy: &CredentialExfiltrationPolicy,
     taint_label: &str,
+    sink_event_id: Uuid,
 ) -> Result<Vec<SecurityEvent>, BackendError> {
     convert_security_events_at(
         raw,
@@ -928,6 +943,7 @@ fn convert_security_events(
         taint_label,
         now_ns(),
         monotonic_now_ns(),
+        sink_event_id,
     )
 }
 
@@ -938,6 +954,7 @@ fn convert_security_events_at(
     taint_label: &str,
     observed_at_ns: u64,
     monotonic_now_ns: Option<u64>,
+    sink_event_id: Uuid,
 ) -> Result<Vec<SecurityEvent>, BackendError> {
     let provenance = raw.provenance.as_ref().ok_or_else(|| {
         BackendError::KernelFailure("ActPlane connect violation lacks source provenance".into())
@@ -964,7 +981,7 @@ fn convert_security_events_at(
         || policy
             .trusted_endpoints
             .iter()
-            .any(|trusted| trusted == &raw.target)
+            .any(|trusted| trusted_endpoint_covers(trusted, &raw.target))
     {
         return Ok(Vec::new());
     }
@@ -998,7 +1015,6 @@ fn convert_security_events_at(
     let sink_identity = event_identity(active, raw.pid, Some(raw.ppid), target_start);
     let source_event_id = Uuid::new_v4();
     let taint_event_id = Uuid::new_v4();
-    let sink_event_id = Uuid::new_v4();
     let decision_event_id = Uuid::new_v4();
     let policy_id = active.binding.request.policy_id.clone();
     let source_path = redact_home_path(&provenance.target);
@@ -1129,10 +1145,50 @@ fn classify_destination(destination: &str) -> DestinationClass {
     classify_public_ipv4_destination(destination)
 }
 
-fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
+/// Splits a destination into its address and optional port.
+///
+/// Accepts both the bare address the kernel reports for a connect and the
+/// `address:port` spelling product policies are written in.
+fn destination_address(destination: &str) -> Option<(IpAddr, Option<u16>)> {
+    if let Ok(address) = destination.parse::<IpAddr>() {
+        return Some((address, None));
+    }
+    destination
+        .parse::<SocketAddr>()
+        .ok()
+        .map(|socket| (socket.ip(), Some(socket.port())))
+}
+
+/// Whether a policy trusted endpoint exempts a reported destination.
+///
+/// The kernel reports a connect destination as a port-less dotted IPv4 address
+/// (`ebpf-ifc-engine`'s `decode`), while operators author trusted endpoints as
+/// `host:port` (the dashboard suggests `10.0.0.8:443`). Comparing the two as
+/// strings therefore never exempts the target the operator named. Compare
+/// addresses instead: an endpoint without a port covers every port, and one
+/// with a port covers a destination reporting the same address. The kernel
+/// reports no port at all, so a trusted endpoint that names one still exempts
+/// its address. Hostnames are not resolved here and stay untrusted.
+fn trusted_endpoint_covers(trusted: &str, destination: &str) -> bool {
+    if trusted == destination {
+        return true;
+    }
+    let Some((trusted_address, trusted_port)) = destination_address(trusted) else {
+        return false;
+    };
+    let Some((destination_address, destination_port)) = destination_address(destination) else {
+        return false;
+    };
+    if trusted_address != destination_address {
+        return false;
+    }
+    destination_port.is_none_or(|port| trusted_port.is_none_or(|trusted| trusted == port))
+}
+
+fn convert_violation(raw: Violation, active: &ActiveBinding, event_id: Uuid) -> ViolationEvent {
     let monotonic_now_ns = monotonic_now_ns();
     let observed_at_ns = now_ns();
-    convert_violation_at(raw, active, observed_at_ns, monotonic_now_ns)
+    convert_violation_at(raw, active, observed_at_ns, monotonic_now_ns, event_id)
 }
 
 fn convert_violation_at(
@@ -1140,6 +1196,7 @@ fn convert_violation_at(
     active: &ActiveBinding,
     observed_at_ns: u64,
     monotonic_now_ns: Option<u64>,
+    event_id: Uuid,
 ) -> ViolationEvent {
     let rule_index = raw.rule_id as usize;
     let occurred_at_ns = monotonic_now_ns
@@ -1148,7 +1205,7 @@ fn convert_violation_at(
         })
         .unwrap_or(observed_at_ns);
     ViolationEvent {
-        event_id: Uuid::new_v4(),
+        event_id,
         binding_id: active.binding.request.binding_id,
         agent_id: active.binding.request.agent_id.clone(),
         session_id: active.binding.request.session_id.clone(),
@@ -1556,25 +1613,47 @@ mod tests {
     }
 
     #[test]
-    fn enforce_policy_compiles_block_rule_with_expires() {
-        let policy = credential_policy();
-        let dsl = compile_credential_exfiltration_policy(&policy)
-            .expect("enforce policy with a trusted endpoint should compile");
+    fn enforce_policy_is_rejected_until_public_scope_is_representable() {
+        // Enforce (block) compilation is deliberately fail-closed: the pinned
+        // kernel rule blocks every endpoint, private ones included, before
+        // userspace can classify the destination. Pin the rejection so
+        // re-enabling it has to update this test consciously.
+        let error = compile_credential_exfiltration_policy(&credential_policy())
+            .expect_err("enforce mode must fail closed");
 
-        assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
-        assert!(dsl.contains("unless target \"10.0.0.8\""));
-        assert!(dsl.contains("expires 900s"));
-        assert!(compile_str(&dsl).is_ok());
+        assert!(
+            error
+                .to_string()
+                .contains("enforce mode is not yet supported"),
+            "unexpected rejection: {error}"
+        );
     }
 
     #[test]
-    fn enforce_policy_requires_trusted_endpoint() {
+    fn enforce_policy_without_a_trusted_endpoint_is_rejected_too() {
+        // Trusted endpoints do not change the verdict: the mode is rejected
+        // whether or not an exception was configured.
         let mut policy = credential_policy();
         policy.trusted_endpoints.clear();
-        let error = compile_credential_exfiltration_policy(&policy)
-            .expect_err("enforce mode without a trusted endpoint must fail closed");
 
-        assert!(error.to_string().contains("trusted_endpoint"));
+        assert!(
+            compile_credential_exfiltration_policy(&policy).is_err(),
+            "enforce mode must fail closed without a trusted endpoint as well"
+        );
+    }
+
+    #[test]
+    fn more_than_one_trusted_endpoint_is_rejected() {
+        // The single-exception limit is checked before the mode, so it is
+        // reachable — assert it in audit mode, where compilation proceeds.
+        let mut policy = credential_policy();
+        policy.mode = PolicyMode::Audit;
+        policy.trusted_endpoints = vec!["10.0.0.8".into(), "10.0.0.9".into()];
+
+        let error = compile_credential_exfiltration_policy(&policy)
+            .expect_err("the pinned ABI takes one trusted endpoint per rule");
+
+        assert!(error.to_string().contains("one trusted endpoint"));
     }
 
     #[test]
@@ -1633,6 +1712,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("fixture violation should convert");
 
@@ -1685,6 +1765,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("audit violation should convert");
 
@@ -1729,6 +1810,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("observe violation should convert");
 
@@ -1768,6 +1850,7 @@ mod tests {
             "CREDENTIAL",
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         )
         .expect("expired taint should normalize safely");
 
@@ -1821,6 +1904,7 @@ mod tests {
                 "CREDENTIAL",
                 1_784_000_000_000_000_000,
                 Some(271_000_000_000),
+                Uuid::new_v4(),
             )
             .expect("out-of-scope destination should normalize safely");
 
@@ -1829,6 +1913,136 @@ mod tests {
                 "{destination} must not be a product sink"
             );
         }
+    }
+
+    #[test]
+    fn one_raw_violation_keeps_one_identity_across_both_streams() {
+        // The production getters read the live monotonic clock, so the taint
+        // must be fresh relative to it for the evidence chain to be emitted.
+        let now = monotonic_now_ns().expect("monotonic clock should be readable");
+        let mut raw = raw_violation(now);
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: now - 1_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.ssh/id_rsa".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let state = RuntimeState::new();
+        let violations = state
+            .events
+            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+        let evidence = state.security_events.subscribe();
+
+        publish_raw_violation(raw, &active, &state);
+
+        let violation = violations
+            .try_recv()
+            .expect("the raw violation must be published");
+        let sink = evidence
+            .try_iter()
+            .find(|event| matches!(event.kind, SecurityEventKind::NetworkAction(_)))
+            .expect("the evidence chain must contain the sink event");
+        assert_eq!(
+            violation.event_id, sink.event_id,
+            "the raw violation and its normalized sink evidence describe one kernel event; \
+             /api/enforcement/violations resolves case_id through the evidence id"
+        );
+    }
+
+    #[test]
+    fn trusted_endpoints_are_compared_as_addresses_with_optional_ports() {
+        assert!(trusted_endpoint_covers("8.8.8.8", "8.8.8.8"));
+        assert!(trusted_endpoint_covers("8.8.8.8", "8.8.8.8:443"));
+        assert!(trusted_endpoint_covers("8.8.8.8:443", "8.8.8.8"));
+        assert!(trusted_endpoint_covers("8.8.8.8:443", "8.8.8.8:443"));
+        assert!(!trusted_endpoint_covers("8.8.8.8:443", "8.8.8.8:8443"));
+        assert!(!trusted_endpoint_covers("8.8.8.9", "8.8.8.8"));
+        assert!(!trusted_endpoint_covers("git.example.com:443", "8.8.8.8"));
+        assert!(!trusted_endpoint_covers("8.8.8.8", "git.example.com:443"));
+    }
+
+    #[test]
+    fn a_trusted_endpoint_written_as_host_port_exempts_its_destination() {
+        let mut raw = raw_violation(270_000_000_000);
+        raw.effect = 0;
+        raw.blocked = false;
+        raw.target = "8.8.8.8".into();
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: 269_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.aws/credentials".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let policy = active
+            .credential_policy
+            .as_mut()
+            .expect("fixture credential policy should exist");
+        policy.mode = PolicyMode::Audit;
+        policy.trusted_endpoints = vec!["8.8.8.8:443".into()];
+        let policy = policy.clone();
+
+        let events = convert_security_events_at(
+            raw,
+            &active,
+            &policy,
+            "CREDENTIAL",
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+            Uuid::new_v4(),
+        )
+        .expect("trusted destination should normalize safely");
+
+        assert!(
+            events.is_empty(),
+            "the destination an operator named as trusted must not become credential-exfiltration evidence"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_public_destination_still_produces_evidence() {
+        let mut raw = raw_violation(270_000_000_000);
+        raw.effect = 0;
+        raw.blocked = false;
+        raw.target = "8.8.8.8".into();
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: 269_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.aws/credentials".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let policy = active
+            .credential_policy
+            .as_mut()
+            .expect("fixture credential policy should exist");
+        policy.mode = PolicyMode::Audit;
+        policy.trusted_endpoints = vec!["8.8.8.9:443".into()];
+        let policy = policy.clone();
+
+        let events = convert_security_events_at(
+            raw,
+            &active,
+            &policy,
+            "CREDENTIAL",
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+            Uuid::new_v4(),
+        )
+        .expect("audit violation should convert");
+
+        assert_eq!(
+            events.len(),
+            4,
+            "a public destination outside the trusted list must stay evidence"
+        );
     }
 
     #[test]
@@ -1942,6 +2156,7 @@ mod tests {
             &active,
             1_784_000_000_000_000_000,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         );
         assert_eq!(event.binding_id, active.binding.request.binding_id);
         assert_eq!(event.agent_id, "agent-1");
@@ -1975,6 +2190,7 @@ mod tests {
             &active,
             observed_at_ns,
             None,
+            Uuid::new_v4(),
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
@@ -1989,6 +2205,7 @@ mod tests {
             &active_binding(),
             observed_at_ns,
             Some(271_000_000_000),
+            Uuid::new_v4(),
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
@@ -2002,6 +2219,7 @@ mod tests {
             &active_binding(),
             observed_at_ns,
             Some(20),
+            Uuid::new_v4(),
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);

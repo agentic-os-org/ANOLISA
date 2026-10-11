@@ -188,11 +188,20 @@ fn parameter_transactions() {
 // the read is denied, the write lands, and no rollback value may be
 // invented. Only fixture files are written.
 fn write_only_body() {
-    // A mode-0200 file denies the read and accepts the owner's write.
-    let outcome = tuner::apply_one(&rec("vm.swappiness", "20"))
+    // A mode-0200 file denies the read and accepts the owner's write. The
+    // single-fix return carries no original in that case: nothing was
+    // recorded, so `ktuner fix` has nothing to report as `previous`.
+    let fix = tuner::apply_one(&rec("vm.swappiness", "20"))
         .expect("write-only swappiness must apply via its write-only arm");
-    assert_eq!(outcome.effective, "20", "request is the effective record");
-    assert!(!outcome.clamped);
+    assert_eq!(
+        fix.outcome.effective, "20",
+        "request is the effective record"
+    );
+    assert!(!fix.outcome.clamped);
+    assert_eq!(
+        fix.recorded_previous, None,
+        "a write-only fix reports no original to restore"
+    );
     assert!(
         !std::path::Path::new(LEDGER).exists(),
         "an unreadable original must not publish a rollback entry"

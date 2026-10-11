@@ -167,6 +167,48 @@ pub(crate) fn fstatat_leaf(
     Ok(st)
 }
 
+/// `fchownat` against an open parent directory, the owner-setting twin of
+/// [`fstatat_leaf`]: `follow == false` changes the leaf's own owner the way
+/// `lchown` does on a nameable path.
+pub(crate) fn fchownat_leaf(
+    dir: &std::fs::File,
+    leaf: &std::ffi::OsStr,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    follow: bool,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let c = cstring_from_os_str(leaf)?;
+    let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+    let rc = unsafe { libc::fchownat(dir.as_raw_fd(), c.as_ptr(), uid, gid, flags) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `utimensat` against an open parent directory: the same no-follow flag
+/// semantics as the plain-path form, without needing a nameable path.
+pub(crate) fn utimensat_leaf(
+    dir: &std::fs::File,
+    leaf: &std::ffi::OsStr,
+    times: &[libc::timespec; 2],
+    nofollow: bool,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let c = cstring_from_os_str(leaf)?;
+    let flags = if nofollow {
+        libc::AT_SYMLINK_NOFOLLOW
+    } else {
+        0
+    };
+    let rc = unsafe { libc::utimensat(dir.as_raw_fd(), c.as_ptr(), times.as_ptr(), flags) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn renameat2_leaf(
     old_dir: &std::fs::File,

@@ -39,11 +39,21 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("mysqld")
         // MariaDB 10.4+ runs as mariadbd; the same OLTP workload as MySQL.
         || info.has_process("mariadbd")
+        // TiDB is an OLTP database and TiKV its distributed KV store — both
+        // are services the engine already detects (KNOWN_SERVICES); the
+        // io-latency profile is defined as "OLTP databases, KV stores".
+        || info.has_process("tidb-server")
+        || info.has_process("tikv-server")
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     let has_cache = info.has_process("redis-server")
         || info.has_process("memcached")
-        || info.has_process("etcd");
+        || info.has_process("etcd")
+        // ZooKeeper and Consul are the same in-memory coordination-KV class
+        // as etcd; the runtime marker table already resolves
+        // org.apache.zookeeper to the "zookeeper" service.
+        || info.has_process("zookeeper")
+        || info.has_process("consul");
     let has_web = info.has_process("nginx")
         || info.has_process("httpd")
         // Debian/Ubuntu/SUSE run the Apache binary as `apache2`; RHEL and
@@ -55,8 +65,13 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("caddy");
     let has_java = info.has_process("java");
     let has_search = info.has_process("elasticsearch") || info.has_process("opensearch");
-    let has_streaming =
-        info.has_process("kafka") || info.has_process("flink") || info.has_process("spark");
+    let has_streaming = info.has_process("kafka")
+        || info.has_process("flink")
+        || info.has_process("spark")
+        // Pulsar is the same event-streaming class as Kafka; the runtime
+        // detector already resolves org.apache.pulsar broker cmdlines to
+        // the "pulsar" service.
+        || info.has_process("pulsar");
 
     if has_db {
         return WorkloadType::IoLatency;
@@ -193,6 +208,26 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_tidb() {
+        // TiDB is an OLTP database and TiKV its distributed KV store — both
+        // are services the detector already knows (KNOWN_SERVICES). classify
+        // must route a TiDB host to the io-latency profile, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["tidb-server"])),
+            WorkloadType::IoLatency
+        );
+        assert_eq!(
+            classify(&make_info(vec!["tikv-server"])),
+            WorkloadType::IoLatency
+        );
+        // A database still outranks the web tier on a combined host.
+        assert_eq!(
+            classify(&make_info(vec!["tidb-server", "nginx"])),
+            WorkloadType::IoLatency
+        );
+    }
+
+    #[test]
     fn test_classify_clickhouse() {
         assert_eq!(
             classify(&make_info(vec!["clickhouse"])),
@@ -205,6 +240,28 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["elasticsearch"])),
             WorkloadType::MemoryIntensive
+        );
+    }
+
+    #[test]
+    fn test_classify_coordination_kv() {
+        // ZooKeeper and Consul are the same in-memory coordination-KV class
+        // as etcd - which classify already routes to memory-intensive - and
+        // both are services the engine detects (the runtime marker table
+        // resolves org.apache.zookeeper to "zookeeper"). A ZooKeeper-only
+        // host must not classify as mixed.
+        assert_eq!(
+            classify(&make_info(vec!["zookeeper"])),
+            WorkloadType::MemoryIntensive
+        );
+        assert_eq!(
+            classify(&make_info(vec!["consul"])),
+            WorkloadType::MemoryIntensive
+        );
+        // A database still outranks coordination on a combined host.
+        assert_eq!(
+            classify(&make_info(vec!["zookeeper", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 
@@ -240,6 +297,23 @@ mod tests {
         assert_eq!(
             classify(&make_info(vec!["flink"])),
             WorkloadType::IoThroughput
+        );
+    }
+
+    #[test]
+    fn test_classify_pulsar() {
+        // Pulsar is the same event-streaming platform class as Kafka (the
+        // runtime detector even resolves org.apache.pulsar broker cmdlines
+        // to the "pulsar" service), so a Pulsar-only host is an
+        // io-throughput workload, not mixed.
+        assert_eq!(
+            classify(&make_info(vec!["pulsar"])),
+            WorkloadType::IoThroughput
+        );
+        // A database on the same host still outranks the streaming tier.
+        assert_eq!(
+            classify(&make_info(vec!["pulsar", "postgres"])),
+            WorkloadType::IoLatency
         );
     }
 

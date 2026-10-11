@@ -48,7 +48,14 @@ impl Aggregator {
                 limits.max_connection_body_bytes,
                 idle_timeout,
             ),
-            http2: Http2StreamAggregator::new(),
+            // HTTP/2 multiplexes many streams per connection; keep the stream
+            // LRU proportional to the connection capacity, like the default
+            // constructor, but enforce the configured byte and idle limits.
+            http2: Http2StreamAggregator::with_limits(
+                connection_capacity.saturating_mul(4),
+                limits.max_connection_body_bytes,
+                idle_timeout,
+            ),
             process: ProcessEventAggregator::new(),
             last_eviction: Instant::now(),
             eviction_period: idle_timeout.min(Duration::from_secs(10)),
@@ -115,6 +122,7 @@ impl Aggregator {
         let now = Instant::now();
         if now.duration_since(self.last_eviction) >= self.eviction_period {
             self.http.evict_idle_and_oversized();
+            self.http2.evict_idle_and_oversized();
             self.last_eviction = now;
         }
 
@@ -228,6 +236,7 @@ impl Aggregator {
 mod tests {
     use super::*;
     use crate::parser::Parser;
+    use crate::parser::http2::{Http2FrameType, ParsedHttp2Frame};
     use crate::probes::sslsniff::SslEvent;
     use std::rc::Rc;
 
@@ -293,6 +302,151 @@ mod tests {
         assert!(
             aggregator.http().has_pending_request(&conn),
             "the terminator write must complete the chunked request body"
+        );
+    }
+
+    fn test_event(pid: u32, ssl_ptr: u64, rw: i32, timestamp_ns: u64) -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns,
+            delta_ns: 0,
+            pid,
+            tid: 1,
+            uid: 0,
+            len: 0,
+            rw,
+            comm: "test".to_string(),
+            buf: Vec::new(),
+            is_handshake: false,
+            ssl_ptr,
+        })
+    }
+
+    fn test_frame(
+        stream_id: u32,
+        frame_type: u8,
+        flags: u8,
+        payload: Vec<u8>,
+        source: Rc<SslEvent>,
+    ) -> ParsedHttp2Frame {
+        let payload_len = payload.len();
+        let mut buf = Vec::with_capacity(9 + payload_len);
+        buf.push(((payload_len >> 16) & 0xFF) as u8);
+        buf.push(((payload_len >> 8) & 0xFF) as u8);
+        buf.push((payload_len & 0xFF) as u8);
+        buf.push(frame_type);
+        buf.push(flags);
+        buf.push(((stream_id >> 24) & 0x7F) as u8);
+        buf.push(((stream_id >> 16) & 0xFF) as u8);
+        buf.push(((stream_id >> 8) & 0xFF) as u8);
+        buf.push((stream_id & 0xFF) as u8);
+        buf.extend_from_slice(&payload);
+
+        let source_event = Rc::new(SslEvent {
+            source: source.source,
+            timestamp_ns: source.timestamp_ns,
+            delta_ns: source.delta_ns,
+            pid: source.pid,
+            tid: source.tid,
+            uid: source.uid,
+            len: buf.len() as u32,
+            rw: source.rw,
+            comm: source.comm.clone(),
+            buf,
+            is_handshake: source.is_handshake,
+            ssl_ptr: source.ssl_ptr,
+        });
+
+        ParsedHttp2Frame {
+            frame_type: Http2FrameType::from_u8(frame_type),
+            flags,
+            stream_id,
+            payload_offset: 9,
+            payload_len,
+            source_event,
+        }
+    }
+
+    fn feed_http2(aggregator: &mut Aggregator, frames: Vec<ParsedHttp2Frame>) {
+        let results = aggregator.process_result(ParseResult {
+            messages: vec![ParsedMessage::Http2Frames(frames)],
+        });
+        assert!(results.is_empty(), "no stream ended in this test");
+    }
+
+    #[test]
+    fn http2_honors_max_connection_body_bytes() {
+        // Regression: the HTTP/2 aggregator was built without the configured
+        // connection limits, so DATA frames were buffered without any size
+        // check and a stream that never sees END_STREAM grew forever.
+        const LIMIT: usize = 4096;
+        let limits = RuntimeLimits {
+            max_connection_body_bytes: LIMIT,
+            ..Default::default()
+        };
+        let mut aggregator = Aggregator::with_limits(4, &limits);
+
+        // Request HEADERS without END_STREAM, followed by a body that never ends.
+        let mut frames = vec![test_frame(
+            1,
+            1,
+            0x04,
+            b":method: POST\n:path: /v1/chat".to_vec(),
+            test_event(7, 0xABC, 1, 1000),
+        )];
+        for i in 0..16 {
+            frames.push(test_frame(
+                1,
+                0,
+                0x00,
+                vec![b'x'; 1024],
+                test_event(7, 0xABC, 1, 2000 + i),
+            ));
+        }
+        feed_http2(&mut aggregator, frames);
+
+        let metrics = aggregator.connection_metrics();
+        assert!(
+            metrics.pending_connection_bytes <= LIMIT,
+            "retained http/2 body must respect max_connection_body_bytes: {} > {}",
+            metrics.pending_connection_bytes,
+            LIMIT
+        );
+    }
+
+    #[test]
+    fn http2_idle_stream_is_swept_by_periodic_eviction() {
+        // Regression: there was no idle sweep for HTTP/2, so a stream that
+        // stopped making progress stayed in memory for the process lifetime.
+        let limits = RuntimeLimits {
+            connection_idle_timeout_secs: 0,
+            ..Default::default()
+        };
+        let mut aggregator = Aggregator::with_limits(4, &limits);
+
+        feed_http2(
+            &mut aggregator,
+            vec![test_frame(
+                1,
+                0,
+                0x00,
+                b"partial".to_vec(),
+                test_event(8, 0xDEF, 1, 1),
+            )],
+        );
+        assert_eq!(aggregator.connection_metrics().pending_connection_count, 1);
+
+        std::thread::sleep(Duration::from_millis(20));
+        // The next parse result runs the periodic eviction tick (period 0 here).
+        let results = aggregator.process_result(ParseResult {
+            messages: Vec::new(),
+        });
+        assert!(results.is_empty());
+
+        assert_eq!(
+            aggregator.connection_metrics().pending_connection_count,
+            0,
+            "an idle http/2 stream must be dropped by the periodic sweep"
         );
     }
 }

@@ -386,6 +386,91 @@ fn test_get_token_timeseries_returns_buckets() {
     cleanup_db(&path);
 }
 
+/// A row whose output_tokens is NULL (interrupted / never-recorded output)
+/// still contributes its input tokens, so a bucket's total_tokens must equal
+/// input_tokens + output_tokens. The unguarded SUM(input + output) dropped the
+/// whole row from the total while input_tokens kept it, breaking the
+/// invariant total >= input.
+#[test]
+fn test_token_totals_survive_null_output_tokens() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_null_output_totals_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns,\
+                   provider, model, input_tokens, output_tokens,\
+                   agent_name, pid, status, event_json\
+                   ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,'complete','{}')";
+        conn.execute(
+            sql,
+            params![
+                "null-out",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                "openai",
+                "gpt-4",
+                100_i64,
+                None::<i64>,
+                "agent-n",
+                1_i32
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "full-row",
+                BASE_NS + STEP_NS,
+                BASE_NS + 2 * STEP_NS,
+                "openai",
+                "gpt-4",
+                50_i64,
+                25_i64,
+                "agent-n",
+                1_i32
+            ],
+        )
+        .unwrap();
+    }
+
+    let bucket = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 2 * STEP_NS, None, 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(bucket.input_tokens, 150, "NULL output must not hide input");
+    assert_eq!(bucket.output_tokens, 25);
+    assert_eq!(
+        bucket.total_tokens, 175,
+        "total must equal input + output, not drop NULL-output rows"
+    );
+
+    let model_bucket = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 2 * STEP_NS, None, 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(model_bucket.total_tokens, 175);
+
+    let summary = store.get_agent_token_summary().unwrap();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].input_tokens, 150);
+    assert_eq!(summary[0].output_tokens, 25);
+    assert_eq!(summary[0].total_tokens, 175);
+
+    drop(store);
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_token_timeseries_respects_requested_bucket_count() {
     // A span of 5 steps over 3 buckets floors bucket_ns to 5*STEP/3, and the
@@ -505,6 +590,73 @@ fn test_get_token_timeseries_zero_width_range_with_buckets() {
     assert_eq!(r[0].bucket_start_ns, BASE_NS);
     assert_eq!(r[0].input_tokens, 100);
     assert_eq!(r[0].output_tokens, 50);
+    cleanup_db(&path);
+}
+
+/// A NULL `model` and the literal `'unknown'` are one series: the select list
+/// labels both `COALESCE(model, 'unknown')`, and the dashboard folds the rows
+/// into a `Map` keyed by that label — overwriting, not summing
+/// (`dashboard/src/utils/timeseriesBuckets.ts`). Grouping on the raw column
+/// emitted two rows with the same `(bucket_start_ns, model)` key, so one of them
+/// was silently discarded. Both producers are live: a pending row enriched from
+/// its SSE body keeps `model = COALESCE(?2, model)` (NULL when the request
+/// carried none) while carrying real token counts, and a completed call whose
+/// body had no model is stored as the literal `'unknown'`.
+#[test]
+fn test_get_model_timeseries_merges_null_and_literal_unknown_model_rows() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_mts_unknown_model_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               status, event_json, process_name\
+               ) VALUES (?1,'llm_call',?2,?3,1000,'openai',?4,?5,?6,?7,'complete','{}','proc')";
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            sql,
+            params![
+                "call-null-model",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                None::<&str>,
+                5_i64,
+                2_i64,
+                7_i64
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "call-unknown-model",
+                BASE_NS + 1,
+                BASE_NS + STEP_NS,
+                "unknown",
+                11_i64,
+                4_i64,
+                15_i64
+            ],
+        )
+        .unwrap();
+    }
+
+    let rows = store
+        .get_model_timeseries(BASE_NS, BASE_NS + STEP_NS, None, 1)
+        .unwrap();
+    let unknown: Vec<_> = rows.iter().filter(|row| row.model == "unknown").collect();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "one row per (bucket, model); got {rows:?}"
+    );
+    assert_eq!(unknown[0].total_tokens, 22);
     cleanup_db(&path);
 }
 
@@ -2458,6 +2610,8 @@ fn test_enrich_pending_from_sse() {
         sse_event_count: Some(42),
         input_tokens: Some(999),
         output_tokens: Some(888),
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
     };
     store.enrich_pending_from_sse("call-5", &e).unwrap();
     let conn = store.conn.lock().unwrap();
@@ -2497,6 +2651,8 @@ fn test_enrich_pending_from_sse_records_tool_call_ids() {
         sse_event_count: Some(3),
         input_tokens: None,
         output_tokens: None,
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
     };
     store.enrich_pending_from_sse("call-5", &e).unwrap();
 
@@ -2535,6 +2691,8 @@ fn test_enrich_pending_from_sse_skips_completed_call() {
         sse_event_count: Some(42),
         input_tokens: Some(999),
         output_tokens: Some(888),
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
     };
     // call-1 is status='complete' in the fixture.
     store.enrich_pending_from_sse("call-1", &e).unwrap();
@@ -2562,6 +2720,112 @@ fn test_enrich_pending_from_sse_skips_completed_call() {
         )
         .unwrap();
     assert_eq!(ids, r#"["tc-1","tc-2"]"#);
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_enrich_pending_from_sse_records_usage_cache_counters() {
+    // Anthropic reports the cache counters in `message_start` usage, outside
+    // `input_tokens`, and bills them on top of it; the live path writes both
+    // the columns and the billed total. The drain enrichment forwarded only
+    // input/output tokens, so a drained Anthropic call kept NULL cache columns
+    // and a `total_tokens` that omitted the cache the provider bills:
+    // `/api/traces` dropped `cache_read_tokens`, the ATIF export lost
+    // `cached_tokens`, and the cache-less totals fed the timeseries and
+    // session-savings aggregates for the very rows that never complete.
+    let (store, path) = create_populated_store("enrich_sse_cache");
+    // What `GenAIBuilder::extract_sse_enrichment` yields for a drained
+    // Anthropic stream (message_start usage merged with message_delta).
+    let enrichment = SseEnrichment {
+        model: Some("claude-sonnet-4-5".to_string()),
+        trace_id: None,
+        provider: None,
+        output_messages: None,
+        sse_event_count: Some(2),
+        input_tokens: Some(10),
+        output_tokens: Some(5),
+        cache_creation_tokens: Some(1234),
+        cache_read_tokens: Some(24576),
+    };
+
+    store
+        .enrich_pending_from_sse("call-5", &enrichment)
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (cc, cr, total): (Option<i64>, Option<i64>, i64) = conn
+        .query_row(
+            "SELECT cache_creation_tokens, cache_read_tokens, total_tokens \
+             FROM genai_events WHERE call_id = 'call-5'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (cc, cr),
+        (Some(1234), Some(24576)),
+        "the drained call must keep the cache counters its stream reported"
+    );
+    assert_eq!(
+        total,
+        10 + 1234 + 24576 + 5,
+        "an anthropic drained call totals the billed input (input + cache) plus output"
+    );
+    drop(conn);
+    cleanup_db(&path);
+}
+
+/// A provider that already counts cached tokens inside its reported input
+/// must not have them added again by the drained-call total — the same rule
+/// `billed_input_col!` states for the aggregations over these rows.
+#[test]
+fn test_enrich_pending_from_sse_does_not_double_count_cached_input() {
+    let (store, path) = create_populated_store("enrich_sse_cache_openai");
+    // OpenAI-style usage: `prompt_tokens` already includes the 64 cached
+    // tokens reported under `prompt_tokens_details.cached_tokens`.
+    let enrichment = SseEnrichment {
+        model: Some("gpt-4o".to_string()),
+        trace_id: None,
+        provider: None,
+        output_messages: None,
+        sse_event_count: Some(2),
+        input_tokens: Some(100),
+        output_tokens: Some(7),
+        cache_creation_tokens: None,
+        cache_read_tokens: Some(64),
+    };
+
+    // Enrichment only reaches calls still pending; call-1 is the fixture's
+    // openai row, so mark it drained-pending first.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE genai_events SET status = 'pending' WHERE call_id = 'call-1'",
+            [],
+        )
+        .unwrap();
+    store
+        .enrich_pending_from_sse("call-1", &enrichment)
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (cr, total): (Option<i64>, i64) = conn
+        .query_row(
+            "SELECT cache_read_tokens, total_tokens \
+             FROM genai_events WHERE call_id = 'call-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cr, Some(64), "the reported cached part is still recorded");
+    assert_eq!(
+        total,
+        100 + 7,
+        "openai-style input already counts the cached part; adding it again would inflate the total"
+    );
     drop(conn);
     cleanup_db(&path);
 }
@@ -3507,5 +3771,126 @@ fn legacy_db_without_conversation_id_is_migrated_before_index_creation() {
         "the conversation_id index must exist, got {indexes:?}"
     );
     drop(conn);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Non-LLMCall events must land in `genai_events`: the INSERTs named a
+/// `timestamp_ns` column that the table does not have (the column is
+/// `start_timestamp_ns`, NOT NULL), so `store_event` returned Err and
+/// `flush` only logged — such events were silently dropped.
+#[test]
+fn non_llm_events_are_persisted_with_the_schema_timestamp_column() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_nonllm_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    store
+        .store_event(&GenAISemanticEvent::ToolUse(
+            crate::genai::semantic::ToolUse {
+                tool_use_id: "t1".to_string(),
+                timestamp_ns: 1_700_000_000_000_000_111,
+                tool_name: "read".to_string(),
+                arguments: serde_json::json!({}),
+                result: None,
+                duration_ns: None,
+                success: true,
+                error: None,
+                parent_llm_call_id: Some("call-1".to_string()),
+                pid: 42,
+            },
+        ))
+        .expect("a ToolUse event must be persisted");
+    store
+        .store_event(&GenAISemanticEvent::AgentInteraction(
+            crate::genai::semantic::AgentInteraction {
+                interaction_id: "i1".to_string(),
+                timestamp_ns: 1_700_000_000_000_000_222,
+                agent_name: "claude".to_string(),
+                interaction_type: "plan".to_string(),
+                content: "step".to_string(),
+                parent_llm_call_id: None,
+                pid: 42,
+            },
+        ))
+        .expect("an AgentInteraction event must be persisted");
+    store
+        .store_event(&GenAISemanticEvent::StreamChunk(
+            crate::genai::semantic::StreamChunk {
+                stream_id: "s1".to_string(),
+                chunk_index: 0,
+                timestamp_ns: 1_700_000_000_000_000_333,
+                content: "tok".to_string(),
+                parent_llm_call_id: "call-1".to_string(),
+                pid: 42,
+            },
+        ))
+        .expect("a StreamChunk event must be persisted");
+
+    let conn = store.conn.lock().unwrap();
+    let rows: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT event_type, start_timestamp_ns FROM genai_events \
+             WHERE event_type IN ('tool_use', 'agent_interaction', 'stream_chunk') \
+             ORDER BY start_timestamp_ns",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("tool_use".to_string(), 1_700_000_000_000_000_111),
+            ("agent_interaction".to_string(), 1_700_000_000_000_000_222),
+            ("stream_chunk".to_string(), 1_700_000_000_000_000_333),
+        ]
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `get_call_turn_indices` reads a nullable column as `String`, so one NULL
+/// `call_id` row fails the whole map — the sibling
+/// `get_tool_call_turn_indices` was hardened for exactly this shape and this
+/// function was missed.
+#[test]
+fn call_turn_indices_survive_a_null_call_id_row() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_turnidx_null_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO genai_events (event_type, call_id, session_id, start_timestamp_ns, event_json)
+             VALUES ('llm_call', 'call-a', 'sess-1', 100, '{}');
+             INSERT INTO genai_events (event_type, call_id, session_id, start_timestamp_ns, event_json)
+             VALUES ('llm_call', NULL, 'sess-1', 200, '{}');
+             INSERT INTO genai_events (event_type, call_id, session_id, start_timestamp_ns, event_json)
+             VALUES ('llm_call', 'call-b', 'sess-1', 300, '{}');",
+        )
+        .unwrap();
+    }
+
+    let indices = store
+        .get_call_turn_indices(&["sess-1"])
+        .expect("a NULL call_id row must not fail the whole map");
+    assert_eq!(indices.get("call-a"), Some(&1));
+    assert_eq!(indices.get("call-b"), Some(&3));
+    drop(store);
     let _ = std::fs::remove_file(&path);
 }

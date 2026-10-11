@@ -73,3 +73,35 @@ fn flagless_failure_keeps_text_heuristic() {
         "flag-less failure text must still be flagged"
     );
 }
+
+#[test]
+fn separator_only_id_echo_still_reaches_the_call() {
+    // `src/atif/converter.rs` pairs results to calls with the shared schema's
+    // tolerant `same_call_id` and then stores the *provider's* echo as
+    // `source_call_id`, so a document written by our own producer can pair
+    // `call_47ad96` with an echoed `call47ad96` (the measured Claude Code
+    // case the helper documents). A reader matching ids with `==` loses the
+    // producer's `is_error` flag for exactly those documents, reporting a
+    // failed call as a success to every accuracy detector and cost ledger.
+    let json = r#"{
+      "schema_version": "ATIF-v1.7",
+      "session_id": "s1",
+      "agent": {"name": "a", "version": "1"},
+      "steps": [
+        {"step_id": 1, "source": "agent", "timestamp": "2026-01-01T00:00:00Z",
+         "tool_calls": [{"tool_call_id": "call_47ad96", "function_name": "Bash",
+                         "arguments": {"command": "ls /nope"}}],
+         "observation": {"results": [{
+            "source_call_id": "call47ad96",
+            "content": "ls: cannot access '/nope': No such file or directory",
+            "extra": {"is_error": true}
+         }]}},
+        {"step_id": 2, "source": "agent", "timestamp": "2026-01-01T00:00:30Z",
+         "message": "done"}
+      ]
+    }"#;
+    assert!(
+        err_of(json),
+        "the producer's echo id differs only by a separator; the flag must still bind"
+    );
+}

@@ -387,13 +387,23 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.
+///
+/// The budget is counted in characters on both sides — the length test used to
+/// count bytes while the cut counted characters, so a CJK snippet with fewer than
+/// `max_len` characters but more bytes kept its whole text *and* gained an
+/// ellipsis, telling the reader it had been cut when it had not. The ellipsis
+/// also comes out of the budget rather than being appended on top of it: the
+/// result is the length the caller asked for, not three characters more.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
+    } else if max_len > 3 {
+        let kept: String = s.chars().take(max_len - 3).collect();
+        format!("{kept}...")
     } else {
-        let mut result: String = s.chars().take(max_len).collect();
-        result.push_str("...");
-        result
+        // Too small to hold the marker: keeping the bound matters more than
+        // signalling the cut.
+        s.chars().take(max_len).collect()
     }
 }
 
@@ -843,5 +853,25 @@ mod tests {
             sim > 0.7,
             "English similarity should still work, got {sim:.4}"
         );
+    }
+
+    /// The documented postcondition is "at most `max_len` characters", on both
+    /// the byte/character axis and the ellipsis.
+    #[test]
+    fn truncate_str_counts_characters_and_reserves_room_for_the_ellipsis() {
+        // 60 CJK characters, 180 bytes: within the character budget, so it must
+        // come back untouched rather than labelled as truncated.
+        let short_cjk = "偏".repeat(60);
+        assert_eq!(truncate_str(&short_cjk, 100), short_cjk);
+
+        // 101 CJK characters: cut to the budget, ellipsis included.
+        let long_cjk = "偏".repeat(101);
+        let truncated = truncate_str(&long_cjk, 100);
+        assert_eq!(truncated.chars().count(), 100);
+        assert!(truncated.starts_with(&"偏".repeat(97)));
+        assert!(truncated.ends_with("..."));
+
+        // A budget smaller than the marker keeps the bound.
+        assert_eq!(truncate_str("abcdef", 2).chars().count(), 2);
     }
 }

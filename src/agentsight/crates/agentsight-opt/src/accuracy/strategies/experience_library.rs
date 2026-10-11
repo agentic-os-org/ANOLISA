@@ -33,12 +33,14 @@ const REPEAT_MIN: usize = 3;
 /// An error retry chain must be at least this long.
 const ERROR_CHAIN_MIN: usize = 2;
 
-/// Backtrack command keywords (matched against lowercase cmd).
+/// Backtrack command keywords (matched against the lowercase command the
+/// call ran — see [`ExperienceLibraryStrategy::command_of`]).
 const BACKTRACK_KEYWORDS: &[&str] = &[
     "git reset",
     "git checkout --",
     "git revert",
     "git restore",
+    "git clean",
     "回退",
     "撤销",
 ];
@@ -89,6 +91,30 @@ pub struct ExperienceLibraryStrategy;
 impl ExperienceLibraryStrategy {
     pub fn new() -> Self {
         Self
+    }
+
+    /// The command a call ran, when its arguments carry one.
+    ///
+    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
+    /// command, so matching `BACKTRACK_KEYWORDS` against it reads *arguments*
+    /// as actions: an `Edit` quoting `git reset --hard`, a `Grep` for
+    /// `git stash`, or a `Read` of `docs/回退.md` all signalled a reversal
+    /// no tool ever ran. Read the command argument instead, and treat a call
+    /// that does not carry one as not a backtrack. Same shape as the merged
+    /// `verify_before_done` helper (2479ca543).
+    fn command_of(call: &ToolCallRecord) -> Option<String> {
+        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
+            return COMMAND_KEYS
+                .iter()
+                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+        }
+        // The summary is truncated, so a long argument string does not parse.
+        // A file-scoped call is never a command; for a command-scoped one the
+        // truncated summary *is* the command text.
+        call.target.is_none().then(|| call.cmd.clone())
     }
 
     /// Compute all inefficiency signals from tool calls.
@@ -161,9 +187,12 @@ impl ExperienceLibraryStrategy {
             }
         }
 
-        // 3. Backtrack commands.
+        // 3. Backtrack commands: the command a call ran, never its arguments.
         for c in calls {
-            let lc = c.cmd.to_lowercase();
+            let Some(command) = Self::command_of(c) else {
+                continue;
+            };
+            let lc = command.to_lowercase();
             if is_backtrack_cmd(&lc) {
                 signals.push(Signal {
                     id: format!("backtrack:{}", c.call_id),
@@ -465,5 +494,62 @@ mod tests {
         let signals = ExperienceLibraryStrategy::compute_signals(&calls);
         assert_eq!(signals.len(), 1);
         assert!(signals[0].id.starts_with("backtrack:"));
+    }
+
+    /// `cmd` is the arguments JSON (see `types.rs`), not a command: quoting a
+    /// reversal in a file's contents, grepping for one, or reading a path that
+    /// names one is not running it. Same class as verify_before_done
+    /// (2479ca543): the keyword table must not let arguments decide the
+    /// signal.
+    #[test]
+    fn arguments_mentioning_a_reversal_are_not_backtrack_signals() {
+        let calls = vec![
+            make_call(
+                "Edit",
+                r#"{"file_path":"src/a.rs","new_string":"git reset --hard"}"#,
+                1.0,
+                false,
+            ),
+            make_call(
+                "Grep",
+                r#"{"pattern":"git stash","path":"src"}"#,
+                2.0,
+                false,
+            ),
+            make_call("Read", r#"{"file_path":"docs/回退.md"}"#, 3.0, false),
+            make_call(
+                "Write",
+                r#"{"file_path":"todo.md","content":"撤销上次提交"}"#,
+                4.0,
+                false,
+            ),
+        ];
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            !signals.iter().any(|s| s.id.starts_with("backtrack:")),
+            "arguments that mention a reversal must not become backtrack signals: {signals:?}"
+        );
+    }
+
+    /// Both encodings a command-scoped call arrives in still signal: the
+    /// compact argument JSON (`command` key) and the truncated plain-text
+    /// summary a long command degrades to.
+    #[test]
+    fn backtrack_commands_still_signal_in_both_encodings() {
+        let calls = vec![
+            make_call("Bash", r#"{"command":"git revert HEAD~2"}"#, 1.0, false),
+            make_call("Bash", "git restore --source=HEAD~1 src/", 2.0, false),
+        ];
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        let backtracks: Vec<&str> = signals
+            .iter()
+            .filter(|s| s.id.starts_with("backtrack:"))
+            .map(|s| s.first_call_id.as_str())
+            .collect();
+        assert_eq!(
+            backtracks,
+            vec!["Bash_1", "Bash_2"],
+            "real reversals must still signal: {signals:?}"
+        );
     }
 }

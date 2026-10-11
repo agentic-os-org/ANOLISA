@@ -426,11 +426,24 @@ export const createCredentialBinding = (input: CredentialBindingInput) =>
     body: JSON.stringify(input),
   });
 
-export const fetchAgentProtectionPreview = (pid: number, directory?: string) => {
+export const fetchAgentProtectionPreview = async (
+  pid: number,
+  directory?: string,
+): Promise<AgentProtectionPreview> => {
   const query = directory ? `?directory=${encodeURIComponent(directory)}` : '';
-  return enforcementRequest<AgentProtectionPreview>(
+  const preview = await enforcementRequest<AgentProtectionPreview>(
     `/api/enforcement/agent-protection/${pid}${query}`,
   );
+  // The response is typed as an object, but a server that does not implement
+  // this route can answer `200` with a body of another shape — the macOS local
+  // viewer's `/api/*` catch-all returns `[]` — and the caller then stores
+  // `preview.source_paths` (undefined) as its source list, which the protection
+  // dialog renders with `.join`/`.length`. Rejecting here routes that into the
+  // callers' existing catch paths instead of a render-time crash.
+  if (!Array.isArray(preview?.source_paths)) {
+    throw new Error('protection preview is unavailable');
+  }
+  return preview;
 };
 
 export const detachEnforcementBinding = (bindingId: string) =>

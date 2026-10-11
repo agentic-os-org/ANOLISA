@@ -169,7 +169,8 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
             "response.output_text.delta"
             | "response.reasoning_text.delta"
             | "response.reasoning_summary_text.delta"
-            | "response.function_call_arguments.delta" => {
+            | "response.function_call_arguments.delta"
+            | "response.refusal.delta" => {
                 return non_empty_string(value.get("delta"));
             }
             "content_block_delta" => {
@@ -255,6 +256,12 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                     || part
                         .get("functionCall")
                         .is_some_and(|call| non_empty_string(call.get("name")))
+                    || part
+                        .get("inlineData")
+                        .is_some_and(|data| non_empty_string(data.get("data")))
+                    || part
+                        .get("executableCode")
+                        .is_some_and(|code| non_empty_string(code.get("code")))
             })
         });
     }
@@ -271,8 +278,10 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                 let message = choice.get("message");
                 non_empty_string(choice.get("text"))
                     || non_empty_string(message.and_then(|item| item.get("content")))
+                    || non_empty_string(message.and_then(|item| item.get("reasoning_content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
+                    || non_empty_string(delta.and_then(|item| item.get("refusal")))
                     || delta
                         .and_then(|item| item.get("tool_calls"))
                         .and_then(serde_json::Value::as_array)
@@ -442,9 +451,14 @@ mod latency_tests {
             "type": "response.output_text.delta",
             "delta": "hello"
         });
+        let refusal = serde_json::json!({
+            "type": "response.refusal.delta",
+            "delta": "I can't help with that."
+        });
         assert!(!event_has_meaningful_output(Some(&created)));
         assert!(!event_has_meaningful_output(Some(&empty)));
         assert!(event_has_meaningful_output(Some(&output)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
     }
 
     #[test]
@@ -456,8 +470,14 @@ mod latency_tests {
         let chat = serde_json::json!({
             "choices": [{"delta": {"content": "hello"}}]
         });
+        // A refusal-only stream still carries the model's answer, so its first
+        // delta is a first-output timestamp like any other.
+        let refusal = serde_json::json!({
+            "choices": [{"delta": {"refusal": "I can't help with that."}}]
+        });
         assert!(event_has_meaningful_output(Some(&anthropic)));
         assert!(event_has_meaningful_output(Some(&chat)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
     }
 
     /// The DashScope/Bailian native envelope nests its payload under `output`
@@ -527,6 +547,35 @@ mod latency_tests {
             ),
             sse_event(
                 r#"{"choices":[{"message":{"content":"Hello there!","tool_use":null}}]}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    /// A stream that thinks before it answers puts reasoning on the same
+    /// accumulated `choices[].message` shape it uses for content (the shape the
+    /// comment above the `choices` walk names for SysOM/Bailian Copilot), so a
+    /// reasoning-only frame is that stream's first output. The `delta` arm
+    /// dates `delta.reasoning_content` and the DashScope-native arm dates
+    /// `output.choices[].message.reasoning_content`, but the accumulated
+    /// message arm checked only `content`/`tool_use`: a thinking-first answer
+    /// kept the TTFT empty until its first content chunk, dating the stream
+    /// later than the model's first token.
+    #[test]
+    fn sysom_stream_dates_a_reasoning_only_message_chunk() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"","tool_use":null}}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"Let me check","tool_use":null}}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello there!","reasoning_content":"Let me check","tool_use":null}}]}"#,
                 300,
             ),
         ]);
@@ -621,5 +670,85 @@ mod latency_tests {
         ]);
 
         assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    /// Gemini image generation streams its answer as `inlineData` parts and
+    /// code execution as `executableCode` parts — neither carries `text`, so
+    /// the candidates arm above never dated them and those calls had no TTFT.
+    #[test]
+    fn recognizes_gemini_multimodal_output_parts() {
+        let image = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                "role": "model"}, "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let code = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_image = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": ""}}],
+                "role": "model"}, "finishReason": "STOP", "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
+        });
+        // The sandbox's execution result is not model output: it follows the
+        // model-authored executableCode part, so it must not date the stream
+        // on its own.
+        let execution_result = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                "role": "model"}, "index": 0}]
+        });
+
+        assert!(event_has_meaningful_output(Some(&image)));
+        assert!(event_has_meaningful_output(Some(&code)));
+        assert!(!event_has_meaningful_output(Some(&empty_image)));
+        assert!(!event_has_meaningful_output(Some(&execution_result)));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_image_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                    "role": "model"},"index":0}]}"#,
+                200,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_code_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}],
+                    "usageMetadata": {"promptTokenCount": 10}}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                    "role": "model"},"index":0}]}"#,
+                250,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                    "role": "model"},"index":0}]}"#,
+                400,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(250));
     }
 }

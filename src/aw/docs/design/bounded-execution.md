@@ -3,8 +3,9 @@
 [中文版](bounded-execution_zh.md)
 
 `aw-exec` runs one command with byte limits, an absolute deadline and cancellation.
-It provides the process transport shared by native hook commands and a future
-Provider Host. It does not depend on `aw-config`, `aw-core` or `aw-provider`.
+It provides the process transport shared by native hook commands and the
+[local Provider Host](provider-host.md). It does not depend on `aw-config`,
+`aw-core` or `aw-provider`.
 
 ## API and ownership
 
@@ -63,8 +64,9 @@ helper threads or reap unrelated children.
 The current delivery serves `tool.before` and `tool.after`. Scheduling remains
 with the native adapter: concurrent calls remain independent, sequential hooks
 remain sequential, and the library does not manufacture after events or approvals.
-Provider protocol integration, daemon/CLI wiring and four-framework adoption
-tests are separate increments. No new `aw.yaml` fields or Core profiles are needed
+`aw-host` composes this transport with the Provider protocol; daemon/CLI wiring
+and four-framework adoption tests remain separate increments. Native command
+callers continue to use `aw-exec` directly. No new `aw.yaml` fields or Core profiles are needed
 for this library.
 
 The extension boundary separates transport, policy evaluation and effect
