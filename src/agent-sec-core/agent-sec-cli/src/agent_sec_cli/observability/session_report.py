@@ -95,19 +95,15 @@ def build_session_report(
         security_hint = "security-events DB not found"
     else:
         try:
-            candidates = sec_reader.query_correlation_candidates(
-                session_id=session_id,
-                categories=_ALL_CATEGORIES,
-            )
-            for c in candidates:
-                ev = c.event
-                cat = ev.category
-                result = ev.result
-                if cat not in security:
-                    security[cat] = {}
-                security[cat][result] = security[cat].get(result, 0) + 1
-            if not security:
-                security_hint = "security hooks may not pass session_id yet"
+            # Correlation candidates are capped; session totals must include
+            # late failures without loading every event into memory.
+            counts = sec_reader.count_session_results(session_id, _ALL_CATEGORIES)
+            if counts is None:
+                security_hint = "failed to query security events"
+            else:
+                security = counts
+                if not security:
+                    security_hint = "security hooks may not pass session_id yet"
         except Exception:
             security_hint = "failed to query security events"
 
