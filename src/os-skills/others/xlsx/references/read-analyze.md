@@ -27,6 +27,13 @@ python3 SKILL_DIR/scripts/xlsx_reader.py input.xlsx --json          # machine-re
 
 Supported formats: `.xlsx`, `.xlsm`, `.csv`, `.tsv`. The script tries multiple encodings for CSV (utf-8-sig, gbk, utf-8, latin-1).
 
+Use `--max-rows N` to analyze at most N data rows per selected sheet/table.
+The positive limit is pushed into pandas IO with one extra row for truncation detection.
+JSON includes `sampling` with per-sheet rows/truncation; text reports label analyzed
+rows. Structure, quality and statistics describe the first records only, so do not
+present sampled results as full-file totals or quality. Omit the flag for the existing
+full-data schema. It is not random sampling or a byte-memory guarantee.
+
 ### Step 2 — Custom Analysis with pandas
 
 Load data and perform the analysis the user requests:

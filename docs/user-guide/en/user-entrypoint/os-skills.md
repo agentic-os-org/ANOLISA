@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## Bounded spreadsheet analysis
+
+Inspect a large table with a predictable number of analyzed records using `--max-rows N`. The positive limit applies independently to each selected Excel worksheet or to the single CSV/TSV table:
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py export.csv --max-rows 1000 --json
+python3 SKILL_DIR/scripts/xlsx_reader.py workbook.xlsx --sheet Sales --max-rows 1000 --quality
+```
+
+The reader requests at most `N+1` data records from pandas, uses the extra record to detect truncation, then analyzes the first N. Truncated tables are reread with N records so the lookahead cannot alter analyzed values or column types. Headers are excluded from the budget; a quoted CSV field spanning lines still counts as one record. Empty, shorter and exactly N-row tables report no truncation. This bounds loaded dataframe rows, rather than guaranteeing a byte-memory limit for workbook parsing.
+
+When a limit is supplied, JSON gains `sampling` with `scope: analyzed_rows_only`, `max_rows_per_sheet`, and each sheet's `rows_analyzed`/`truncated` values. The human report labels analyzed rows and worksheets with additional data. Structure, null percentages, quality findings and statistics all describe the analyzed prefix; the reader does not infer full-file row totals or quality from that prefix. Errors or encoding problems beyond the records read may remain unobserved.
+
+Omit the flag for the existing full-data behavior and unchanged report schema. `--sheet`, `--quality`, Unicode/quoted records and automatic text decoding remain compatible; original file bytes stay unchanged. This mode selects the first rows and is not a random or representative sample.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

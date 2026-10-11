@@ -84,6 +84,23 @@ confirm_destructive = true
 
 ---
 
+## 有界电子表格分析
+
+通过 `--max-rows N` 以可预测的分析记录数检查大表。此正整数上限独立用于每个选中的 Excel 工作表，或单个 CSV/TSV 表格：
+
+```bash
+python3 SKILL_DIR/scripts/xlsx_reader.py export.csv --max-rows 1000 --json
+python3 SKILL_DIR/scripts/xlsx_reader.py workbook.xlsx --sheet Sales --max-rows 1000 --quality
+```
+
+读取器向 pandas 最多请求 `N+1` 条数据记录，用额外记录检测截断，然后分析前 N 条。截断表会按 N 条记录重新读取，避免用于检测的额外记录改变已分析值或列类型。表头不占预算；跨行的带引号 CSV 字段仍按一条记录计数。空表、较短表和恰好 N 行的表报告未截断。此功能限制载入的 DataFrame 行数，而不保证工作簿解析的字节内存上限。
+
+提供上限后，JSON 增加 `sampling`，包含 `scope: analyzed_rows_only`、`max_rows_per_sheet` 以及每张表的 `rows_analyzed`/`truncated`。文本报告标明分析行数及仍有额外数据的工作表。结构、缺失值百分比、质量发现与统计都只描述已分析的前缀，读取器不会据此推断完整文件的行数或质量。已读记录以外的错误或编码问题可能不会被发现。
+
+省略此选项时保持原有完整数据行为与报告结构。与 `--sheet`、`--quality`、Unicode、带引号记录及自动文本解码兼容，原文件字节保持不变。此模式选择前几行，不是随机或代表性抽样。
+
+---
+
 ## 参见
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

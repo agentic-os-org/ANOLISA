@@ -27,13 +27,56 @@ from pathlib import Path
 # Format detection and loading
 # ---------------------------------------------------------------------------
 
-def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dict:
+
+def _bounded_tables(
+    tables: dict, max_rows: int | None, truncated_titles: set | None = None
+) -> dict:
+    if max_rows is None:
+        return tables
+    bounded = {}
+    for title, frame in tables.items():
+        truncated = (
+            title in truncated_titles if truncated_titles is not None else len(frame) > max_rows
+        )
+        limited = frame.head(max_rows).copy() if truncated else frame
+        if hasattr(frame, "_reader_encoding"):
+            limited._reader_encoding = frame._reader_encoding
+        limited.attrs["reader_row_limit"] = max_rows
+        limited.attrs["reader_truncated"] = truncated
+        bounded[title] = limited
+    return bounded
+
+
+def _sampling_scope(sheets: dict, max_rows: int | None) -> dict | None:
+    if max_rows is None:
+        return None
+    return {
+        "scope": "analyzed_rows_only",
+        "max_rows_per_sheet": max_rows,
+        "sheets": {
+            title: {
+                "rows_analyzed": len(frame),
+                "truncated": frame.attrs["reader_truncated"],
+            }
+            for title, frame in sheets.items()
+        },
+    }
+
+
+def detect_and_load(
+    file_path: str, sheet_name_filter: str | None = None, *, max_rows: int | None = None
+) -> dict:
     """
     Load file into {sheet_name: DataFrame} dict.
     CSV/TSV files are mapped to a single-key dict using the file stem as key.
 
     Raises ValueError for unsupported formats or encoding failures.
     """
+    if max_rows is not None and (
+        isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
+    ):
+        raise ValueError("--max-rows must be a positive integer")
+    read_rows = max_rows + 1 if max_rows is not None else None
     try:
         import pandas as pd
     except ImportError:
@@ -49,12 +92,17 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
 
     if suffix in (".xlsx", ".xlsm"):
         target = sheet_name_filter if sheet_name_filter else None
-        result = pd.read_excel(file_path, sheet_name=target)
+        result = pd.read_excel(file_path, sheet_name=target, nrows=read_rows)
         # pd.read_excel with sheet_name=None returns dict; with a name, returns DataFrame
-        if isinstance(result, dict):
-            return result
-        else:
-            return {sheet_name_filter: result}
+        tables = result if isinstance(result, dict) else {sheet_name_filter: result}
+        truncated = set()
+        if max_rows is not None:
+            for title, frame in tables.items():
+                if len(frame) > max_rows:
+                    truncated.add(title)
+                    # The lookahead record must not influence analyzed values or dtypes.
+                    tables[title] = pd.read_excel(file_path, sheet_name=title, nrows=max_rows)
+        return _bounded_tables(tables, max_rows, truncated)
 
     elif suffix in (".csv", ".tsv"):
         sep = "\t" if suffix == ".tsv" else ","
@@ -63,9 +111,14 @@ def detect_and_load(file_path: str, sheet_name_filter: str | None = None) -> dic
         for enc in encodings:
             try:
                 import pandas as pd
-                df = pd.read_csv(file_path, sep=sep, encoding=enc)
+                df = pd.read_csv(file_path, sep=sep, encoding=enc, nrows=read_rows)
+                truncated = max_rows is not None and len(df) > max_rows
+                if truncated:
+                    df = pd.read_csv(file_path, sep=sep, encoding=enc, nrows=max_rows)
                 df._reader_encoding = enc  # attach metadata (non-standard, for reporting)
-                return {path.stem: df}
+                return _bounded_tables(
+                    {path.stem: df}, max_rows, {path.stem} if truncated else set()
+                )
             except (UnicodeDecodeError, Exception) as e:
                 last_error = e
                 continue
@@ -237,6 +290,7 @@ def render_report(
     structure: dict,
     quality: dict,
     stats: dict,
+    sampling: dict | None = None,
 ) -> str:
     lines = []
     p = lines.append
@@ -249,7 +303,17 @@ def render_report(
     sheet_list = list(structure.keys())
     total_rows = sum(s["shape"]["rows"] for s in structure.values())
     p(f"\nSheets ({len(sheet_list)}): {', '.join(sheet_list)}")
-    p(f"Total rows across all sheets: {total_rows:,}")
+    if sampling is None:
+        p(f"Total rows across all sheets: {total_rows:,}")
+    else:
+        limit = sampling["max_rows_per_sheet"]
+        p(f"Analysis scope: first {limit} data rows per sheet; analyzed rows only.")
+        p(f"Analyzed rows across all sheets: {total_rows:,}")
+        truncated = [title for title, info in sampling["sheets"].items() if info["truncated"]]
+        if truncated:
+            p(f"Additional rows exist beyond the limit in: {', '.join(truncated)}")
+        else:
+            p("No additional rows were found beyond the limit.")
 
     for sheet_name, info in structure.items():
         p(f"\n{'─' * 50}")
@@ -307,7 +371,11 @@ def render_report(
     p("\n" + "=" * 60)
     quality_issue_count = sum(len(v) for v in quality.values())
     if quality_issue_count == 0:
-        p("RESULT: No data quality issues detected.")
+        p(
+            "RESULT: No data quality issues detected."
+            if sampling is None
+            else "RESULT: No data quality issues detected in analyzed rows."
+        )
     else:
         p(f"RESULT: {quality_issue_count} data quality issue(s) found. See details above.")
     p("=" * 60)
@@ -318,6 +386,16 @@ def render_report(
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
+
+def positive_max_rows(value: str) -> int:
+    try:
+        rows = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--max-rows must be a positive integer") from error
+    if rows <= 0:
+        raise argparse.ArgumentTypeError("--max-rows must be a positive integer")
+    return rows
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -332,14 +410,19 @@ def main() -> None:
         "--quality", action="store_true",
         help="Run data quality audit only (skip stats)"
     )
+    parser.add_argument(
+        "--max-rows", type=positive_max_rows, metavar="N",
+        help="Analyze at most N data rows per sheet and label the report scope"
+    )
     args = parser.parse_args()
 
     try:
-        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet)
+        sheets = detect_and_load(args.file, sheet_name_filter=args.sheet, max_rows=args.max_rows)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
+    sampling = _sampling_scope(sheets, args.max_rows)
     structure = explore_structure(sheets)
     quality = audit_quality(sheets)
     stats = {} if args.quality else compute_stats(sheets)
@@ -351,10 +434,12 @@ def main() -> None:
             "quality": quality,
             "stats": stats,
         }
+        if sampling is not None:
+            output["sampling"] = sampling
         # Convert preview records to serializable form (handle non-JSON types)
         print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
     else:
-        report = render_report(args.file, structure, quality, stats)
+        report = render_report(args.file, structure, quality, stats, sampling=sampling)
         print(report)
 
 
