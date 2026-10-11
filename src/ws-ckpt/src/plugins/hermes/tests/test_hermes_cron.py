@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch, call
 
+import pytest
+
+import hermes.cron
 from hermes.cron import (
     validate_cron_expr,
     parse_schedules_update,
@@ -170,12 +173,10 @@ class TestWriteCrontab:
 
 
 class TestCrontabManagerSync:
-    @patch("hermes.cron.os.close")
-    @patch("hermes.cron.os.open", return_value=99)
-    @patch("hermes.cron.fcntl.flock")
     @patch("hermes.cron._write_crontab", return_value=True)
     @patch("hermes.cron._read_crontab")
-    def test_replaces_old_entries(self, mock_read, mock_write, _flock, _open, _close):
+    def test_replaces_old_entries(self, mock_read, mock_write, tmp_path, monkeypatch):
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(tmp_path / "cron.lock"))
         old_line = _build_cron_line("/ws", "0 * * * *")
         mock_read.return_value = ["# comment", old_line]
         result = CrontabManager.sync("/ws", ["5 4 * * *"])
@@ -185,26 +186,121 @@ class TestCrontabManagerSync:
         assert not any("0 * * * *" in l and "ws-ckpt" in l for l in written)
         assert "# comment" in written
 
-    @patch("hermes.cron.os.close")
-    @patch("hermes.cron.os.open", return_value=99)
-    @patch("hermes.cron.fcntl.flock")
     @patch("hermes.cron._read_crontab", return_value=None)
-    def test_read_failure(self, _read, _flock, _open, _close):
+    def test_read_failure(self, _read, tmp_path, monkeypatch):
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(tmp_path / "cron.lock"))
         assert CrontabManager.sync("/ws", ["0 * * * *"]) is False
 
 
 class TestCrontabManagerRemove:
-    @patch("hermes.cron.os.close")
-    @patch("hermes.cron.os.open", return_value=99)
-    @patch("hermes.cron.fcntl.flock")
     @patch("hermes.cron._write_crontab", return_value=True)
     @patch("hermes.cron._read_crontab")
-    def test_removes_entries(self, mock_read, mock_write, _flock, _open, _close):
+    def test_removes_entries(self, mock_read, mock_write, tmp_path, monkeypatch):
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(tmp_path / "cron.lock"))
         old_line = _build_cron_line("/ws", "0 * * * *")
         mock_read.return_value = [old_line, "other line"]
         CrontabManager.remove("/ws")
         written = mock_write.call_args[0][0]
         assert written == ["other line"]
+
+
+class TestCrontabLock:
+    """The lock must follow the OpenClaw plugin's mkdir protocol.
+
+    Both plugins share the lock path; OpenClaw takes it with ``mkdir``.
+    The old flock-on-a-file scheme crashed with ``IsADirectoryError``
+    whenever an OpenClaw lock directory existed at that path.
+    """
+
+    def _fake_clock(self, monkeypatch):
+        """Replace the retry clock so the 5 s window passes instantly."""
+        ticks = {"n": 0}
+
+        def fake_monotonic():
+            ticks["n"] += 1
+            return ticks["n"] * 1.0
+
+        monkeypatch.setattr(hermes.cron.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(hermes.cron.time, "sleep", lambda _s: None)
+
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab", return_value=[])
+    def test_openclaw_lock_directory_never_crashes_sync(
+        self, _read, _write, tmp_path, monkeypatch
+    ):
+        lock = tmp_path / "cron.lock"
+        lock.mkdir()  # what the OpenClaw plugin (or a crashed holder) leaves
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(lock))
+        self._fake_clock(monkeypatch)
+
+        assert CrontabManager.sync("/ws", ["0 * * * *"]) is True
+
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab", return_value=[])
+    def test_timed_out_caller_keeps_foreign_lock_directory(
+        self, _read, _write, tmp_path, monkeypatch
+    ):
+        lock = tmp_path / "cron.lock"
+        lock.mkdir()
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(lock))
+        self._fake_clock(monkeypatch)
+
+        CrontabManager.sync("/ws", ["0 * * * *"])
+
+        assert lock.is_dir(), "non-owner must not evict the active holder's lock"
+
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab", return_value=[])
+    def test_owner_removes_lock_directory_after_operation(
+        self, _read, _write, tmp_path, monkeypatch
+    ):
+        lock = tmp_path / "cron.lock"
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(lock))
+
+        assert CrontabManager.sync("/ws", ["0 * * * *"]) is True
+        assert not lock.exists(), "owner must release the lock directory"
+
+    @patch("hermes.cron._write_crontab", return_value=True)
+    @patch("hermes.cron._read_crontab", return_value=[])
+    def test_unwritable_lock_parent_fails_open(
+        self, _read, _write, tmp_path, monkeypatch
+    ):
+        lock = tmp_path / "cron.lock"
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(lock))
+        self._fake_clock(monkeypatch)
+
+        def deny(_path):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(hermes.cron.os, "mkdir", deny)
+        assert CrontabManager.sync("/ws", ["0 * * * *"]) is True
+        assert not lock.exists()
+
+    def test_lock_directory_serializes_concurrent_syncs(self, tmp_path, monkeypatch):
+        """Two syncs in one process observe a single mkdir window at a time."""
+        lock = tmp_path / "cron.lock"
+        monkeypatch.setattr(hermes.cron, "_LOCK_PATH", str(lock))
+        seen = []
+        read_calls = {"n": 0}
+
+        def read():
+            read_calls["n"] += 1
+            seen.append(f"read-{read_calls['n']}")
+            return []
+
+        def write(lines):
+            seen.append(f"write-{read_calls['n']}")
+            return True
+
+        with patch("hermes.cron._read_crontab", side_effect=read), patch(
+            "hermes.cron._write_crontab", side_effect=write
+        ):
+            assert CrontabManager.sync("/ws", ["0 * * * *"]) is True
+            assert CrontabManager.sync("/ws", ["0 * * * *"]) is True
+
+        # Each sync ran its crontab read-modify-write strictly inside its own
+        # lock ownership window.
+        assert seen == ["read-1", "write-1", "read-2", "write-2"]
 
 
 class TestSyncWithRetry:
@@ -257,12 +353,8 @@ class TestMigrate:
 
 
 class TestListInstalled:
-    @patch("hermes.cron.os.close")
-    @patch("hermes.cron.os.open", return_value=99)
-    @patch("hermes.cron.fcntl.flock")
-    @patch("hermes.cron._write_crontab", return_value=True)
     @patch("hermes.cron._read_crontab")
-    def _sync_then_list(self, ws, schedules, mock_read, mock_write, *_):
+    def _sync_then_list(self, ws, schedules, mock_read):
         lines = [_build_cron_line(ws, s) for s in schedules]
         lines.append("# unrelated")
         mock_read.return_value = lines
