@@ -2049,17 +2049,56 @@ fn irqs_forced_threaded(cmdline_path: &str, version_path: &str) -> bool {
         //
         // The scan stops at the separator: a token behind it is an init
         // argument the kernel never reads as a parameter.
-        if cmdline
-            .split_whitespace()
-            .take_while(|t| *t != "--")
-            .any(|t| t == "threadirqs" || t.starts_with("threadirqs="))
-        {
+        if cmdline_has_threadirqs(&cmdline) {
             return true;
         }
     }
     match std::fs::read_to_string(version_path) {
         Ok(version) => version.contains("PREEMPT_RT"),
         Err(_) => false,
+    }
+}
+
+// Linux next_arg keeps whitespace inside double quotes and removes a leading
+// quote. Only parsed parameter names decide; a value's -- is never a separator.
+fn cmdline_has_threadirqs(mut cmdline: &str) -> bool {
+    loop {
+        cmdline = cmdline.trim_start_matches([' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}']);
+        if cmdline.is_empty() {
+            return false;
+        }
+        let mut in_quote = false;
+        let end = cmdline
+            .char_indices()
+            .find_map(|(index, ch)| {
+                if ch == '"' {
+                    in_quote = !in_quote;
+                } else if !in_quote
+                    && matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000b}' | '\u{000c}')
+                {
+                    return Some(index);
+                }
+                None
+            })
+            .unwrap_or(cmdline.len());
+        let token = &cmdline[..end];
+        cmdline = &cmdline[end..];
+        let quoted = token.starts_with('"');
+        let token = token.strip_prefix('"').unwrap_or(token);
+        let (name, has_value) = token
+            .split_once('=')
+            .map_or((token, false), |(name, _)| (name, true));
+        let name = if quoted && !has_value {
+            token.strip_suffix('"').unwrap_or(token)
+        } else {
+            name
+        };
+        if name == "--" && !has_value {
+            return false;
+        }
+        if name == "threadirqs" {
+            return true;
+        }
     }
 }
 
@@ -9380,6 +9419,55 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quoted_boot_parameters_preserve_rq_affinity_decisions() {
+        let dir = std::env::temp_dir().join(format!(
+            "ktuner_cmdline_quotes_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let version = dir.join("version");
+        std::fs::write(&version, "Linux version 6.6.0 #1 SMP PREEMPT_DYNAMIC\n").unwrap();
+        let cmdline = dir.join("cmdline");
+        let mut info = make_test_info();
+        info.numa_nodes = 2;
+        info.disks[0].rq_affinity = 0;
+        let cases = [
+            (r#"foo="a threadirqs b""#, true),
+            (r#"foo="a threadirqs=0 b""#, true),
+            (r#"foo="a -- b" threadirqs"#, false),
+            (r#""threadirqs""#, false),
+            (r#""threadirqs=0""#, false),
+            (r#"foo="threadirqs""#, true),
+            (r#"threadirqs="a -- b""#, false),
+            ("-- threadirqs", true),
+            ("threadirqs=0", false),
+            ("root=/dev/sda1", true),
+            ("'threadirqs'", true),
+            (r#"foo="a \" threadirqs"#, false),
+            ("\u{000b}threadirqs\t", false),
+            (r#""--" threadirqs"#, true),
+            ("--=value threadirqs", false),
+        ];
+        for (content, expect_advice) in cases {
+            std::fs::write(&cmdline, content).unwrap();
+            let mut recs = Vec::new();
+            eval_rq_affinity_at(
+                &info,
+                &mut recs,
+                cmdline.to_str().unwrap(),
+                version.to_str().unwrap(),
+            );
+            assert_eq!(
+                recs.iter().any(|r| r.param.contains("rq_affinity")),
+                expect_advice,
+                "{content:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

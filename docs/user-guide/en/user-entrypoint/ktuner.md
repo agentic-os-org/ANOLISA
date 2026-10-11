@@ -10,6 +10,8 @@ ktuner is a rule engine, not an LLM: every recommendation comes from a hard-code
 
 It is designed to be driven by cosh and other ANOLISA-compatible agents as a tool, but the CLI is equally usable by hand.
 
+Disk `rq_affinity` advice respects `threadirqs` boot parameters and PREEMPT_RT. Quoted parameter values do not introduce flags or a `--` separator; parameters after the actual separator are arguments to init.
+
 ---
 
 ## Installation

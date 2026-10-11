@@ -10,6 +10,8 @@ ktuner 是规则引擎，不是 LLM：每条建议都来自读取 `/proc/sys` �
 
 它设计为被 cosh 及其他 ANOLISA 兼容 Agent 作为工具调用，但命令行同样可以手动使用。
 
+磁盘 `rq_affinity` 建议会考虑 `threadirqs` 启动参数和 PREEMPT_RT。引号内的参数值不会引入独立 flag 或 `--` 分隔符；实际分隔符后的参数属于 init。
+
 ---
 
 ## 安装
