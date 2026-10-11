@@ -172,12 +172,18 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
     # 2. <row r="N"> and <c r="XN"> inside sheetData
     sheet_data = root.find(_tag("sheetData"))
     if sheet_data is not None:
-        rows_to_reorder = []
+        rows_to_remove = []
         for row_el in list(sheet_data):
             r_str = row_el.get("r")
             if r_str is None:
                 continue
             r = int(r_str)
+            if delta < 0 and at <= r < at - delta:
+                # Rows inside the deleted range are removed, not renumbered:
+                # keeping them (shifted up) produced duplicate row numbers
+                # and duplicate cell refs with the rows already above `at`.
+                rows_to_remove.append(row_el)
+                continue
             if r >= at:
                 new_r = max(1, r + delta)
                 row_el.set("r", str(new_r))
@@ -199,6 +205,10 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
                     if new_f != f_el.text:
                         f_el.text = new_f
                         changes += 1
+
+        for row_el in rows_to_remove:
+            sheet_data.remove(row_el)
+            changes += 1
 
     # 3. <mergeCell ref="A5:C7">
     for mc in root.iter(_tag("mergeCell")):
