@@ -476,36 +476,39 @@ export class BtrfsManager {
    * Expected format: a JSON array of snapshot objects.
    */
   private parseSnapshotList(stdout: string): SnapshotInfo[] {
-    if (!stdout.trim()) return [];
-
+    let data: unknown;
     try {
-      const data = JSON.parse(stdout);
-      if (Array.isArray(data)) {
-        return data.map((item: Record<string, unknown>) => {
-          // Fields live under item.meta in the current CLI format;
-          // fall back to top-level for backward compatibility.
-          const meta = (item.meta ?? {}) as Record<string, unknown>;
-          return {
-            snapshot: String(item.snapshot ?? item.id ?? ""),
-            message: (meta.message ?? item.message) ? String(meta.message ?? item.message) : undefined,
-            metadata: (meta.metadata ?? item.metadata) as Record<string, unknown> | undefined,
-            createdAt: String(
-              meta.created_at ?? meta.createdAt
-              ?? item.created_at ?? item.createdAt
-              ?? new Date().toISOString(),
-            ),
-            detail: item.detail === "summary" ? "summary" : "full",
-            omittedFields: Array.isArray(item.omitted_fields)
-              ? item.omitted_fields.map(String)
-              : undefined,
-          };
-        });
-      }
-      return [];
+      data = JSON.parse(stdout);
     } catch {
-      console.warn(`[ws-ckpt] Failed to parse snapshot list output: ${stdout.substring(0, 200)}`);
-      return [];
+      throw new Error("Invalid snapshot list JSON");
     }
+    if (!Array.isArray(data)) {
+      throw new Error("Invalid snapshot list: expected an array");
+    }
+    return data.map((item: Record<string, unknown>, index: number) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)
+          || typeof (item.snapshot ?? item.id) !== "string"
+          || !(item.snapshot ?? item.id)) {
+        throw new Error(`Invalid snapshot list entry at index ${index}`);
+      }
+      // Fields live under item.meta in the current CLI format;
+      // fall back to top-level for backward compatibility.
+      const meta = (item.meta ?? {}) as Record<string, unknown>;
+      return {
+        snapshot: String(item.snapshot ?? item.id ?? ""),
+        message: (meta.message ?? item.message) ? String(meta.message ?? item.message) : undefined,
+        metadata: (meta.metadata ?? item.metadata) as Record<string, unknown> | undefined,
+        createdAt: String(
+          meta.created_at ?? meta.createdAt
+          ?? item.created_at ?? item.createdAt
+          ?? new Date().toISOString(),
+        ),
+        detail: item.detail === "summary" ? "summary" : "full",
+        omittedFields: Array.isArray(item.omitted_fields)
+          ? item.omitted_fields.map(String)
+          : undefined,
+      };
+    });
   }
 
 }
