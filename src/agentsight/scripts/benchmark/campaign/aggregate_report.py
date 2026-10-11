@@ -385,20 +385,28 @@ def write_recovery(
     ]
     outcomes: dict[tuple[str, int], dict[str, Any]] = {}
     for (version, repetition), phases in sorted(grouped.items()):
-        overload = phases.get("overload")
-        recover = phases.get("recover")
+        overload = (
+            campaign_evidence.summary_of_phase(phases, "overload")
+            if "overload" in phases
+            else {}
+        )
+        recover = (
+            campaign_evidence.summary_of_phase(phases, "recover")
+            if "recover" in phases
+            else {}
+        )
         outcome = campaign_evidence.recovery_outcome(phases, settings, thresholds)
         outcomes[(version, repetition)] = outcome
         seconds = outcome["seconds"]
         lines.append(
             f"| {version}/{repetition} | "
-            f"{display(nested(overload[1]['summary'], 'resources', 'rss_mb', 'max') if overload else None, ' MB')} | "
+            f"{display(nested(overload, 'resources', 'rss_mb', 'max'), ' MB')} | "
             f"{display(seconds.get('effective_qps'), 's')}/"
             f"{display(seconds.get('latency_p99_ms'), 's')}/"
             f"{display(seconds.get('rss_mb'), 's')} | "
             f"{display(seconds.get('channel_length'), 's')}/"
             f"{display(seconds.get('connection_cache_bytes'), 's')} | "
-            f"{ratio_display(nested(recover[1]['summary'], 'trace_completeness') if recover else None)} | "
+            f"{ratio_display(nested(recover, 'trace_completeness'))} | "
             f"{outcome['verdict']} |"
         )
     if not grouped:
