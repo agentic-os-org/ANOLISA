@@ -178,8 +178,8 @@ def _fmt_is_comma(num_fmt_id: int, num_fmts: dict) -> bool:
 def _looks_like_year(value_text: str) -> bool:
     """True if value is a 4-digit year between 1900 and 2100."""
     try:
-        v = int(float(value_text))
-        return 1900 <= v <= 2100
+        v = float(value_text)
+        return v.is_integer() and 1900 <= v <= 2100
     except (ValueError, TypeError):
         return False
 
