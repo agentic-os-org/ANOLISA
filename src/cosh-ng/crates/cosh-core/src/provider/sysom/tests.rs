@@ -220,7 +220,7 @@ fn build_request_preserves_user_provided_secrets() {
             access_key_secret: "test-secret".to_string(),
             security_token: None,
         }),
-        is_sts: false,
+        refresh_from_ecs_metadata: false,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
     };
@@ -242,7 +242,7 @@ fn test_provider() -> SysomProvider {
             access_key_secret: "test-secret".to_string(),
             security_token: None,
         }),
-        is_sts: false,
+        refresh_from_ecs_metadata: false,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
     }
