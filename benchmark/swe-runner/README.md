@@ -409,6 +409,9 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Approximate tool-output token metrics use `cl100k_base` and count literal
+tokenizer markers, such as `<|endoftext|>`, as ordinary text.
+
 Analyze existing traces:
 
 ```bash

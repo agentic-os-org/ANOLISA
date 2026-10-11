@@ -399,6 +399,9 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+工具输出的近似 token 指标使用 `cl100k_base`，将 `<|endoftext|>` 等字面
+tokenizer 标记按普通文本计数。
+
 分析已有 trace：
 
 ```bash
