@@ -347,7 +347,10 @@ fn toon_candidate(value: &Value, min_chars: usize) -> Option<String> {
     }
     let encoded = toon_format::encode_default(value).ok()?;
     let candidate = encoded.trim_end().to_owned();
-    (!candidate.is_empty()).then_some(candidate)
+    // TOON's numeric domain can be narrower than JSON's. A shorter encoding
+    // must retain values and types before it can replace the exact JSON tree.
+    let decoded: Value = toon_format::decode_default(&candidate).ok()?;
+    (!candidate.is_empty() && decoded == *value).then_some(candidate)
 }
 
 fn strictly_smaller(candidate: &str, baseline: &str) -> bool {
