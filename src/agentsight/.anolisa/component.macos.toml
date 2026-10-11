@@ -1,6 +1,6 @@
 [component]
 name = "agentsight"
-version = "0.13.1"
+version = "0.14.0"
 layer = "runtime"
 domain = "observability"
 display_name = "AgentSight"

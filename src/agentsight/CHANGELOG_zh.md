@@ -1,5 +1,20 @@
 # 更新日志
 
+## 0.14.0
+
+### 新功能
+- 统一 SQLite 存储总容量上限（默认 2200 MB），优先裁剪最大的数据库；维护任务会重读该上限，无需重启。
+
+### 修复
+- 修正 Anthropic、Gemini、Codex 与 Responses provider 的流式内容、推理、工具调用、响应 ID、结束原因和 token 用量解析及统计。
+- 提升 Agent 发现、轨迹过滤、复用标签、语义搜索、Dashboard 指标、节省率和中断聚合的准确性与稳定性。
+- 加强 enforcement、凭证发现、IMDSv2、BPF 轮询、进程重启、OOM 检测与审计/事件校验。
+- 使 SQLite 维护、存储预算、UTF-8、SSE/HPACK 解析及时间处理能够应对异常和边界输入。
+- 支持旧内核 enforcement、inode guard 包装标签、旧 function_call 工具请求及更多进程/文件引用格式。
+
+### 测试
+- 扩展 provider、SLS、轨迹、Dashboard 过滤、存储预算和 enforcement 的回归覆盖。
+
 ## 0.13.1
 
 ### 新功能
