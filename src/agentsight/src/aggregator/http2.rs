@@ -1175,7 +1175,16 @@ impl Http2StreamAggregator {
 
     /// Release the side maps belonging to a stream that is no longer retained.
     fn discard_side_state(&mut self, stream_id: StreamId) {
-        self.continuation_buffers.remove(&stream_id);
+        // A buffered continuation block is bytes the peer's encoder already
+        // accounted for — its dynamic-table insertions were applied on the
+        // wire — while our decoder never decoded them. Dropping the buffer
+        // must reset that direction's decoder, exactly like a decode error or
+        // an oversized block: a later block referencing the lost indices
+        // would otherwise resolve them against stale entries (wrong `:path`,
+        // `:status`, content-type) instead of failing closed.
+        if let Some(buffer) = self.continuation_buffers.remove(&stream_id) {
+            self.reset_hpack_decoder(stream_id.connection_id, buffer.direction);
+        }
         self.decoded_headers_store.remove(&stream_id);
         self.last_activity.pop(&stream_id);
     }
@@ -1210,8 +1219,13 @@ impl Http2StreamAggregator {
             stream.decoded_response_headers = pair.response;
         }
         // Defensive cleanup: a malformed or aborted stream could leave a stale
-        // continuation buffer behind; remove it when the stream completes.
-        self.continuation_buffers.remove(&stream_id);
+        // continuation buffer behind; remove it when the stream completes. The
+        // buffer holds an undecoded block whose dynamic-table insertions the
+        // peer's encoder applied, so dropping it resets the decoder like every
+        // other drop path rather than leaving a stale table behind.
+        if let Some(buffer) = self.continuation_buffers.remove(&stream_id) {
+            self.reset_hpack_decoder(stream_id.connection_id, buffer.direction);
+        }
         self.last_activity.pop(&stream_id);
         stream
     }
@@ -2769,6 +2783,93 @@ mod tests {
             create_test_frame(1, 1, 0x00, head.to_vec(), event.clone()),
             create_test_frame(1, 9, 0x04, tail.to_vec(), event),
         ]);
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
+    }
+
+    /// Regression: a stream that never receives END_HEADERS can still complete —
+    /// a capture gap that lost the CONTINUATION records, or a malformed sender,
+    /// lets DATA finish the stream — and `finalize_stream`'s defensive cleanup
+    /// then dropped the buffered, undecoded block without resetting the
+    /// connection's HPACK decoder. The peer's encoder had applied the block's
+    /// dynamic-table insertions, so the stale table resolved later dynamic
+    /// indices to the wrong entries — the same silent corruption the size-drop
+    /// paths were fixed for, on a path that needs no oversized block at all.
+    #[test]
+    fn abandoned_continuation_completion_does_not_leave_stale_hpack_state() {
+        let conn_id = ConnectionId {
+            pid: 830,
+            ssl_ptr: 0x8300,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut encoder);
+
+        // A block small enough to buffer, whose only insertion is (x-final,
+        // FINAL_VALUE): the encoder's dynamic index 62 is x-final afterwards.
+        let abandoned = encoder.encode([(&b"x-final"[..], FINAL_VALUE.as_bytes())]);
+        assert!(abandoned.len() <= MAX_CONTINUATION_BUFFER);
+        let event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        // HEADERS flags 0x00: no END_HEADERS, no END_STREAM — buffered.
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            1,
+            0x00,
+            abandoned,
+            event.clone(),
+        )]);
+        // DATA with END_STREAM finishes the request side without the header
+        // block ever being decoded.
+        aggregator.process_frames(vec![create_test_frame(1, 0, 0x01, b"{}".to_vec(), event)]);
+        // A self-contained response completes the stream; the defensive
+        // cleanup in finalize_stream drops the pending buffer.
+        let mut resp_encoder = Encoder::new();
+        let resp = resp_encoder.encode([(&b":status"[..], &b"200"[..])]);
+        let resp_event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 0, 2000);
+        let completed =
+            aggregator.process_frames(vec![create_test_frame(1, 1, 0x05, resp, resp_event)]);
+        assert_eq!(completed.len(), 1);
+        assert!(
+            !aggregator
+                .continuation_buffers
+                .contains_key(&StreamId::new(conn_id, 1))
+        );
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
+    }
+
+    /// Regression: the periodic idle sweep drops a stream abandoned mid-block
+    /// (the peer stopped sending CONTINUATIONs) through `discard_side_state`,
+    /// which removed the buffered, undecoded fragments without resetting the
+    /// connection's HPACK decoder — the same stale dynamic table the size-drop
+    /// paths leave behind.
+    #[test]
+    fn abandoned_continuation_idle_eviction_does_not_leave_stale_hpack_state() {
+        let conn_id = ConnectionId {
+            pid: 840,
+            ssl_ptr: 0x8400,
+        };
+        let mut aggregator = Http2StreamAggregator::with_limits(
+            DEFAULT_CONNECTION_CAPACITY * 4,
+            DEFAULT_MAX_STREAM_BYTES,
+            Duration::from_millis(1),
+        );
+        let mut encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut encoder);
+
+        let abandoned = encoder.encode([(&b"x-final"[..], FINAL_VALUE.as_bytes())]);
+        assert!(abandoned.len() <= MAX_CONTINUATION_BUFFER);
+        let event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        aggregator.process_frames(vec![create_test_frame(1, 1, 0x00, abandoned, event)]);
+
+        // Let the idle timeout lapse, then run the periodic sweep.
+        std::thread::sleep(Duration::from_millis(5));
+        aggregator.evict_idle_and_oversized();
+        assert!(
+            !aggregator
+                .continuation_buffers
+                .contains_key(&StreamId::new(conn_id, 1))
+        );
 
         assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
     }
