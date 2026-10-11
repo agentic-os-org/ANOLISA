@@ -45,6 +45,11 @@ pub struct ImportReport {
 }
 
 /// Reconstruct markdown from frontmatter map + body.
+///
+/// The frontmatter format is line-based (one `key: value` or `  - item`
+/// line each), so a value or list item containing a line break can never be
+/// emitted verbatim: written raw, its second line would become a new
+/// frontmatter key and inject or corrupt the file's metadata.
 fn reconstruct_markdown(fm: &HashMap<String, String>, body: &str) -> String {
     if fm.is_empty() {
         return body.to_string();
@@ -57,17 +62,28 @@ fn reconstruct_markdown(fm: &HashMap<String, String>, body: &str) -> String {
         // If value is a JSON array, emit as YAML list items
         if value.starts_with('[') {
             if let Ok(items) = serde_json::from_str::<Vec<String>>(value) {
-                out.push_str(&format!("{key}:\n"));
-                for item in &items {
-                    out.push_str(&format!("  - {item}\n"));
+                // The list form is only safe when every item survives the
+                // line-based format verbatim; otherwise fall through to the
+                // escaped single-line scalar below.
+                if items.iter().all(|item| is_single_line(item)) {
+                    out.push_str(&format!("{key}:\n"));
+                    for item in &items {
+                        out.push_str(&format!("  - {item}\n"));
+                    }
+                    continue;
                 }
-                continue;
             }
         }
         if value.is_empty() {
             out.push_str(&format!("{key}:\n"));
-        } else {
+        } else if is_single_line(value) {
             out.push_str(&format!("{key}: {value}\n"));
+        } else {
+            // Multi-line values are JSON-escaped onto one line: the escapes
+            // keep the line break out of the file while remaining a stable
+            // scalar through the export parser's `key: value` split.
+            let encoded = serde_json::to_string(value).unwrap_or_default();
+            out.push_str(&format!("{key}: {encoded}\n"));
         }
     }
     out.push_str("---\n\n");
@@ -76,6 +92,11 @@ fn reconstruct_markdown(fm: &HashMap<String, String>, body: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A scalar that can be written verbatim as one frontmatter line.
+fn is_single_line(value: &str) -> bool {
+    !value.contains('\n') && !value.contains('\r')
 }
 
 /// Import memories from an AMA JSON string.
@@ -338,6 +359,64 @@ mod tests {
         let body = "Just content.";
         let md = reconstruct_markdown(&fm, body);
         assert_eq!(md, body);
+    }
+
+    #[test]
+    fn multiline_value_cannot_inject_frontmatter_keys() {
+        // A hand-edited or third-party AMA archive may carry a frontmatter
+        // value with an embedded line break. Written verbatim, the second
+        // line would become its own frontmatter key (`id: injected`).
+        let mut fm = HashMap::new();
+        fm.insert("note".to_string(), "line one\nid: injected".to_string());
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        for line in md.lines() {
+            assert!(
+                !line.starts_with("id:"),
+                "value line break injected a frontmatter key: {md:?}"
+            );
+        }
+        // The value survives on one escaped line instead.
+        assert!(
+            md.contains("note: \"line one\\nid: injected\""),
+            "multi-line value should be JSON-escaped onto one line: {md:?}"
+        );
+    }
+
+    #[test]
+    fn json_list_with_multiline_items_falls_back_to_one_line() {
+        // `["a\nb"]` cannot be a YAML list here: the embedded line break
+        // would split the item across lines and corrupt the frontmatter.
+        let mut fm = HashMap::new();
+        fm.insert("next_steps".to_string(), "[\"a\nb\"]".to_string());
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        assert!(
+            !md.lines().any(|line| line.starts_with("b\"]")),
+            "list item line break corrupted the frontmatter: {md:?}"
+        );
+        assert!(
+            md.contains("next_steps: "),
+            "the key must still be present: {md:?}"
+        );
+    }
+
+    #[test]
+    fn single_line_lists_keep_the_yaml_item_form() {
+        let mut fm = HashMap::new();
+        fm.insert(
+            "next_steps".to_string(),
+            "[\"Step 1\",\"Step 2\"]".to_string(),
+        );
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        assert!(
+            md.contains("next_steps:\n  - Step 1\n  - Step 2\n"),
+            "well-formed lists must keep the item form: {md:?}"
+        );
     }
 
     #[test]
