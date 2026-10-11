@@ -409,6 +409,10 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+Per-step and session cost fields use recorded scalar costs or OpenClaw's
+structured `usage.cost.total`. Missing totals stay unknown; component costs
+are not recomputed because a recorded total may reflect provider billing.
+
 Analyze existing traces:
 
 ```bash

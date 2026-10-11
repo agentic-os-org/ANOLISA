@@ -199,6 +199,8 @@ def _usage_int(usage: dict[str, Any], *keys: str) -> int:
 def _usage_float(usage: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
         value = usage.get(key)
+        if isinstance(value, dict):
+            value = value.get("total")
         if isinstance(value, int | float):
             return float(value)
     return None

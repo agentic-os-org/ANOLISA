@@ -399,6 +399,10 @@ swe-runner evaluate --namespace none
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
 
+每步及会话成本字段采用记录中的标量成本或 OpenClaw 的结构化
+`usage.cost.total`。缺失的总成本保持未知；不会从分项重算，因为记录的
+总成本可能包含提供商实际计费结果。
+
 分析已有 trace：
 
 ```bash
