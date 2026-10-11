@@ -409,6 +409,11 @@ swe-runner evaluate --namespace none
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
 
+When using run metadata, an explicit `--openclaw-profiles-dir` takes precedence
+over recorded per-profile directory paths. Use it to collect relocated or
+replacement profiles while retaining the recorded session identity selection.
+Without the override, recorded profile directories remain authoritative.
+
 Analyze existing traces:
 
 ```bash
