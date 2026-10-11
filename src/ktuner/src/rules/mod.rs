@@ -5296,18 +5296,44 @@ fn eval_oom_dump_tasks_at(info: &SystemInfo, recs: &mut Vec<Recommendation>, pat
 }
 
 fn eval_tcp_moderate_rcvbuf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/net/ipv4/tcp_moderate_rcvbuf";
-    if !std::path::Path::new(path).exists() {
+    eval_tcp_moderate_rcvbuf_at(
+        info,
+        recs,
+        "/proc/sys/net/ipv4/tcp_moderate_rcvbuf",
+        info.has_listen_sockets(),
+    )
+}
+
+/// Path-injectable form of [`eval_tcp_moderate_rcvbuf`] (the `eval_*_at` idiom).
+///
+/// Through v5.12 net/ipv4/sysctl_net_ipv4.c registered tcp_moderate_rcvbuf as
+/// a plain `proc_dointvec` int with no min/max (the same table and registration
+/// as tcp_sack and tcp_dsack), so -1 is a legal, persistent value there, and
+/// the kernel consumer is a bare truthiness test (net/ipv4/tcp_input.c:
+/// `READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_moderate_rcvbuf) && ...` arms
+/// receive-buffer auto-tuning). The unsigned reader parsed "-1" to Err and fell
+/// back to 0 — the *disabled* value — so the `== 0` gate invented a finding on
+/// a host whose auto-tuning is on. Since v5.13 the knob is u8
+/// (`proc_dou8vec_minmax`, no extra1/extra2), where negatives are rejected at
+/// write time; the signed reader keeps the truthiness contract correct on both
+/// registrations.
+fn eval_tcp_moderate_rcvbuf_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+    has_listen_sockets: bool,
+) -> usize {
+    if !info.param_exists(path) {
         return 1;
     }
-    if !info.has_listen_sockets() {
+    if !has_listen_sockets {
         return 1;
     }
-    let current = read_sysctl_u64(path);
+    let current = read_sysctl_i64(path);
     if current == 0 {
         recs.push(Recommendation {
             param: "net.ipv4.tcp_moderate_rcvbuf".to_string(),
-            current_value: "0".to_string(),
+            current_value: current.to_string(),
             recommended_value: "1".to_string(),
             reason: "TCP 接收缓冲区自动调整被禁用，可能导致内存浪费或吞吐受限".to_string(),
             confidence: Confidence::High,
@@ -8093,6 +8119,50 @@ mod tests {
         assert!(
             recs.iter().all(|r| r.param != "net.ipv4.tcp_fastopen"),
             "a host without listeners is not recommended TFO"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_moderate_rcvbuf_reads_truthiness_signed() {
+        // The reader is the defect: read_sysctl_u64 parsed "-1" to Err and
+        // fell back to 0, the *disabled* value, so the `== 0` gate invented
+        // a finding on a host whose receive-buffer auto-tuning is on.
+        // Feeding the path-injectable form a temp file keeps the branch
+        // assertable on any host, listener or not.
+        let path =
+            std::env::temp_dir().join(format!("ktuner-tcp-moderate-rcvbuf-{}", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        for (value, expect_rec) in [("-1", false), ("0", true), ("1", false), ("2", false)] {
+            std::fs::write(&path, value).unwrap();
+            let info = make_test_info();
+            let mut recs = Vec::new();
+            eval_tcp_moderate_rcvbuf_at(&info, &mut recs, path_str, true);
+            let rec = recs
+                .iter()
+                .find(|r| r.param == "net.ipv4.tcp_moderate_rcvbuf");
+            assert_eq!(
+                rec.is_some(),
+                expect_rec,
+                "value={value}: only 0 disables auto-tuning"
+            );
+            if let Some(rec) = rec {
+                assert_eq!(
+                    rec.current_value, value,
+                    "current must be what the kernel holds"
+                );
+                assert_eq!(rec.recommended_value, "1");
+            }
+        }
+        // The listener gate still short-circuits on a host that never listens.
+        std::fs::write(&path, "0").unwrap();
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        eval_tcp_moderate_rcvbuf_at(&info, &mut recs, path_str, false);
+        assert!(
+            recs.iter()
+                .all(|r| r.param != "net.ipv4.tcp_moderate_rcvbuf"),
+            "a host without listeners is not recommended auto-tuning"
         );
         let _ = std::fs::remove_file(&path);
     }
