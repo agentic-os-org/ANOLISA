@@ -10,7 +10,7 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#随包提供的-rtk-命令)。
 
-PostTool 清理和 Record Reduction 会保留未省略 JSON 数字的精度。Core 仅在 TOON 解码后保留相同的值与类型时采用它，否则保持 JSON 表示。
+当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行清理和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
 ## 核心能力
 

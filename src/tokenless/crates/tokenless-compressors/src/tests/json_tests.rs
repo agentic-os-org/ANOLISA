@@ -740,16 +740,12 @@ fn unrecoverable_bounded_candidate_can_be_disallowed() {
 }
 
 #[test]
-fn compact_json_preserves_exact_numeric_values() {
+fn imprecise_json_numbers_pass_through_without_stashing() {
     for literal in [
         "18446744073709551617",
         "-9223372036854775809",
         "1.234567890123456789",
         "1e-400",
-        "1e400",
-        "18446744073709551615",
-        "42",
-        "1.25",
     ] {
         let input = format!(
             "{{\n{}\"value\": {literal},\n{}\"label\": \"synthetic\"\n}}",
@@ -760,30 +756,67 @@ fn compact_json_preserves_exact_numeric_values() {
             input.clone(),
             serde_json::to_string(&input).unwrap(),
             format!("\u{feff}{input}"),
+            format!("[{input}]"),
         ] {
+            let store = InMemoryStore::new();
             let outcome = JsonCompressor::default()
-                .compress(&source, &context(None))
+                .compress(&source, &context(Some(&store)))
                 .unwrap();
+            assert_eq!(outcome.output, source);
             assert_eq!(outcome.recoverability, Recoverability::Lossless);
-            let expected = if literal == "1e400" {
-                "1e+400"
-            } else {
-                literal
-            };
-            assert_eq!(output_value(&outcome)["value"].to_string(), expected);
-            assert!(output_value(&outcome)["value"].is_number());
+            assert!(outcome.operations.is_empty());
+            assert!(outcome.stash_writes.is_empty());
+            assert_eq!(outcome.metrics, JsonMetrics::default());
         }
     }
 }
 
 #[test]
-fn toon_candidate_rejects_numeric_rounding() {
+fn equivalent_decimal_spellings_and_numeric_strings_still_compress() {
     for literal in [
-        "18446744073709551617",
-        "-9223372036854775809",
-        "1.234567890123456789",
-        "1e-400",
-        "1e400",
+        "18446744073709551615",
+        "1e3",
+        "1000.00",
+        "1.2500",
+        "-0",
+        "42",
+    ] {
+        let label = serde_json::to_string(r#"数字 18446744073709551617 \"1e-400\" \\"#).unwrap();
+        let input = format!(
+            "{{\n{}\"value\": {literal},\n{}\"label\": {label}\n}}",
+            " ".repeat(600),
+            " ".repeat(600)
+        );
+        let outcome = JsonCompressor::default()
+            .compress(&input, &context(None))
+            .unwrap();
+        assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
+        assert_eq!(outcome.recoverability, Recoverability::Lossless);
+        assert_eq!(
+            output_value(&outcome),
+            serde_json::from_str::<Value>(&input).unwrap()
+        );
+    }
+}
+
+#[test]
+fn reserved_number_key_remains_an_object() {
+    let input = "{\"value\":{\"$serde_json::private::Number\":\"123\"},\"tail\":null}";
+    let outcome = JsonCompressor::default()
+        .compress(input, &context(None))
+        .unwrap();
+    assert_eq!(
+        output_value(&outcome)["value"],
+        serde_json::json!({"$serde_json::private::Number":"123"})
+    );
+}
+
+#[test]
+fn toon_candidate_preserves_large_integers_and_types() {
+    for literal in [
+        "9007199254740993",
+        "18446744073709551615",
+        "-9223372036854775808",
     ] {
         let value: Value = serde_json::from_str(&format!(
             "{{\"nested\":[{{\"value\":{literal}}}],\"string\":\"{literal}\"}}"
@@ -804,7 +837,7 @@ fn toon_candidate_rejects_numeric_rounding() {
 
 #[test]
 fn record_reduction_keeps_retained_numbers_exact() {
-    let literal = "18446744073709551617";
+    let literal = "18446744073709551615";
     let input = format!(
         "[{}]",
         (0..40)

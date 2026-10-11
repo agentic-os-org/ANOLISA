@@ -170,7 +170,16 @@ impl JsonCompressor {
         input: &str,
         context: &JsonCompressionContext<'_>,
     ) -> Result<JsonOutcome, JsonError> {
-        let (normalized, original) = parse_input(input)?;
+        let (normalized, original, exact_numbers) = parse_input(input)?;
+        if !exact_numbers {
+            return Ok(JsonOutcome {
+                output: input.to_owned(),
+                operations: Vec::new(),
+                recoverability: Recoverability::Lossless,
+                stash_writes: Vec::new(),
+                metrics: JsonMetrics::default(),
+            });
+        }
         let mut full_session = Session::new(&self.config, None, false, context.recovery);
         let full = build_candidate(
             &normalized,
@@ -309,7 +318,7 @@ fn build_candidate(
     })
 }
 
-fn parse_input(input: &str) -> Result<(String, Value), JsonError> {
+fn parse_input(input: &str) -> Result<(String, Value, bool), JsonError> {
     // The detector skips one leading byte-order mark, so a marked document
     // is routed here; the parser must agree or that routing turns a
     // passthrough into an error. serde_json rejects the mark, so skip it
@@ -319,9 +328,84 @@ fn parse_input(input: &str) -> Result<(String, Value), JsonError> {
     if let Value::String(inner) = &outer
         && let Ok(value @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(inner)
     {
-        return Ok((serde_json::to_string(&value)?, value));
+        return Ok((
+            serde_json::to_string(&value)?,
+            value,
+            numbers_are_exact(inner),
+        ));
     }
-    Ok((input.to_owned(), outer))
+    Ok((input.to_owned(), outer, numbers_are_exact(input)))
+}
+
+// Syntax is already validated by serde_json. Inspect number tokens outside
+// strings before any cleanup/reduction can discard their original spelling.
+fn numbers_are_exact(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    index += 1;
+                }
+                let literal = &input[start..index];
+                let Ok(number) = serde_json::from_str::<serde_json::Number>(literal) else {
+                    return false;
+                };
+                let Some(expected) = decimal_value(literal) else {
+                    return false;
+                };
+                if decimal_value(&number.to_string()).as_ref() != Some(&expected) {
+                    return false;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    true
+}
+
+// Compare decimal values without floating-point conversion. Equivalent JSON
+// spellings (1e3, 1000.0) share a sign, zero-stripped coefficient and exponent.
+fn decimal_value(literal: &str) -> Option<(bool, String, i64)> {
+    let (negative, literal) = match literal.strip_prefix('-') {
+        Some(literal) => (true, literal),
+        None => (false, literal),
+    };
+    let (mantissa, exponent) = match literal.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (literal, 0),
+    };
+    let fractional = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fractional)| fractional.len());
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some((negative, String::new(), 0));
+    }
+    let coefficient = digits.trim_end_matches('0');
+    let trailing = i64::try_from(digits.len() - coefficient.len()).ok()?;
+    let exponent = exponent
+        .checked_sub(i64::try_from(fractional).ok()?)?
+        .checked_add(trailing)?;
+    Some((negative, coefficient.to_owned(), exponent))
 }
 
 fn restore_top_level_shape(original: &Value, transformed: Value) -> Value {

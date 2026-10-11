@@ -2445,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_lossless_cleanup_preserves_exact_numbers() {
+    fn post_tool_preserves_numbers_the_parser_cannot_represent() {
         for literal in [
             "18446744073709551617",
             "-9223372036854775809",
@@ -2462,16 +2462,11 @@ mod tests {
                 request.content_origin = ContentOrigin::ApiResponse;
                 request.capabilities.replace_with_text = replace_with_text;
                 let outcome = post_tool_with_store(&request, &options(), None).unwrap();
-                assert_eq!(outcome.response.disposition, Disposition::Applied);
+                assert_eq!(outcome.response.disposition, Disposition::NoSavings);
                 assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
-                assert_eq!(
-                    outcome.response.applied_operations,
-                    [AppliedOperation::JsonCleanup]
-                );
+                assert!(outcome.response.applied_operations.is_empty());
                 assert!(outcome.response.stash_keys.is_empty());
-                let output: Value = serde_json::from_str(&outcome.response.output).unwrap();
-                assert!(output["value"].is_number());
-                assert_eq!(output["value"].to_string(), literal);
+                assert_eq!(outcome.response.output, content);
             }
         }
     }
