@@ -943,6 +943,11 @@ fn configure_raw_cli_command(command: &mut Command) {
         .env("TERM", "xterm-256color")
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
+        // glibc lets a non-empty LANGUAGE win over LC_ALL unless the locale is
+        // C/POSIX, so an inherited LANGUAGE (e.g. zh_CN on Chinese-locale
+        // hosts) would still localize child shell output and break English
+        // assertions. Remove it so the LC_ALL pin actually controls output.
+        .env_remove("LANGUAGE")
         .env("HOME", home)
         .env("GIT_DIR", git_work_tree.join(".git"))
         .env("GIT_WORK_TREE", git_work_tree);
