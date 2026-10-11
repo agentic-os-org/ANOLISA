@@ -84,6 +84,35 @@ confirm_destructive = true
 
 ---
 
+## OpenClaw runtime option bounds
+
+The OpenClaw installer validates its port and timeout flags during argument
+parsing, before dependency checks, configuration writes or model calls:
+
+```bash
+python3 SKILL_DIR/scripts/install_openclaw.py --precheck-only --gateway-port 18789 --preflight-timeout 20
+```
+
+Replace `SKILL_DIR` with the installed `ai/install-openclaw` directory.
+`--gateway-port` must be an integer from 1 to 65535. All five timeout options
+must be positive integer seconds; zero and negative values are rejected.
+Defaults remain unchanged:
+
+| Option | Default |
+| --- | --- |
+| `--gateway-port` | 18789 |
+| `--gateway-command-timeout` | 30 seconds |
+| `--gateway-ready-timeout` | 30 seconds |
+| `--gateway-status-timeout` | 8 seconds |
+| `--gateway-write-check-timeout` | 60 seconds |
+| `--preflight-timeout` | 20 seconds |
+
+Validation also applies to supplied flags in `--precheck-only` or skip modes.
+Use `--skip-preflight` to skip the model check; setting its timeout to zero
+is not a substitute for that flag.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

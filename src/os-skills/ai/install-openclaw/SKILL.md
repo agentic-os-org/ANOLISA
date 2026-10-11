@@ -9,6 +9,14 @@ Use this skill to turn a user's one-sentence request into a complete local OpenC
 
 Do not execute `openclaw onboard` unless the user explicitly asks for interactive setup or asks to skip first-run BOOTSTRAP onboarding. After setup, always tell the user they can run `openclaw onboard --skip-bootstrap` if they want the first real task to run without the introductory BOOTSTRAP flow. Do not configure DingTalk unless the user provides DingTalk credentials or asks for DingTalk access.
 
+## 运行参数范围
+
+网关端口 `--gateway-port` 必须为 1..65535 的整数；command、ready、status、
+write-check 四个网关超时及 `--preflight-timeout` 必须为正整数秒数。
+非法值会在依赖检查、写配置或模型调用之前拒绝，含 precheck-only/skip 模式。
+默认值仍为端口 18789，五项超时分别为 30、30、8、60、20 秒。
+跳过模型检查应使用 `--skip-preflight`，不应使用零超时。
+
 ## Billing
 
 Map user wording to `--billing`:

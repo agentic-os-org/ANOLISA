@@ -1313,6 +1313,23 @@ def print_summary(metadata, args):
         print("  openclaw channels status --probe")
 
 
+def positive_runtime_seconds(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def tcp_gateway_port(value: str) -> int:
+    port = positive_runtime_seconds(value)
+    if port > 65535:
+        raise argparse.ArgumentTypeError("must be between 1 and 65535")
+    return port
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Install and configure OpenClaw non-interactively for Alibaba Cloud Model Studio."
@@ -1366,11 +1383,11 @@ def parse_args():
     )
     parser.add_argument("--install-dingtalk-plugin", action="store_true")
     parser.add_argument("--skip-gateway", action="store_true")
-    parser.add_argument("--gateway-port", type=int, default=18789)
-    parser.add_argument("--gateway-command-timeout", type=int, default=30)
-    parser.add_argument("--gateway-ready-timeout", type=int, default=30)
-    parser.add_argument("--gateway-status-timeout", type=int, default=8)
-    parser.add_argument("--gateway-write-check-timeout", type=int, default=60)
+    parser.add_argument("--gateway-port", type=tcp_gateway_port, default=18789)
+    parser.add_argument("--gateway-command-timeout", type=positive_runtime_seconds, default=30)
+    parser.add_argument("--gateway-ready-timeout", type=positive_runtime_seconds, default=30)
+    parser.add_argument("--gateway-status-timeout", type=positive_runtime_seconds, default=8)
+    parser.add_argument("--gateway-write-check-timeout", type=positive_runtime_seconds, default=60)
     parser.add_argument(
         "--skip-gateway-write-check",
         action="store_true",
@@ -1406,7 +1423,7 @@ def parse_args():
     )
     parser.add_argument(
         "--preflight-timeout",
-        type=int,
+        type=positive_runtime_seconds,
         default=20,
         help="Seconds to wait for the model endpoint pre-flight API call.",
     )
