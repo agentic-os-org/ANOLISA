@@ -1277,3 +1277,69 @@ fn credential_prompt_output_stays_silent_end_to_end() {
         FailureAnalysisDisposition::SilentRecord
     );
 }
+
+#[test]
+fn ai_disabled_auto_trigger_skips_agent_start_without_bookkeeping() {
+    let block = failed_block(1, "cargo test");
+    let blocks = std::slice::from_ref(&block);
+    let findings = findings_from_blocks(blocks);
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Auto,
+        ..InlineState::default()
+    };
+    state.personalization.ai_disabled = true;
+    state.agent_run.active = Some(test_active_run());
+    let mut output = Vec::new();
+
+    start_agent_for_block(
+        &block,
+        blocks,
+        &findings,
+        &adapter,
+        &mut state,
+        &mut output,
+        FailedCommandAgentStartOptions {
+            selectable_after_event_index: None,
+            trigger: FailedCommandAnalysisTrigger::Auto,
+        },
+    )
+    .expect("skip auto analysis");
+
+    assert!(output.is_empty());
+    assert!(state.agent_run.queued_requests.is_empty());
+    assert!(!state.analyzed_blocks.contains(&block.id));
+}
+
+#[test]
+fn ai_disabled_user_confirmed_trigger_skips_agent_start_without_bookkeeping() {
+    let block = failed_block(1, "cargo test");
+    let blocks = std::slice::from_ref(&block);
+    let findings = findings_from_blocks(blocks);
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+    state.personalization.ai_disabled = true;
+    state.agent_run.active = Some(test_active_run());
+    let mut output = Vec::new();
+
+    start_agent_for_block(
+        &block,
+        blocks,
+        &findings,
+        &adapter,
+        &mut state,
+        &mut output,
+        FailedCommandAgentStartOptions {
+            selectable_after_event_index: None,
+            trigger: FailedCommandAnalysisTrigger::UserConfirmed,
+        },
+    )
+    .expect("skip confirmed analysis");
+
+    assert!(output.is_empty());
+    assert!(state.agent_run.queued_requests.is_empty());
+    assert!(!state.analyzed_blocks.contains(&block.id));
+}

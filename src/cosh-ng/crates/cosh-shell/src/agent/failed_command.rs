@@ -554,6 +554,12 @@ pub(crate) fn start_agent_for_block<W: Write>(
     output: &mut W,
     options: FailedCommandAgentStartOptions,
 ) -> std::io::Result<()> {
+    // COSH_SHELL_AI=off: single choke point for both Auto and UserConfirmed
+    // triggers; return before throttle/analyzed bookkeeping so re-enabling AI
+    // later can still analyze the same block.
+    if state.personalization.ai_disabled {
+        return Ok(());
+    }
     let should_start = match options.trigger {
         FailedCommandAnalysisTrigger::Auto => true,
         FailedCommandAnalysisTrigger::UserConfirmed => can_user_confirm_failure_analysis(block),
