@@ -5,7 +5,7 @@ description: Install and configure OpenClaw non-interactively with Alibaba Cloud
 
 # OpenClaw Non-Interactive Setup
 
-Use this skill to turn a user's one-sentence request into a complete local OpenClaw setup. The normal path is one script command: resolve the Alibaba Cloud Model Studio plan, validate the API key/Base URL/model combination with the official `anthropic-messages` endpoint shape, install Node.js/npm/OpenClaw when needed, write config, install/restart the local gateway service, and verify a real local `openclaw agent` message through Gateway.
+Use this skill to turn a user's one-sentence request into a complete local OpenClaw setup. The normal path is one script command: resolve the Alibaba Cloud Model Studio plan, validate the API key/Base URL/model combination with the official `anthropic-messages` endpoint shape or a configured `openai-completions` endpoint, install Node.js/npm/OpenClaw when needed, write config, install/restart the local gateway service, and verify a real local `openclaw agent` message through Gateway.
 
 Do not execute `openclaw onboard` unless the user explicitly asks for interactive setup or asks to skip first-run BOOTSTRAP onboarding. After setup, always tell the user they can run `openclaw onboard --skip-bootstrap` if they want the first real task to run without the introductory BOOTSTRAP flow. Do not configure DingTalk unless the user provides DingTalk credentials or asks for DingTalk access.
 
@@ -108,6 +108,19 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
   --base-url "https://dashscope.aliyuncs.com/apps/anthropic"
 ```
 
+OpenAI-compatible Chat Completions endpoint (set `OPENAI_MODEL` to a supported model):
+
+```bash
+python3 SKILL_DIR/scripts/install_openclaw.py --billing payg \
+  --api-key-env BAILIAN_API_KEY --provider-api openai-completions \
+  --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --model-id "$OPENAI_MODEL"
+```
+
+For `openai-completions`, provide the full compatible Base URL. Preflight appends
+`/chat/completions`, preserves query parameters and uses Bearer authentication,
+a user `ping` message and `max_tokens: 1`. Other provider-specific parameters
+are not added. The existing timeout, diagnostics and `--skip-preflight` apply.
+
 With DingTalk:
 
 ```bash
@@ -123,13 +136,13 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
 
 - Checks Node.js/npm and installs them with `dnf`/`yum` when needed.
 - Runs dependency precheck before installing or writing config.
-- Runs a model endpoint pre-flight check before writing config or starting Gateway. It uses the official Alibaba Cloud OpenClaw `anthropic-messages` shape and validates the resolved API key, Base URL, and model ID. Pass `--skip-preflight` only when the endpoint is temporarily unreachable and the user accepts deferring validation to Gateway startup.
+- Runs a model endpoint pre-flight check before writing config or starting Gateway. It uses the default `anthropic-messages` shape or `--provider-api openai-completions`, and validates the resolved API key, Base URL, and model ID. Pass `--skip-preflight` only when the endpoint is temporarily unreachable and the user accepts deferring validation to Gateway startup.
 - With `--dry-run`, still resolves config and runs the model pre-flight check, but skips local install/config/gateway changes. Combine with `--skip-preflight` only for an offline local-flow preview.
 - With `--precheck-only`, checks only local dependencies and prints the API key source; it does not require or validate an API key.
 - Installs OpenClaw with npm unless `--skip-install-openclaw` is passed.
 - Uses npm registry `https://registry.npmmirror.com` by default; override with `--npm-registry`.
 - Writes only OpenClaw schema-supported config fields.
-- Writes Alibaba Cloud Model Studio config with `api = anthropic-messages`.
+- Writes Alibaba Cloud Model Studio config with `api = anthropic-messages` by default; `--provider-api openai-completions` retains the configured compatible protocol.
 - Sets `gateway.mode = local`, `gateway.bind = loopback`, and `gateway.auth.mode = none` for local single-machine setup.
 - Starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart` unless `--skip-gateway` is passed.
 - After the Gateway port is listening, runs a bounded local message smoke test to verify the local operator device has `operator.write`. If stale read-only local operator device state exists, the script clears it and retries the message smoke test.

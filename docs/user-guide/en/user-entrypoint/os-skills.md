@@ -84,6 +84,36 @@ confirm_destructive = true
 
 ---
 
+## OpenAI-compatible OpenClaw preflight
+
+The OpenClaw installer validates both `anthropic-messages` (the default) and
+`openai-completions` before writing configuration or starting Gateway:
+
+```bash
+python3 SKILL_DIR/scripts/install_openclaw.py --billing payg \
+  --api-key-env BAILIAN_API_KEY --provider-api openai-completions \
+  --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --model-id "$OPENAI_MODEL"
+```
+
+Replace `SKILL_DIR` with the installed `ai/install-openclaw` directory and set
+`OPENAI_MODEL` to a model accepted by your configured endpoint. Supply the
+complete compatible API base with `--base-url`; this protocol selection does
+not replace the billing plan's default Base URL. The check appends
+`/chat/completions` to the base path, preserving query parameters, and accepts
+an already complete endpoint without duplicating the path. It sends a Bearer
+API key and a user `ping` message with `max_tokens: 1`, using
+`--preflight-timeout` (default 20 seconds). HTTP/authentication/network failures
+stop before config writes and reuse the existing provider diagnostics.
+
+`--skip-preflight` explicitly defers endpoint validation; unsupported provider
+protocols retain the existing skip notice. `--dry-run` still performs the
+preflight unless it is skipped, while `--precheck-only` performs local checks
+without a model request. Endpoints must accept the standard chat request;
+models requiring additional provider-specific parameters need validation
+through their own supported configuration.
+
+---
+
 ## See Also
 
 - [Copilot Shell](copilot-shell/QUICKSTART.md)

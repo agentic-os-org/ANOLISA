@@ -3,7 +3,7 @@
 Non-interactive OpenClaw installer/configuration helper for Alibaba Cloud Model Studio.
 
 The script prepares Node.js/OpenClaw, writes ~/.openclaw/openclaw.json using
-the OpenClaw Anthropic provider shape documented by Alibaba Cloud Model Studio,
+the configured Anthropic or OpenAI-compatible provider shape,
 and starts the local gateway service.
 """
 
@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -414,6 +415,14 @@ def anthropic_messages_url(base_url):
     return f"{base}/v1/messages"
 
 
+def openai_chat_completions_url(base_url):
+    parsed = urllib.parse.urlsplit(base_url)
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/chat/completions"):
+        path += "/chat/completions"
+    return urllib.parse.urlunsplit(parsed._replace(path=path))
+
+
 def extract_error_message(body):
     if not body:
         return ""
@@ -462,7 +471,7 @@ def preflight_model_call(args, metadata):
     if args.skip_preflight:
         print("\n--- Skipping model pre-flight check (--skip-preflight) ---\n")
         return
-    if metadata["api"] != "anthropic-messages":
+    if metadata["api"] not in {"anthropic-messages", "openai-completions"}:
         print(
             "\n--- Skipping model pre-flight check "
             f"(unsupported provider api: {metadata['api']}) ---\n"
@@ -470,7 +479,17 @@ def preflight_model_call(args, metadata):
         return
 
     print("\n--- Model endpoint pre-flight check ---\n")
-    url = anthropic_messages_url(metadata["base_url"])
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "install-openclaw-preflight/1.0",
+    }
+    if metadata["api"] == "anthropic-messages":
+        url = anthropic_messages_url(metadata["base_url"])
+        headers.update({"anthropic-version": "2023-06-01", "x-api-key": metadata["api_key"]})
+    else:
+        url = openai_chat_completions_url(metadata["base_url"])
+        headers["Authorization"] = f"Bearer {metadata['api_key']}"
     payload = {
         "model": metadata["model_id"],
         "max_tokens": 1,
@@ -481,13 +500,7 @@ def preflight_model_call(args, metadata):
         url,
         data=body,
         method="POST",
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "install-openclaw-preflight/1.0",
-            "anthropic-version": "2023-06-01",
-            "x-api-key": metadata["api_key"],
-        },
+        headers=headers,
     )
 
     print(f"  endpoint={url}")
@@ -1328,7 +1341,10 @@ def parse_args():
     parser.add_argument("--region", default="china")
     parser.add_argument("--provider-id", default="")
     parser.add_argument("--base-url", default="")
-    parser.add_argument("--provider-api", default="anthropic-messages")
+    parser.add_argument(
+        "--provider-api", default="anthropic-messages",
+        help="provider protocol (preflight supports anthropic-messages and openai-completions)",
+    )
     parser.add_argument("--model-id", default="")
     parser.add_argument("--extra-model", action="append", default=[])
 
