@@ -845,7 +845,7 @@ fn ns_to_iso8601(ns: u64) -> String {
     use chrono::DateTime;
 
     let dt = DateTime::from_timestamp_nanos(ns as i64);
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
 #[cfg(test)]
