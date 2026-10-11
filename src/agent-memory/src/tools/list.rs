@@ -124,6 +124,15 @@ pub fn list(svc: &MemoryService, dir: &str, opts: ListOptions) -> Result<Vec<Lis
             size,
         });
         if out.len() >= MAX_ENTRIES {
+            // The caller cannot distinguish "exactly MAX_ENTRIES entries"
+            // from "more exist but were cut" — a recursive listing of a
+            // large store silently looks complete. Surface the cut.
+            tracing::warn!(
+                "mem_list hit the {}-entry cap under '{}' — listing truncated, \
+                 narrow with a glob or a subdirectory",
+                MAX_ENTRIES,
+                rel
+            );
             break;
         }
     }

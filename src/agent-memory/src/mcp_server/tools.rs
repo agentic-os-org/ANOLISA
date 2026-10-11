@@ -97,7 +97,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "List entries under a directory. Empty dir means mount root. recursive=true walks the tree (max depth 16). glob filters by path pattern (e.g. **/*.md)."
+        description = "List entries under a directory. Empty dir means mount root. recursive=true walks the tree (max depth 16). glob filters by path pattern (e.g. **/*.md). Returns at most 5000 entries; narrow with a glob or a subdirectory when the result may be larger."
     )]
     async fn mem_list(
         &self,
