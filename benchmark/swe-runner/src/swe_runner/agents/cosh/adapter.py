@@ -14,6 +14,7 @@
 
 """Adapter for the cosh CLI tool."""
 
+import contextlib
 import logging
 import subprocess
 import threading
@@ -58,28 +59,36 @@ class CoshAdapter(AgentAdapter):
             pull_registry=settings.agent.docker_pull_registry,
         )
         work_dir = docker.start()
-        base_revision = get_git_revision(work_dir)
-        prompt = build_prompt(
-            instance,
-            work_dir,
-            docker.container_name,
-            agent_name=self.name,
-            use_skill=settings.agent.use_skill,
-            skills_dir=settings.agent.skills_dir,
-            use_per_case_prompt=settings.agent.per_case_prompt,
-            prompts_dir=settings.agent.prompts_dir,
-        )
-        return PreparedAgentRun(
-            instance=instance,
-            settings=settings,
-            work_dir=work_dir,
-            prompt=prompt,
-            timeout=settings.agent.timeout,
-            max_turns=settings.agent.step_limit,
-            base_revision=base_revision,
-            metadata=RunArtifacts(docker_image_name=image_name).to_metadata(),
-            cleanup_callbacks=[docker.cleanup],
-        )
+        try:
+            base_revision = get_git_revision(work_dir)
+            prompt = build_prompt(
+                instance,
+                work_dir,
+                docker.container_name,
+                agent_name=self.name,
+                use_skill=settings.agent.use_skill,
+                skills_dir=settings.agent.skills_dir,
+                use_per_case_prompt=settings.agent.per_case_prompt,
+                prompts_dir=settings.agent.prompts_dir,
+            )
+            return PreparedAgentRun(
+                instance=instance,
+                settings=settings,
+                work_dir=work_dir,
+                prompt=prompt,
+                timeout=settings.agent.timeout,
+                max_turns=settings.agent.step_limit,
+                base_revision=base_revision,
+                metadata=RunArtifacts(docker_image_name=image_name).to_metadata(),
+                cleanup_callbacks=[docker.cleanup],
+            )
+        except BaseException:
+            try:
+                docker.cleanup(timeout=0)
+            except BaseException:
+                with contextlib.suppress(BaseException):
+                    logger.exception("COSH_PREPARE_CLEANUP_FAILED instance=%s", instance.instance_id)
+            raise
 
     def run(self, prepared: PreparedAgentRun) -> AgentResult:
         prompt = prepared.prompt
