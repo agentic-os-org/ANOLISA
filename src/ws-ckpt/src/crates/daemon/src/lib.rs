@@ -81,8 +81,11 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         );
     }
 
-    // 9. Start background scheduler
-    scheduler::start_scheduler(state.clone());
+    // 9. Start background scheduler (cancellable; the handle joins the
+    // loops before the final flush so no cleanup pass writes index.json
+    // concurrently with it).
+    let scheduler_cancel = CancellationToken::new();
+    let scheduler = scheduler::start_scheduler(state.clone(), scheduler_cancel.clone());
 
     // 10. Create cancellation token
     let cancel = CancellationToken::new();
@@ -125,26 +128,23 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     }
 
     cancel.cancel();
+    scheduler_cancel.cancel();
 
     // 14. Wait for listener to finish
     if let Err(e) = listener_handle.await {
         tracing::error!("Listener task panicked: {}", e);
     }
 
+    // 14a. Wait for the scheduler loops (and any in-flight cleanup pass) to
+    // finish BEFORE the final flush: both write the same index.json files
+    // and `atomic_write`'s fixed `.tmp` name is not safe against a
+    // concurrent writer. A pass that overruns the bound is still safe —
+    // the flush takes each workspace's mutation mutex (see
+    // flush_workspace_indexes).
+    scheduler.shutdown().await;
+
     // 15. Flush all workspace index.json files
-    info!("Flushing workspace indexes...");
-    let all_ws = state.all_workspaces();
-    for ws in &all_ws {
-        let ws_guard = ws.read().await;
-        let ws_dir = state.index_dir(&ws_guard.ws_id);
-        if let Err(e) = tokio::fs::create_dir_all(&ws_dir).await {
-            tracing::error!("Failed to create index directory {:?}: {}", ws_dir, e);
-            continue;
-        }
-        if let Err(e) = index_store::save(&ws_dir, &ws_guard.index).await {
-            tracing::error!("Failed to save index for {}: {:#}", ws_guard.ws_id, e);
-        }
-    }
+    snapshot_mgr::flush_workspace_indexes(&state).await;
 
     // 16. Save final state
     if let Err(e) = state.save_manifest().await {
