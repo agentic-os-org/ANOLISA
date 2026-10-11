@@ -183,6 +183,74 @@ class TestOnSessionStart:
         h._on_session_start()
         mgr.create_checkpoint.assert_called_once()
 
+    @patch("hermes.checkpoint_manager.os.getcwd", return_value="/other")
+    @patch("hermes.get_manager")
+    def test_skipped_checkpoint_not_reported_saved(self, mock_get_mgr, _):
+        """A skipped (empty-workspace) checkpoint must not print 'saved'."""
+        import io
+        import contextlib
+
+        cfg = HermesPluginConfig(workspace="/ws", auto_checkpoint=True)
+        mgr = MagicMock(spec=CheckpointManager)
+        type(mgr).config = PropertyMock(return_value=cfg)
+        mgr.init_workspace.return_value = CommandOutput(exit_code=0, stdout="ok", stderr="")
+        mgr.create_checkpoint.return_value = CheckpointResult(
+            success=True,
+            message="Empty workspace, no snapshot created.",
+            snapshot="",
+            skipped=True,
+            reason="Empty workspace, no snapshot created.",
+        )
+        mock_get_mgr.return_value = mgr
+
+        import hermes as h
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            h._on_session_start()
+        out = buf.getvalue()
+
+        assert "saved" not in out, f"skip was reported as saved: {out!r}"
+        assert "skipped" in out
+        assert "Empty workspace" in out
+
+
+# ---------------------------------------------------------------------------
+# _on_session_end — skipped checkpoints
+# ---------------------------------------------------------------------------
+
+
+class TestOnSessionEndSkipped:
+    @patch("hermes.get_manager")
+    def test_skipped_checkpoint_not_reported_saved(self, mock_get_mgr):
+        """A skipped (empty-workspace) turn checkpoint must not print 'saved'."""
+        import io
+        import contextlib
+
+        cfg = HermesPluginConfig(workspace="/ws", auto_checkpoint=True)
+        mgr = MagicMock(spec=CheckpointManager)
+        type(mgr).config = PropertyMock(return_value=cfg)
+        mgr.skip_next_auto_checkpoint = False
+        mgr.advance_turn.return_value = 1
+        mgr.create_checkpoint.return_value = CheckpointResult(
+            success=True,
+            message="Empty workspace, no snapshot created.",
+            snapshot="",
+            skipped=True,
+            reason="Empty workspace, no snapshot created.",
+        )
+        mock_get_mgr.return_value = mgr
+
+        import hermes as h
+        h._last_user_message = "hello"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            h._on_session_end()
+        out = buf.getvalue()
+
+        assert "saved" not in out, f"skip was reported as saved: {out!r}"
+        assert "skipped" in out
+        assert "Empty workspace" in out
+
 
 # ---------------------------------------------------------------------------
 # register
