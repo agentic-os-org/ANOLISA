@@ -47,6 +47,7 @@ function mockApi(pluginConfig: Record<string, unknown>) {
   const tools: string[] = [];
   const hooks: string[] = [];
   const warnings: string[] = [];
+  const handlers: Record<string, (...args: any[]) => unknown> = {};
   const api = {
     pluginConfig,
     resolvePath: (p: string) => p,
@@ -58,8 +59,9 @@ function mockApi(pluginConfig: Record<string, unknown>) {
         warnings.push(message);
       },
     },
-    on: (event: string) => {
+    on: (event: string, handler: (...args: any[]) => unknown) => {
       hooks.push(event);
+      handlers[event] = handler;
     },
     registerTool: (spec: { name: string }) => {
       tools.push(spec.name);
@@ -67,7 +69,7 @@ function mockApi(pluginConfig: Record<string, unknown>) {
     registerMemoryCapability: () => {},
     registerMemoryCorpusSupplement: () => {},
   };
-  return { api: api as never, tools, hooks, warnings };
+  return { api: api as never, tools, hooks, warnings, handlers };
 }
 
 function register(host: MockHost) {
@@ -168,5 +170,36 @@ describe("register() stale-client teardown", () => {
     register(mockApi(config("ses_again")));
 
     assert.deepEqual(stopped.slice(mark).map(sessionIdOf), ["ses_recovered"]);
+  });
+});
+
+describe("auto-capture persistence", () => {
+  it("retries a failed observation and deduplicates only after it is saved", async () => {
+    const host = register(mockApi(config("ses_capture_retry")));
+    const realCall = McpStdioClient.prototype.callTool;
+    const attempts: Array<{ name: string; args: Record<string, unknown> }> = [];
+    McpStdioClient.prototype.callTool = async function (name, args) {
+      attempts.push({ name, args });
+      if (attempts.length === 1) throw new Error("temporary storage failure");
+      return "observation saved";
+    };
+    try {
+      const event = { messages: [{ role: "assistant", content: [{ type: "text", text: "I found that the project uses SQLite." }] }] };
+      await host.handlers.agent_end(event, {});
+      assert.equal(attempts.length, 1);
+      assert.ok(host.warnings.some((warning) => warning.includes("temporary storage failure")));
+
+      await host.handlers.agent_end(event, {});
+      assert.equal(attempts.length, 2, "an unsaved observation must be retried");
+      assert.equal(attempts[0].name, "memory_observe");
+      assert.deepEqual(attempts[1], attempts[0]);
+      assert.equal(attempts[1].args.content, "I found that the project uses SQLite.");
+
+      await host.handlers.agent_end(event, {});
+      assert.equal(attempts.length, 2, "a saved observation must remain deduplicated");
+    } finally {
+      McpStdioClient.prototype.callTool = realCall;
+      await host.handlers.gateway_stop();
+    }
   });
 });

@@ -482,7 +482,6 @@ export default definePluginEntry({
             .digest("hex")
             .slice(0, 16);
           if (hash === lastCaptureHash) return;
-          lastCaptureHash = hash;
 
           // Trigger-based filtering: only capture when the assistant
           // mentions decisions, findings, preferences, or notable items.
@@ -512,6 +511,7 @@ export default definePluginEntry({
             content,
             hint: `auto-capture-${hash}`,
           });
+          lastCaptureHash = hash;
           api.logger.info?.("agent-memory: auto-captured observation");
         } catch (err) {
           api.logger.warn?.(
