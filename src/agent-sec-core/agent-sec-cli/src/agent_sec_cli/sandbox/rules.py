@@ -146,9 +146,29 @@ SAFE_CONDITIONAL = [
     # git 和 sed 有 special_handler，在代码中单独处理
 ]
 
-# Shell 不安全操作符（用于 bash -c 解析）
-SHELL_UNSAFE_OPERATORS = frozenset([">", "<", ">>", "(", ")", "`", "$("])
-SHELL_SAFE_OPERATORS = frozenset(["&&", "||", ";", "|"])
+# Shell 操作符配置
+SHELL_REDIRECTION_OPERATORS = frozenset(
+    [
+        ">",
+        ">>",
+        "<",
+        "<<",
+        "<<<",
+        "1>",
+        "2>",
+        "0>",
+        "&>",
+        ">&",
+        ">|",
+        "1>>",
+        "2>>",
+        "&>>",
+        "2>&1",
+        "1>&2",
+    ]
+)
+SHELL_UNSAFE_OPERATORS = frozenset(["`", "$("])
+SHELL_SAFE_OPERATORS = frozenset(["&&", "||", ";", "|", "|&", "&"])
 
 # ============================================================================
 # 额外权限配置 - default 命令的网络/路径权限
