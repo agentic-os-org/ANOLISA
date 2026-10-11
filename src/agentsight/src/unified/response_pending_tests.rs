@@ -67,7 +67,7 @@ fn response_pending_exit_and_dead_pid_preserve_crash_evidence() {
                     aggregator.drain_connections_for_pid(PID)
                 };
                 assert_eq!(drained.len(), 1);
-                let (id, state) = &drained[0];
+                let (id, state, _) = &drained[0];
                 assert!(matches!(state, ConnectionState::ResponsePending { .. }));
                 let pending = GenAIBuilder::new()
                     .build_pending_from_request(
@@ -368,7 +368,7 @@ fn drain_fallback_counts_every_request_shape() {
             1,
             "{path}: the dead-PID drain keeps the call"
         );
-        let (_, state) = drained.into_iter().next().unwrap();
+        let (_, state, _) = drained.into_iter().next().unwrap();
         let request_body = state.pending_request().and_then(|r| r.json_body());
         let sse_events = match state {
             ConnectionState::SseActive { sse_events, .. } => sse_events,
@@ -430,5 +430,84 @@ fn drain_fallback_counts_dashscope_native_parameter_tools() {
     assert!(
         counted > baseline,
         "the native tool definitions must reach the template: {counted} vs {baseline}"
+    );
+}
+
+/// A stream that dies mid-event must not lose the split tail.
+///
+/// The usage event arrives split across two reads: the head parses as an SSE
+/// event with a truncated `data:` field and the tail has no `data:` prefix,
+/// so it lands in the SSE continuation buffer. The dead-PID drain used to
+/// drop that buffer with the connection, so the terminal usage a dying
+/// process had already received was silently lost — the input side fell back
+/// to a tokenizer estimate and the output side stayed NULL. The drain hands
+/// the bytes to the caller now and the enrichment reassembles them first.
+#[test]
+fn drain_recovers_split_event_usage_from_continuation_bytes() {
+    let mut aggregator = Aggregator::with_limits(
+        4,
+        &RuntimeLimits {
+            connection_idle_timeout_secs: 0,
+            ..Default::default()
+        },
+    );
+    let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+
+    // Response head establishes the SSE stream with one complete delta
+    // event.
+    let head = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+    );
+    assert!(feed(&mut aggregator, 0, head.as_bytes()).is_empty());
+    // The usage event arrives split across two further reads: the head
+    // carries the `data:` prefix and parses as an event with truncated
+    // data; the tail has no prefix, so it arrives as RawData and only the
+    // continuation buffer keeps it.
+    assert!(feed(&mut aggregator, 0, b"data: {\"usage\":{\"input_tokens\":57").is_empty());
+    assert!(feed(&mut aggregator, 0, b",\"output_tokens\":7}}\n\n").is_empty());
+
+    assert!(!crate::utils::procfs::proc_pid(PID).exists());
+    let drained = aggregator.drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
+    let (_, state, continuation) = drained.into_iter().next().unwrap();
+    let sse_events = match state {
+        ConnectionState::SseActive { sse_events, .. } => sse_events,
+        _ => panic!("expected an active SSE stream to drain"),
+    };
+    let mut enrichment =
+        GenAIBuilder::extract_sse_enrichment(&sse_events).expect("enrichment from events");
+    assert!(
+        enrichment.input_tokens.is_none() && enrichment.output_tokens.is_none(),
+        "the truncated head event carries no usable usage"
+    );
+
+    // The production drain path: reassemble from the continuation bytes
+    // before any tokenizer fallback runs.
+    if enrichment.input_tokens.is_none() || enrichment.output_tokens.is_none() {
+        if let Some((input, output)) = continuation.as_deref().and_then(drained_continuation_usage)
+        {
+            if enrichment.input_tokens.is_none() {
+                enrichment.input_tokens = Some(input);
+            }
+            if enrichment.output_tokens.is_none() {
+                enrichment.output_tokens = Some(output);
+            }
+        }
+    }
+    assert_eq!(
+        enrichment.input_tokens,
+        Some(57),
+        "the reassembled usage must supply the input side"
+    );
+    assert_eq!(
+        enrichment.output_tokens,
+        Some(7),
+        "the reassembled usage must supply the output side"
     );
 }
