@@ -24,7 +24,7 @@ def _key():
 def _wanx(prompt, model, size, key):
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
     h = {"Authorization":f"Bearer {key}","Content-Type":"application/json","X-DashScope-Async":"enable"}
-    body = {"model":model,"input":{"prompt":prompt},"parameters":{"size":size,"n":1}}
+    body = {"model":model,"input":{"prompt":prompt},"parameters":{"size":size.replace("x","*"),"n":1}}
     req = urllib.request.Request(url,json.dumps(body).encode(),h,method="POST")
     try:
         with urllib.request.urlopen(req,timeout=60) as r: res = json.loads(r.read())
@@ -49,7 +49,7 @@ def _wanx(prompt, model, size, key):
 
 def _compat(prompt, model, size, key, base):
     h = {"Authorization":f"Bearer {key}","Content-Type":"application/json"}
-    body = {"model":model,"prompt":prompt,"size":size,"n":1,"response_format":"url"}
+    body = {"model":model,"prompt":prompt,"size":size.replace("*","x"),"n":1,"response_format":"url"}
     req = urllib.request.Request(f"{base}/images/generations",json.dumps(body).encode(),h,method="POST")
     try:
         with urllib.request.urlopen(req,timeout=120) as r: res = json.loads(r.read())
@@ -77,7 +77,7 @@ def main():
     ap.add_argument("--api-base",default="https://dashscope.aliyuncs.com/compatible-mode/v1")
     a = ap.parse_args()
     key = _key()
-    size = a.size.replace("x","*")
+    size = a.size
     wanx = ["wanx-v1","wanx2.1-t2i-turbo","wanx2.1-t2i-plus","wanx2.0-t2i-turbo"]
     src = _wanx(a.prompt,a.model,size,key) if a.model in wanx else _compat(a.prompt,a.model,size,key,a.api_base)
     _save(src, a.output)
