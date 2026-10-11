@@ -46,6 +46,11 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 电子表格样式验证
+
+XLSX 技能的 `style_audit.py` 检查样式集合计数，以及每个 cellXfs 条目的填充和边框引用，
+包括尚未使用的样式。验证输出详见[用户指南](../../docs/user-guide/zh/user-entrypoint/os-skills.md)。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
