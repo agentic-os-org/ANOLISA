@@ -151,7 +151,7 @@ test('conversation-list: hiding a model series uses hide, not a transparent fill
 
   assert.match(
     bars,
-    /hide=\{hidden\.has\(m\)\}/,
+    /hide=\{hidden\.has\(modelKey\(m\)\)\}/,
     'the model Bar must receive hide so Recharts drops it from the stack and the Y-axis domain',
   );
   assert.doesNotMatch(
@@ -382,4 +382,80 @@ test('system-audit: the sessions card does not fall back to the loaded page leng
     /affected_sessions \?\? sessions\.length/,
     'the loaded page length must never be reported as the session count',
   );
+});
+
+test('conversation-list: case variants across buckets form one model series', () => {
+  const driver = createHooksDriver();
+  const recharts = Object.fromEntries([
+    'LineChart', 'Line', 'BarChart', 'Bar', 'XAxis', 'YAxis', 'CartesianGrid',
+    'Tooltip', 'Legend', 'ResponsiveContainer',
+  ].map((name) => [name, Object.assign(() => null, { displayName: name })]));
+  const buckets = { exports: {} };
+  new Function('require', 'module', 'exports', transpile('src/utils/timeseriesBuckets.ts'))(
+    () => ({}), buckets, buckets.exports,
+  );
+  const page = loadPageModule('src/pages/ConversationList.tsx', {
+    recharts,
+    'react-router-dom': { useNavigate: () => () => {}, useSearchParams: () => [new URLSearchParams(), () => {}] },
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+    '../utils/apiClient': {}, '../utils/datetime': {},
+    '../utils/timeseriesBuckets': buckets.exports,
+    '../components/InterruptionBadge': {}, '../components/InterruptionPanel': {},
+    '../components/EvaluationBadge': {}, '../components/EvaluationPanel': {},
+    '../components/DateTimePicker': {}, '../components/SessionIdHelp': {},
+    '../components/SessionResourceChart': {},
+  }, driver, '\nexports.ModelTimeseriesChart = ModelTimeseriesChart;');
+  const startNs = Date.UTC(2026, 9, 1) * 1_000_000;
+  const sourceData = [
+    { bucket_start_ns: startNs, model: 'gpt-4o', total_tokens: 37 },
+    { bucket_start_ns: startNs + 30_000_000_000, model: 'GPT-4o', total_tokens: 12 },
+  ];
+  const frozenData = sourceData.map((row) => Object.freeze(row));
+  const props = {
+    data: frozenData,
+    startNs, endNs: startNs + 60_000_000_000, bucketCount: 2,
+  };
+  const rendered = driver.render(page.ModelTimeseriesChart, props);
+  const chart = collectElements(rendered.element, (node) => node.type === recharts.BarChart)[0];
+  const axis = collectElements(rendered.element, (node) => node.type === recharts.XAxis)[0];
+  const bars = collectElements(rendered.element, (node) => node.type === recharts.Bar);
+  assert.equal(bars.length, 1, 'case variants in separate time buckets must be one model series');
+  const { getValueByDataKey, getStackedData } = require('recharts/lib/util/ChartUtils');
+  assert.deepEqual(chart.props.data.map((row) => getValueByDataKey(row, bars[0].props.dataKey)), [37, 12]);
+  assert.deepEqual(getStackedData(chart.props.data, bars, 'none')[0].map((point) => point[1] - point[0]), [37, 12]);
+  const renderWith = (data) => driver.render(page.ModelTimeseriesChart, { ...props, data });
+  const reverse = renderWith([...sourceData].reverse());
+  const reverseBars = collectElements(reverse.element, (node) => node.type === recharts.Bar);
+  assert.deepEqual(reverseBars.map((node) => node.props.name), bars.map((node) => node.props.name),
+    'a bucket order change must not rename the one model series');
+  const legend = collectElements(reverse.element, (node) => node.type === recharts.Legend)[0];
+  legend.props.onClick({ dataKey: reverseBars[0].props.dataKey, value: reverseBars[0].props.name, payload: reverseBars[0].props });
+  const hidden = renderWith(sourceData);
+  assert.equal(collectElements(hidden.element, (node) => node.type === recharts.Bar)[0].props.hide, true);
+  const lowercaseOnly = renderWith(sourceData.map((row) => ({ ...row, model: 'gpt-4o' })));
+  const lowerBar = collectElements(lowercaseOnly.element, (node) => node.type === recharts.Bar)[0];
+  assert.equal(lowerBar.props.name, 'gpt-4o');
+  assert.equal(lowerBar.props.hide, true, 'a case-only refresh must preserve hidden model identity');
+  const lowerLegend = collectElements(lowercaseOnly.element, (node) => node.type === recharts.Legend)[0];
+  assert.equal(lowerLegend.props.formatter(lowerBar.props.name, { dataKey: lowerBar.props.dataKey, payload: lowerBar.props, color: '#123' }).props.style.color, '#aaa');
+  lowerLegend.props.onClick({ dataKey: lowerBar.props.dataKey, value: lowerBar.props.name, payload: lowerBar.props });
+  const uppercaseOnly = renderWith(sourceData.map((row) => ({ ...row, model: 'GPT-4o' })));
+  const upperBar = collectElements(uppercaseOnly.element, (node) => node.type === recharts.Bar)[0];
+  assert.equal(upperBar.props.hide, false, 'showing a model with a new spelling clears its existing hidden identity');
+  const upperLegend = collectElements(uppercaseOnly.element, (node) => node.type === recharts.Legend)[0];
+  upperLegend.props.onClick({ dataKey: upperBar.props.dataKey, value: upperBar.props.name, payload: upperBar.props });
+  const lowercaseAgain = renderWith(sourceData.map((row) => ({ ...row, model: 'gpt-4o' })));
+  assert.equal(collectElements(lowercaseAgain.element, (node) => node.type === recharts.Bar)[0].props.hide, true);
+  const unicode = renderWith([
+    { bucket_start_ns: startNs, model: 'Ä', total_tokens: 2 },
+    { bucket_start_ns: startNs + 30_000_000_000, model: 'ä', total_tokens: 3 },
+  ]);
+  const unicodeBars = collectElements(unicode.element, (node) => node.type === recharts.Bar);
+  assert.equal(unicodeBars.length, 2, 'SQLite NOCASE does not collapse non-ASCII model letters');
+  const ordinary = renderWith([
+    { bucket_start_ns: startNs, model: 'gpt-4o', total_tokens: 2 },
+    { bucket_start_ns: startNs + 30_000_000_000, model: 'claude-sonnet', total_tokens: 3 },
+  ]);
+  assert.equal(collectElements(ordinary.element, (node) => node.type === recharts.Bar).length, 2,
+    'unrelated models stay separate');
 });

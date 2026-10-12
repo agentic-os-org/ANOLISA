@@ -603,8 +603,18 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
 }) => {
   const { t } = useI18n();
   const spanMs = (endNs - startNs) / 1_000_000;
-  const models = Array.from(new Set(data.map((d) => d.model))).sort();
-  const filled = fillModelBuckets(data, startNs, endNs, bucketCount, models);
+  // SQLite NOCASE groups ASCII case variants within a bucket; the chosen
+  // spelling can differ across buckets, but the chart must keep one series.
+  const modelKey = (model: string) => model.replace(/[A-Z]/g, (char) => char.toLowerCase());
+  const modelNames = new Map<string, string>();
+  for (const { model } of data) {
+    const key = modelKey(model);
+    const name = modelNames.get(key);
+    if (name === undefined || model < name) modelNames.set(key, model);
+  }
+  const models = Array.from(modelNames.values()).sort();
+  const normalized = data.map((bucket) => ({ ...bucket, model: modelNames.get(modelKey(bucket.model))! }));
+  const filled = fillModelBuckets(normalized, startNs, endNs, bucketCount, models);
 
   const bucketMap = new Map<number, Record<string, number>>();
   for (const d of filled) {
@@ -618,9 +628,10 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
   // Track which model bars are hidden
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const toggleModel = (key: string) => {
+    const identity = modelKey(key);
     setHidden((prev) => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      next.has(identity) ? next.delete(identity) : next.add(identity);
       return next;
     });
   };
@@ -648,17 +659,17 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
           onClick={(e) => toggleModel((e.payload as { name?: string })?.name ?? e.value)}
           formatter={(value, entry) => {
             const name = (entry as any).payload?.name ?? value;
-            const color = hidden.has(name) ? '#aaa' : (entry as any).color;
+            const color = hidden.has(modelKey(name)) ? '#aaa' : (entry as any).color;
             return <span style={{ color }}>{name}</span>;
           }}
         />
         {models.map((m, i) => (
           <Bar
-            key={m}
+            key={modelKey(m)}
             dataKey={(bucket: (typeof chartData)[number]) => bucket.tokens[m] ?? 0}
             name={m}
             stackId="model"
-            hide={hidden.has(m)}
+            hide={hidden.has(modelKey(m))}
             fill={MODEL_COLORS[i % MODEL_COLORS.length]}
           />
         ))}
