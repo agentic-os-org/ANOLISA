@@ -841,7 +841,7 @@ mod tests {
 
         assert_eq!(
             component_names_for_target(&index, "raw", "linux", "aarch64"),
-            ["cosh-ng", "tokenless"]
+            ["cosh-ng", "tokenless", "ws-ckpt"]
         );
         assert_eq!(
             component_names_for_target(&index, "raw", "macos", "aarch64"),

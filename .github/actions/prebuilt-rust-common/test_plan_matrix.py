@@ -59,6 +59,38 @@ class PlanMatrixTests(unittest.TestCase):
     def test_component_without_prebuilt_targets(self) -> None:
         self.assertEqual(plan_matrix.build_matrix("agentsight"), {"include": []})
 
+    def test_ws_ckpt_requires_both_linux_targets(self) -> None:
+        matrix = plan_matrix.build_matrix("ws-ckpt")
+        self.assertEqual(
+            [(row["target-os"], row["target-arch"], row["profile"]) for row in matrix["include"]],
+            [
+                ("linux", "x86_64", "gnu2.28-x86_64"),
+                ("linux", "aarch64", "gnu2.28-aarch64"),
+            ],
+        )
+        self.assertTrue(all(row["component"] == "ws-ckpt" for row in matrix["include"]))
+
+    def test_ws_ckpt_download_requires_arm64_artifact(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "verify_artifacts", Path(__file__).with_name("verify-artifacts.py")
+        )
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for arch in ("x86_64", "aarch64"):
+                (root / f"ws-ckpt-prebuilt-0.5.0-linux-{arch}").mkdir()
+            args = [
+                "verify-artifacts.py", "--component", "ws-ckpt", "--version", "0.5.0",
+                "--directory", temporary, "--layout", "actions",
+            ]
+            with mock.patch("sys.argv", args), mock.patch.object(verifier, "validate_directory"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(verifier.main(), 0)
+                (root / "ws-ckpt-prebuilt-0.5.0-linux-aarch64").rmdir()
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    verifier.main()
+
     def test_cosh_ng_artifact_set_requires_intel_mac(self) -> None:
         self.assert_intel_artifact_set("cosh-ng", "0.25.0")
 
