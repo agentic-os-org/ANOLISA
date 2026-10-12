@@ -45,11 +45,9 @@ pub mod security;
 // Cross-platform: the request/response contract and LLM ranking call behind
 // `POST /api/sessions/search`, shared by the Linux and macOS server handlers.
 pub mod semantic_search;
-pub mod tokenizer;
-// Cross-platform: offline ChatML token-consumption breakdown over Chrome
-// Trace files (`agentsight analyze-chatml`); pure analysis over `chrome_trace`
-// and `tokenizer`, no eBPF dependency.
+#[cfg(target_os = "linux")]
 pub mod token_breakdown;
+pub mod tokenizer;
 pub mod utils;
 
 // ─── Linux-only modules (eBPF observability pipeline) ──────────────────────
