@@ -39,7 +39,7 @@ pub enum PapError {
     /// Human-readable Policy name validation failed.
     #[error("invalid policy name: {0}")]
     InvalidPolicyName(String),
-    /// Policy authoring or lowering validation failed.
+    /// Policy template validation failed.
     #[error("invalid policy: {0}")]
     InvalidPolicy(ValidationError),
     /// Scope authoring validation failed.
@@ -60,12 +60,9 @@ pub enum PapError {
     /// The requested exact record does not exist.
     #[error("record not found")]
     NotFound,
-    /// A Binding references a Policy revision that is neither current nor in its snapshot.
+    /// Scope admission requested a Policy revision that is no longer current.
     #[error("referenced policy revision not found")]
     ReferencedPolicyRevisionNotFound,
-    /// A Binding references a Scope revision that is neither current nor in its snapshot.
-    #[error("referenced scope revision not found")]
-    ReferencedScopeRevisionNotFound,
     /// No further positive `u32` revision can be allocated.
     #[error("revision space exhausted")]
     RevisionExhausted,

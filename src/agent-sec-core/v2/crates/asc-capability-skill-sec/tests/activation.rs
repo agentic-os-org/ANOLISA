@@ -206,6 +206,10 @@ fn rollback_retains_backup_and_restores_selected_snapshot() {
         fs::read_to_string(f.root.io_dir.join("main.sh")).unwrap(),
         "echo safe\n"
     );
+    // rollbackBackup documents which recovery copy the rollback ran with;
+    // the copy is deliberately retained — it can be the only copy of the
+    // replaced tree's unrecorded changes, so the returned path must still
+    // name an inspectable directory.
     let backup = Path::new(result["rollbackBackup"].as_str().unwrap());
     assert_eq!(
         fs::read_to_string(backup.join("main.sh")).unwrap(),

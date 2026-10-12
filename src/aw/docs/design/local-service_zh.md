@@ -179,3 +179,23 @@ SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `
 - [Runtime](../../crates/aw-service/src/runtime.rs) 与
   [审计元数据](../../crates/aw-service/src/audit.rs)
 - [开发检查](../../CONTRIBUTING_zh.md#运行时验收)
+
+## 布尔命令投影
+
+CLI 组合入口在 core 制品内提供 `aw policy`，作为内置 stdio Provider 桥接。
+命令读取标准化事件并返回一个 JSON 布尔值，私有配置声明命中后的
+`observe`/`block` effect，服务不内置安全引擎或业务规则。桥接实现现有三个
+Provider 方法并回显关联 invoke 的摘要。这些字段保留在 `aw-provider/v1alpha1`
+中，不暴露给用户命令。摘要绑定内容，不认证 Provider 身份。
+
+命令复用 `aw-exec` 的字面 argv、固定工作目录、Host 选定环境、限制和自有进程
+清理。命令预算包含桥接输入解析，共享传入的调用预算。方法失败仍是结构化
+Provider 错误，由步骤 `on_error` 处理。两个握手方法均不执行命令。
+launcher/adapter 的采用语义不变；零 Provider 启动仍绑定共享服务，
+没有工具策略步骤或每次工具调用的 AW 记录。
+
+结构化传输失败时，Host 使用 `aw-exec::run_cooperative` 发送 SIGTERM，给予
+250 ms 后强制清理进程组，再使用原有独立的一秒校验预算。桥接将 CLI 的停止
+信号标志传给普通 `aw-exec::run`，取消时立即停止用户命令进程组，包括忽略
+SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意外 SIGKILL，以及
+后代逃离进程组，仍受执行器已声明的限制约束。

@@ -1,8 +1,13 @@
+#[cfg(test)]
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/policy.rs"
+));
+
 use asc_policy_types::Validate;
+use asc_policy_types::binding::BindingScope;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
-use asc_policy_types::identifiers::Revision;
-use asc_policy_types::policy::{PolicyEnvelope, PreparedPolicy};
-use asc_policy_types::scope::PreparedScope;
+use asc_policy_types::policy::PreparedPolicy;
 
 const COMPLETE_BINDING: &str = include_str!("fixtures/prepared-binding.json");
 
@@ -18,7 +23,7 @@ fn complete_binding_round_trips_and_validates_as_one_boundary_document() {
     binding.validate().unwrap();
     assert_eq!(binding.binding_revision.get(), 7);
     assert_eq!(binding.policy.revision.get(), 1);
-    assert_eq!(binding.scope.revision.get(), 3);
+    assert_eq!(binding.scope.process.start_time, 987_654);
     assert_eq!(serde_json::to_value(binding).unwrap(), expected);
 }
 
@@ -39,13 +44,13 @@ fn scope_requires_an_explicit_supported_selector_including_inside_bindings() {
         } else {
             binding["scope"].as_object_mut().unwrap().remove("selector");
         }
-        assert!(serde_json::from_value::<PreparedScope>(binding["scope"].clone()).is_err());
+        assert!(serde_json::from_value::<BindingScope>(binding["scope"].clone()).is_err());
         assert!(serde_json::from_value::<PreparedBinding>(binding).is_err());
     }
 }
 
 #[test]
-fn scope_contains_only_identity_revision_and_selector_and_rejects_removed_fields() {
+fn binding_scope_contains_provenance_instance_and_rejects_removed_fields() {
     let complete: serde_json::Value = serde_json::from_str(COMPLETE_BINDING).unwrap();
     for selector in [
         serde_json::json!({"kind": "pid", "pid": 4242}),
@@ -53,10 +58,10 @@ fn scope_contains_only_identity_revision_and_selector_and_rejects_removed_fields
     ] {
         let expected = serde_json::json!({
             "scopeId": complete["scope"]["scopeId"],
-            "revision": complete["scope"]["revision"],
+            "process": complete["scope"]["process"],
             "selector": selector,
         });
-        let scope: PreparedScope = serde_json::from_value(expected.clone()).unwrap();
+        let scope: BindingScope = serde_json::from_value(expected.clone()).unwrap();
         scope.validate().unwrap();
         assert_eq!(serde_json::to_value(scope).unwrap(), expected);
     }
@@ -74,7 +79,7 @@ fn scope_contains_only_identity_revision_and_selector_and_rejects_removed_fields
     ] {
         let mut binding = complete.clone();
         binding["scope"][key] = value;
-        assert!(serde_json::from_value::<PreparedScope>(binding["scope"].clone()).is_err());
+        assert!(serde_json::from_value::<BindingScope>(binding["scope"].clone()).is_err());
         assert!(serde_json::from_value::<PreparedBinding>(binding).is_err());
     }
 }
@@ -87,7 +92,7 @@ fn policy_round_trips_without_template_digest_and_rejects_the_removed_field() {
     let encoded = serde_json::to_value(policy).unwrap();
     assert_eq!(encoded, complete["policy"]);
     assert!(encoded.get("templateDigest").is_none());
-    assert_eq!(encoded.as_object().unwrap().len(), 5);
+    assert_eq!(encoded.as_object().unwrap().len(), 4);
 
     for digest in [
         serde_json::json!(
@@ -103,12 +108,13 @@ fn policy_round_trips_without_template_digest_and_rejects_the_removed_field() {
 }
 
 #[test]
-fn binding_validation_rejects_inconsistent_embedded_policy_identity() {
+fn binding_validation_rejects_invalid_embedded_template() {
     let mut binding = prepared_binding();
-    binding.policy.canonical_policy.revision = Revision::new(2).unwrap();
-
-    let error = binding.validate().unwrap_err();
-    assert_eq!(error.path, "policy.canonicalPolicy.revision");
+    binding.policy.template = file_policy(vec!["relative".into()]);
+    assert_eq!(
+        binding.validate().unwrap_err().path,
+        "policy.template.rules[0].target.path"
+    );
 }
 
 #[test]
@@ -224,7 +230,7 @@ fn removed_legacy_fields_and_unknown_fields_are_rejected() {
 
         let mut scope = complete.clone();
         scope["scope"]["retired"] = retired;
-        assert!(serde_json::from_value::<PreparedScope>(scope["scope"].clone()).is_err());
+        assert!(serde_json::from_value::<BindingScope>(scope["scope"].clone()).is_err());
         assert!(serde_json::from_value::<PreparedBinding>(scope).is_err());
     }
 
@@ -245,33 +251,17 @@ fn removed_legacy_fields_and_unknown_fields_are_rejected() {
 }
 
 #[test]
-fn canonical_policy_rejects_removed_payload_digest_at_every_embedding_boundary() {
+fn snapshots_reject_unknown_fields_at_every_embedding_boundary() {
     let complete: serde_json::Value = serde_json::from_str(COMPLETE_BINDING).unwrap();
-    let envelope: PolicyEnvelope =
-        serde_json::from_value(complete["policy"]["canonicalPolicy"].clone()).unwrap();
-    envelope.validate().unwrap();
-    assert_eq!(
-        serde_json::to_value(envelope).unwrap(),
-        complete["policy"]["canonicalPolicy"]
-    );
-    assert!(
-        complete["policy"]["canonicalPolicy"]
-            .get("payloadDigest")
-            .is_none()
-    );
-    for digest in [
-        serde_json::json!(
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-        ),
-        serde_json::Value::Null,
-    ] {
+    for unknown in [serde_json::json!({"extra": 1}), serde_json::Value::Null] {
         let mut legacy = complete.clone();
-        legacy["policy"]["canonicalPolicy"]["payloadDigest"] = digest;
-        assert!(
-            serde_json::from_value::<PolicyEnvelope>(legacy["policy"]["canonicalPolicy"].clone())
-                .is_err()
-        );
+        legacy["policy"]["unknownField"] = unknown;
         assert!(serde_json::from_value::<PreparedPolicy>(legacy["policy"].clone()).is_err());
+        let scope = serde_json::json!({
+            "scopeId": "assignment", "selector": complete["scope"]["selector"],
+            "status": "ACTIVE", "policySnapshots": [legacy["policy"].clone()]
+        });
+        assert!(serde_json::from_value::<asc_policy_types::scope::PreparedScope>(scope).is_err());
         assert!(serde_json::from_value::<PreparedBinding>(legacy).is_err());
     }
 }

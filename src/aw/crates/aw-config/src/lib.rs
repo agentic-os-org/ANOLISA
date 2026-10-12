@@ -17,6 +17,19 @@ pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum nesting depth, including Provider-owned configuration.
 pub const MAX_DEPTH: usize = 32;
 
+/// Parses one bounded YAML or JSON value without checking configuration shape.
+///
+/// Use this for editor definitions, then validate the complete edited document
+/// with [`Validator`]. Mapping keys remain strings and scalar types are retained.
+///
+/// # Errors
+/// Rejects duplicate keys, ambiguous YAML constructs, non-JSON scalars, multiple
+/// documents and input exceeding the byte, expansion or nesting limits.
+/// Diagnostics omit the supplied values.
+pub fn parse_value(input: &[u8]) -> Result<Value, Error> {
+    parsing::parse(input)
+}
+
 /// Errors report locations and constraints without printing configuration values.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -90,7 +103,7 @@ impl Validator {
     /// references and inconsistent event actions. Provider-owned `config` stays
     /// opaque JSON; its schema and requested capabilities require later admission.
     pub fn parse(&self, input: &[u8]) -> Result<Configuration, Error> {
-        let document = parsing::parse(input)?;
+        let document = parse_value(input)?;
         self.0.validate(&document).map_err(|error| Error::Shape {
             path: error.instance_path().to_string(),
             reason: error.masked().to_string(),

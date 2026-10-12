@@ -576,7 +576,17 @@ mod tests {
             allow: true,
         }];
         let scanner = AgentScanner::from_rules(&rules, &[]);
-        let matched = scanner.try_match_process(pid);
+        // The comm file is not the only input the matcher reads: `/proc/<pid>/
+        // cmdline` and `/proc/<pid>/exe` can both be momentarily empty right
+        // after exec, so the match is polled under the same bound as the name
+        // above. A single attempt made the test fail on a loaded CI runner
+        // (observed once: "a non-UTF-8 comm must not hide the process from
+        // discovery") even though nothing was wrong with the reader.
+        let mut matched = None;
+        while matched.is_none() && std::time::Instant::now() < deadline {
+            matched = scanner.try_match_process(pid);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
 
         child.kill().ok();
         child.wait().ok();

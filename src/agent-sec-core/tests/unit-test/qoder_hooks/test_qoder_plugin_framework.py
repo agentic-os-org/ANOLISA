@@ -29,10 +29,8 @@ def _write_executable(path: Path, content: str) -> None:
 
 
 def _package_version() -> str:
-    pyproject = tomllib.loads(
-        (_CORE_DIR / "agent-sec-cli" / "pyproject.toml").read_text()
-    )
-    return pyproject["project"]["version"]
+    workspace = tomllib.loads((_CORE_DIR / "v2" / "Cargo.toml").read_text())
+    return workspace["workspace"]["package"]["version"]
 
 
 def _python_version_script(version: tuple[int, int]) -> str:

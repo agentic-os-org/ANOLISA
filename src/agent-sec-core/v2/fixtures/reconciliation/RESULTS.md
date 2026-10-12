@@ -255,7 +255,6 @@ mock 组合验收，不证明真实 PEP 或跨重启恢复。内部接口回退�
 | `asc-policy-target-contracts` | `0.1.0` |
 | `asc-policy-types` | `0.1.0` |
 | `asc-foundation-types` | `0.1.0` |
-| `asc-policy-engine` | `0.1.0` |
 | `asc-policy-adapter-agentsight` | `0.1.0` |
 | `asc-agentsight-client` | `0.1.0` |
 | `asc-daemon` | `0.1.0` |

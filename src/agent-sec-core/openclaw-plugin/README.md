@@ -344,7 +344,7 @@ openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval tru
 
 The `pii-scan-user-input` capability registers one input hook based on `api.runtime.version`:
 
-- Stable OpenClaw `>=2026.5.12`: `before_agent_run` scans `prompt`, `systemPrompt`, and message text, including history and tool arguments/results, with `source=model_input`. Media payloads and message metadata are excluded.
+- Stable OpenClaw `>=2026.5.12`: `before_agent_run` scans only the current user input in `prompt`. System prompts, session history, media payloads, and message metadata are excluded. A missing, non-string, or blank `prompt` skips scanning without falling back to other fields. `source=model_input` continues to identify the model-entry hook, not full-context coverage.
 - Older supported hosts, prereleases, and unrecognized versions: `before_dispatch` scans host-provided inbound text with `source=user_input` and logs a compatibility warning. The minimum supported host remains `2026.4.14`.
 
 Startup logs identify the selected hook. The new gate uses the existing `allowConversationAccess=true` permission set by deployment. It inspects text available at run entry, does not recover credentials already masked by OpenClaw, and does not cover every model request during a run or auxiliary model calls such as session title generation. A `pass` on masked input is acceptable when the provider request also contains no original credential. The plugin does not replace model input with redacted output.

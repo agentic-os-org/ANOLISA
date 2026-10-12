@@ -4,7 +4,7 @@ use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_observability::AgentFieldProcessor;
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+
 use opentelemetry::trace::{Status, TracerProvider as _};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider, SpanData};
 use serde_json::{Value, json};
@@ -107,10 +107,7 @@ async fn uds_failures_preserve_business_and_context() {
         release: Mutex::new(wait),
     });
     let dispatcher = Arc::new(DaemonDispatcher::new(
-        PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        ),
+        PapService::new(Arc::new(ProcessLocalPapRepository::default())),
         policy.clone(),
         asc_daemon::scan_application(
             asc_action_runtime::testing::discarding_finalizer(),
@@ -145,7 +142,7 @@ async fn uds_failures_preserve_business_and_context() {
             &path,
             json!({"method":"policy.templates.create", "params": {
                 "policyName": format!("policy-{index}"),
-                "template":{"kind":"prevent_file_deletion", "files":["/protected"]}
+                "template":{"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/protected"}, "where": {"operation": {"eq": "delete"}}}]}
             }}),
         )
         .await;
@@ -164,7 +161,7 @@ async fn uds_failures_preserve_business_and_context() {
     provider.force_flush().unwrap();
     let spans = all.get_finished_spans().unwrap();
     check_failure_spans(&spans, &clean);
-    check_compiler_parentage(&spans);
+    check_pap_parentage(&spans);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -186,7 +183,7 @@ async fn exercise_failures(
             "invalid_request",
         ),
         (
-            json!({"method":"policy.templates.create", "params":{"policyName":"bad", "template":{"kind":"prevent_file_deletion", "files":[]}}}),
+            json!({"method":"policy.templates.create", "params":{"policyName":"bad", "template":{"specVersion": "0.1", "rules": []}}}),
             "invalid_argument",
         ),
     ] {
@@ -270,31 +267,22 @@ fn check_failure_spans(spans: &[SpanData], clean: &Value) {
 }
 
 // Internal span inspection, independent of the production local-only runtime.
-fn check_compiler_parentage(spans: &[SpanData]) {
-    let compiled: Vec<_> = spans
+fn check_pap_parentage(spans: &[SpanData]) {
+    let creates: Vec<_> = spans
         .iter()
-        .filter(|span| span.name == "policy.compile")
+        .filter(|span| span.name == "pap.create_policy")
         .collect();
-    assert_eq!(compiled.len(), 13); // Twelve valid creates and one invalid template.
+    assert_eq!(creates.len(), 13); // Twelve valid creates and one invalid template.
     let mut failures = 0;
-    for child in compiled {
-        let parent = spans
-            .iter()
-            .find(|span| span.span_context.span_id() == child.parent_span_id)
-            .unwrap();
-        assert_eq!(parent.name, "pap.create_policy");
-        assert_eq!(
-            parent.span_context.trace_id(),
-            child.span_context.trace_id()
-        );
+    for child in creates {
         let request = spans
             .iter()
-            .find(|span| span.span_context.span_id() == parent.parent_span_id)
+            .find(|span| span.span_context.span_id() == child.parent_span_id)
             .unwrap();
         assert_eq!(request.name, "daemon.request");
         assert_eq!(
             request.span_context.trace_id(),
-            parent.span_context.trace_id()
+            child.span_context.trace_id()
         );
         if matches!(request.status, Status::Error { .. }) {
             failures += 1;

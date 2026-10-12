@@ -4,6 +4,7 @@
 
 use crate::diff::DiffRecords;
 use crate::record::{CompressionMode, OperationType, StatsRecord};
+use crate::warn_stats;
 use chrono::DateTime;
 use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
@@ -279,9 +280,9 @@ impl StatsRecorder {
     /// permanently breaking every subsequent query.
     fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|poisoned| {
-            eprintln!(
+            warn_stats(&format!(
                 "[tokenless-stats] WARNING: mutex was poisoned by a previous panic; recovering: {poisoned}"
-            );
+            ));
             self.conn.clear_poison();
             poisoned.into_inner()
         })
@@ -409,10 +410,10 @@ impl StatsRecorder {
                 Err(e) => {
                     static CORRUPT_LOGGED: AtomicBool = AtomicBool::new(false);
                     if !CORRUPT_LOGGED.swap(true, Ordering::Relaxed) {
-                        eprintln!(
+                        warn_stats(&format!(
                             "[tokenless-stats] skipping corrupt row(s): {e} \
                              (further corrupt rows suppressed)"
-                        );
+                        ));
                     }
                     None
                 }
@@ -748,7 +749,9 @@ impl StatsRecorder {
             timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
                 .map(|dt| dt.with_timezone(&chrono::Local))
                 .unwrap_or_else(|e| {
-                    eprintln!("[tokenless-stats] corrupt timestamp, using current time: {e}");
+                    warn_stats(&format!(
+                        "[tokenless-stats] corrupt timestamp, using current time: {e}"
+                    ));
                     chrono::Local::now()
                 }),
             operation: OperationType::from_str(&row.get::<_, String>(2)?).map_err(|e| {

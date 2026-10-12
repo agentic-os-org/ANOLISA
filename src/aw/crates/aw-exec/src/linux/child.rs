@@ -123,6 +123,15 @@ impl OwnedChild {
         Ok(unsafe { info.si_pid() } != 0)
     }
 
+    pub(super) fn terminate(&self) -> io::Result<()> {
+        self.signal(libc::SIGTERM)?;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while !self.observe_exit()? && Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
+        }
+        Ok(())
+    }
+
     pub(super) fn cleanup(&mut self) -> io::Result<ExitStatus> {
         let deadline = Instant::now() + CLEANUP_GRACE;
         self.signal_group()?;

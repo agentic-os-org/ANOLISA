@@ -5,7 +5,47 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Validate, ValidationError};
 use crate::identifiers::{ResourceId, Revision};
 use crate::policy::PreparedPolicy;
-use crate::scope::PreparedScope;
+use crate::process_discovery::ProcessIdentity;
+use crate::scope::ScopeSelector;
+
+/// Assignment provenance and the concrete instance selected for this Binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BindingScope {
+    /// Owning assignment identity.
+    pub scope_id: ResourceId,
+    /// Original selection criteria, retained for diagnostics.
+    pub selector: ScopeSelector,
+    /// Process instance pinned at discovery, including its namespace.
+    pub process: ProcessIdentity,
+}
+
+impl Validate for BindingScope {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.selector.validate().map_err(|error| {
+            ValidationError::new(format!("selector.{}", error.path), error.message)
+        })?;
+        if self.process.pid == 0
+            || self.process.start_time == 0
+            || self.process.boot_id.is_empty()
+            || self.process.pid_namespace.is_empty()
+        {
+            return Err(ValidationError::new(
+                "process",
+                "requires a complete process identity",
+            ));
+        }
+        if let ScopeSelector::Pid { pid } = self.selector
+            && pid != self.process.pid
+        {
+            return Err(ValidationError::new(
+                "process.pid",
+                "must match the selected PID",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Complete Adapter-independent immutable Binding specification.
 ///
@@ -20,10 +60,10 @@ pub struct PreparedBinding {
     pub binding_id: ResourceId,
     /// Immutable spec revision.
     pub binding_revision: Revision,
-    /// Exactly one authored and lowered Policy revision.
+    /// Exactly one authored Policy revision, compiled by the target Adapter.
     pub policy: PreparedPolicy,
-    /// Exactly one authored Scope revision.
-    pub scope: PreparedScope,
+    /// Scope provenance and the selected execution instance.
+    pub scope: BindingScope,
 }
 
 impl Validate for PreparedBinding {

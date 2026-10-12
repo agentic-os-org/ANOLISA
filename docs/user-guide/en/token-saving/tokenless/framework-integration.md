@@ -315,6 +315,26 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
 
+The optional `selective-claw` context engine has its own configuration under
+`plugins.entries.selective-claw.config`, separate from the response adapter:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "selective-claw": {
+        "config": { "enabled": true, "freshTailTurns": 3, "dbPath": "~/.openclaw/selective-claw.db" }
+      }
+    }
+  }
+}
+```
+
+`~/` expands to the current user's home directory. With no `dbPath`, the archive
+is `selective-claw.db` under `OPENCLAW_STATE_DIR`, or under `~/.openclaw` when that
+variable is unset. Setting the plugin's `enabled` option to `false` skips database,
+context engine and recall tool registration.
+
 ### Hermes
 
 The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the

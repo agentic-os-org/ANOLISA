@@ -266,12 +266,14 @@ current adapter attempts enforcement.
 
 ### OpenClaw input protection
 
-On stable OpenClaw `>=2026.5.12`, PII Checker uses `before_agent_run` to scan
-`prompt`, `systemPrompt`, and text in the supplied session messages, including tool
-arguments and results. It records `source=model_input`. Media payloads and message
-metadata are excluded. This checks text available at run entry. It does not cover every
-model request inside the run or auxiliary model calls such as session title generation,
-and does not promise access to the original user input.
+On stable OpenClaw `>=2026.5.12`, PII Checker uses `before_agent_run` to scan only
+the current user input in `prompt`. System prompts, session history, media payloads,
+and message metadata are excluded. A missing, non-string, or blank `prompt` skips
+scanning without falling back to other fields. It still records `source=model_input`
+to identify the model-entry hook, not full-context coverage. This checks the current
+input supplied by OpenClaw at run entry. It does not cover every model request inside
+the run or auxiliary model calls such as session title generation, and does not promise
+access to the original user input.
 
 Older supported versions (`>=2026.4.14`), prereleases, and unrecognized versions use
 `before_dispatch` with `source=user_input`. This legacy path only scans the inbound

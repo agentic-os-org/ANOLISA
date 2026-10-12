@@ -1,18 +1,18 @@
-//! `SQLite` schema version for the observability index.
+//! `SQLite` schema revision for the observability index.
 
-/// Schema version of the `observability_events` table.
+/// Revision 2 adds trusted UID ownership and owner-scoped indexes.
 ///
-/// Migrated from v1 `observability/models.py`. Unlike security events there is
-/// no revision registry and no migration callback: the table has only ever had
-/// one shape, and the store is opened with no migrator at all.
-pub const OBSERVABILITY_SQLITE_SCHEMA_VERSION: u32 = 1;
+/// Every new write requires a trusted UID. Revision 1 stores predate ownership:
+/// the kernel converges them by adding a nullable `uid` column, so historical
+/// rows keep an unknown owner (`NULL`) while new rows always carry one.
+pub const OBSERVABILITY_SQLITE_SCHEMA_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn schema_version_matches_v1() {
-        assert_eq!(OBSERVABILITY_SQLITE_SCHEMA_VERSION, 1);
+    fn schema_version_includes_uid_ownership() {
+        assert_eq!(OBSERVABILITY_SQLITE_SCHEMA_VERSION, 2);
     }
 }

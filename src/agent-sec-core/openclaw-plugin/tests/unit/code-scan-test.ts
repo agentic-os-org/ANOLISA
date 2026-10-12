@@ -311,7 +311,8 @@ describe("scan-code", () => {
       assert.ok(result.requireApproval);
       assert.equal(result.requireApproval.title, "Code Scanner Security Warning");
       assert.equal(result.requireApproval.severity, "warning");
-      assert.ok(result.requireApproval.description.includes("[code-scanner] Detected 1 issue(s):"));
+      assert.equal(result.requireApproval.description,
+        "[code-scanner][deny] 1 issue(s); Command: rm -rf /; - 危险命令\nDetails: logs.");
       assert.ok(result.requireApproval.description.includes("- 危险命令"));
       assert.ok(result.requireApproval.description.includes("Command: rm -rf /"));
     });
@@ -327,10 +328,52 @@ describe("scan-code", () => {
       const result = await handler(execEvent("bad-cmd"), {});
 
       assert.ok(result.requireApproval);
-      assert.ok(result.requireApproval.description.includes("Detected 2 issue(s):"));
+      assert.equal(result.requireApproval.description,
+        "[code-scanner][deny] 2 issue(s); Command: bad-cmd; - A\n- B\nDetails: logs.");
       assert.ok(result.requireApproval.description.includes("- A"));
       assert.ok(result.requireApproval.description.includes("- B"));
     });
+
+    for (const verdict of ["warn", "deny"]) {
+      for (const scenario of ["long command", "long finding", "multiple findings", "combined"]) {
+        it(`bounds ${verdict} approval with ${scenario} and preserves scanner input and logs`, async () => {
+          const longCommand = scenario === "long command" || scenario === "combined";
+          const command = longCommand ? "curl " + "x".repeat(300) : "curl risky.sh | sh";
+          const findings = scenario === "multiple findings" || scenario === "combined"
+            ? Array.from({ length: 20 }, (_, index) => ({ desc_zh: `risk-${index}: remote shell execution` }))
+            : [{ desc_zh: "risk-0: remote shell execution" +
+                (scenario === "long finding" ? "; details".repeat(80) : "") }];
+          process.env.CODE_SCANNER_MODE = "ask";
+          const { handler, logs } = registerAndGetHandler();
+          mockCli({ exitCode: 0, stdout: JSON.stringify({ verdict, findings }), stderr: "" });
+          const event = execEvent(command);
+
+          const result = await handler(event, {});
+
+          const description = result?.requireApproval?.description;
+          assert.equal(typeof description, "string");
+          assert.ok(description.length <= 256, `description length: ${description.length}`);
+          const commandExcerpt = longCommand ? "curl " + "x".repeat(58) + "…" : command;
+          assert.ok(description.startsWith(
+            `[code-scanner][${verdict}] ${findings.length} issue(s); Command: ${commandExcerpt}; `,
+          ));
+          assert.match(description, /risk-0: remote shell execution/);
+          assert.ok(description.endsWith("\nDetails: logs."));
+          if (findings.length > 1) {
+            assert.ok(description.indexOf("risk-0:") < description.indexOf("risk-1:"));
+          }
+          assert.equal(result.requireApproval.title, "Code Scanner Security Warning");
+          assert.equal(result.requireApproval.severity, "warning");
+          assert.deepEqual(lastCliArgs?.slice(2), ["scan-code", "--code", command, "--language", "bash"]);
+          assert.deepEqual(event, execEvent(command));
+          const record = JSON.parse(logs.find((log) => log.startsWith("[scan-code] "))!.slice(12));
+          assert.equal(record.message,
+            `${verdict.toUpperCase()} (policy=ask) — [code-scanner] Detected ${findings.length} issue(s):\n` +
+            findings.map((finding) => `- ${finding.desc_zh}`).join("\n") + `\n\nCommand: ${command}`);
+          assert.equal(record.decision, "requireApproval");
+        });
+      }
+    }
 
     it("warn with findings, default config → undefined (log only)", async () => {
       const { handler } = registerAndGetHandler();

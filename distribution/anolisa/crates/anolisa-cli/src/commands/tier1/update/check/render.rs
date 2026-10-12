@@ -195,3 +195,90 @@ fn render_component_line(component: &ComponentCheck, color: &Palette) {
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::CheckSummary;
+    use super::*;
+
+    fn report(
+        updates: usize,
+        reconciliations: usize,
+        missing_defaults: usize,
+    ) -> UpdateCheckReport {
+        UpdateCheckReport {
+            target: None,
+            backend: "rpm".to_string(),
+            upgrade_available: updates > 0,
+            action_required: updates > 0 || reconciliations > 0 || missing_defaults > 0,
+            cli: CliCheck {
+                package: None,
+                installed: None,
+                available: None,
+                action: ACTION_NOOP.to_string(),
+                error: None,
+            },
+            components: Vec::new(),
+            summary: CheckSummary {
+                updates,
+                reconciliations,
+                missing_defaults,
+                unsupported: 0,
+                errors: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn motd_uses_singular_and_plural_forms() {
+        let one = build_motd(&report(1, 0, 0)).expect("one update needs a MOTD");
+        assert!(
+            one.starts_with(
+                "ANOLISA toolchain update is available.\n1 component can be upgraded.\n"
+            ),
+            "{one}"
+        );
+        let two = build_motd(&report(2, 0, 0)).expect("two updates need a MOTD");
+        assert!(two.contains("2 components can be upgraded"), "{two}");
+    }
+
+    #[test]
+    fn motd_headline_reflects_the_action_class() {
+        // Reconciliation alone gets its own headline.
+        let rec = build_motd(&report(0, 1, 0)).expect("reconciliation needs a MOTD");
+        assert!(
+            rec.starts_with(
+                "ANOLISA state reconciliation is required.\n1 component requires state reconciliation.\n"
+            ),
+            "{rec}"
+        );
+        // A missing default keeps the update headline even with zero upgrades.
+        let inst = build_motd(&report(0, 0, 1)).expect("a missing default needs a MOTD");
+        assert!(
+            inst.starts_with(
+                "ANOLISA toolchain update is available.\n1 new default component can be installed.\n"
+            ),
+            "{inst}"
+        );
+    }
+
+    #[test]
+    fn motd_joins_all_parts_in_order_with_the_run_hint() {
+        let all = build_motd(&report(1, 3, 2)).expect("mixed state needs a MOTD");
+        let lines: Vec<&str> = all.lines().collect();
+        assert_eq!(lines.len(), 3, "{all}");
+        assert_eq!(lines[0], "ANOLISA toolchain update is available.");
+        // Part order is upgrades, new defaults, reconciliation; the trailing
+        // period belongs to the sentence, and "3 components requires" pins the
+        // current (grammatically imperfect) wording against silent drift.
+        assert_eq!(
+            lines[1],
+            "1 component can be upgraded; 2 new default components can be installed; \
+             3 components requires state reconciliation."
+        );
+        assert_eq!(
+            lines[2],
+            "Run: \"sudo anolisa upgrade\" to apply, or \"anolisa update --check\" for details"
+        );
+    }
+}

@@ -1140,6 +1140,53 @@ mod tests {
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
 
+    #[test]
+    fn ws_ckpt_contract_installs_adapter_bundles_without_duplicate_destinations() {
+        use anolisa_core::install_runner::InstallRunner;
+        use std::collections::BTreeSet;
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for contract in [
+            "../../../../src/ws-ckpt/.anolisa/component.toml",
+            "../../manifests/components/ws-ckpt/component.toml",
+        ] {
+            let manifest = ComponentManifest::from_file(&manifest_dir.join(contract))
+                .expect("ws-ckpt Raw contract must parse");
+            let sandbox = tempdir().unwrap();
+            let layout = FsLayout::system(Some(sandbox.path().join("system")));
+            let mut files = resolve_manifest_files(&manifest, &layout, "ws-ckpt").unwrap();
+            files.extend(resolve_adapter_files(&manifest, &layout, "ws-ckpt").unwrap());
+            let sources = files
+                .iter()
+                .map(|file| {
+                    let source = file.source.as_ref().unwrap();
+                    if source.ends_with('/') {
+                        format!("{source}fixture.txt")
+                    } else {
+                        source.clone()
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+            let entries = sources
+                .iter()
+                .map(|source| (source.as_str(), b"fixture".as_slice()))
+                .collect::<Vec<_>>();
+            let artifact = sandbox.path().join("ws-ckpt.tar.gz");
+            std::fs::write(&artifact, build_tar_gz(&entries)).unwrap();
+            let runner = InstallRunner::new(&layout);
+            let prepared = runner
+                .prepare_files("tar_gz", &artifact, &files)
+                .expect("layout and adapter mappings must install without duplicate destinations");
+            runner.install_prepared(prepared).unwrap();
+            for framework in ["openclaw", "hermes"] {
+                let plugin = layout
+                    .datadir
+                    .join(format!("runtime/ws-ckpt/plugins/{framework}/fixture.txt"));
+                assert_eq!(std::fs::read(plugin).unwrap(), b"fixture");
+            }
+        }
+    }
+
     /// Split-index bootstrap: a repository that publishes the complete
     /// generation-2 index must be served from it, so gated entries are
     /// visible to this CLI while pre-gate CLIs keep reading `index.toml`.

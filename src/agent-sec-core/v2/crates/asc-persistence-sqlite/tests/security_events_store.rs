@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use asc_persistence_sqlite::QueryScope;
 use asc_persistence_sqlite::security_events::{
     EventFilters, SECURITY_EVENTS_TABLES, SecurityEventRepository, SecurityEventsFaultPolicy,
     SecurityEventsMigrator, StderrDropSink, VALID_GROUP_FIELDS, repository::CorrelationRequest,
@@ -17,6 +18,11 @@ use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 
 const LOG_PREFIX: &str = "[security_events]";
+
+/// The owner scope matching the uid `SecurityEvent::new` stamps in this process.
+fn owner() -> QueryScope {
+    QueryScope::Owner(SecurityEvent::new("scope", "scope", Map::new()).uid)
+}
 
 fn store(path: &Path, read_only: bool) -> Arc<SqliteStore> {
     Arc::new(
@@ -95,8 +101,9 @@ fn a_written_event_round_trips_through_a_read_only_source() {
     seed(&path);
 
     let source = read(&path);
-    let events =
-        source.query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 100, 0));
+    let events = source.query_or_default(|repo, conn| {
+        repo.query(conn, &EventFilters::default(), &owner(), 100, 0)
+    });
 
     assert_eq!(events.len(), 3);
     // Newest first, matching v1's ORDER BY timestamp_epoch DESC.
@@ -120,8 +127,9 @@ fn the_verdict_column_is_derived_from_both_details_shapes() {
     seed(&path);
 
     let source = read(&path);
-    let verdicts = source
-        .query_or_default(|repo, conn| repo.count_by(conn, "verdict", &EventFilters::default(), 0));
+    let verdicts = source.query_or_default(|repo, conn| {
+        repo.count_by(conn, "verdict", &EventFilters::default(), &owner(), 0)
+    });
 
     let mut rendered: Vec<(Option<String>, u64)> = verdicts;
     rendered.sort_by(|a, b| a.0.cmp(&b.0));
@@ -143,11 +151,11 @@ fn filters_are_applied_in_sql_including_verdict() {
         verdict: Some("deny".to_owned()),
         ..EventFilters::default()
     };
-    let events = source.query_or_default(|repo, conn| repo.query(conn, &filters, 100, 0));
+    let events = source.query_or_default(|repo, conn| repo.query(conn, &filters, &owner(), 100, 0));
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_id, "e2");
 
-    let count = source.query_or(0, |repo, conn| repo.count(conn, &filters, 0));
+    let count = source.query_or(0, |repo, conn| repo.count(conn, &filters, &owner(), 0));
     assert_eq!(count, 1);
 }
 
@@ -163,7 +171,7 @@ fn a_time_window_uses_an_inclusive_lower_and_exclusive_upper_bound() {
         .expect("since")
         .until("2026-01-03T00:00:00+00:00")
         .expect("until");
-    let events = source.query_or_default(|repo, conn| repo.query(conn, &filters, 100, 0));
+    let events = source.query_or_default(|repo, conn| repo.query(conn, &filters, &owner(), 100, 0));
     assert_eq!(
         events
             .iter()
@@ -185,6 +193,7 @@ fn an_offset_count_reports_the_remainder() {
         source.query_or(0, |repo, conn| repo.count(
             conn,
             &EventFilters::default(),
+            &owner(),
             0
         )),
         3
@@ -193,6 +202,7 @@ fn an_offset_count_reports_the_remainder() {
         source.query_or(0, |repo, conn| repo.count(
             conn,
             &EventFilters::default(),
+            &owner(),
             2
         )),
         1
@@ -206,11 +216,11 @@ fn get_returns_one_event_or_nothing() {
     seed(&path);
     let source = read(&path);
 
-    let found = source.query_or(None, |repo, conn| repo.get(conn, "e2"));
+    let found = source.query_or(None, |repo, conn| repo.get(conn, "e2", &owner()));
     assert_eq!(found.map(|event| event.event_id), Some("e2".to_owned()));
     assert!(
         source
-            .query_or(None, |repo, conn| repo.get(conn, "absent"))
+            .query_or(None, |repo, conn| repo.get(conn, "absent", &owner()))
             .is_none()
     );
 }
@@ -222,8 +232,8 @@ fn summary_aggregates_five_groups_and_the_latest_rows() {
     seed(&path);
     let source = read(&path);
 
-    let summary =
-        source.query_or_default(|repo, conn| repo.summary(conn, &EventFilters::default(), 2));
+    let summary = source
+        .query_or_default(|repo, conn| repo.summary(conn, &EventFilters::default(), &owner(), 2));
 
     assert_eq!(summary.total, 3);
     let mut by_category = summary.by_category.clone();
@@ -266,7 +276,7 @@ fn a_filtered_summary_repeats_the_bound_parameters_per_branch() {
         category: Some("exec".to_owned()),
         ..EventFilters::default()
     };
-    let summary = source.query_or_default(|repo, conn| repo.summary(conn, &filters, 5));
+    let summary = source.query_or_default(|repo, conn| repo.summary(conn, &filters, &owner(), 5));
     assert_eq!(summary.total, 2);
     assert_eq!(summary.by_category, vec![(Some("exec".to_owned()), 2)]);
 }
@@ -280,7 +290,7 @@ fn count_by_rejects_a_field_outside_the_allowlist() {
     let store = store(&path, true);
     let error = store
         .with_connection(true, |conn| {
-            SecurityEventRepository.count_by(conn, "details", &EventFilters::default(), 0)
+            SecurityEventRepository.count_by(conn, "details", &EventFilters::default(), &owner(), 0)
         })
         .expect_err("details is not groupable");
     let message = error.to_string();
@@ -296,7 +306,7 @@ fn count_by_rejects_a_field_outside_the_allowlist() {
     for field in VALID_GROUP_FIELDS {
         store
             .with_connection(true, |conn| {
-                SecurityEventRepository.count_by(conn, field, &EventFilters::default(), 0)
+                SecurityEventRepository.count_by(conn, field, &EventFilters::default(), &owner(), 0)
             })
             .unwrap_or_else(|err| panic!("{field} must be groupable: {err}"));
     }
@@ -330,8 +340,8 @@ fn correlation_candidates_are_ordered_and_capped_by_the_filters() {
         run_id: Some("r-1"),
         ..CorrelationRequest::default()
     };
-    let candidates =
-        source.query_or_default(|repo, conn| repo.query_correlation_candidates(conn, &request));
+    let candidates = source
+        .query_or_default(|repo, conn| repo.query_correlation_candidates(conn, &request, &owner()));
     assert_eq!(
         candidates
             .iter()
@@ -349,7 +359,9 @@ fn correlation_candidates_are_ordered_and_capped_by_the_filters() {
     };
     assert!(
         source
-            .query_or_default(|repo, conn| repo.query_correlation_candidates(conn, &no_categories))
+            .query_or_default(|repo, conn| {
+                repo.query_correlation_candidates(conn, &no_categories, &owner())
+            })
             .is_empty()
     );
     let blank = vec![String::new()];
@@ -361,9 +373,11 @@ fn correlation_candidates_are_ordered_and_capped_by_the_filters() {
     };
     assert!(
         source
-            .query_or_default(
-                |repo, conn| repo.query_correlation_candidates(conn, &blank_tool_calls)
-            )
+            .query_or_default(|repo, conn| repo.query_correlation_candidates(
+                conn,
+                &blank_tool_calls,
+                &owner()
+            ))
             .is_empty()
     );
 }
@@ -384,8 +398,9 @@ fn a_malformed_stored_row_is_skipped_not_fatal() {
         .expect("corrupt one row")
         .expect("value");
 
-    let events = read(&path)
-        .query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 100, 0));
+    let events = read(&path).query_or_default(|repo, conn| {
+        repo.query(conn, &EventFilters::default(), &owner(), 100, 0)
+    });
     assert_eq!(
         events
             .iter()
@@ -412,8 +427,9 @@ fn a_row_whose_result_is_out_of_range_is_skipped() {
         .expect("corrupt one row")
         .expect("value");
 
-    let events = read(&path)
-        .query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 100, 0));
+    let events = read(&path).query_or_default(|repo, conn| {
+        repo.query(conn, &EventFilters::default(), &owner(), 100, 0)
+    });
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event.event_id != "e1"));
 }
@@ -433,6 +449,7 @@ fn a_duplicate_event_id_is_not_a_dropped_write() {
         read(&path).query_or(0, |repo, conn| repo.count(
             conn,
             &EventFilters::default(),
+            &owner(),
             0
         )),
         1
@@ -475,8 +492,9 @@ fn retention_prunes_by_timestamp_epoch() {
         .expect("prune")
         .expect("value");
 
-    let events = read(&path)
-        .query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 100, 0));
+    let events = read(&path).query_or_default(|repo, conn| {
+        repo.query(conn, &EventFilters::default(), &owner(), 100, 0)
+    });
     assert_eq!(
         events
             .iter()
@@ -552,23 +570,35 @@ fn a_revision_one_database_is_lifted_by_generic_convergence() {
     drop(seed_conn);
 
     let sink = sink(&path);
-    sink.write(&event(
-        "new",
-        "exec",
-        "2026-01-02T00:00:00+00:00",
-        Map::new(),
-    ));
+    let mut new = event("new", "exec", "2026-01-02T00:00:00+00:00", Map::new());
+    // One owner scope must observe the convergence, so match the legacy row's uid.
+    new.uid = 1;
+    sink.write(&new);
     sink.close(1000.0);
 
     let source = read(&path);
-    let events =
-        source.query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 100, 0));
+    let events = source.query_or_default(|repo, conn| {
+        repo.query(
+            conn,
+            &EventFilters::default(),
+            &QueryScope::Owner(1),
+            100,
+            0,
+        )
+    });
     assert_eq!(events.len(), 2, "the legacy row must survive convergence");
 
     // The migrator's guard is `from < 3 <= to`, so a 1 -> 3 lift also backfills;
     // generic convergence adds the three correlation columns on the same pass.
-    let verdicts = source
-        .query_or_default(|repo, conn| repo.count_by(conn, "verdict", &EventFilters::default(), 0));
+    let verdicts = source.query_or_default(|repo, conn| {
+        repo.count_by(
+            conn,
+            "verdict",
+            &EventFilters::default(),
+            &QueryScope::Owner(1),
+            0,
+        )
+    });
     assert_eq!(
         verdicts,
         vec![(Some("deny".to_owned()), 1)],
@@ -580,7 +610,9 @@ fn a_revision_one_database_is_lifted_by_generic_convergence() {
         ..EventFilters::default()
     };
     assert_eq!(
-        source.query_or(u64::MAX, |repo, conn| repo.count(conn, &filters, 0)),
+        source.query_or(u64::MAX, |repo, conn| {
+            repo.count(conn, &filters, &QueryScope::Owner(1), 0)
+        }),
         0,
         "the run_id column must exist for the filter to be applied in SQL"
     );
@@ -614,16 +646,21 @@ fn a_revision_two_database_is_backfilled_by_the_migrator() {
     drop(seed_conn);
 
     let sink = sink(&path);
-    sink.write(&event(
-        "new",
-        "exec",
-        "2026-01-02T00:00:00+00:00",
-        Map::new(),
-    ));
+    let mut new = event("new", "exec", "2026-01-02T00:00:00+00:00", Map::new());
+    // One owner scope must observe the backfill, so match the legacy row's uid.
+    new.uid = 1;
+    sink.write(&new);
     sink.close(1000.0);
 
-    let verdicts = read(&path)
-        .query_or_default(|repo, conn| repo.count_by(conn, "verdict", &EventFilters::default(), 0));
+    let verdicts = read(&path).query_or_default(|repo, conn| {
+        repo.count_by(
+            conn,
+            "verdict",
+            &EventFilters::default(),
+            &QueryScope::Owner(1),
+            0,
+        )
+    });
     assert_eq!(
         verdicts,
         vec![(Some("deny".to_owned()), 1)],
@@ -663,6 +700,7 @@ fn ten_threads_sharing_one_sink_lose_no_rows() {
         read(&path).query_or(0, |repo, conn| repo.count(
             conn,
             &EventFilters::default(),
+            &owner(),
             0
         )),
         100
@@ -709,8 +747,9 @@ fn independent_sinks_on_one_database_only_lose_rows_to_busy() {
         sink.close(1000.0);
     }
 
-    let events = read(&path)
-        .query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 1000, 0));
+    let events = read(&path).query_or_default(|repo, conn| {
+        repo.query(conn, &EventFilters::default(), &owner(), 1000, 0)
+    });
     let landed: Vec<_> = events
         .iter()
         .filter(|event| event.category == "concurrent")
@@ -765,8 +804,9 @@ fn a_cold_bootstrap_race_keeps_the_database_usable() {
     ));
     probe.close(1000.0);
 
-    let events = read(&path)
-        .query_or_default(|repo, conn| repo.query(conn, &EventFilters::default(), 1000, 0));
+    let events = read(&path).query_or_default(|repo, conn| {
+        repo.query(conn, &EventFilters::default(), &owner(), 1000, 0)
+    });
     let ids: Vec<_> = events.iter().map(|e| e.event_id.as_str()).collect();
     assert!(
         ids.contains(&"cold-probe"),

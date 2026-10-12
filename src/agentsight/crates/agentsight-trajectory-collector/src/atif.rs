@@ -153,6 +153,32 @@ pub fn convert_qoder_events(
             let mut step_model: Option<String> = None;
             let mut step_metrics: Option<Metrics> = None;
 
+            // Claude Code splits one message into blocks with cumulative
+            // usage. Other collectors retain per-event partial accounting.
+            let mut last_usage_by_id = HashMap::new();
+            for te in turn_events.iter().filter(|_| agent_name == "claude-code") {
+                let Some(msg) = te.get("message") else {
+                    continue;
+                };
+                if let (Some(id), Some(usage)) = (
+                    msg.get("id")
+                        .and_then(|value| value.as_str())
+                        .filter(|id| !id.is_empty()),
+                    msg.get("usage").filter(|usage| {
+                        usage
+                            .get("input_tokens")
+                            .and_then(|value| value.as_u64())
+                            .is_some()
+                            || usage
+                                .get("output_tokens")
+                                .and_then(|value| value.as_u64())
+                                .is_some()
+                    }),
+                ) {
+                    last_usage_by_id.insert(id, usage);
+                }
+            }
+
             for te in &turn_events {
                 let msg = match te.get("message") {
                     Some(m) => m,
@@ -162,10 +188,17 @@ pub fn convert_qoder_events(
                     step_model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
                 }
 
-                // Extract usage/metrics — accumulate across multiple usage
-                // events within the same LLM turn (some providers emit partial
-                // usage per chunk); only keeping the last would under-count.
-                if let Some(usage) = msg.get("usage") {
+                // Count each Claude Code message once; unidentified records
+                // and other sources keep their existing partial accounting.
+                let message_id = msg
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .filter(|id| agent_name == "claude-code" && !id.is_empty());
+                let usage = match message_id {
+                    Some(id) => last_usage_by_id.remove(id),
+                    None => msg.get("usage"),
+                };
+                if let Some(usage) = usage {
                     let pt = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let ct = usage.get("output_tokens").and_then(|v| v.as_u64());
                     let cache_read = usage

@@ -293,6 +293,25 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 
 安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写，默认关闭 TOON。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
 
+可选的 `selective-claw` 上下文引擎在 `plugins.entries.selective-claw.config` 中配置，
+与响应压缩适配器的配置相互独立：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "selective-claw": {
+        "config": { "enabled": true, "freshTailTurns": 3, "dbPath": "~/.openclaw/selective-claw.db" }
+      }
+    }
+  }
+}
+```
+
+`~/` 会展开为当前用户的主目录。未设置 `dbPath` 时，归档为 `OPENCLAW_STATE_DIR` 下的
+`selective-claw.db`；该环境变量未设置时使用 `~/.openclaw`。将插件的 `enabled` 选项设为
+`false` 时，不打开数据库，也不注册上下文引擎或召回工具。
+
 ### Hermes
 
 Plugin 在 Hermes 新会话中生效。重启 Hermes 后先执行 Shell 工具任务验证阻止后重试改写，

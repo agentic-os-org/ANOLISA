@@ -102,6 +102,10 @@ pub struct EnableOptions {
     /// adapter. Even when set, the driver adds the framework's unsafe flag
     /// only if the host's install help exposes it.
     pub allow_unsafe_plugin_install: bool,
+    /// Withhold automatic capability consent (`--no-accept-capabilities`).
+    /// Only valid for OpenClaw plugin adapters; the default preserves the
+    /// existing help-gated consent grants without reading ambient policy.
+    pub no_accept_capabilities: bool,
     /// Explicit profiles for profile-scoped framework adapters such as dsh.
     /// An empty list means no profiles were selected; profile-scoped drivers
     /// reject that input rather than silently mutating an implicit profile.
@@ -901,6 +905,17 @@ impl AdapterManager {
             });
         }
 
+        if options.no_accept_capabilities
+            && (framework != "openclaw" || adapter_type.as_deref() == Some("skill_bundle"))
+        {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason: "--no-accept-capabilities is only valid for an OpenClaw plugin adapter"
+                    .to_string(),
+            });
+        }
+
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let skill_specs = declared_skills(&manifest, &framework);
         let config = declared_config(&manifest, &framework);
@@ -1008,6 +1023,7 @@ impl AdapterManager {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -1050,6 +1066,7 @@ impl AdapterManager {
             declared_bundle_entry: bundle_entry,
             framework_version_req,
             allow_unsafe_plugin_install: options.allow_unsafe_plugin_install,
+            no_accept_capabilities: options.no_accept_capabilities,
             dry_run,
             ops: &ops,
         };
@@ -1395,6 +1412,7 @@ impl AdapterManager {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -1427,6 +1445,7 @@ impl AdapterManager {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run,
             ops: &ops,
         };
@@ -1572,6 +1591,7 @@ impl AdapterManager {
                 declared_bundle_entry: None,
                 framework_version_req: None,
                 allow_unsafe_plugin_install: false,
+                no_accept_capabilities: false,
                 dry_run: false,
                 ops: &probe_ops,
             };
@@ -1603,6 +1623,7 @@ impl AdapterManager {
                 declared_bundle_entry: None,
                 framework_version_req: None,
                 allow_unsafe_plugin_install: false,
+                no_accept_capabilities: false,
                 dry_run: false,
                 ops: &ops,
             };

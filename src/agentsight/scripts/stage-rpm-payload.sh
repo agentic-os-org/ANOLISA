@@ -13,7 +13,6 @@ destination="$1"
 
 sources=(
     "target/release/agentsight"
-    "target/release/agentsight-enforcer"
     "scripts/agentsight-start.sh"
     "scripts/agentsight.service"
     "scripts/agentsight-enforcer.service"
@@ -25,7 +24,6 @@ sources=(
 )
 targets=(
     "agentsight"
-    "agentsight-enforcer"
     "agentsight-start"
     "agentsight.service"
     "agentsight-enforcer.service"
@@ -52,11 +50,16 @@ if [[ -e "$destination" ]]; then
     exit 1
 fi
 
+# No shared "latest" fallback: a missing handoff requires a fresh attested build.
+if [[ -z "${ENFORCER_BIN:-}" ]]; then
+    ENFORCER_BIN="$("$project_root/scripts/build-enforcer.sh")"
+fi
 install -d -m 0755 "$destination"
+python3 "$script_dir/copy-enforcer.py" "$ENFORCER_BIN" "$destination/agentsight-enforcer"
 for index in "${!sources[@]}"; do
     mode=0644
     case "${targets[$index]}" in
-        agentsight|agentsight-enforcer|agentsight-start)
+        agentsight|agentsight-start)
             mode=0755
             ;;
     esac

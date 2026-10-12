@@ -30,6 +30,133 @@ fn dispatcher_advances_cursor_to_snapshot_end() {
     );
 }
 
+fn upgrade_notice() -> crate::upgrade::check::UpgradeNotice {
+    crate::upgrade::check::UpgradeNotice {
+        package: "cosh-ng".to_string(),
+        current: "1.0.0".to_string(),
+        latest: "1.1.0".to_string(),
+        command: "anolisa update cosh-ng".to_string(),
+    }
+}
+
+#[test]
+fn deferred_upgrade_notice_waits_for_a_prompt_ready_boundary() {
+    assert_deferred_upgrade_notice_renders_at(shell_ready_event("/tmp"));
+}
+
+#[test]
+fn deferred_upgrade_notice_renders_at_the_prompt_after_a_command() {
+    for kind in [
+        ShellEventKind::CommandCompleted,
+        ShellEventKind::CommandFailed,
+    ] {
+        let mut boundary = shell_ready_event("/tmp");
+        boundary.kind = kind;
+        assert_deferred_upgrade_notice_renders_at(boundary);
+    }
+}
+
+fn assert_deferred_upgrade_notice_renders_at(boundary: ShellEvent) {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        ..InlineState::default()
+    };
+    state.startup_upgrade.resolved = Some(Some(upgrade_notice()));
+
+    let mut input = ShellEvent::user_input_intercepted("s", "echo drafting");
+    input.component = Some("shell_input".to_string());
+    input.message = Some("echo drafting".to_string());
+    let mut output = Vec::new();
+    let first = ShellEventSnapshot::new(std::slice::from_ref(&input));
+    let actions =
+        RuntimeDispatcher::dispatch_inline_batch(&first, &adapter, "bash", &mut state, &mut output)
+            .expect("input dispatch should render");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+    assert!(state.personalization.shell_input_active);
+    assert!(!state.startup_upgrade.rendered);
+    assert!(output.is_empty());
+
+    let events = [input, boundary];
+    let second = ShellEventSnapshot::new(&events);
+    let actions = RuntimeDispatcher::dispatch_inline_batch(
+        &second,
+        &adapter,
+        "bash",
+        &mut state,
+        &mut output,
+    )
+    .expect("prompt-ready dispatch should render");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+    let output = String::from_utf8(output).expect("UTF-8 output");
+    assert!(state.startup_upgrade.rendered);
+    assert!(output.contains("cosh-ng update available"), "{output}");
+}
+
+#[test]
+fn deferred_upgrade_notice_renders_on_an_idle_tick_at_an_empty_prompt() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        shell_at_prompt: true,
+        ..InlineState::default()
+    };
+    state.startup_upgrade.resolved = Some(Some(upgrade_notice()));
+    let mut output = Vec::new();
+
+    let idle = ShellEventSnapshot::new(&[]);
+    let actions =
+        RuntimeDispatcher::dispatch_inline_batch(&idle, &adapter, "bash", &mut state, &mut output)
+            .expect("idle dispatch should render");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+
+    let output = String::from_utf8(output).expect("UTF-8 output");
+    assert!(state.startup_upgrade.rendered);
+    assert!(output.contains("cosh-ng update available"), "{output}");
+}
+
+#[test]
+fn deferred_upgrade_notice_idle_tick_leaves_an_active_draft_alone() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        shell_at_prompt: true,
+        ..InlineState::default()
+    };
+    state.startup_upgrade.resolved = Some(Some(upgrade_notice()));
+    state.personalization.shell_input_active = true;
+    let mut output = Vec::new();
+
+    let idle = ShellEventSnapshot::new(&[]);
+    let actions =
+        RuntimeDispatcher::dispatch_inline_batch(&idle, &adapter, "bash", &mut state, &mut output)
+            .expect("idle dispatch should render");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+
+    assert!(!state.startup_upgrade.rendered);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn deferred_upgrade_notice_idle_tick_waits_for_a_fresh_prompt_boundary() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        ..InlineState::default()
+    };
+    state.startup_upgrade.resolved = Some(Some(upgrade_notice()));
+    let mut output = Vec::new();
+
+    let idle = ShellEventSnapshot::new(&[]);
+    let actions =
+        RuntimeDispatcher::dispatch_inline_batch(&idle, &adapter, "bash", &mut state, &mut output)
+            .expect("idle dispatch should defer");
+    RuntimeDispatcher::apply_actions(actions, &mut state);
+
+    assert!(!state.startup_upgrade.rendered);
+    assert!(output.is_empty());
+}
+
 #[test]
 fn command_activity_evidence_holds_across_cumulative_snapshots() {
     // The activity flag keys the executor's cwd fallback off positive
@@ -89,6 +216,31 @@ fn pty_input_event() -> ShellEvent {
     event.input = None;
     event.component = Some("shell_pty_input".to_string());
     event.message = Some("write".to_string());
+    event
+}
+
+/// A prompt occupancy barrier observed by the raw input relay.
+fn prompt_input_event() -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("s", "");
+    event.input = None;
+    event.component = Some("shell_prompt_input".to_string());
+    event.message = Some("write".to_string());
+    event
+}
+
+fn prompt_submit_event(count: usize) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("s", "");
+    event.input = None;
+    event.component = Some("shell_prompt_submit".to_string());
+    event.message = Some(count.to_string());
+    event
+}
+
+fn reconciled_prompt_event(state: &str) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("s", "");
+    event.input = None;
+    event.component = Some("shell_prompt_ready".to_string());
+    event.message = Some(state.to_string());
     event
 }
 
@@ -245,6 +397,104 @@ fn pty_input_invalidates_the_prompt_cwd_report() {
         Some("/repo-b"),
         "a fresh report after the input restores the evidence"
     );
+}
+
+#[test]
+fn prompt_input_after_command_completion_marks_the_shell_active() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState::default();
+    let mut output = Vec::new();
+    let mut completed = shell_ready_event("/tmp");
+    completed.kind = ShellEventKind::CommandCompleted;
+    let mut events = vec![completed];
+
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(state.shell_at_prompt);
+
+    events.push(prompt_input_event());
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(
+        !state.shell_at_prompt,
+        "input at the new prompt must win before the next preexec marker"
+    );
+}
+
+#[test]
+fn queued_typeahead_blocks_upgrade_notice_after_command_completion() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        rendered_startup_banner: true,
+        ..InlineState::default()
+    };
+    state.startup_upgrade.resolved = Some(Some(upgrade_notice()));
+    let mut output = Vec::new();
+    let mut completed = shell_ready_event("/tmp");
+    completed.kind = ShellEventKind::CommandCompleted;
+    let mut events = vec![
+        prompt_submit_event(1),
+        prompt_submit_event(1),
+        completed.clone(),
+    ];
+
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(!state.shell_at_prompt);
+    assert_eq!(state.pending_shell_submits, 1);
+    assert!(!state.startup_upgrade.rendered);
+    assert!(output.is_empty());
+
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(
+        !state.startup_upgrade.rendered,
+        "an idle poll must not render over a queued typeahead submission"
+    );
+
+    events.push(completed);
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(state.shell_at_prompt);
+    assert_eq!(state.pending_shell_submits, 0);
+    assert!(state.startup_upgrade.rendered);
+}
+
+#[test]
+fn reconciled_prompt_ready_clears_a_foreground_consumed_submit() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        pending_shell_submits: 1,
+        ..InlineState::default()
+    };
+    let mut output = Vec::new();
+
+    dispatch_and_apply(
+        &[reconciled_prompt_event("painted")],
+        &adapter,
+        &mut state,
+        &mut output,
+    );
+
+    assert!(state.shell_at_prompt);
+    assert_eq!(state.pending_shell_submits, 0);
+}
+
+#[test]
+fn reconciled_occupied_prompt_clears_submit_debt_without_claiming_idleness() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        pending_shell_submits: 1,
+        ..InlineState::default()
+    };
+    let mut output = Vec::new();
+    let mut events = vec![reconciled_prompt_event("occupied")];
+
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(!state.shell_at_prompt);
+    assert_eq!(state.pending_shell_submits, 0);
+
+    let mut completed = shell_ready_event("/tmp");
+    completed.kind = ShellEventKind::CommandCompleted;
+    events.extend([prompt_submit_event(1), completed]);
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert!(state.shell_at_prompt);
+    assert_eq!(state.pending_shell_submits, 0);
 }
 
 #[test]

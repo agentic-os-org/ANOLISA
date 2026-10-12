@@ -3,21 +3,38 @@
 [中文版](README_zh.md)
 
 AW provides a shared configuration and local service for Agent policies. On
-Linux, it starts Qoder CLI and OpenClaw through verified native entrypoints,
+Linux, it starts Qoder CLI, OpenClaw and QwenPaw through verified native entrypoints,
 runs external Providers and keeps execution metadata independently of an Agent
 session. Native scheduling and permissions remain with the framework; the
 current interfaces are experimental.
+
+AW Preview provides core and Provider packages installed with `aw-package`. It
+currently includes the sec-core Provider and an example sharing one configuration
+between Qoder and OpenClaw; see [Preview installation and demo](../../docs/user-guide/en/user-entrypoint/aw-preview.md).
+
+AW core can be built and initialized without sec-core. `aw-build` defaults to
+core; select `--component all` for the existing combined distribution.
+`aw-package configure` accepts one Agent and no Provider by default; select
+`--provider sec-core` or `--provider command` explicitly. Boolean commands return
+only true/false, with effects declared in YAML; AW supplies the Provider handshake
+and response correlation. See [boolean policy commands](../../docs/user-guide/en/user-entrypoint/aw.md#boolean-policy-commands).
+
+`aw-package config` views, validates and edits Providers and Hook steps in an
+existing YAML/JSON file. Edits are offline and preserve unrelated values; declare
+events explicitly before adding steps. See the [editing reference](../../docs/user-guide/en/user-entrypoint/aw-preview.md#edit-existing-provider-and-hook-configuration).
 
 ## Available today
 
 | Capability | Availability |
 | --- | --- |
 | Validate one `aw.yaml` with named Providers and all 16 event names | ✅ |
+| View, validate, add or remove Providers and Hook steps in an existing file | ✅ Offline `aw-package config`; no service reload |
 | Start Qoder CLI 1.1.64 and connect before/after tool Hooks | ✅ Linux source build |
 | Run structured Providers before tools (`observe`/`block`) and after successful tools (`observe`) | ✅ |
 | Execute native Hook commands with unchanged callback input | ✅ Byte output and exit status returned to Qoder; rewrite chains and approval flows excluded |
 | Start or reuse a standalone service and query execution metadata | ✅ |
 | Start OpenClaw through AW | ✅ a new Gateway with Agent tool hooks |
+| Start QwenPaw through AW | ✅ the official App/API entrypoint |
 | Start the remaining first-release frameworks | ❌ Separate adapter delivery |
 | Install a published AW package, request portable approval or enforce policy below native Hooks | ❌ |
 
@@ -71,11 +88,23 @@ for source builds, configuration and a local Host example.
 
 Use OpenClaw 2026.9.6 with its existing native model configuration.
 The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
-required profile options and supported tool lifecycle. From `src/aw`:
+required working directory and supported tool lifecycle. From `src/aw`:
 
 ```bash
 target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent openclaw \
   --native-settings /absolute/openclaw.json --native-state-dir /absolute/openclaw-state
+```
+
+## Run QwenPaw
+
+Use QwenPaw 2.2.2b4 / AgentScope 2.0.8 with its existing native model configuration.
+The [user guide](../../docs/user-guide/en/user-entrypoint/aw.md) explains the
+required working directory and supported tool lifecycle. From `src/aw`:
+
+```bash
+QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
+  --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
+  -- --host 127.0.0.1 --port 8096
 ```
 
 ## Integration and development

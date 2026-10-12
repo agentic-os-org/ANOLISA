@@ -57,9 +57,10 @@ Rust V2 核心通过现有 `skill-ledger` 命令提供 **SkillSec**：本地扫�
 
 Cosh-NG 为同一次 SkillSec Hook 调用中的初始化和查询共预留 10 秒。
 
-源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供全部 15 条 Policy、Scope、Binding
-CRUD 命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
-和 [V2 workspace](v2/README.md)。当前 PAP 状态仅在进程内存中，Binding 受理不代表策略已生效。
+源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供12 条 Policy、Scope、Binding 管理命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
+和 [V2 workspace](v2/README.md)。PAP 状态保存在 SQLite 中，Binding 受理不代表策略已生效。
+PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当前仅执行文件删除 block 规则。
+Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
 
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
@@ -326,7 +327,7 @@ L2 分类器默认使用 ModelScope 上的
 # 部署环境提供 daemon endpoint。
 export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# regex 引擎（V2 当前唯一可用的扫描引擎）
+# 内嵌 regex 引擎
 agent-sec-cli scan-code --code 'rm -rf /'
 agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
   scan-code --code 'import os; os.system("rm -rf /")' --language python
@@ -370,6 +371,7 @@ V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、�
 公共 CLI `--trace-context` 适配通过顶层 OTel 信封传播关联信息，不支持 `params.traceContext`。
 
 正式版 OpenClaw `>=2026.5.12` 在模型运行入口扫描，记录为 `source=model_input`；
+此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
 
 详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md)。
@@ -517,6 +519,8 @@ agent-sec-cli harden --downstream-help
 
 ## Observability
 
+Rust V2 的 report/review 仅通过 daemon 查询。普通用户只见自身数据；root 可查全部。查询身份仅来自 UDS peer。report 保留 V1 的 `--session-id`、`--last`、`--format`，review 不增加业务参数，report JSON 不新增 UID 字段。`observability schema` 在本地从 Rust 契约动态生成兼容 V1 的记录 Schema。
+
 ```bash
 # 交互式下钻 TUI（需要交互式终端）
 agent-sec-cli observability review
@@ -534,6 +538,10 @@ agent-sec-cli observability schema
 ## Security Events
 
 安全事件会同时写入 JSONL 与 SQLite 存储。使用 `agent-sec-cli events` 查询该存储：
+
+V2 查询使用 UDS peer UID：普通用户读取自身事件，root 读取全部 UID。
+使用原始 session ID 筛选；root 返回所有 UID 下匹配该 ID 的事件。
+同名会话在 root 返回结果中显示为 `UID_session_id`，用于区分归属。
 
 ```bash
 agent-sec-cli events --last-hours 24

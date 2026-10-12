@@ -10,5 +10,5 @@
   "_BEARER_RE": "(?i)\\bBearer\\s+([A-Za-z0-9._~+/=-]{16,})",
   "_PRIVATE_KEY_RE": "-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\\s\\S]+?-----END \\1-----",
   "_ALIYUN_ACCESS_KEY_ID_RE": "\\bLTAI[A-Za-z0-9]{12,30}\\b",
-  "_SECRET_FIELD_RE": "(?i)(?<![\\w\\u4e00-\\u9fff])(?P<name>password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key[_-]?secret|accessKeySecret|client[_-]?secret|authorization|密码|口令|密钥|令牌|授权|访问密钥)\\s*[:=：]\\s*(?P<quoted_value>\\\"(?P<double_value>[^\\s\\\"',;，；：]{8,})\\\"|'(?P<single_value>[^\\s\\\"',;，；：]{8,})'|(?P<bare_value>[^\\s\\\"',;，；：]{8,}))"
+  "_SECRET_FIELD_RE": "(?i)(?<![\\w\\u4e00-\\u9fff])(?P<full_name>(?P<name>password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key[_-]?secret|accessKeySecret|client[_-]?secret|authorization|secret[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|密码|口令|密钥|令牌|授权|访问密钥)|(?P<compound_prefix>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+){0,8}[-_])(?P<keyword>password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret))\\s*[:=：]\\s*(?P<quoted_value>\\\"(?P<double_value>[^\\s\\\"',;，；：]{8,})\\\"|'(?P<single_value>[^\\s\\\"',;，；：]{8,})'|(?P<bare_value>[^\\s\\\"',;，；：]{8,}))"
 }

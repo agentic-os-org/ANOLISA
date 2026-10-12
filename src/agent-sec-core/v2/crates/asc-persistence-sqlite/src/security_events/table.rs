@@ -9,6 +9,8 @@ use asc_sqlite_kernel::{ColumnSpec, ExtraColumn, IndexSpec, TableSpec};
 /// The single table both v1 and v2 write for this stream.
 pub const SECURITY_EVENTS_TABLES: &[TableSpec] = &[TableSpec {
     name: "security_events",
+    strict: false,
+    constraints: &[],
     columns: COLUMNS,
     indexes: INDEXES,
     extra_columns: EXTRA_COLUMNS,

@@ -3,7 +3,7 @@
 //! The Client consumes the versioned target plan emitted by the `AgentSight`
 //! Adapter, resolves the live Linux process start time, and calls the minimal
 //! health/apply/delete surface documented by `AgentSight`. It does not read
-//! Binding repository state, own reconciliation, or translate Policy IR.
+//! Binding repository state, own reconciliation, or translate `PolicyTemplate` snapshots.
 //! Its `TargetDeploymentClient` implementation prepares stable requests and
 //! wraps AgentSight-specific replacement/partial-result semantics.
 

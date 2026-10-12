@@ -463,3 +463,47 @@ fn a_grouped_number_survives_a_decorated_token() {
         "structural commas must still split: {json:?}"
     );
 }
+
+#[test]
+fn json_arrays_preserve_individual_numeric_facts() {
+    for text in [
+        r#"[119,120]"#,
+        r#"[119, 120]"#,
+        r#"{"counts":[119,120]}"#,
+        r#"{"nested":[[119],{"count":120}]}"#,
+    ] {
+        let values: Vec<_> = extract_claims(text)
+            .iter()
+            .filter_map(|c| c.value)
+            .collect();
+        assert_eq!(values, vec![119.0, 120.0], "{text}");
+    }
+    let values: Vec<_> = extract_claims("[119.5,-240,1.2e3,true,null]")
+        .iter()
+        .filter_map(|c| c.value)
+        .collect();
+    assert_eq!(values, vec![119.5, -240.0, 1200.0]);
+    assert!(extract_claims("[1,2]").is_empty());
+}
+
+#[test]
+fn json_strings_keep_human_numeric_grouping() {
+    for text in ["Recorded count: 119,120", r#"{"count":"119,120"}"#] {
+        let values: Vec<_> = extract_claims(text)
+            .iter()
+            .filter_map(|c| c.value)
+            .collect();
+        assert_eq!(values, vec![119120.0], "{text}");
+    }
+    let claims = extract_claims(
+        r#"{"count": 119, "path": "/tmp/report.txt", "version": "1.2.3", "url": "https://example.test/api"}"#,
+    );
+    for class in [
+        ClaimClass::Number,
+        ClaimClass::Path,
+        ClaimClass::Version,
+        ClaimClass::Url,
+    ] {
+        assert!(claims.iter().any(|c| c.class == class), "{class:?}");
+    }
+}

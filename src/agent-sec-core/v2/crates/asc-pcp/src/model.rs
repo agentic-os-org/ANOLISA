@@ -10,19 +10,24 @@ pub struct ExpectedBinding {
     pub id: ResourceId,
     pub revision: Revision,
     pub status: BindingStatus,
+    pub status_version: i64,
 }
 
 impl ExpectedBinding {
-    pub fn from_binding(binding: &BindingView) -> Self {
+    pub fn from_snapshot(record: &BindingStateSnapshot) -> Self {
+        let binding = &record.binding;
         Self {
+            status_version: record.status_version,
             id: binding.spec.binding_id.clone(),
             revision: binding.spec.binding_revision,
             status: binding.status.phase,
         }
     }
 
-    pub fn matches(&self, binding: &BindingView) -> bool {
-        self.id == binding.spec.binding_id
+    pub fn matches(&self, record: &BindingStateSnapshot) -> bool {
+        let binding = &record.binding;
+        self.status_version == record.status_version
+            && self.id == binding.spec.binding_id
             && self.revision == binding.spec.binding_revision
             && self.status == binding.status.phase
     }
@@ -66,17 +71,21 @@ pub enum Disposition {
 }
 
 /// Retained before the storage call, including across post-commit unwind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingWrite {
     pub expected: BindingStateSnapshot,
     pub write: BindingStateWrite,
     pub matched: bool,
 }
-/// Call-local outcome and write receipt retained only for panic bookkeeping.
-#[derive(Debug, Default)]
+/// Runtime-owned storage continuation; never contains credentials or prepared requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ExecutionSlot {
     pub(crate) pending: Option<AttemptOutcome>,
     pub(crate) completion: Option<PendingWrite>,
+    pub(crate) unconfirmed: Option<PendingWrite>,
+    pub(crate) actual_outcome: bool,
+    pub(crate) remote_started: bool,
+    pub(crate) attempt_counted: bool,
 }
 
 /// Preparation used only by the current attempt; never serialized or cached.
@@ -93,8 +102,21 @@ pub struct AttemptSchedule {
     pub attempts_started: u32,
     pub next_attempt_at: Option<u64>,
     intent: Option<(Revision, bool)>,
+    pub(crate) slot: ExecutionSlot,
+    /// Version owned by this attempt, used to fence scheduler terminalization.
+    pub status_version: Option<i64>,
+    /// Scheduler failure write retained with its original condition and ID.
+    pub pending_termination: Option<(BindingStateSnapshot, BindingStateWrite)>,
 }
 impl AttemptSchedule {
+    /// Pending storage work must finish before another remote attempt can start.
+    pub fn has_pending_storage(&self) -> bool {
+        self.pending_termination.is_some()
+            || self.slot.unconfirmed.is_some()
+            || self.slot.pending.is_some()
+            || self.slot.completion.is_some()
+    }
+
     pub(crate) fn observe(&mut self, binding: &BindingView) {
         let deleting = matches!(
             binding.status.phase,

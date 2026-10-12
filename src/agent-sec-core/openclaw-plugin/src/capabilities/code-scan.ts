@@ -5,6 +5,7 @@ import {
   envFlagEnabled,
   isHookPolicyValue,
   normalizeHookPolicy,
+  truncateApprovalText,
 } from "../utils.js";
 
 export const codeScan: SecurityCapability = {
@@ -98,6 +99,11 @@ export const codeScan: SecurityCapability = {
         // 构建提示信息（与 cosh hook 的 msg 格式一致）
         const descs = findings.map((f: any) => `- ${f.desc_zh}`);
         const msg = `[code-scanner] Detected ${findings.length} issue(s):\n${descs.join("\n")}\n\nCommand: ${command}`;
+        const details = "\nDetails: logs.";
+        const description = truncateApprovalText(
+          `[code-scanner][${verdict}] ${findings.length} issue(s); Command: ${truncateApprovalText(command, 64)}; ${descs.join("\n")}`,
+          256 - details.length,
+        ) + details;
 
         if (verdict === "deny") {
           report("warn", `DENY (policy=${policy}) — ${msg}`, {
@@ -117,7 +123,7 @@ export const codeScan: SecurityCapability = {
             return {
               requireApproval: {
                 title: "Code Scanner Security Warning",
-                description: msg,
+                description,
                 severity: "warning" as const,
               },
             };
@@ -143,7 +149,7 @@ export const codeScan: SecurityCapability = {
             return {
               requireApproval: {
                 title: "Code Scanner Security Warning",
-                description: msg,
+                description,
                 severity: "warning" as const,
               },
             };

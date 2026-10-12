@@ -1,6 +1,6 @@
 # V2 原生 OpenTelemetry 上下文与 tracing 实现设计
 
-`[TARGET V2]` 首期已实现 Rust CLI → UDS → daemon handler → PAP/compiler 的 tracing、
+`[TARGET V2]` 首期已实现 Rust CLI → UDS → daemon handler → PAP 的 tracing、
 关联输入适配与本地关联日志。具体测试结果及限制见 [验收记录](V2_OTEL_ACCEPTANCE_zh.md)。
 本文保留架构决策和接入约束；配置详表见 [V2 README](../../v2/README.md)。
 
@@ -14,10 +14,10 @@ observability metadata 是继续支持的 caller 输入，carrier 的 `version: 
 ```text
 asc-cli main → 同步 asc-daemon-client → UDS service
   → spawn_blocking → DaemonDispatcher::dispatch / handle
-  → PapHandler → PapService → Compiler / ProcessLocalPapRepository
+  → PapHandler → PapService → Repository
 ```
 
-两个产品 main 初始化 runtime；client、dispatcher、PAP 和 compiler 建立 span。
+两个产品 main 初始化 runtime；client、dispatcher 和 PAP 建立 span。
 service 保持 protocol-independent，不解析 tracing JSON。当前 PAP 使用 process-local repository；
 本次未实现 Action Runtime、Rust SecurityEvent sink 或 observability record RPC。
 
@@ -60,7 +60,7 @@ SDK root；生产固定未采样，关闭日志输出仍应具有有效身份和
 | [protocol trace.rs](../../v2/crates/asc-daemon-protocol/src/trace.rs) | 纯 wire DTO 和预算，不依赖 OTel SDK |
 | CLI/daemon main | 选择 runtime feature 并初始化一次 |
 | client/handler | DTO 与 Context 的边界适配；业务函数不新增 Context 参数 |
-| PAP/compiler | 原生 `tracing` 埋点，不初始化 SDK |
+| PAP | 原生 `tracing` 埋点，不初始化 SDK |
 
 `asc-observability` 不依赖 daemon/PAP/Policy types；propagation 使用 `Extractor/Injector`。
 快照是只读消费结果，不是另一份可修改、持续传播的上下文。
@@ -184,7 +184,7 @@ client 创建 CLIENT child，从 child 注入请求副本，不能直接转发�
 CLI 消费初始 carrier 后让 client 继承 command scope，形成：
 
 ```text
-external span（可选）→ cli.command → daemon.client → daemon.request → PAP/compiler
+external span（可选）→ cli.command → daemon.client → daemon.request → PAP
 ```
 
 保持同步 connect/write/read 的单次 deadline、不重试、stdout 和业务退出码；编码/解码在既有 I/O
@@ -318,7 +318,7 @@ OTel 不能强停已开始的 blocking 工作，诊断丢失不触发业务重�
 
 ## 11. 直接消费者与验证入口
 
-基础设施、daemon 入站、CLI/client、PAP/compiler 埋点、关联输入适配五个切片已落地。
+基础设施、daemon 入站、CLI/client、PAP 埋点、关联输入适配五个切片已落地。
 新增埋点按直接消费者验证父子关系、字段投影和生命周期；新增业务接口仍需自己的兼容 fixtures。
 实际测试命令、执行结果、外部兼容边界统一维护于 [验收记录](V2_OTEL_ACCEPTANCE_zh.md)。
 

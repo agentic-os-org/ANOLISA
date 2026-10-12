@@ -17,7 +17,6 @@ asc-pcp.workspace = true
 
 [dev-dependencies]
 asc-pap-repository-memory.workspace = true
-asc-policy-engine.workspace = true
 serde_json.workspace = true
 
 [lints]

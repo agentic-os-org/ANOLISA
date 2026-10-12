@@ -437,7 +437,7 @@ per-user path、user service 和用户级 singleton 不能直接升级为 V2 PRE
 | DCB-016 | daemon error 与失败 ActionResult 保持三层分离，并兼容历史 action response projection |
 | DCB-017 | Host 第二实例被拒绝；system-scope service 和每 Node 单 DaemonSet 形态通过验收 |
 | DCB-018 | 多 UID/Agent 使用同一 socket，trusted Principal 和 owner QueryScope 阻止越权查询 |
-| DCB-019 | CLI/TUI 不直读 SQLite、Compiler 或 PCP；所有查询经过 daemon-core authorization |
+| DCB-019 | CLI/TUI 不直读 SQLite 或 PCP；所有查询经过 daemon-core authorization |
 | DCB-020 | V1 per-user state 由 state migrator 安全映射到 system-owned persistence，并支持失败恢复与回滚 |
 
 时间、PID、UUID、latency、socket 临时路径等非确定字段在比较前允许规范化；方法名、

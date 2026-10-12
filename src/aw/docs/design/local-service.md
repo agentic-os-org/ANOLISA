@@ -232,3 +232,29 @@ history and allocates a new generation.
 - [Runtime](../../crates/aw-service/src/runtime.rs) and
   [audit metadata](../../crates/aw-service/src/audit.rs)
 - [Development checks](../../CONTRIBUTING.md#runtime-validation)
+
+## Boolean command projection
+
+The CLI composition root provides `aw policy`, a built-in stdio Provider bridge
+in the core payload. Its command reads a normalized event and returns one JSON
+boolean. Private configuration declares the matched `observe`/`block` effect;
+no security engine or rule is compiled into the service. The bridge supplies
+all three existing Provider methods and echoes the correlated invoke digest.
+These fields remain on `aw-provider/v1alpha1`; they are not exposed to the user
+command. The digest binds content but does not authenticate Provider identity.
+
+The command reuses `aw-exec` for literal argv, a pinned working directory and
+Host-selected environment, limits and owned process cleanup. The command
+budget includes bridge input parsing and shares the incoming invocation budget.
+Method failures remain structured Provider errors, governed by step `on_error`.
+Neither handshake runs the command. The launcher/adapters and their adoption
+semantics are unchanged; a zero-Provider launch still binds to the shared
+service, with no tool policy steps or per-tool AW records.
+
+On structured transport failure, the Host uses `aw-exec::run_cooperative` to send
+SIGTERM and allow 250 ms before forced group cleanup (with its existing separate
+one-second verification budget). The bridge shares the CLI's stop-signal flag
+with its ordinary `aw-exec::run`, which immediately stops the user command group
+on cancellation, including descendants that ignore SIGTERM. Native commands and
+successful exchanges retain immediate cleanup. Unexpected SIGKILL of the caller
+and descendants escaping their group retain the executor's documented limits.

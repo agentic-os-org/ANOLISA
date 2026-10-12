@@ -789,6 +789,10 @@ impl OpenAIParser {
         let mut first_chunk: Option<&serde_json::Value> = None;
         // Merge tool_call deltas by index: index -> (id, name, arguments_accumulated)
         let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // Legacy `function_call` deltas (pre-`tool_calls` spelling): the name
+        // arrives once, the arguments as string fragments, so they accumulate
+        // the same way the indexed tool_calls above do.
+        let mut legacy_function_call: Option<(String, String)> = None;
 
         for chunk in chunks {
             // Try to parse as OpenAiSseChunk
@@ -854,6 +858,24 @@ impl OpenAIParser {
                             }
                         }
                     }
+                    // Legacy function_call delta: the pre-`tool_calls`
+                    // spelling streams its single tool request as
+                    // `delta.function_call` fragments. The typed field exists
+                    // but was never read, and the aggregated message below
+                    // hardcoded `function_call: None` — dropping the streamed
+                    // call exactly where the whole-message form is converted.
+                    if let Some(fc) = &choice.delta.function_call {
+                        let entry = legacy_function_call
+                            .get_or_insert_with(|| (String::new(), String::new()));
+                        if let Some(name) = fc.get("name").and_then(|v| v.as_str()) {
+                            if !name.is_empty() {
+                                entry.0 = name.to_string();
+                            }
+                        }
+                        if let Some(args) = fc.get("arguments").and_then(|v| v.as_str()) {
+                            entry.1.push_str(args);
+                        }
+                    }
                     if finish_reason.is_none() && choice.finish_reason.is_some() {
                         finish_reason = choice.finish_reason.clone();
                     }
@@ -917,7 +939,12 @@ impl OpenAIParser {
                                 content: Some(OpenAIContent::Text(combined_content)),
                                 reasoning_content: combined_reasoning,
                                 refusal: combined_refusal,
-                                function_call: None,
+                                // The aggregated legacy `function_call`, in
+                                // the whole-message shape the converters
+                                // (#5348) turn into a ToolCall part.
+                                function_call: legacy_function_call.map(|(name, arguments)| {
+                                    serde_json::json!({"name": name, "arguments": arguments})
+                                }),
                                 tool_calls,
                                 tool_call_id: None,
                                 name: None,
@@ -2142,6 +2169,55 @@ mod tests {
         assert_eq!(
             resp.choices[0].message.refusal.as_deref(),
             Some("I can't help with that. Ask something else.")
+        );
+    }
+
+    /// Legacy `function_call` streams: the single tool request arrives as
+    /// `delta.function_call` fragments (the name once, then bare argument
+    /// fragments), the pre-`tool_calls` spelling. The aggregation hardcoded
+    /// `function_call: None`, so a streamed legacy call was dropped exactly
+    /// where the whole-message form is read.
+    #[test]
+    fn test_aggregate_sse_chunks_legacy_function_call_delta() {
+        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-legacy",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "gpt-3.5-turbo",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"function_call": {"name": "get_weather", "arguments": ""}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function_call": {"arguments": "{\"city\":"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function_call": {"arguments": "\"Beijing\"}"}}),
+                Some("function_call"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("function_call".to_string())
+        );
+        let fc = resp.choices[0]
+            .message
+            .function_call
+            .as_ref()
+            .expect("the legacy streamed call must survive aggregation");
+        assert_eq!(fc.get("name").unwrap().as_str().unwrap(), "get_weather");
+        assert_eq!(
+            fc.get("arguments").unwrap().as_str().unwrap(),
+            "{\"city\":\"Beijing\"}"
         );
     }
 

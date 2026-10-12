@@ -13,16 +13,20 @@
 //! `apply` is a quiet skip (`supported: false`): setcap is meaningless
 //! without root + a system-mode layout, so those installs are no-ops for
 //! capabilities.
-//!
-//! [`FakeCapabilityManager`] is the executor used by this module's unit
-//! tests and by integration tests asserting which binaries were targeted.
+//! `FakeCapabilityManager` is the executor used by this module's unit
+//! tests and by integration tests asserting which binaries were targeted;
+//! it is gated behind the `test-util` feature, so the default build does
+//! not compile it.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 
 use anolisa_env::EnvFacts;
+
+#[cfg(any(test, feature = "test-util"))]
+use std::collections::HashSet;
+#[cfg(any(test, feature = "test-util"))]
+use std::sync::Mutex;
 
 /// What [`CapabilityManager`] returns from a single `apply`.
 #[derive(Debug, Clone)]
@@ -212,6 +216,7 @@ pub fn for_install_mode(install_mode: &str, env: &EnvFacts) -> Box<dyn Capabilit
 
 /// In-memory [`CapabilityManager`] for tests: records every `apply` and
 /// can be told to fail specific paths.
+#[cfg(any(test, feature = "test-util"))]
 pub struct FakeCapabilityManager {
     manager_name: String,
     supported: bool,
@@ -219,6 +224,7 @@ pub struct FakeCapabilityManager {
     fail_paths: Mutex<HashSet<PathBuf>>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl FakeCapabilityManager {
     /// Supported fake with no injected failures.
     pub fn new() -> Self {
@@ -243,12 +249,14 @@ impl FakeCapabilityManager {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl Default for FakeCapabilityManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl CapabilityManager for FakeCapabilityManager {
     fn manager(&self) -> &str {
         &self.manager_name

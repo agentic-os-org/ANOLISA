@@ -6,16 +6,17 @@
 //! Loads the prebuilt CO-RE object `process.bpf.o` (compiled from the untouched
 //! kernel C in this directory), installs the compiled policy into writable BPF
 //! array maps, attaches the enforcer, and surfaces `TAINT_VIOLATION` events.
-//! Supports runtime policy deltas via `ReloadHandle` (user ring buffer).
+//! Supports runtime policy deltas via `ReloadHandle` (single-slot mailbox).
 //!
 //! The config blob is exactly the `struct taint_config` the collector's DSL
 //! compiler already produces (the same bytes the C loader read from `--config`).
 
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use aya::maps::{Array, HashMap, Map, MapData, MapError, ProgramArray, RingBuf};
 use aya::programs::links::FdLink;
@@ -84,13 +85,13 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
 // the marker check loudly instead of being silently reused with mismatched
 // links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v2_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v4_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v3_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v5_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v2_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v2_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -217,15 +218,32 @@ pub const INODE_GUARD_RENAME: u32 = 2;
 /// Inode guard flag: block write.
 pub const INODE_GUARD_WRITE: u32 = 4;
 
-/// Value stored in te_inode_guard map: flags + owning domain_id.
 /// Must match BPF `struct inode_guard_val` layout.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InodeGuardVal {
     pub flags: u32,
     pub domain_id: u32,
+    pub rule_id: u32,
+    pub _pad: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FileDomainId {
+    fid: FileId,
+    domain_id: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InodePathVal {
+    path: [u8; FILENAME_LEN],
+}
+
+unsafe impl aya::Pod for FileDomainId {}
+unsafe impl aya::Pod for InodePathVal {}
 unsafe impl aya::Pod for FileId {}
 unsafe impl aya::Pod for InodeGuardVal {}
 unsafe impl aya::Pod for CUpdate {}
@@ -515,6 +533,88 @@ fn pin_profile_marker(
     Ok(())
 }
 
+/// Marker prefix pinned when tracepoints could not be pinned as bpf links.
+///
+/// Kernels before 5.15 attach tracepoints through the perf_event ioctl, which
+/// bpffs cannot pin, so the installing process keeps them attached for its
+/// lifetime. The `<pid>_<start_time>` suffix names that process; once it is
+/// gone the pinned layout is stale and gets rebuilt.
+const TRACEPOINT_HOLDER_PREFIX: &str = "tp_holder_";
+
+fn proc_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+fn pin_tracepoint_holder(
+    bpf: &Ebpf,
+    paths: &PinnedEnginePaths,
+    created: &mut Vec<PathBuf>,
+) -> io::Result<PathBuf> {
+    let pid = std::process::id();
+    let start = proc_start_time(pid).ok_or_else(|| {
+        err(format!(
+            "read /proc/{pid}/stat start time for tracepoint holder"
+        ))
+    })?;
+    let marker = paths.map(&format!("{TRACEPOINT_HOLDER_PREFIX}{pid}_{start}"));
+    bpf.map("cap_state")
+        .ok_or_else(|| err("map cap_state missing for tracepoint holder marker"))?
+        .pin(&marker)
+        .map_err(|e| {
+            err(format!(
+                "pin tracepoint holder at {}: {e}",
+                marker.display()
+            ))
+        })?;
+    created.push(marker.clone());
+    Ok(marker)
+}
+
+fn tracepoint_holder_owned_by_current_process(
+    paths: &PinnedEnginePaths,
+    allow_current: bool,
+) -> io::Result<bool> {
+    let entries = match std::fs::read_dir(paths.maps_dir()) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let current_pid = std::process::id();
+    let current_start = proc_start_time(current_pid);
+    for entry in entries {
+        let name = entry?.file_name();
+        let Some(owner) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(TRACEPOINT_HOLDER_PREFIX))
+        else {
+            continue;
+        };
+        let Some((pid, start)) = owner.split_once('_') else {
+            continue;
+        };
+        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else {
+            continue;
+        };
+        if proc_start_time(pid) != Some(start) {
+            continue;
+        }
+        if pid == current_pid && current_start == Some(start) && allow_current {
+            return Ok(true);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("ActPlane tracepoints are held by live process {pid}"),
+        ));
+    }
+    Ok(false)
+}
+
 fn pin_pending_links(
     paths: &PinnedEnginePaths,
     links: Vec<(String, FdLink)>,
@@ -545,19 +645,16 @@ fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedF
     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
 }
 
-/// Declare to the BPF drain gate that THIS pid is about to submit to `cap_req`.
-/// The gate (`cap_pending_submitter`) makes the drain hook refuse to run in any
-/// other pid's context, so a foreign syscall on the trigger tracepoint cannot
-/// consume the submitter's records in a foreign capability context
-/// (#3021 follow-up 3).
+/// Declare to the BPF drain gate that this thread is about to submit to
+/// `cap_req`. The gate refuses to drain in any other thread's context.
 fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
     let slot: u32 = 0;
-    let pid: i32 = std::process::id() as i32;
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as i32 };
     let rc = unsafe {
         libbpf_sys::bpf_map_update_elem(
             fd,
             &slot as *const u32 as *const std::ffi::c_void,
-            &pid as *const i32 as *const std::ffi::c_void,
+            &tid as *const i32 as *const std::ffi::c_void,
             BPF_ANY,
         )
     };
@@ -567,20 +664,192 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn open_append_lock() -> io::Result<std::fs::File> {
+fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+    let slot: u32 = 0;
+    let tid: i32 = 0;
+    let rc = unsafe {
+        libbpf_sys::bpf_map_update_elem(
+            fd,
+            &slot as *const u32 as *const std::ffi::c_void,
+            &tid as *const i32 as *const std::ffi::c_void,
+            BPF_ANY,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Capacity of the `cap_req` mailbox slot; must match `CAP_REQ_MAILBOX_BYTES`
+/// in `capability.bpf.h`.
+const CAP_REQ_MAILBOX_BYTES: usize = 512;
+
+/// Value of the single-slot `cap_req` mailbox. The drain hook zeroes `len`
+/// once it has claimed the record.
+#[repr(C)]
+struct CapReqSlot {
+    len: u32,
+    _pad: u32,
+    data: [u8; CAP_REQ_MAILBOX_BYTES],
+}
+
+fn write_cap_req_mailbox(fd: RawFd, slot: &CapReqSlot) -> io::Result<()> {
+    let key: u32 = 0;
+    let rc = unsafe {
+        libbpf_sys::bpf_map_update_elem(
+            fd,
+            &key as *const u32 as *const std::ffi::c_void,
+            slot as *const CapReqSlot as *const std::ffi::c_void,
+            BPF_ANY,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn read_cap_req_mailbox_len(fd: RawFd) -> io::Result<u32> {
+    let key: u32 = 0;
+    let mut slot = CapReqSlot {
+        len: 0,
+        _pad: 0,
+        data: [0; CAP_REQ_MAILBOX_BYTES],
+    };
+    let rc = unsafe {
+        libbpf_sys::bpf_map_lookup_elem(
+            fd,
+            &key as *const u32 as *const std::ffi::c_void,
+            &mut slot as *mut CapReqSlot as *mut std::ffi::c_void,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(slot.len)
+}
+
+/// Submits one record to the `cap_req` mailbox and self-triggers the drain in
+/// this thread's context.
+///
+/// # Errors
+///
+/// Fails when the record does not fit the mailbox, a map operation fails, the
+/// drain trigger syscall fails, or the record remains pending after the trigger.
+fn submit_cap_req(cap_req_fd: RawFd, cap_pending_fd: RawFd, data: &[u8]) -> io::Result<()> {
+    if data.len() > CAP_REQ_MAILBOX_BYTES {
+        return Err(err(format!(
+            "cap_req record of {} bytes exceeds the {CAP_REQ_MAILBOX_BYTES}-byte mailbox",
+            data.len()
+        )));
+    }
+    let mut slot = CapReqSlot {
+        len: data.len() as u32,
+        _pad: 0,
+        data: [0; CAP_REQ_MAILBOX_BYTES],
+    };
+    slot.data[..data.len()].copy_from_slice(data);
+
+    // Check the trigger before publishing. This prevents a known seccomp or
+    // ENOSYS failure from leaving an already-committed record behind.
+    trigger_cap_req_drain()?;
+    declare_drain_intent_fd(cap_pending_fd)?;
+    if let Err(e) = write_cap_req_mailbox(cap_req_fd, &slot) {
+        let _ = clear_drain_intent_fd(cap_pending_fd);
+        return Err(e);
+    }
+
+    let trigger = trigger_cap_req_drain();
+    let pending = match read_cap_req_mailbox_len(cap_req_fd) {
+        Ok(pending) => pending,
+        Err(e) => {
+            let _ = clear_cap_req_mailbox(cap_req_fd);
+            let _ = clear_drain_intent_fd(cap_pending_fd);
+            return Err(e);
+        }
+    };
+    if pending == 0 {
+        // The sys_enter tracepoint may have drained the record even when the
+        // syscall itself returned an error.
+        return Ok(());
+    }
+
+    let clear_mailbox = clear_cap_req_mailbox(cap_req_fd);
+    let clear_intent = clear_drain_intent_fd(cap_pending_fd);
+    clear_mailbox?;
+    clear_intent?;
+    trigger?;
+    Err(err(
+        "cap_req mailbox record was not drained in the submitting thread",
+    ))
+}
+
+fn clear_cap_req_mailbox(fd: RawFd) -> io::Result<()> {
+    write_cap_req_mailbox(
+        fd,
+        &CapReqSlot {
+            len: 0,
+            _pad: 0,
+            data: [0; CAP_REQ_MAILBOX_BYTES],
+        },
+    )
+}
+
+fn trigger_cap_req_drain() -> io::Result<()> {
+    let rc = unsafe { libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0) };
+    if rc < 0 {
+        return Err(err(format!(
+            "drain self-trigger failed: membarrier(MEMBARRIER_CMD_QUERY): {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+fn cap_req_map_fd(bpf: &Ebpf) -> io::Result<RawFd> {
+    match bpf.map("cap_req").ok_or_else(|| err("cap_req missing"))? {
+        Map::Array(data) => Ok(data.fd().as_fd().as_raw_fd()),
+        _ => Err(err("cap_req is not a mailbox array")),
+    }
+}
+
+fn open_lock_file(name: &str) -> io::Result<std::fs::File> {
+    let dir = PathBuf::from("/run/agentsight");
+    std::fs::create_dir_all(&dir)?;
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(std::env::temp_dir().join("actplane.append.lock"))
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(name))
+}
+
+fn open_append_lock() -> io::Result<std::fs::File> {
+    open_lock_file("actplane.append.lock")
 }
 
 fn open_runtime_lock() -> io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(std::env::temp_dir().join("actplane.runtime.lock"))
+    open_lock_file("actplane.runtime.lock")
+}
+
+struct InstallLock(std::fs::File);
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn acquire_install_lock() -> io::Result<InstallLock> {
+    let file = open_lock_file("actplane.install.lock")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(InstallLock(file))
 }
 
 fn pinned_hash_map<K: aya::Pod, V: aya::Pod>(
@@ -592,6 +861,21 @@ fn pinned_hash_map<K: aya::Pod, V: aya::Pod>(
 }
 
 fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io::Result<bool> {
+    pinned_engine_present_inner(paths, reserve, false)
+}
+
+fn pinned_engine_present_after_install(
+    paths: &PinnedEnginePaths,
+    reserve: HookReserve,
+) -> io::Result<bool> {
+    pinned_engine_present_inner(paths, reserve, true)
+}
+
+fn pinned_engine_present_inner(
+    paths: &PinnedEnginePaths,
+    reserve: HookReserve,
+    allow_current_tracepoint_holder: bool,
+) -> io::Result<bool> {
     for name in [
         "rb",
         "cap_req",
@@ -605,6 +889,7 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
         "ts_root",
         "te_protected_pids",
         "te_inode_guard",
+        "te_inode_path",
     ] {
         if !paths.map(name).try_exists()? {
             return Ok(false);
@@ -618,10 +903,12 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
         )));
     }
     let budget = HookBudget::for_pinned_reserve(reserve);
+    let tracepoints_held =
+        tracepoint_holder_owned_by_current_process(paths, allow_current_tracepoint_holder)?;
     for spec in TRACEPOINTS {
         let exists = paths.link(spec.name).try_exists()?;
         let expected = tracepoint_needed(spec, budget);
-        if expected && !exists {
+        if expected && !exists && !tracepoints_held {
             return Ok(false);
         }
         if exists && !expected {
@@ -1724,6 +2011,12 @@ fn lsm_needed_for_budget(
 ) -> bool {
     if budget.file_open_only {
         return (block_file && name == "enforce_file_open")
+            || (block_file
+                && budget.features & FEAT_FILE_FLOW != 0
+                && matches!(
+                    name,
+                    "enforce_file_permission" | "enforce_mmap_file" | "enforce_file_mprotect"
+                ))
             || (block_connect && name == "enforce_socket_connect");
     }
     lsm_needed(
@@ -1738,6 +2031,7 @@ fn lsm_needed_for_budget(
 
 fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
     lsm_active
+        && (name != "enforce_file_truncate" || lsm_prog_hook(name).is_none_or(lsm_hook_available))
         && lsm_needed_for_budget(
             name,
             budget.features & FEAT_BLOCK_EXEC != 0,
@@ -1746,6 +2040,48 @@ fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
             budget.has_recv(),
             budget,
         )
+}
+
+fn lsm_prog_hook(name: &str) -> Option<&'static str> {
+    LSM_PROGS
+        .iter()
+        .find(|(prog, _)| *prog == name)
+        .map(|(_, hook)| *hook)
+}
+
+/// Whether the running kernel exposes the `bpf_lsm_<hook>` attach point.
+///
+/// Hooks newer than the oldest supported kernel are skipped instead of failing
+/// the whole load: `file_truncate` only exists since 6.2, and older kernels
+/// still mediate `ftruncate` through `path_truncate`. When kernel BTF cannot
+/// be read every hook is reported present, so the load fails loudly as before.
+fn lsm_hook_available(hook: &str) -> bool {
+    static MISSING: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let missing = MISSING.get_or_init(|| {
+        let btf = unsafe { libbpf_sys::btf__load_vmlinux_btf() };
+        if btf.is_null() {
+            return Vec::new();
+        }
+        let missing = LSM_PROGS
+            .iter()
+            .map(|(_, hook)| *hook)
+            .filter(|hook| {
+                let Ok(func) = std::ffi::CString::new(format!("bpf_lsm_{hook}")) else {
+                    return false;
+                };
+                unsafe {
+                    libbpf_sys::btf__find_by_name_kind(
+                        btf,
+                        func.as_ptr(),
+                        libbpf_sys::BTF_KIND_FUNC,
+                    ) < 0
+                }
+            })
+            .collect();
+        unsafe { libbpf_sys::btf__free(btf) };
+        missing
+    });
+    !missing.contains(&hook)
 }
 
 fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
@@ -1792,7 +2128,7 @@ pub fn bpf_lsm_active() -> bool {
 }
 
 fn err(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, msg.into())
+    io::Error::other(msg.into())
 }
 
 /// Error kind marking a stale pinned-engine layout (marker/profile/schema
@@ -1818,15 +2154,21 @@ fn validate_config(cfg: &CConfig) -> io::Result<()> {
     }
     for (i, u) in cfg.updates.iter().take(cfg.n_updates as usize).enumerate() {
         if u.op == OP_EXEC && u.m == M_SUFFIX {
-            return Err(err(format!("config update[{i}]: suffix exec matches are unsupported; use DSL exec patterns that lower to exact/prefix")));
+            return Err(err(format!(
+                "config update[{i}]: suffix exec matches are unsupported; use DSL exec patterns that lower to exact/prefix"
+            )));
         }
     }
     for (i, r) in cfg.rules.iter().take(cfg.n_rules as usize).enumerate() {
         if r.op == OP_EXEC && r.m == M_SUFFIX {
-            return Err(err(format!("config rule[{i}]: suffix exec matches are unsupported; use DSL exec patterns that lower to exact/prefix")));
+            return Err(err(format!(
+                "config rule[{i}]: suffix exec matches are unsupported; use DSL exec patterns that lower to exact/prefix"
+            )));
         }
         if r.op == OP_EXEC && r.cond_kind == C_TARGET && r.cond_match == M_SUFFIX {
-            return Err(err(format!("config rule[{i}]: suffix exec target conditions are unsupported; use exact/prefix exec patterns")));
+            return Err(err(format!(
+                "config rule[{i}]: suffix exec target conditions are unsupported; use exact/prefix exec patterns"
+            )));
         }
     }
     Ok(())
@@ -1992,12 +2334,37 @@ struct Loader {
     bpf: Ebpf,
     enforce: bool,
     policy_features: u32,
+    /// Marker for tracepoints kept attached by this loader instead of bpffs.
+    tracepoint_holder_marker: Option<PathBuf>,
+    submit_lock: Arc<Mutex<()>>,
+}
+
+struct TracepointMarker(PathBuf);
+
+impl Drop for TracepointMarker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Keeps an installing [`Loader`] alive while it holds unpinnable tracepoints.
+struct TracepointHolder {
+    // Fields drop in declaration order: detach first, then remove the marker.
+    _loader: Mutex<Loader>,
+    _marker: TracepointMarker,
+}
+
+impl std::fmt::Debug for TracepointHolder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TracepointHolder")
+    }
 }
 
 #[derive(Debug)]
 pub struct PinnedEngine {
     paths: PinnedEnginePaths,
     policy_features: u32,
+    _tracepoint_holder: Option<TracepointHolder>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2176,6 +2543,7 @@ fn kernel_supports_bpf_d_path_in_lsm() -> bool {
 
 impl PinnedEngine {
     pub fn open_or_install_singleton() -> io::Result<Self> {
+        let _install_lock = acquire_install_lock()?;
         let paths = PinnedEnginePaths::from_env();
         let reserve = HookReserve::pinned_profile()?;
         validate_pinned_runtime(reserve, bpf_lsm_active())?;
@@ -2191,17 +2559,30 @@ impl PinnedEngine {
             return Ok(Self {
                 paths,
                 policy_features,
+                _tracepoint_holder: None,
             });
         }
         remove_stale_pin_root(&paths)?;
 
         match Loader::load_with_pinned_layout(&empty_config_blob(), reserve, paths.clone()) {
             Ok(installer) => {
-                drop(installer);
-                if pinned_engine_present(&paths, reserve)? {
+                let holder = if let Some(marker) = installer.tracepoint_holder_marker.clone() {
+                    log::warn!(
+                        "ActPlane: kernel cannot pin tracepoint links; this process keeps them attached"
+                    );
+                    Some(TracepointHolder {
+                        _loader: Mutex::new(installer),
+                        _marker: TracepointMarker(marker),
+                    })
+                } else {
+                    drop(installer);
+                    None
+                };
+                if pinned_engine_present_after_install(&paths, reserve)? {
                     Ok(Self {
                         paths,
                         policy_features,
+                        _tracepoint_holder: holder,
                     })
                 } else {
                     Err(err(format!(
@@ -2215,6 +2596,7 @@ impl PinnedEngine {
                     Ok(Self {
                         paths,
                         policy_features,
+                        _tracepoint_holder: None,
                     })
                 } else {
                     Err(e)
@@ -2232,7 +2614,7 @@ impl PinnedEngine {
             == (FEAT_BLOCK_FILE | FEAT_WRITE_RULES)
     }
 
-    pub fn try_lock_runtime(&self) -> io::Result<std::fs::File> {
+    pub fn try_lock_runtime() -> io::Result<std::fs::File> {
         let file = open_runtime_lock()?;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let e = io::Error::last_os_error();
@@ -2261,9 +2643,21 @@ impl PinnedEngine {
     /// Add an inode to the guard map. Files matching `(ino, dev)` will be
     /// blocked from unlink/rename/write according to `flags`, but only for
     /// processes in the specified `domain_id`.
-    pub fn guard_inode(&self, ino: u64, dev: u32, flags: u32, domain_id: u32) -> io::Result<()> {
+    pub fn guard_inode(
+        &self,
+        ino: u64,
+        dev: u32,
+        flags: u32,
+        domain_id: u32,
+        rule_id: u32,
+    ) -> io::Result<()> {
         let key = FileId { ino, dev, _pad: 0 };
-        let val = InodeGuardVal { flags, domain_id };
+        let val = InodeGuardVal {
+            flags,
+            domain_id,
+            rule_id,
+            _pad: 0,
+        };
         let mut guard: HashMap<_, FileId, InodeGuardVal> =
             pinned_hash_map(&self.paths, "te_inode_guard")?;
         guard
@@ -2294,6 +2688,49 @@ impl PinnedEngine {
         Ok(())
     }
 
+    /// Registers a policy path only within its owning domain.
+    pub fn register_inode_path(
+        &self,
+        ino: u64,
+        dev: u32,
+        domain_id: u32,
+        path: &str,
+    ) -> io::Result<()> {
+        if !path.starts_with('/') || path.len() >= FILENAME_LEN || path.contains('\0') {
+            return Err(err(
+                "inode path must be absolute, NUL-free and shorter than 127 bytes",
+            ));
+        }
+        let key = FileDomainId {
+            fid: FileId { ino, dev, _pad: 0 },
+            domain_id,
+            _pad: 0,
+        };
+        let mut value = InodePathVal {
+            path: [0; FILENAME_LEN],
+        };
+        value.path[..path.len()].copy_from_slice(path.as_bytes());
+        let mut paths: HashMap<_, FileDomainId, InodePathVal> =
+            pinned_hash_map(&self.paths, "te_inode_path")?;
+        paths
+            .insert(key, value, 0)
+            .map_err(|e| err(format!("register inode path {path}: {e}")))
+    }
+
+    /// Clears paths when the singleton policy runtime is reset.
+    pub fn clear_inode_paths(&self) -> io::Result<()> {
+        let mut paths: HashMap<_, FileDomainId, InodePathVal> =
+            pinned_hash_map(&self.paths, "te_inode_path")?;
+        let keys: Vec<FileDomainId> = paths
+            .keys()
+            .map(|key| key.map_err(|e| err(format!("list inode paths: {e}"))))
+            .collect::<io::Result<_>>()?;
+        for key in keys {
+            ignore_missing_remove(paths.remove(&key), "clear inode path")?;
+        }
+        Ok(())
+    }
+
     /// Returns `true` if the current kernel supports `bpf_d_path` in LSM hooks
     /// (Alibaba Cloud Linux kernel >= 7.1). When `false`, inode guard mode is
     /// the only option for file-delete-guard.
@@ -2315,7 +2752,7 @@ impl PinnedEngine {
             cap_state_fd: dup_pinned_map_fd(&self.paths, "cap_state")?,
             cap_policy_fd: dup_pinned_map_fd(&self.paths, "cap_policy")?,
             ts_counts_fd: dup_pinned_map_fd(&self.paths, "ts_counts")?,
-            append_lock: Mutex::new(()),
+            append_lock: Arc::new(Mutex::new(())),
             append_lock_file: Some(open_append_lock()?),
             policy_features: self.policy_features,
         })
@@ -2486,7 +2923,7 @@ impl PinnedEngine {
 
     pub fn run(&self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
         let data = pinned_map_data(&self.paths, "rb")?;
-        let mut ring =
+        let ring =
             RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
         let fix_fd = ring.as_raw_fd();
 
@@ -2691,6 +3128,7 @@ impl Loader {
 
         load_exec_tail_programs(&mut bpf)?;
         let mut pending_links: Vec<(String, FdLink)> = Vec::new();
+        let mut tracepoints_held = false;
 
         // Attach only the tracepoints required by this loaded hook set, then LSM
         // programs only when BPF LSM is active.
@@ -2708,17 +3146,21 @@ impl Loader {
             let link_id = p
                 .attach(spec.category, spec.event)
                 .map_err(|e| err(format!("{}.attach: {e}", spec.name)))?;
-            if pin_paths.is_some() {
+            if pin_paths.is_some() && !tracepoints_held {
                 let link = p
                     .take_link(link_id)
                     .map_err(|e| err(format!("{}.take_link: {e}", spec.name)))?;
-                let fd_link: FdLink = link.try_into().map_err(|e| {
-                    err(format!(
-                        "{} tracepoint link is not pinnable as an fd link: {e}",
-                        spec.name
-                    ))
-                })?;
-                pending_links.push((spec.name.to_string(), fd_link));
+                match FdLink::try_from(link) {
+                    Ok(fd_link) => pending_links.push((spec.name.to_string(), fd_link)),
+                    Err(_) => {
+                        // A perf_event ioctl attachment (pre-5.15) cannot be
+                        // pinned and the failed conversion detached it, so
+                        // re-attach and let this loader keep it alive.
+                        p.attach(spec.category, spec.event)
+                            .map_err(|e| err(format!("{}.attach: {e}", spec.name)))?;
+                        tracepoints_held = true;
+                    }
+                }
             }
         }
         if enforce {
@@ -2733,6 +3175,17 @@ impl Loader {
                     hook_budget,
                 ) {
                     continue;
+                }
+                if !lsm_hook_available(hook) {
+                    if *name == "enforce_file_truncate" {
+                        log::warn!(
+                            "ActPlane: kernel has no LSM hook {hook}; {name} is not attached"
+                        );
+                        continue;
+                    }
+                    return Err(err(format!(
+                        "required LSM hook {hook} for program {name} is unavailable"
+                    )));
                 }
                 let p: &mut Lsm = bpf
                     .program_mut(name)
@@ -2752,11 +3205,16 @@ impl Loader {
             }
         }
 
+        let mut tracepoint_holder_marker = None;
         if let Some(paths) = pin_paths.as_ref() {
             let mut created = Vec::new();
             let pin_result = (|| -> io::Result<()> {
                 pin_loaded_maps(&bpf, paths, &mut created)?;
                 pin_profile_marker(&bpf, paths, hook_reserve, &mut created)?;
+                if tracepoints_held {
+                    tracepoint_holder_marker =
+                        Some(pin_tracepoint_holder(&bpf, paths, &mut created)?);
+                }
                 pin_pending_links(paths, pending_links, &mut created)
             })();
             match pin_result {
@@ -2774,6 +3232,8 @@ impl Loader {
             bpf,
             enforce,
             policy_features,
+            tracepoint_holder_marker,
+            submit_lock: Arc::new(Mutex::new(())),
         };
         Ok(loader)
     }
@@ -2803,16 +3263,7 @@ impl Loader {
 
     /// Create a `ReloadHandle` that can append runtime policy deltas.
     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
-        let map = self
-            .bpf
-            .map("cap_req")
-            .ok_or_else(|| err("cap_req missing"))?;
-        let map_data = match map {
-            Map::Unsupported(data) => data,
-            _ => return Err(err("cap_req is not a user ringbuf map")),
-        };
-        let raw = map_data.fd().as_fd().as_raw_fd();
-        let dup = dup_cloexec_fd(raw)?;
+        let dup = dup_cloexec_fd(cap_req_map_fd(&self.bpf)?)?;
         Ok(ReloadHandle {
             cap_req_fd: dup,
             cap_pending_fd: dup_array_map_fd(&self.bpf, "cap_pending_submitter")?,
@@ -2820,7 +3271,7 @@ impl Loader {
             cap_state_fd: dup_hash_map_fd(&self.bpf, "cap_state")?,
             cap_policy_fd: dup_hash_map_fd(&self.bpf, "cap_policy")?,
             ts_counts_fd: dup_array_map_fd(&self.bpf, "ts_counts")?,
-            append_lock: Mutex::new(()),
+            append_lock: Arc::clone(&self.submit_lock),
             append_lock_file: None,
             policy_features: self.policy_features,
         })
@@ -3045,24 +3496,19 @@ impl Loader {
         Ok(report)
     }
 
-    /// Submit a runtime policy delta through the user-to-kernel ring buffer.
+    /// Submit a runtime policy delta through the user-to-kernel `cap_req` channel.
     ///
     /// The BPF side admits the request only if `caller_pid` maps to a state with
     /// the needed authority masks, and then applies a monotonic delta to
     /// `cap_state`. The caller normally sets `caller_pid` to its own pid. The
     /// submission first declares the drain intent so the BPF gate only lets
-    /// OUR pid drain, then self-triggers the drain hook with a
+    /// this thread drain, then self-triggers the drain hook with a
     /// `membarrier(QUERY)`.
     pub fn submit_delta(&self, req: DeltaRequest) -> io::Result<()> {
-        let map = self
-            .bpf
-            .map("cap_req")
-            .ok_or_else(|| err("cap_req missing"))?;
-        let map_data = match map {
-            Map::Unsupported(data) => data,
-            _ => return Err(err("cap_req is not a user ringbuf map")),
-        };
-        let ring_fd = map_data.fd().as_fd().as_raw_fd();
+        let _guard = self
+            .submit_lock
+            .lock()
+            .map_err(|_| err("cap_req submit lock poisoned"))?;
         let pending = self
             .bpf
             .map("cap_pending_submitter")
@@ -3072,53 +3518,22 @@ impl Loader {
             Map::Unsupported(data) => data,
             _ => return Err(err("cap_pending_submitter is not an array map")),
         };
-        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd())?;
-        unsafe {
-            let rb = libbpf_sys::user_ring_buffer__new(ring_fd, std::ptr::null());
-            if rb.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let sample = libbpf_sys::user_ring_buffer__reserve(
-                rb,
-                std::mem::size_of::<DeltaRequest>() as u32,
-            );
-            if sample.is_null() {
-                let e = io::Error::last_os_error();
-                libbpf_sys::user_ring_buffer__free(rb);
-                return Err(e);
-            }
-            std::ptr::copy_nonoverlapping(
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
                 &req as *const DeltaRequest as *const u8,
-                sample as *mut u8,
                 std::mem::size_of::<DeltaRequest>(),
-            );
-            libbpf_sys::user_ring_buffer__submit(rb, sample);
-            libbpf_sys::user_ring_buffer__free(rb);
-            // Self-trigger the drain in OUR pid context. The BPF-side gate
-            // double-checks that we are the declared submitter, so even a
-            // foreign membarrier(QUERY) storm between submit and this trigger
-            // cannot consume the record in a foreign capability context
-            // (#3021 follow-up 3). QUERY has no side effects.
-            //
-            // The trigger must not fail silently: if the syscall is blocked
-            // (seccomp EPERM) or absent (ENOSYS), the record would sit in the
-            // ringbuf until a later successful trigger drains it — after the
-            // caller already rolled the submission back. Fail loudly here so
-            // the rollback path reports the real cause.
-            let rc = libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0);
-            if rc < 0 {
-                return Err(err(format!(
-                    "drain self-trigger failed: membarrier(MEMBARRIER_CMD_QUERY): {}",
-                    io::Error::last_os_error()
-                )));
-            }
-        }
-        Ok(())
+            )
+        };
+        submit_cap_req(
+            cap_req_map_fd(&self.bpf)?,
+            pending_data.fd().as_fd().as_raw_fd(),
+            bytes,
+        )
     }
 
     /// Poll the ring buffer until `stop` is set, delivering each violation.
     pub fn run(&mut self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
-        let mut ring = RingBuf::try_from(self.bpf.map_mut("rb").ok_or_else(|| err("rb missing"))?)
+        let ring = RingBuf::try_from(self.bpf.map_mut("rb").ok_or_else(|| err("rb missing"))?)
             .map_err(|e| err(format!("rb: {e}")))?;
         let fix_fd = ring.as_raw_fd();
 
@@ -3257,7 +3672,7 @@ fn populate_policy_mask_map(bpf: &mut Ebpf, cfg: &CConfig) -> io::Result<()> {
     Ok(())
 }
 
-// ── Runtime policy deltas via cap_req ring buffer ──────────────────
+// ── Runtime policy deltas via the cap_req channel ──────────────────
 
 const CAP_REQ_APPEND_UPDATE: i32 = -4;
 const CAP_REQ_APPEND_RULE: i32 = -5;
@@ -3284,9 +3699,17 @@ struct AppendRule {
     entry: CRule,
 }
 
+// Every cap_req record must fit the mailbox slot.
+const _: () = assert!(
+    std::mem::size_of::<AppendUpdate>() <= CAP_REQ_MAILBOX_BYTES
+        && std::mem::size_of::<AppendRule>() <= CAP_REQ_MAILBOX_BYTES
+        && std::mem::size_of::<DeltaRequest>() <= CAP_REQ_MAILBOX_BYTES
+        && std::mem::size_of::<CapReqSlot>() == 8 + CAP_REQ_MAILBOX_BYTES
+);
+
 /// A handle for appending runtime policy deltas into a running eBPF engine.
 ///
-/// Holds only the `cap_req` user ring buffer fd (via a dup'd `OwnedFd`).
+/// Holds the `cap_req` mailbox fd (via a dup'd `OwnedFd`).
 /// `Send + Sync` — safe to share across threads and the async MCP server.
 pub struct ReloadHandle {
     cap_req_fd: std::os::fd::OwnedFd,
@@ -3295,7 +3718,7 @@ pub struct ReloadHandle {
     cap_state_fd: std::os::fd::OwnedFd,
     cap_policy_fd: std::os::fd::OwnedFd,
     ts_counts_fd: std::os::fd::OwnedFd,
-    append_lock: Mutex<()>,
+    append_lock: Arc<Mutex<()>>,
     append_lock_file: Option<std::fs::File>,
     policy_features: u32,
 }
@@ -3325,41 +3748,11 @@ impl ReloadHandle {
     }
 
     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
-        declare_drain_intent_fd(self.cap_pending_fd.as_raw_fd())?;
-        let fd = self.cap_req_fd.as_raw_fd();
-        unsafe {
-            let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
-            if rb.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let sample = libbpf_sys::user_ring_buffer__reserve(rb, data.len() as u32);
-            if sample.is_null() {
-                let e = io::Error::last_os_error();
-                libbpf_sys::user_ring_buffer__free(rb);
-                return Err(e);
-            }
-            std::ptr::copy_nonoverlapping(data.as_ptr(), sample as *mut u8, data.len());
-            libbpf_sys::user_ring_buffer__submit(rb, sample);
-            libbpf_sys::user_ring_buffer__free(rb);
-            // Self-trigger the drain in OUR pid context; the BPF-side
-            // submitter gate makes foreign triggers harmless regardless of
-            // which syscall they ride (#3021 follow-up 3). QUERY has no side
-            // effects.
-            //
-            // The trigger must not fail silently: if the syscall is blocked
-            // (seccomp EPERM) or absent (ENOSYS), the record would sit in the
-            // ringbuf until a later successful trigger drains it — after the
-            // caller already rolled the submission back. Fail loudly here so
-            // the rollback path reports the real cause.
-            let rc = libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0);
-            if rc < 0 {
-                return Err(err(format!(
-                    "drain self-trigger failed: membarrier(MEMBARRIER_CMD_QUERY): {}",
-                    io::Error::last_os_error()
-                )));
-            }
-        }
-        Ok(())
+        submit_cap_req(
+            self.cap_req_fd.as_raw_fd(),
+            self.cap_pending_fd.as_raw_fd(),
+            data,
+        )
     }
 
     fn submit<T: Copy>(&self, val: &T) -> io::Result<()> {
@@ -3476,6 +3869,8 @@ impl ReloadHandle {
             .lock()
             .map_err(|e| err(format!("append lock poisoned: {e}")))?;
         let _file_guard = self.lock_append_file()?;
+        clear_cap_req_mailbox(self.cap_req_fd.as_raw_fd())?;
+        clear_drain_intent_fd(self.cap_pending_fd.as_raw_fd())?;
         self.set_count_slot(0, 0)?;
         self.set_count_slot(1, 0)?;
         clear_hash_map::<i32, u32>(&self.cap_task_fd, "cap_task")?;
@@ -3853,6 +4248,10 @@ mod tests {
     // with. These are the documented sizes from bpf/taint.h.
     #[test]
     fn abi_sizes() {
+        assert_eq!(std::mem::size_of::<FileId>(), 16);
+        assert_eq!(std::mem::size_of::<FileDomainId>(), 24);
+        assert_eq!(std::mem::size_of::<InodeGuardVal>(), 16);
+        assert_eq!(std::mem::size_of::<InodePathVal>(), 127);
         assert_eq!(std::mem::size_of::<ProcState>(), 16);
         assert_eq!(std::mem::size_of::<CapState>(), 56);
         assert_eq!(std::mem::size_of::<DeltaRequest>(), 48);
@@ -3889,7 +4288,7 @@ mod tests {
     }
 
     #[test]
-    fn object_has_capability_user_ringbuf_path() {
+    fn object_has_capability_mailbox_path() {
         let b = object_bytes();
         for name in [
             b"cap_req".as_slice(),
@@ -4055,7 +4454,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v2"));
+        assert!(marker.contains("file_v4"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -4091,7 +4490,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v2"));
+        assert!(marker.contains("agent_file_guard_v4"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -4131,7 +4530,9 @@ mod tests {
         assert!(!tracepoint_needed(connect_exit, budget));
         assert!(lsm_link_expected("enforce_file_open", budget, true));
         assert!(lsm_link_expected("enforce_socket_connect", budget, true));
-        assert!(!lsm_link_expected("enforce_file_permission", budget, true));
+        assert!(lsm_link_expected("enforce_file_permission", budget, true));
+        assert!(lsm_link_expected("enforce_mmap_file", budget, true));
+        assert!(lsm_link_expected("enforce_file_mprotect", budget, true));
         assert!(!lsm_link_expected("enforce_bpf_syscall", budget, true));
     }
 
@@ -4141,7 +4542,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v3"));
+        assert!(marker.contains("credential_exfiltration_v5"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -5035,8 +5436,9 @@ os.execv({hit:?}, [{hit:?}])
             loader.submit_delta(req).expect("submit_delta");
         }
 
-        let _ = &mut spinners.0; // keep guard alive until here
-                                 // Let any in-flight drain settle before reading the counters.
+        // Keep guard alive until here.
+        let _ = &mut spinners.0;
+        // Let any in-flight drain settle before reading the counters.
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         let drops = cap_stat(3) - drop0;
@@ -5052,8 +5454,8 @@ os.execv({hit:?}, [{hit:?}])
         );
     }
 
-    /// The drain gate itself (#3021 follow-up 3): while OUR pid is the declared
-    /// pending submitter, a foreign membarrier(QUERY) storm must not even enter
+    /// The drain gate itself (#3021 follow-up 3): while this thread is the declared
+    /// pending submitter, foreign processes and sibling threads must not enter
     /// the drain body (DRAIN stat frozen), and our own trigger must still drain
     /// (DRAIN advances). Without the BPF-side gate the same storm drove DRAIN up
     /// by millions within seconds (reproduced on kernel 6.6).
@@ -5128,17 +5530,31 @@ os.execv({hit:?}, [{hit:?}])
         );
 
         let drain0 = cap_stat(2);
+        let same_process_spinners: Vec<_> = (0..2)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                    while std::time::Instant::now() < until {
+                        unsafe {
+                            libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0)
+                        };
+                    }
+                })
+            })
+            .collect();
         for s in spinners.0.iter_mut() {
             s.wait().expect("spinner exit");
+        }
+        for thread in same_process_spinners {
+            thread.join().expect("same-process spinner exit");
         }
         let foreign_drains = cap_stat(2) - drain0;
         assert_eq!(
             foreign_drains, 0,
-            "foreign membarrier(QUERY) must not enter the drain body while a \
-             different pid holds the pending-submitter declaration"
+            "a foreign process or another thread must not enter the drain body"
         );
 
-        // Our own trigger still drains (empty ringbuf, but the hook body runs).
+        // The declaring thread still drains (empty channel, but the hook body runs).
         let drain1 = cap_stat(2);
         unsafe { libc::syscall(libc::SYS_membarrier, libc::MEMBARRIER_CMD_QUERY, 0, 0) };
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -5178,6 +5594,7 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
         }
@@ -5289,6 +5706,7 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
         }
@@ -5331,6 +5749,7 @@ os.execv({hit:?}, [{hit:?}])
             "ts_root",
             "te_protected_pids",
             "te_inode_guard",
+            "te_inode_path",
         ] {
             std::fs::write(paths.map(name), b"").expect("map pin");
         }
@@ -7474,7 +7893,9 @@ raise SystemExit(0 if status == 0 else 1)
             .map(|s| s.success())
             .unwrap_or(false);
         if !python_has_sendmsg {
-            eprintln!("skipping abstract unix datagram sendmsg smoke: python3 socket.sendmsg is unavailable");
+            eprintln!(
+                "skipping abstract unix datagram sendmsg smoke: python3 socket.sendmsg is unavailable"
+            );
             return;
         }
 
