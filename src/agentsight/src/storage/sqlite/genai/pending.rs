@@ -596,33 +596,21 @@ impl GenAISqliteStore {
                          ORDER BY start_timestamp_ns DESC \
                          LIMIT ?2) \
                    ORDER BY start_timestamp_ns ASC";
-        let mut stmt = match conn.prepare(sql) {
-            Ok(statement) => statement,
-            Err(error) => {
-                log::warn!(
-                    "Failed to prepare the recent-calls lookup for conversation {conversation_id}: {error}"
-                );
-                return None;
-            }
-        };
-        let rows = match stmt.query_map(params![conversation_id, limit as i64], |row| {
-            let call_id: String = row.get(0)?;
-            let output_messages_json: Option<String> = row.get(1)?;
-            let input_tokens: i64 = row.get(2)?;
-            let output_tokens: i64 = row.get(3)?;
-            Ok((call_id, output_messages_json, input_tokens, output_tokens))
-        }) {
-            Ok(rows) => rows,
-            Err(error) => {
-                log::warn!(
-                    "Failed to query recent calls for conversation {conversation_id}: {error}"
-                );
-                return None;
-            }
-        };
+        // `prepare` and `query_map` both run statements, and either can fail on
+        // a foreign or half-migrated file. They share one error arm so the
+        // failure is reported (and logged) once, not twice.
+        let calls = (|| -> rusqlite::Result<Vec<crate::interruption::RecentCallSummary>> {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![conversation_id, limit as i64], |row| {
+                let call_id: String = row.get(0)?;
+                let output_messages_json: Option<String> = row.get(1)?;
+                let input_tokens: i64 = row.get(2)?;
+                let output_tokens: i64 = row.get(3)?;
+                Ok((call_id, output_messages_json, input_tokens, output_tokens))
+            })?;
 
-        Some(
-            rows.filter_map(|r| r.ok())
+            Ok(rows
+                .filter_map(|r| r.ok())
                 .map(|(call_id, output_json, input_tokens, output_tokens)| {
                     let (tool_calls, output_text_snippet) =
                         parse_output_messages_for_loop_detection(output_json.as_deref());
@@ -634,8 +622,18 @@ impl GenAISqliteStore {
                         output_tokens,
                     }
                 })
-                .collect(),
-        )
+                .collect())
+        })();
+
+        match calls {
+            Ok(calls) => Some(calls),
+            Err(error) => {
+                log::warn!(
+                    "Failed to read the recent calls for conversation {conversation_id}: {error}"
+                );
+                None
+            }
+        }
     }
 
     /// List all pending calls for a specific PID.

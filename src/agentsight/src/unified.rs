@@ -1752,26 +1752,29 @@ impl AgentSight {
                                 let loop_detector = crate::interruption::LoopDetector::default();
                                 // A failed lookup is not a short window: the
                                 // detector reads a short list as "too few
-                                // repetitions to be a loop", so the DeadLoop
-                                // interruption — and with it the auto-kill —
-                                // would never fire for this conversation.
-                                let Some(recent) = sqlite.get_recent_calls_for_conversation(
-                                    cid,
-                                    loop_detector.config.window_size,
-                                ) else {
-                                    log::warn!(
-                                        "Skipping DeadLoop detection for conversation {cid}: the recent-calls lookup failed"
-                                    );
-                                    continue;
-                                };
-                                if let Some(loop_event) = loop_detector.detect(
-                                    cid,
-                                    llm_call.metadata.get("session_id").map(|s| s.as_str()),
-                                    llm_call.agent_name.as_deref(),
-                                    Some(llm_call.pid),
-                                    llm_call.end_timestamp_ns as i64,
-                                    &recent,
-                                ) {
+                                // repetitions to be a loop", so running it on
+                                // an answer we never got would conclude "no
+                                // loop" for this conversation and keep the
+                                // DeadLoop interruption — and the auto-kill
+                                // behind it — from ever firing. `None` skips
+                                // the detection; the storage layer has already
+                                // logged which read failed.
+                                let detected = sqlite
+                                    .get_recent_calls_for_conversation(
+                                        cid,
+                                        loop_detector.config.window_size,
+                                    )
+                                    .and_then(|recent| {
+                                        loop_detector.detect(
+                                            cid,
+                                            llm_call.metadata.get("session_id").map(|s| s.as_str()),
+                                            llm_call.agent_name.as_deref(),
+                                            Some(llm_call.pid),
+                                            llm_call.end_timestamp_ns as i64,
+                                            &recent,
+                                        )
+                                    });
+                                if let Some(loop_event) = detected {
                                     let _ = istore.insert(&loop_event);
                                     log::warn!(
                                         "DeadLoop detected in conversation {}: {:?}",
