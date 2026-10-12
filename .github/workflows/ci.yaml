@@ -928,11 +928,35 @@ jobs:
           make -C src/tokenless test-integration
 
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false
+          cache-dependency-glob: |
+            src/tokenless/python/tokenless/pyproject.toml
+            src/tokenless/python/agentscope/pyproject.toml.in
+            src/tokenless/tests/test-agentscope-integration.sh
+            src/tokenless/Makefile
 
       - uses: extractions/setup-just@v2
 
       - name: Install RTK Rust toolchain
         run: rustup toolchain install 1.91.0 --profile minimal
+
+      - name: Identify bundled RTK cache inputs
+        id: rtk-cache-inputs
+        run: |
+          echo "glibc=$(getconf GNU_LIBC_VERSION)" >> "$GITHUB_OUTPUT"
+          echo "rust=$(rustup run 1.91.0 rustc --version)" >> "$GITHUB_OUTPUT"
+
+      # Preserve mtimes for RTK and the shared modules compiled by its stats patch.
+      - name: Cache bundled RTK source and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/tokenless/third_party/rtk
+            src/tokenless/crates/tokenless-stats/src/home.rs
+            src/tokenless/crates/tokenless-stats/src/path_policy.rs
+          key: tokenless-rtk-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rtk-cache-inputs.outputs.rust }}-${{ steps.rtk-cache-inputs.outputs.glibc }}-${{ hashFiles('src/tokenless/scripts/setup-rtk.sh', 'src/tokenless/third_party/patches/*.patch', 'src/tokenless/Makefile', 'src/tokenless/crates/tokenless-stats/src/home.rs', 'src/tokenless/crates/tokenless-stats/src/path_policy.rs') }}
 
       - name: Test bundled RTK integration
         env:
@@ -946,9 +970,14 @@ jobs:
           make -C src/tokenless \
             test-python-runtime test-agentscope-integration
 
+      - name: Remove local wheels from UV dependency cache
+        run: uv cache clean anolisa-tokenless anolisa-tokenless-agentscope
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: src/tokenless/adapters/tokenless/openclaw/package-lock.json
 
       # Adapter lifecycle tests (install / detect / uninstall for openclaw,
       # dsh, qoder, opencode and qwenpaw) sit behind `make test-adapters`,
