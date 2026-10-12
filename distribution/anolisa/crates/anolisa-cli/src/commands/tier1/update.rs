@@ -4031,27 +4031,39 @@ sha256 = "{sha}"
             &raw_artifact("foo", "0.2.0", b"new\n"),
         );
         let rpm = FakeRpm::new("unused", None);
+        let layout = common::resolve_layout(&c);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(&layout.cache_dir).expect("cache directory");
+            std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("read-only system cache");
+        }
 
         let effects = crate::test_support::RawEffectRecorder::default();
-        let outcome = effects
-            .with(|f| {
-                application::run_with_dependencies(
-                    application::ApplicationRequest {
-                        component: "foo",
-                        intent: execution_intent(&c),
-                    },
-                    &c,
-                    &rpm,
-                    &rpm,
-                    false,
-                    f,
-                )
-            })
-            .expect("read-only update outcome");
+        let outcome = effects.with(|f| {
+            application::run_with_dependencies(
+                application::ApplicationRequest {
+                    component: "foo",
+                    intent: execution_intent(&c),
+                },
+                &c,
+                &rpm,
+                &rpm,
+                false,
+                f,
+            )
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore cache permissions");
+        }
+        let outcome = outcome.expect("read-only update outcome");
         assert!(effects.calls().is_empty());
         render_application_outcome(&c, outcome).expect("render");
 
-        let layout = common::resolve_layout(&c);
         assert_eq!(
             std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
             body,

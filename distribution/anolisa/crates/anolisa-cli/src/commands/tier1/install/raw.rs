@@ -2,9 +2,9 @@
 //! command. Execution moved to the planner-driven pipeline: `dispatch.rs`
 //! drives the plan, `owned_ops.rs` performs the side effects.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anolisa_core::download::{DownloadCache, DownloadError};
+use anolisa_core::download::{DownloadCache, DownloadError, DownloadedArtifact};
 use anolisa_core::install_runner::{
     RenderMode, RenderSpec, ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES,
     read_embedded_component_manifest_text,
@@ -90,7 +90,7 @@ fn remote_file_absent(err: &DownloadError) -> bool {
 /// one (split-index bootstrap; see `raw_index_v2_url`). Returns the URL the
 /// index was actually served from, for error attribution downstream.
 fn fetch_raw_index(
-    cache: &DownloadCache,
+    cache: &mut RawResolutionCache,
     base_url: &str,
     repository_origin: Option<&RawRepositoryOrigin>,
 ) -> Result<(String, std::path::PathBuf), CliError> {
@@ -107,6 +107,53 @@ fn fetch_raw_index(
             Ok((v1_url, downloaded.cached_path))
         }
         Err(err) => Err(index_fetch_error(&v2_url, err, repository_origin)),
+    }
+}
+
+/// Preview reads can fall back to a private cache when the persistent cache
+/// is not writable. Keep its guard alive until callers finish parsing files.
+struct RawResolutionCache {
+    root: PathBuf,
+    dry_run: bool,
+    temporary: Option<tempfile::TempDir>,
+}
+
+impl RawResolutionCache {
+    fn new(root: PathBuf, dry_run: bool) -> Self {
+        Self {
+            root,
+            dry_run,
+            temporary: None,
+        }
+    }
+
+    fn fetch(
+        &mut self,
+        url: &str,
+        expected_sha: Option<&str>,
+    ) -> Result<DownloadedArtifact, DownloadError> {
+        let root = self
+            .temporary
+            .as_ref()
+            .map_or(self.root.as_path(), |dir| dir.path());
+        let result = DownloadCache::new(root.to_path_buf()).fetch(url, expected_sha);
+        if matches!(
+            &result,
+            Err(DownloadError::Io { path, source })
+                if self.dry_run && self.temporary.is_none()
+                    && source.kind() == std::io::ErrorKind::PermissionDenied
+                    && path.starts_with(&self.root)
+        ) {
+            let temporary = tempfile::tempdir().map_err(|source| DownloadError::Io {
+                path: std::env::temp_dir(),
+                source,
+            })?;
+            let cache = DownloadCache::new(temporary.path().to_path_buf());
+            self.temporary = Some(temporary);
+            cache.fetch(url, expected_sha)
+        } else {
+            result
+        }
     }
 }
 
@@ -128,9 +175,9 @@ pub(crate) fn resolve_raw(
 
     // The index is always re-fetched (DownloadCache overwrites on conflict),
     // so a republished repo is picked up without a cache flush.
-    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let mut cache = RawResolutionCache::new(layout.cache_dir.clone(), ctx.dry_run);
     let (index_url, cached_index_path) =
-        fetch_raw_index(&cache, &base_url, repository_origin.as_ref())?;
+        fetch_raw_index(&mut cache, &base_url, repository_origin.as_ref())?;
     // Every message below names the repository the user configured; name it by
     // origin so a credential or secret path segment in `base_url` is not echoed.
     let index_label = common::repository_url_label(&index_url);
@@ -407,7 +454,7 @@ pub(crate) fn load_dry_run_install_contract(
     resolution: &RawResolution,
 ) -> Result<Option<LoadedInstallContract>, CliError> {
     let expected_sha = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?;
-    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let mut cache = RawResolutionCache::new(layout.cache_dir.clone(), ctx.dry_run);
     // Candidates are keyed by full URL in the download cache, so a sibling and
     // a version-level `meta.toml` never share a cache entry.
     for meta_url in meta_url_candidates(
@@ -1140,6 +1187,99 @@ mod tests {
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
 
+    fn preview_inputs(base_url: &str) -> ResolveInputs<'static> {
+        ResolveInputs {
+            component: "example".to_string(),
+            package: "example".to_string(),
+            backend: "raw".to_string(),
+            base_url: base_url.to_string(),
+            repository_origin: Some(RawRepositoryOrigin::CliOverride),
+            version: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_dry_run_does_not_require_creating_system_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if anolisa_platform::privilege::is_root() {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let mut ctx = ctx_with_prefix(false, Some(tmp.path().join("system")));
+        ctx.dry_run = true;
+        let layout = common::resolve_layout(&ctx);
+        let base = write_published_layout_repo_with_meta(
+            &tmp.path().join("repo"),
+            "example",
+            "1.0.0",
+            &["system"],
+        );
+        let env = anolisa_env::EnvService::detect();
+        let parent = layout.cache_dir.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let preview = resolve_raw(&ctx, &layout, &env, preview_inputs(&base))
+            .and_then(|resolution| load_dry_run_install_contract(&ctx, &layout, &resolution));
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let contract = preview
+            .expect("read-only preview")
+            .expect("published contract");
+        assert_eq!(contract.manifest.component.version, "1.0.0");
+        assert!(
+            !layout.cache_dir.exists(),
+            "preview must not create the system cache"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_dry_run_reads_index_and_sidecar_with_read_only_system_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if anolisa_platform::privilege::is_root() {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let mut ctx = ctx_with_prefix(false, Some(tmp.path().join("system")));
+        ctx.dry_run = true;
+        let layout = common::resolve_layout(&ctx);
+        let base = write_published_layout_repo_with_meta(
+            &tmp.path().join("repo"),
+            "example",
+            "1.0.0",
+            &["system"],
+        );
+        let env = anolisa_env::EnvService::detect();
+        // Resolve against a separate writable cache to exercise the sidecar
+        // read independently of the index read's result below.
+        let setup_layout = FsLayout::system(Some(tmp.path().join("setup")));
+        let resolution = resolve_raw(&ctx, &setup_layout, &env, preview_inputs(&base))
+            .expect("fixture resolution");
+        std::fs::create_dir_all(&layout.cache_dir).unwrap();
+        std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        let index = resolve_raw(&ctx, &layout, &env, preview_inputs(&base));
+        let sidecar = load_dry_run_install_contract(&ctx, &layout, &resolution);
+        ctx.dry_run = false;
+        let execution = resolve_raw(&ctx, &layout, &env, preview_inputs(&base));
+        let entries = std::fs::read_dir(&layout.cache_dir).unwrap().count();
+        std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        assert!(index.is_ok(), "index: {:?}", index.err());
+        assert!(sidecar.is_ok(), "sidecar: {:?}", sidecar.err());
+        assert!(sidecar.unwrap().is_some());
+        assert!(
+            execution.is_err(),
+            "real execution must not bypass cache permissions"
+        );
+        assert_eq!(entries, 0, "preview must leave the system cache untouched");
+    }
+
     /// Split-index bootstrap: a repository that publishes the complete
     /// generation-2 index must be served from it, so gated entries are
     /// visible to this CLI while pre-gate CLIs keep reading `index.toml`.
@@ -1151,9 +1291,9 @@ mod tests {
         std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
         std::fs::write(root.join("index-v2.toml"), "schema_version = 2\n").unwrap();
         let cache = tempdir().unwrap();
-        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let mut dl = RawResolutionCache::new(cache.path().to_path_buf(), false);
         let (url, path) =
-            fetch_raw_index(&dl, &format!("file://{}", root.display()), None).unwrap();
+            fetch_raw_index(&mut dl, &format!("file://{}", root.display()), None).unwrap();
         assert!(url.ends_with("/index-v2.toml"), "got {url}");
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("schema_version = 2"));
@@ -1167,9 +1307,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
         let cache = tempdir().unwrap();
-        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let mut dl = RawResolutionCache::new(cache.path().to_path_buf(), false);
         let (url, path) =
-            fetch_raw_index(&dl, &format!("file://{}", root.display()), None).unwrap();
+            fetch_raw_index(&mut dl, &format!("file://{}", root.display()), None).unwrap();
         assert!(url.ends_with("/index.toml"), "got {url}");
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("schema_version = 1"));
@@ -1185,12 +1325,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
         let cache = tempdir().unwrap();
-        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let mut dl = RawResolutionCache::new(cache.path().to_path_buf(), false);
         let base_url = format!("file://{}", root.display());
-        fetch_raw_index(&dl, &base_url, None).expect("prime the cache");
+        fetch_raw_index(&mut dl, &base_url, None).expect("prime the cache");
 
         std::fs::remove_file(root.join("index.toml")).unwrap();
-        let err = fetch_raw_index(&dl, &base_url, None).unwrap_err();
+        let err = fetch_raw_index(&mut dl, &base_url, None).unwrap_err();
         let CliError::Runtime { reason, .. } = err else {
             panic!("expected runtime error");
         };
@@ -1208,8 +1348,9 @@ mod tests {
         let root = repo.path().join("v1");
         std::fs::create_dir_all(&root).unwrap();
         let cache = tempdir().unwrap();
-        let dl = DownloadCache::new(cache.path().to_path_buf());
-        let err = fetch_raw_index(&dl, &format!("file://{}", root.display()), None).unwrap_err();
+        let mut dl = RawResolutionCache::new(cache.path().to_path_buf(), false);
+        let err =
+            fetch_raw_index(&mut dl, &format!("file://{}", root.display()), None).unwrap_err();
         let CliError::Runtime { reason, .. } = err else {
             panic!("expected runtime error");
         };
