@@ -29,6 +29,11 @@ on:
       - "src/agent-sec-core/scripts/ci/run-openclaw-plugin-e2e.sh"
   workflow_dispatch:
 
+# Only superseded PR runs share a group; pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -106,7 +111,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 5
       matrix:
         openclaw:
           - label: "2026.4.14"

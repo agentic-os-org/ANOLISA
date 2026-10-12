@@ -12,6 +12,11 @@ on:
       - '.github/workflows/sec-core-rpmbuild.yaml'
   workflow_dispatch:       # 手动触发不受 paths 限制
 
+# Only superseded PR runs share a group; pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
