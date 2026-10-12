@@ -2,11 +2,12 @@
 //!
 //! Wire format: [4-byte LE length prefix][bincode payload]
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
+use bincode::Options;
 use serde::Serialize;
 
 use cosh_types::checkpoint::*;
@@ -862,18 +863,8 @@ impl CkptClient {
             )));
         }
 
-        // 6. Read response payload.
-        let mut resp_buf = vec![0u8; resp_len];
-        stream.read_exact(&mut resp_buf).map_err(|error| {
-            CkptRequestFailure::possibly_applied(if error.kind() == ErrorKind::UnexpectedEof {
-                protocol_error(ProtocolFailure::TruncatedPayload)
-            } else {
-                classify_io_error(error, IoPhase::ReadResponsePayload)
-            })
-        })?;
-
-        // 7. Decode response.
-        decode_response(&resp_buf).map_err(CkptRequestFailure::possibly_applied)
+        // 6. Decode within the frame without allocating its advertised length.
+        decode_response(stream, resp_len).map_err(CkptRequestFailure::possibly_applied)
     }
 }
 
@@ -965,9 +956,76 @@ fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, CoshError> {
     Ok(frame)
 }
 
-/// Decode a bincode payload into a WsCkptResponse.
-fn decode_response(data: &[u8]) -> Result<WsCkptResponse, CoshError> {
-    bincode::deserialize(data).map_err(|_| protocol_error(ProtocolFailure::InvalidPayload))
+fn decode_response(reader: impl Read, resp_len: usize) -> Result<WsCkptResponse, CoshError> {
+    let mut payload = BufReader::new(reader.take(resp_len as u64));
+    // Match bincode::serialize's fixed-width integers and legacy trailing bytes.
+    let response = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(resp_len as u64)
+        .deserialize_from_custom(ResponseReader(&mut payload));
+
+    if let Err(error) = response.as_ref() {
+        if let bincode::ErrorKind::Io(error) = error.as_ref() {
+            if error.kind() != ErrorKind::UnexpectedEof {
+                return Err(classify_io_error(
+                    std::io::Error::from(error.kind()),
+                    IoPhase::ReadResponsePayload,
+                ));
+            }
+        }
+    }
+
+    // Consume permitted trailing bytes in constant space, and distinguish an
+    // incomplete frame from an invalid bincode value inside a complete frame.
+    std::io::copy(&mut payload, &mut std::io::sink())
+        .map_err(|error| classify_io_error(error, IoPhase::ReadResponsePayload))?;
+    if payload.get_ref().limit() != 0 {
+        return Err(protocol_error(ProtocolFailure::TruncatedPayload));
+    }
+    response.map_err(|_| protocol_error(ProtocolFailure::InvalidPayload))
+}
+
+// Bincode's default IoReader resizes its buffer to an untrusted string length
+// before reading. Grow fields only as their bytes actually arrive instead.
+struct ResponseReader<R>(R);
+
+impl<R: Read> Read for ResponseReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buffer)
+    }
+}
+
+impl<'de, R: Read> bincode::de::read::BincodeRead<'de> for ResponseReader<R> {
+    fn get_byte_buffer(&mut self, length: usize) -> bincode::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 8192];
+        let mut remaining = length;
+        while remaining != 0 {
+            let count = remaining.min(chunk.len());
+            self.read_exact(&mut chunk[..count])?;
+            bytes.extend_from_slice(&chunk[..count]);
+            remaining -= count;
+        }
+        Ok(bytes)
+    }
+
+    fn forward_read_str<V>(&mut self, length: usize, visitor: V) -> bincode::Result<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        let bytes = self.get_byte_buffer(length)?;
+        let string = String::from_utf8(bytes)
+            .map_err(|error| bincode::ErrorKind::InvalidUtf8Encoding(error.utf8_error()))?;
+        visitor.visit_string(string)
+    }
+
+    fn forward_read_bytes<V>(&mut self, length: usize, visitor: V) -> bincode::Result<V::Value>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor.visit_byte_buf(self.get_byte_buffer(length)?)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,7 +2206,7 @@ mod tests {
             snapshot_id: "snap-123".into(),
         };
         let data = bincode::serialize(&resp).unwrap();
-        let decoded = decode_response(&data).unwrap();
+        let decoded = decode_response(data.as_slice(), data.len()).unwrap();
         match decoded {
             WsCkptResponse::CheckpointOk { snapshot_id } => assert_eq!(snapshot_id, "snap-123"),
             _ => panic!("Wrong variant"),
@@ -2158,8 +2216,72 @@ mod tests {
     #[test]
     fn test_decode_response_invalid() {
         let bad_data = b"not valid bincode data!!!!";
-        let result = decode_response(bad_data);
+        let result = decode_response(bad_data.as_slice(), bad_data.len());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn response_large_string_decodes_across_chunks() {
+        let snapshot_id = "s".repeat(3 * 8192 + 1);
+        let response = WsCkptResponse::CheckpointOk {
+            snapshot_id: snapshot_id.clone(),
+        };
+        let payload = bincode::serialize(&response).unwrap();
+        match decode_response(payload.as_slice(), payload.len()).unwrap() {
+            WsCkptResponse::CheckpointOk {
+                snapshot_id: actual,
+            } => {
+                assert_eq!(actual, snapshot_id);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_trailing_bytes_preserve_legacy_contract() {
+        let response = WsCkptResponse::CheckpointOk {
+            snapshot_id: "snap-1".into(),
+        };
+        let mut payload = bincode::serialize(&response).unwrap();
+        payload.extend_from_slice(&[0; 32]);
+        assert!(matches!(
+            decode_response(payload.as_slice(), payload.len()).unwrap(),
+            WsCkptResponse::CheckpointOk { .. }
+        ));
+        let error = decode_response(payload.as_slice(), payload.len() + 1).unwrap_err();
+        assert_eq!(error.details.unwrap()["kind"], "truncated_payload");
+    }
+
+    #[test]
+    fn response_decode_stays_within_frame() {
+        let payload = bincode::serialize(&WsCkptResponse::CheckpointOk {
+            snapshot_id: "snap-1".into(),
+        })
+        .unwrap();
+        let mut reader = payload.as_slice();
+        let error = decode_response(&mut reader, 4).unwrap_err();
+        assert_eq!(error.details.unwrap()["kind"], "decode_failed");
+        assert_eq!(reader, &payload[4..]);
+    }
+
+    #[test]
+    fn response_string_length_beyond_frame_is_decode_failure() {
+        let mut payload = 0_u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&u64::MAX.to_le_bytes());
+        let error = decode_response(payload.as_slice(), payload.len()).unwrap_err();
+        assert_eq!(error.details.unwrap()["kind"], "decode_failed");
+    }
+
+    #[test]
+    fn response_payload_timeout_preserves_transport_classification() {
+        struct TimedOutReader;
+        impl Read for TimedOutReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(ErrorKind::TimedOut.into())
+            }
+        }
+        let error = decode_response(TimedOutReader, 4).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
     }
 
     #[test]

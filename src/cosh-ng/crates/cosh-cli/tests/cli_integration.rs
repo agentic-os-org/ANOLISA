@@ -1103,6 +1103,126 @@ fn test_checkpoint_diff_invalid_bincode_is_protocol_error() {
     assert_checkpoint_protocol_error(response, "decode_failed");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn test_checkpoint_response_memory_is_not_reserved_from_lengths() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn vm_size_kib(pid: u32) -> Option<usize> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status.lines().find_map(|line| {
+            line.strip_prefix("VmSize:")?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
+    }
+
+    const RESPONSE_LEN: u32 = 64 * 1024 * 1024;
+    for case in ["prefix_only", "zero_payload", "string_length"] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = ChildGuard(
+            cosh_bin()
+                .args(["checkpoint", "status", "--workspace"])
+                .arg(directory.path())
+                .arg("--socket")
+                .arg(&socket)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "{case}: connection timed out");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{case}: accept failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut request = vec![0; u32::from_le_bytes(length) as usize];
+        stream.read_exact(&mut request).unwrap();
+        // The CLI is initialized and waiting for the daemon at this baseline.
+        let baseline = vm_size_kib(child.0.id()).unwrap();
+        stream.write_all(&RESPONSE_LEN.to_le_bytes()).unwrap();
+        if case == "string_length" {
+            // InitOk with a string that fits the frame but never arrives.
+            stream.write_all(&0_u32.to_le_bytes()).unwrap();
+            stream
+                .write_all(&u64::from(RESPONSE_LEN - 12).to_le_bytes())
+                .unwrap();
+        }
+        let daemon = thread::spawn(move || {
+            // Keep the client blocked so transient preallocation is observable.
+            thread::sleep(Duration::from_millis(200));
+            if case == "zero_payload" {
+                let chunk = [0; 64 * 1024];
+                for _ in 0..RESPONSE_LEN as usize / chunk.len() {
+                    stream.write_all(&chunk).unwrap();
+                }
+            }
+        });
+        let mut peak = baseline;
+        let exit = loop {
+            if let Some(size) = vm_size_kib(child.0.id()) {
+                peak = peak.max(size);
+            }
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "{case}: CLI timed out");
+            thread::sleep(Duration::from_millis(1));
+        };
+        daemon.join().unwrap();
+        let mut stdout = String::new();
+        child
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(exit.code(), Some(1), "{case}");
+        assert_eq!(response["error"]["code"], "CheckpointProtocolError");
+        let expected_kind = if case == "zero_payload" {
+            "unexpected_response"
+        } else {
+            "truncated_payload"
+        };
+        assert_eq!(response["error"]["details"]["kind"], expected_kind);
+        eprintln!("{case}: VmSize growth {} KiB", peak - baseline);
+        assert!(
+            peak - baseline < 4 * 1024,
+            "{case}: VmSize grew by {} KiB (baseline {baseline}, peak {peak})",
+            peak - baseline,
+        );
+        let directory_path = directory.path().to_owned();
+        drop(directory);
+        assert!(!directory_path.exists(), "{case}: temporary files remain");
+    }
+}
+
 #[test]
 fn test_checkpoint_create_skipped_is_success() {
     let reason = "workspace has no changes";
