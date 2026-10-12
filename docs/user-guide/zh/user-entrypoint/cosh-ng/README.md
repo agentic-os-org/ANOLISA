@@ -11,6 +11,7 @@ cosh-ng 是一个 AI 原生 Linux 终端，默认使用 Enhanced Assisted，也�
 - [模型提供商](core/providers.md)：配置认证并选择模型提供商。
 - [配置](configuration.md)：了解配置文件、设置项和优先级。
 - [支持的平台](supported-distros.md)：确认软件包和服务后端。
+- [登录救援](login-rescue.md)：cosh 登录运行时损坏时恢复访问。
 
 ## 在终端工作
 
