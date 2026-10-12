@@ -115,9 +115,21 @@ impl Parser {
             // so the request body was captured truncated and
             // `chunked_stream_complete` never fired. Write-direction buffers
             // must flow through as RawData so the framing completes.
+            //
+            // It is also a line of the chunked framing, so it can only start at
+            // a line boundary: what precedes it — the previous chunk's CRLF, or
+            // the SSE event's own newline when the terminator was appended to
+            // the last data chunk — must end with a newline. Without that guard
+            // a last data line that merely *ends* in `0`
+            // (`data: 10\r\n\r\ndata: 20\r\n\r\n`) was read as the terminator:
+            // the `0` was cut out of the payload, a synthetic done marker ended
+            // the stream, and every later event on that connection was
+            // discarded. A standalone 5-byte read keeps being detected; it has
+            // no preceding byte to inspect.
             let terminator_pos = if ssl_event.rw == 0
                 && buf.len() >= TERMINATOR.len()
                 && buf.ends_with(TERMINATOR)
+                && (buf.len() == TERMINATOR.len() || buf[buf.len() - TERMINATOR.len() - 1] == b'\n')
             {
                 Some(buf.len() - TERMINATOR.len())
             } else {
@@ -303,6 +315,58 @@ mod tests {
         let event = make_ssl_event(data);
         let result = parser.parse_ssl_event(event);
         // Should produce: 1 SSE event from the data + 1 done marker
+        assert_eq!(result.messages.len(), 2);
+        assert!(matches!(
+            result.messages[0],
+            ParsedMessage::SseEvent(ref e) if !e.is_done()
+        ));
+        assert!(matches!(
+            result.messages[1],
+            ParsedMessage::SseEvent(ref e) if e.is_done()
+        ));
+    }
+
+    /// The terminator is a line of the chunked framing, so it can only start
+    /// at a line boundary. A last data line that merely *ends* in `0` —
+    /// `data: 10\r\n\r\ndata: 20\r\n\r\n` — was read as one: the trailing `0`
+    /// was cut out of the payload, a synthetic done marker terminated the
+    /// stream, and every later event on the connection was discarded.
+    #[test]
+    fn test_data_line_ending_in_zero_is_not_a_terminator() {
+        let parser = Parser::new();
+        let event = make_ssl_event(b"data: 10\r\n\r\ndata: 20\r\n\r\n".to_vec());
+        let result = parser.parse_ssl_event(event);
+
+        let datas: Vec<&[u8]> = result
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                ParsedMessage::SseEvent(e) if !e.is_done() => Some(e.data()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            datas,
+            vec![b"10".as_slice(), b"20".as_slice()],
+            "the trailing zero belongs to the payload, not to the framing"
+        );
+        assert!(
+            !result
+                .messages
+                .iter()
+                .any(|m| matches!(m, ParsedMessage::SseEvent(e) if e.is_done())),
+            "no chunked terminator arrived, so no done marker may be synthesized"
+        );
+    }
+
+    /// A real terminator is still detected when it follows the last chunk's
+    /// CRLF (or arrives as a standalone read).
+    #[test]
+    fn test_terminator_after_a_line_break_is_still_detected() {
+        let parser = Parser::new();
+        let event = make_ssl_event(b"data: 20\r\n\r\n\r\n0\r\n\r\n".to_vec());
+        let result = parser.parse_ssl_event(event);
+
         assert_eq!(result.messages.len(), 2);
         assert!(matches!(
             result.messages[0],
