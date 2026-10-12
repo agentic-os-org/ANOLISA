@@ -18,6 +18,14 @@ use crate::dispatcher::{
 use crate::frame::{BoundedResponseBuffer, FrameReadError, ResponseFrameError, read_request_frame};
 use crate::shutdown::ShutdownToken;
 
+/// Byte budget for one frame exchanged inside an authenticated session.
+///
+/// Both directions of the connection-local exchange (incoming request
+/// frames and outgoing session responses) are bounded by this single
+/// budget, so session adapters must keep every [`SessionStep`] response
+/// inside it.
+pub const SESSION_FRAME_BYTES: usize = 64 * 1024;
+
 /// A bound listener plus filesystem identity proving socket-path ownership.
 pub struct BoundUnixSocket {
     listener: Option<UnixListener>,
@@ -427,7 +435,7 @@ async fn process_session(
                 return Err(());
             }
             for response in step.responses {
-                let mut buffer = BoundedResponseBuffer::new(64 * 1024);
+                let mut buffer = BoundedResponseBuffer::new(SESSION_FRAME_BYTES);
                 std::io::Write::write_all(&mut buffer, &response).map_err(|_| ())?;
                 reader
                     .get_mut()
@@ -439,7 +447,7 @@ async fn process_session(
                 reader.get_mut().shutdown().await.map_err(|_| ())?;
                 return Ok(());
             }
-            let payload = read_request_frame(&mut reader, 64 * 1024)
+            let payload = read_request_frame(&mut reader, SESSION_FRAME_BYTES)
                 .await
                 .map_err(|_| ())?;
             step = session.advance(&payload).map_err(|_| ())?;

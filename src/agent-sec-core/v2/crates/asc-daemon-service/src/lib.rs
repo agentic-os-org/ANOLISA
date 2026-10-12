@@ -21,5 +21,7 @@ pub use dispatcher::{
     RejectedRequest, RejectionEncoder, RejectionReason, RequestDispatcher, ResponseDisposition,
     SessionStep, StartedSession,
 };
-pub use server::{BindError, BoundUnixSocket, ServeError, ServeReport, UnixService};
+pub use server::{
+    BindError, BoundUnixSocket, SESSION_FRAME_BYTES, ServeError, ServeReport, UnixService,
+};
 pub use shutdown::ShutdownToken;

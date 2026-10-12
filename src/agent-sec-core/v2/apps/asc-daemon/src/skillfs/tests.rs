@@ -762,3 +762,88 @@ async fn assert_activation_after_scan_error(
     assert_eq!(scan["details"]["request"]["command"], "scan");
     assert_eq!(activate["details"]["request"]["command"], "activate");
 }
+
+// The authenticated session exchanges frames through a bounded 64 KiB buffer,
+// while the acceptance response echoes the notify request back as diagnostics:
+// with 16 unique paths close to the 4 KiB per-path bound the request still
+// fits the session read bound, but the echo plus the response envelope crosses
+// the response bound. The queue commits the notify before the response is
+// written, so a dropped frame would leave SkillFS unable to distinguish
+// acceptance from rejection (and identical retries would never converge).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acceptance_whose_echo_exceeds_the_session_frame_is_delivered_degraded() {
+    let fixture = Arc::new(Fixture::new());
+    let service = fixture.service();
+    let events = Arc::new(Events::default());
+    let worker = SkillWorker::default();
+    let bridge = Arc::new(SkillFsBridge::prepare(fixture.config(), &worker).unwrap());
+    let executor = SkillSecExecutor::new(service.clone()).with_environment(bridge.environment());
+    let application = crate::skill_application(
+        audit_finalizer(events),
+        Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+        executor,
+    );
+    worker
+        .start(application.clone(), || Ok(Vec::new()))
+        .unwrap();
+    let dispatcher = Arc::new(SkillFsDispatcher::new(
+        ordinary_dispatcher(application),
+        Some(bridge),
+    ));
+    let socket = fixture.directory.path().join("daemon.sock");
+    let bound = BoundUnixSocket::bind(&socket, 0o666).unwrap();
+    let server = UnixService::new(
+        bound,
+        transport_config(),
+        dispatcher,
+        Arc::new(asc_daemon_handler::JsonRejectionEncoder),
+    )
+    .unwrap();
+    let shutdown = ShutdownToken::new();
+    let task = tokio::spawn(server.serve(shutdown.clone()));
+
+    // Sixteen unique single-component relative paths, each below the 4 KiB
+    // validation bound, sized so the serialized request stays inside the
+    // session read bound while the echoed acceptance crosses the response
+    // bound.
+    let mut paths: Vec<String> = (0..16)
+        .map(|index| format!("{index:02}") + &"a".repeat(3997))
+        .collect();
+    let mut request = fixture.notification(&json!(paths));
+    while serde_json::to_vec(&request).unwrap().len() < 65_500 {
+        for path in &mut paths {
+            if path.len() < 4096 {
+                path.push('a');
+            }
+        }
+        request = fixture.notification(&json!(paths));
+    }
+    let wire = serde_json::to_vec(&request).unwrap();
+    assert!(
+        wire.len() <= 65_535,
+        "the notify request must stay readable inside the session frame: {}",
+        wire.len()
+    );
+
+    let key = fixture.secret.clone();
+    let response =
+        tokio::task::spawn_blocking(move || notify(&socket, &key, &request, false, false))
+            .await
+            .unwrap()
+            .expect("the acceptance must be delivered after the queue committed the notify");
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["data"]["schemaVersion"], 2);
+    assert_eq!(response["data"]["accepted"], true);
+    assert!(
+        response["data"]["skill"].get("paths").is_none(),
+        "the degraded echo must omit the paths array"
+    );
+    assert_eq!(response["data"]["skill"]["pathsOmitted"], json!(16));
+
+    shutdown.request();
+    task.await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || worker.shutdown().unwrap())
+        .await
+        .unwrap();
+}

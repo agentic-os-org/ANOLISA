@@ -14,7 +14,7 @@ use asc_daemon_core::ActionService;
 use asc_daemon_handler::DaemonDispatcher;
 use asc_daemon_service::{
     ConnectionSession, DispatchError, DispatchRequest, PeerCredentials, RequestDispatcher,
-    ResponseDisposition, SessionStep,
+    ResponseDisposition, SESSION_FRAME_BYTES, SessionStep,
 };
 use auth::{Frame, NOTIFY_CLIENT, NOTIFY_SERVER};
 use serde::Deserialize;
@@ -46,6 +46,14 @@ pub struct Mount {
     /// Kernel UID of the `SkillFS` process, used in both directions.
     pub peer_uid: u32,
 }
+
+/// Serialized acceptance payload that must fit one session response frame.
+///
+/// [`SESSION_FRAME_BYTES`] bounds every frame of the authenticated session
+/// exchange, and the `SkillFS` client applies the same 64 KiB cap to the
+/// response it accepts. The LF delimiter appended on the wire reserves one
+/// byte of the budget.
+const NOTIFY_RESPONSE_BUDGET_BYTES: usize = SESSION_FRAME_BYTES - 1;
 
 /// Errors at the authenticated transport and configured mapping boundary.
 #[derive(Debug, thiserror::Error)]
@@ -342,7 +350,7 @@ impl Session {
                     ),
                 };
                 let response = notify_response(id.as_deref(), result);
-                let bytes = serde_json::to_vec(&response)?;
+                let bytes = bounded_response_bytes(response)?;
                 let tag = auth::sign(
                     &self.resolver.secret,
                     NOTIFY_SERVER,
@@ -452,6 +460,42 @@ fn notify_response(id: Option<&str>, result: Result<Value, SkillFsError>) -> Val
         }
     }
     response
+}
+
+/// Serializes one notify response, degrading the diagnostic `skill` echo
+/// when it would not fit the session's response frame.
+///
+/// The queue has already committed the notify when the response is built,
+/// so an oversized echo must not cost the peer its acceptance: the `SkillFS`
+/// client validates only `ok`, `data.schemaVersion` and `data.accepted`,
+/// which always fit. The `paths` array is dropped first (replaced by the
+/// omitted count); a still-oversized echo (an unbounded canonical path or
+/// skill id) drops the whole `skill` object.
+fn bounded_response_bytes(mut response: Value) -> Result<Vec<u8>, SkillFsError> {
+    let mut bytes = serde_json::to_vec(&response)?;
+    if bytes.len() > NOTIFY_RESPONSE_BUDGET_BYTES {
+        if let Some(skill) = response
+            .get_mut("data")
+            .and_then(Value::as_object_mut)
+            .and_then(|data| data.get_mut("skill"))
+            .and_then(Value::as_object_mut)
+        {
+            let omitted = skill
+                .get("paths")
+                .and_then(Value::as_array)
+                .map_or(0, <Vec<Value>>::len);
+            skill.remove("paths");
+            skill.insert("pathsOmitted".to_owned(), json!(omitted));
+        }
+        bytes = serde_json::to_vec(&response)?;
+    }
+    if bytes.len() > NOTIFY_RESPONSE_BUDGET_BYTES {
+        if let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) {
+            data.remove("skill");
+        }
+        bytes = serde_json::to_vec(&response)?;
+    }
+    Ok(bytes)
 }
 
 #[derive(Deserialize)]
