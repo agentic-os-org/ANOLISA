@@ -9,6 +9,14 @@ on:
       - 'src/agent-sec-core/**'
       - 'scripts/build-all.sh'
       - '.github/workflows/sec-core-source-code-build.yaml'
+      - '!src/agent-sec-core/**/*.md'
+      - 'src/agent-sec-core/**/SKILL.md'
+      - 'src/agent-sec-core/skills/**'
+      - 'src/agent-sec-core/**/fixtures/**'
+      - '!src/agent-sec-core/v2/**'
+      - '!src/agent-sec-core/packaging/raw/**'
+      - '!src/agent-sec-core/tests/v2/**'
+      - '!src/agent-sec-core/tests/packaging/**'
   workflow_dispatch:
 
 permissions:

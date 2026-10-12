@@ -40,22 +40,36 @@ rust-code-pretty: ## Format Rust code with cargo fmt (agent-sec-cli + V2 + linux
 	cd linux-sandbox && cargo fmt
 
 .PHONY: rust-fmt-check
-rust-fmt-check: ## Check Rust formatting without modifying files
-	@echo "🔍 Checking Rust formatting..."
+rust-fmt-check: rust-fmt-check-v1 rust-fmt-check-v2 ## Check Rust formatting without modifying files
+
+.PHONY: rust-fmt-check-v1
+rust-fmt-check-v1: ## Check Rust formatting (agent-sec-cli + linux-sandbox)
+	@echo "🔍 Checking V1 Rust formatting..."
 	cd agent-sec-cli && cargo fmt --all -- --check
-	cd v2 && cargo fmt --all -- --check
 	cd linux-sandbox && cargo fmt -- --check
 
+.PHONY: rust-fmt-check-v2
+rust-fmt-check-v2: ## Check Rust formatting (V2 workspace)
+	@echo "🔍 Checking V2 Rust formatting..."
+	cd v2 && cargo fmt --all -- --check
+
 .PHONY: rust-lint
-rust-lint: ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
-	@echo "🔍 Running cargo clippy..."
+rust-lint: rust-lint-v1 rust-lint-v2 ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
+
+.PHONY: rust-lint-v1
+rust-lint-v1: ## Run cargo clippy (agent-sec-cli; linux-sandbox on Linux only)
+	@echo "🔍 Running V1 cargo clippy..."
 	cd agent-sec-cli && { $(PYO3_PIN); cargo clippy --workspace --all-targets -- -D warnings; }
-	cd v2 && cargo clippy --workspace --all-targets --locked -- -D warnings
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		cd linux-sandbox && cargo clippy --all-targets -- -D warnings; \
 	else \
 		echo "  (linux-sandbox clippy skipped: requires Linux)"; \
 	fi
+
+.PHONY: rust-lint-v2
+rust-lint-v2: ## Run cargo clippy (V2 workspace)
+	@echo "🔍 Running V2 cargo clippy..."
+	cd v2 && cargo clippy --workspace --all-targets --locked -- -D warnings
 
 # =============================================================================
 # TEST
@@ -166,14 +180,18 @@ test-python-coverage: ## Run Python tests with coverage report
 test-rust: ## Run Rust tests (agent-sec-cli + V2; linux-sandbox on Linux only)
 	@echo "🧪 Running agent-sec-cli workspace Rust tests..."
 	cd agent-sec-cli && { $(PYO3_PIN); cargo test --workspace; }
-	@echo "🧪 Running AgentSecCore V2 workspace Rust tests..."
-	cd v2 && cargo test --workspace --locked
+	@$(MAKE) test-rust-v2
 	@echo "🧪 Running linux-sandbox Rust tests (Linux only)..."
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		cd linux-sandbox && cargo test -- --skip bwrap_seccomp; \
 	else \
 		echo "  (linux-sandbox tests skipped: requires Linux)"; \
 	fi
+
+.PHONY: test-rust-v2
+test-rust-v2: ## Run Rust tests (V2 workspace)
+	@echo "🧪 Running AgentSecCore V2 workspace Rust tests..."
+	cd v2 && cargo test --workspace --locked
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
