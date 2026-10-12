@@ -79,6 +79,9 @@ function viewer({ readFailure = false } = {}) {
   }
   return {
     requests, downloads,
+    params: () => new URLSearchParams(searchParams),
+    visitParams(value) { searchParams = new URLSearchParams(value); },
+    queryId() { return nodes(render(), (node) => node.type === 'input' && node.props.type === 'text')[0].props.value; },
     nodes: (predicate) => nodes(render(), predicate),
     rounds: () => nodes(render(), (node) => node.type?.name === 'RoundListItem'),
     detail: () => nodes(render(), (node) => node.type?.name === 'RoundDetail')[0],
@@ -162,6 +165,81 @@ test('switching an embedded subagent resets filtering for its own rounds', () =>
   page.nodes(() => false); // flush document-change effect before checking the next render
   assert.equal(page.nodes((node) => node.type === 'input' && node.props.type === 'search')[0].props.value, '');
   assert.deepEqual(keys(page), [0, 1, 2]);
+});
+
+test('importing another document starts at its root instead of an old URL node', () => {
+  const previous = trajectory('previous');
+  previous.subagent_trajectories = [trajectory('child')];
+  const page = loaded(previous);
+  page.visitParams('type=session&id=previous&highlight_call_id=old-call');
+  let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  graph.props.onSelect(graph.props.root.children[0]);
+  page.nodes(() => false);
+  graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  assert.deepEqual(graph.props.selectedPath, ['child']);
+  assert.equal(page.params().get('node'), 'child');
+
+  const imported = trajectory('imported');
+  imported.steps[2].message = 'new root message';
+  imported.subagent_trajectories = [trajectory('child')];
+  imported.subagent_trajectories[0].steps[2].message = 'new child message';
+  page.complete(page.import(), imported);
+  page.nodes(() => false);
+  graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  assert.equal(page.session(), 'imported');
+  assert.deepEqual(Array.from(graph.props.selectedPath), [], 'the previous document node must not select the imported child');
+  assert.equal(page.params().get('node'), null, 'import success clears the old document node');
+  assert.equal(page.queryId(), 'imported', 'URL cleanup must not replace the newly imported input ID');
+  assert.equal(page.params().get('id'), 'previous', 'the established local-import URL identity is unchanged');
+  assert.equal(page.params().get('highlight_call_id'), 'old-call', 'unrelated existing parameters are unchanged');
+  assert.equal(page.rounds().find((node) => node.props.round.key === 1).props.round.steps[1].message,
+    'new root message');
+});
+
+test('a rejected import keeps the existing node selection and URL', () => {
+  const previous = trajectory('previous');
+  previous.subagent_trajectories = [trajectory('child')];
+  const page = loaded(previous);
+  let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  graph.props.onSelect(graph.props.root.children[0]);
+  page.nodes(() => false);
+  page.complete(page.import(), { schema_version: 'ATIF-v1.7', steps: [null] });
+  page.nodes(() => false);
+  graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  assert.equal(page.session(), 'previous');
+  assert.equal(page.error(), 'atif.malformedDocument');
+  assert.deepEqual(graph.props.selectedPath, ['child']);
+  assert.equal(page.params().get('node'), 'child');
+});
+
+test('a successful import without the former child still selects its root', () => {
+  const previous = trajectory('previous');
+  previous.subagent_trajectories = [trajectory('child')];
+  const page = loaded(previous);
+  let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  graph.props.onSelect(graph.props.root.children[0]);
+  page.nodes(() => false);
+  const imported = trajectory('imported');
+  imported.subagent_trajectories = [trajectory('other-child')];
+  page.complete(page.import(), imported);
+  page.nodes(() => false);
+  graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  assert.deepEqual(Array.from(graph.props.selectedPath), []);
+  assert.equal(page.params().get('node'), null);
+});
+
+test('URL navigation still selects an embedded child after a successful import', () => {
+  const doc = trajectory('imported');
+  doc.subagent_trajectories = [trajectory('child')];
+  const page = loaded(doc);
+  page.visitParams('type=session&id=imported&node=child');
+  page.nodes(() => false);
+  let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  assert.deepEqual(graph.props.selectedPath, ['child']);
+  page.visitParams('type=session&id=imported');
+  page.nodes(() => false);
+  graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
+  assert.deepEqual(Array.from(graph.props.selectedPath), []);
 });
 test('a filtered raw JSON download retains the whole original root and subagent document', async () => {
   const doc = trajectory(); doc.subagent_trajectories = [trajectory('child')];
