@@ -608,12 +608,12 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
 
   const bucketMap = new Map<number, Record<string, number>>();
   for (const d of filled) {
-    if (!bucketMap.has(d.bucket_start_ns)) bucketMap.set(d.bucket_start_ns, {});
+    if (!bucketMap.has(d.bucket_start_ns)) bucketMap.set(d.bucket_start_ns, Object.create(null));
     bucketMap.get(d.bucket_start_ns)![d.model] = d.total_tokens;
   }
   const chartData = Array.from(bucketMap.entries())
     .sort(([a], [b]) => a - b)
-    .map(([ns, tokens]) => ({ label: nsToLabel(ns, spanMs), ...tokens }));
+    .map(([ns, tokens]) => ({ label: nsToLabel(ns, spanMs), tokens }));
 
   // Track which model bars are hidden
   const [hidden, setHidden] = useState<Set<string>>(new Set());
@@ -645,16 +645,17 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
         <Tooltip formatter={(v: number) => v.toLocaleString()} />
         <Legend
           wrapperStyle={{ fontSize: 12, cursor: 'pointer' }}
-          onClick={(e) => toggleModel(e.dataKey as string)}
+          onClick={(e) => toggleModel((e.payload as { name?: string })?.name ?? e.value)}
           formatter={(value, entry) => {
-            const color = hidden.has((entry as any).dataKey) ? '#aaa' : (entry as any).color;
-            return <span style={{ color }}>{value}</span>;
+            const name = (entry as any).payload?.name ?? value;
+            const color = hidden.has(name) ? '#aaa' : (entry as any).color;
+            return <span style={{ color }}>{name}</span>;
           }}
         />
         {models.map((m, i) => (
           <Bar
             key={m}
-            dataKey={m}
+            dataKey={(bucket: (typeof chartData)[number]) => bucket.tokens[m] ?? 0}
             name={m}
             stackId="model"
             hide={hidden.has(m)}

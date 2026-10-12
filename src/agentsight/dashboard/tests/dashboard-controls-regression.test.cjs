@@ -87,8 +87,8 @@ function createHooksDriver() {
   return driver;
 }
 
-function loadPageModule(relativePath, moduleStubs, driver) {
-  const code = transpile(relativePath);
+function loadPageModule(relativePath, moduleStubs, driver, extra = '') {
+  const code = transpile(relativePath) + extra;
   const module = { exports: {} };
   const hooks = {
     useState: driver.useState,
@@ -159,6 +159,73 @@ test('conversation-list: hiding a model series uses hide, not a transparent fill
     /transparent/,
     'a transparent fill still reserves the stack height and still scales the Y axis',
   );
+});
+
+test('conversation-list: model names cannot overwrite the time-axis label', () => {
+  const driver = createHooksDriver();
+  const recharts = Object.fromEntries([
+    'LineChart', 'Line', 'BarChart', 'Bar', 'XAxis', 'YAxis', 'CartesianGrid',
+    'Tooltip', 'Legend', 'ResponsiveContainer',
+  ].map((name) => [name, Object.assign(() => null, { displayName: name })]));
+  const buckets = { exports: {} };
+  new Function('require', 'module', 'exports', transpile('src/utils/timeseriesBuckets.ts'))(
+    () => ({}), buckets, buckets.exports,
+  );
+  const page = loadPageModule('src/pages/ConversationList.tsx', {
+    recharts,
+    'react-router-dom': { useNavigate: () => () => {}, useSearchParams: () => [new URLSearchParams(), () => {}] },
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+    '../utils/apiClient': {}, '../utils/datetime': {},
+    '../utils/timeseriesBuckets': buckets.exports,
+    '../components/InterruptionBadge': {}, '../components/InterruptionPanel': {},
+    '../components/EvaluationBadge': {}, '../components/EvaluationPanel': {},
+    '../components/DateTimePicker': {}, '../components/SessionIdHelp': {},
+    '../components/SessionResourceChart': {},
+  }, driver, '\nexports.ModelTimeseriesChart = ModelTimeseriesChart;');
+  const startNs = Date.UTC(2026, 9, 1) * 1_000_000;
+  const sourceData = [
+    { bucket_start_ns: startNs, model: '', total_tokens: 5 },
+    { bucket_start_ns: startNs, model: 'label', total_tokens: 37 },
+    { bucket_start_ns: startNs, model: 'gpt-4.1', total_tokens: 12 },
+  ];
+  const frozenData = sourceData.map((row) => Object.freeze(row));
+  const props = {
+    data: frozenData,
+    startNs, endNs: startNs + 60_000_000_000, bucketCount: 1,
+  };
+  const rendered = driver.render(page.ModelTimeseriesChart, props);
+  const chart = collectElements(rendered.element, (node) => node.type === recharts.BarChart)[0];
+  const axis = collectElements(rendered.element, (node) => node.type === recharts.XAxis)[0];
+  const bars = collectElements(rendered.element, (node) => node.type === recharts.Bar);
+  const bar = bars.find((node) => node.props.name === 'label');
+  const data = chart.props.data[0];
+  const { getValueByDataKey, getStackedData } = require('recharts/lib/util/ChartUtils');
+  const read = (key) => getValueByDataKey(data, key);
+  assert.match(read(axis.props.dataKey), /^\d{2}:\d{2}$/,
+    'the X axis must stay a time label even when the model has that name');
+  assert.equal(read(bar.props.dataKey), 37);
+  assert.equal(bar.props.name, 'label');
+  assert.equal(read(bars.find((node) => node.props.name === 'gpt-4.1').props.dataKey), 12,
+    'ordinary dotted model identifiers retain their exact token value');
+  const stack = getStackedData(chart.props.data, bars, 'none');
+  assert.deepEqual(stack.map((series) => [series[0][0], series[0][1]]), [[0, 5], [5, 17], [17, 54]],
+    'the real Recharts stacking consumer retains both exact model totals');
+  assert.deepEqual(axis.props.ticks, [read(axis.props.dataKey)]);
+  const legend = collectElements(rendered.element, (node) => node.type === recharts.Legend)[0];
+  legend.props.onClick({ dataKey: bar.props.dataKey, value: bar.props.name });
+  const hiddenRender = driver.render(page.ModelTimeseriesChart, props);
+  const hiddenBars = collectElements(hiddenRender.element, (node) => node.type === recharts.Bar);
+  const hiddenBar = hiddenBars.find((node) => node.props.name === 'label');
+  assert.equal(hiddenBar.props.hide, true, 'the same named series still toggles in the legend');
+  assert.equal(hiddenBars.find((node) => node.props.name === 'gpt-4.1').props.hide, false,
+    'toggling one series leaves the other visible');
+  const emptyBar = hiddenBars.find((node) => node.props.name === '');
+  const nextLegend = collectElements(hiddenRender.element, (node) => node.type === recharts.Legend)[0];
+  nextLegend.props.onClick({ dataKey: emptyBar.props.dataKey, value: emptyBar.props.dataKey, payload: emptyBar.props });
+  const emptyRender = driver.render(page.ModelTimeseriesChart, props);
+  const emptyHiddenBar = collectElements(emptyRender.element, (node) => node.type === recharts.Bar)
+    .find((node) => node.props.name === '');
+  assert.equal(emptyHiddenBar.props.hide, true, 'an empty recorded model name remains a valid series key');
 });
 
 // ─── Bug 4: the risk sort only covers one page of the server result ──────────
