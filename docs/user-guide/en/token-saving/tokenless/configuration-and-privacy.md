@@ -331,7 +331,7 @@ The OpenClaw plugin also provides framework-level options:
 |--------|---------|
 | `rtk_enabled` | Rewrite supported shell commands through RTK |
 | `tool_ready_enabled` | OpenClaw-side Tool Ready registration gate |
-| `post_tool_enabled` | Optimize supported persisted tool results |
+| `post_tool_enabled` | Replace supported live tool text before the model request |
 | `verbose` | Plugin diagnostic logging |
 
 The OpenClaw plugin does not compress tool schemas or provide content retrieval. Results that cannot
@@ -345,8 +345,15 @@ useful and which tool outputs must pass through unchanged. The removed
 longer control the adapter.
 
 These values are managed by OpenClaw plugin configuration, not `~/.tokenless/config.json`. The
-adapter requires OpenClaw Plugin API 2026.4.22 or later. Restart the gateway as instructed after
-changing them.
+adapter requires OpenClaw 2026.6.6 or later and explicit plugin enablement. Its manifest declares
+`contracts.agentToolResultMiddleware: ["openclaw"]`. Unsupported or unrecognized versions are
+rejected before installation. Missing runtime middleware disables PostTool with a warning rather
+than using transcript-only compression. Restart the gateway as instructed after
+changing them. On legacy hosts, registering middleware can itself truncate results before
+Tokenless receives them; fail-open cannot undo that preprocessing. Supported hosts remain
+usable within this limit. See the [OpenClaw compatibility notes](framework-integration.md#openclaw)
+for the recommended upstream fix. Set `post_tool_enabled: false` to stop Tokenless from
+registering result middleware while leaving RTK independently configurable.
 
 ## Related documents
 

@@ -31,6 +31,10 @@ set -euo pipefail
 [ -z "${OPENCLAW_HOME+x}" ]
 [ "$OPENCLAW_STATE_DIR" = "$TEST_STATE_DIR" ]
 printf '%s\n' "$*" >> "$TEST_ARGV_LOG"
+if [ "$*" = --version ]; then
+    echo "${TEST_VERSION:-OpenClaw 2026.8.2 (0965053)}"
+    exit "${TEST_VERSION_EXIT:-0}"
+fi
 if [ "$*" = "plugins install --help" ]; then
     echo "--force"
     case "${TEST_SUPPORT:?}" in
@@ -117,6 +121,7 @@ run_installer() {
     : > "$TEST_ARGV_LOG"
     rm -f "$TEST_INSTALLED"
     env -u ANOLISA_DRY_RUN -u ANOLISA_TARGET -u ANOLISA_COMPONENT \
+        -u TEST_VERSION -u TEST_VERSION_EXIT \
         "$@" bash "$INSTALL_SH" >"$SANDBOX/output" 2>&1
 }
 
@@ -183,6 +188,32 @@ for TEST_SUPPORT in modern legacy near_match colon paren big \
     esac
     echo "PASS: $TEST_SUPPORT installer"
 done
+
+for TEST_VERSION_CASE in 2026.4.22 2026.6.5 2026.6.6-beta.1 unknown; do
+    export TEST_SUPPORT=modern
+    rc=0
+    run_installer TEST_VERSION="$TEST_VERSION_CASE" || rc=$?
+    [ "$rc" = 1 ] || fail "$TEST_VERSION_CASE: expected unsupported version to fail"
+    expect_no_install "$TEST_VERSION_CASE"
+    [ "$(count_probes)" = 0 ] || fail "$TEST_VERSION_CASE: help was probed before version rejection"
+    expect_log "$TEST_VERSION_CASE" '2026.6.6'
+    echo "PASS: unsupported version $TEST_VERSION_CASE rejected before installation"
+done
+
+for TEST_VERSION_CASE in 'OpenClaw 2026.6.6' '2026.6.6+build.1' 'OpenClaw 2026.08.02 (commit)' '2026.8.1-beta.1' '2027.1.1'; do
+    rc=0
+    run_installer TEST_VERSION="$TEST_VERSION_CASE" || rc=$?
+    [ "$rc" = 0 ] || fail "$TEST_VERSION_CASE: supported version was rejected"
+    check_argv_log "$TEST_VERSION_CASE" "$(argv yes no)"
+    echo "PASS: supported version $TEST_VERSION_CASE accepted"
+done
+
+rc=0
+run_installer TEST_VERSION_EXIT=3 || rc=$?
+[ "$rc" = 1 ] || fail 'failed version command: expected installation failure'
+expect_no_install 'failed version command'
+expect_log 'failed version command' 'Cannot read OpenClaw version'
+echo 'PASS: failed version command stops installation'
 
 export TEST_SUPPORT=noop_rejected
 rc=0

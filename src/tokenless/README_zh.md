@@ -86,7 +86,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ### Agent Adapter
 
-- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
+- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损实时 PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
 - **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
 - **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
@@ -99,15 +99,21 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
-`tokenless compress`，`tool_result_persist` 把 OpenClaw 自己持久化的 Tool Result 交给同一
-Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
+`tokenless compress`，`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
+结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
 本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
-候选。该 PostTool Hook 只改写持久化 transcript，不会改变同一轮中模型已经看到的实时结果；
-Media 与多个 Content Block 也会透传。
+候选。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
+PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Content Block 透传。不再注册
+独立的持久化压缩 hook，避免重复压缩和重复统计。Fail-open 保留宿主交付的结果，
+包括此前发生的截断。2026.8.2 等旧版宿主在注册 middleware 后会把文本限制在
+100,000 个 UTF-16 Code Unit 内，仍在该限制下受支持；建议使用包含上游提交
+`2f620b970a04` 的构建。宿主限制及关闭 PostTool 的方法见
+[OpenClaw 兼容说明](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
 
-该 Adapter 要求 OpenClaw Plugin API `2026.4.22` 或更高版本；支持兼容性检查的宿主会在
-安装阶段根据 Package Metadata 强制执行该下限。OpenClaw 配置只包含
+该 Adapter 要求 OpenClaw `2026.6.6` 或更高版本；安装脚本在安装前拒绝旧版和无法识别的
+版本，Package Metadata 也声明相同下限。运行时缺少 middleware API 或注册抛错时，插件
+告警并关闭 PostTool，PreTool 仍可运行；不回退到仅持久化优化。OpenClaw 配置只包含
 `rtk_enabled`、`post_tool_enabled`、`tool_ready_enabled` 和 `verbose`；
 默认值依次为 `true`、`true`、`true` 和 `false`。旧的 Response、TOON 与工具分类开关已经
 删除，所有压缩策略由 Core 统一决定。
@@ -614,6 +620,19 @@ tokenless env-check --tool Shell --fix
 
 安装产物检查与可选的真实 Agent 任务见
 [发布前回归测试](tests/release_regression/README_zh.md)，分别报告工具输出节省和恢复开销。
+
+要用本地脚本模型检查 OpenClaw 的实时交付边界，先构建 CLI 和插件，再执行
+与本地 Docker 镜像对应的命令：
+
+```bash
+python3 tests/test-openclaw-gateway.py --image tokenless-test-agent-openclaw:2026.8.2 --host-output-policy legacy
+python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970a04 --host-output-policy normalized
+```
+
+镜像需提供对应的 OpenClaw 构建和 Python 3.11+。本文的 2026.8.2 镜像使用 `legacy`；
+源码包含上游修复 `2f620b970a04` 的构建使用 `normalized`。应根据源码来源选择，
+不能仅依赖版本字符串。测试覆盖透传、立即替换、持久化、统计单次计数和 Core 失败恢复；
+会打印证据目录，不发送云端请求。
 
 - `crates/tokenless-schema/` — BeforeModel 工具 Schema 压缩：`SchemaCompressor`
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）

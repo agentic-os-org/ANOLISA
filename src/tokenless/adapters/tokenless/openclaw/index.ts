@@ -1,8 +1,8 @@
 /**
  * Tokenless lifecycle adapter for OpenClaw.
  *
- * OpenClaw can replace arguments before a tool call and synchronously rewrite
- * tool-result transcript entries. Core owns RTK execution and PostTool policy;
+ * OpenClaw can replace arguments before a tool call and rewrite tool results before the model
+ * consumes them. Core owns RTK execution and PostTool policy;
  * this adapter only translates those host events to Protocol v2.
  */
 
@@ -21,7 +21,8 @@ let tokenlessPath = "tokenless";
 
 const TOKENLESS_FALLBACK = "/usr/bin/tokenless";
 const SYSTEM_BIN = "/usr/local/bin";
-const USER_HOME = process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : null;
+const USER_HOME =
+  process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : null;
 const LOCAL_BIN = USER_HOME ? join(USER_HOME, ".local", "bin") : null;
 const LOCAL_LIB = USER_HOME
   ? join(USER_HOME, ".local", "lib", "anolisa", "tokenless")
@@ -47,11 +48,18 @@ interface ToolCategories {
   layer_2_shell: { tools: string[] };
 }
 
+interface ToolResult {
+  content: unknown[];
+  details?: unknown;
+  [key: string]: unknown;
+}
+
 interface ToolResultEvent {
-  toolName?: string;
-  toolCallId?: string;
-  message: unknown;
-  isSynthetic?: boolean;
+  toolName: string;
+  toolCallId: string;
+  args: Record<string, unknown>;
+  result: ToolResult;
+  isError?: boolean;
 }
 
 interface HookContext {
@@ -69,33 +77,40 @@ interface TextBlock {
   [key: string]: unknown;
 }
 
-type ContentSlot =
-  | { kind: "string"; content: string; replaceWithText: true }
-  | {
-    kind: "tool_text";
-    content: string;
-    replaceWithText: true;
-    message: Record<string, unknown>;
-    block: TextBlock;
-  }
-  | {
-    kind: "structured";
-    content: string;
-    replaceWithText: false;
-    message: Record<string, unknown> | unknown[];
-  };
-
 const FALLBACK_FILE_TOOLS = [
-  "Read", "read", "read_file", "read_many_files",
-  "Glob", "glob", "search_file", "list_directory", "list_dir",
-  "Grep", "grep", "grep_code", "grep_search", "search_files",
-  "Lsp", "lsp", "NotebookRead", "notebook_read", "notebookread",
+  "Read",
+  "read",
+  "read_file",
+  "read_many_files",
+  "Glob",
+  "glob",
+  "search_file",
+  "list_directory",
+  "list_dir",
+  "Grep",
+  "grep",
+  "grep_code",
+  "grep_search",
+  "search_files",
+  "Lsp",
+  "lsp",
+  "NotebookRead",
+  "notebook_read",
+  "notebookread",
 ];
 
 const FALLBACK_SHELL_TOOLS = [
-  "Bash", "bash", "Shell", "shell", "exec", "terminal",
-  "run_shell_command", "run_in_terminal", "get_terminal_output",
-  "execute_command", "process",
+  "Bash",
+  "bash",
+  "Shell",
+  "shell",
+  "exec",
+  "terminal",
+  "run_shell_command",
+  "run_in_terminal",
+  "get_terminal_output",
+  "execute_command",
+  "process",
 ];
 
 function binaryIn(directory: string | null, name: string): string {
@@ -111,7 +126,10 @@ function isExecutable(path: string): boolean {
   }
 }
 
-function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null {
+function resolveBinaryPath(
+  name: string,
+  ...fallbacks: string[]
+): string | null {
   for (const directory of (process.env.PATH || "").split(delimiter)) {
     if (!directory) continue;
     const candidate = join(directory, name);
@@ -122,9 +140,9 @@ function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null 
 
 function checkTokenless(): boolean {
   if (
-    tokenlessAvailable !== null
-    && tokenlessCheckedAt !== null
-    && Date.now() - tokenlessCheckedAt > CACHE_TTL_MS
+    tokenlessAvailable !== null &&
+    tokenlessCheckedAt !== null &&
+    Date.now() - tokenlessCheckedAt > CACHE_TTL_MS
   ) {
     tokenlessAvailable = null;
   }
@@ -151,7 +169,14 @@ function loadToolCategories(): ToolCategories {
   };
   const possiblePaths = [
     join(import.meta.dirname, "tool_categories.json"),
-    join(import.meta.dirname, "..", "..", "common", "hooks", "tool_categories.json"),
+    join(
+      import.meta.dirname,
+      "..",
+      "..",
+      "common",
+      "hooks",
+      "tool_categories.json",
+    ),
     join(import.meta.dirname, "common", "hooks", "tool_categories.json"),
     "/usr/share/anolisa/adapters/tokenless/common/hooks/tool_categories.json",
     "/usr/local/share/anolisa/adapters/tokenless/common/hooks/tool_categories.json",
@@ -160,16 +185,20 @@ function loadToolCategories(): ToolCategories {
   try {
     const path = possiblePaths.find((candidate) => existsSync(candidate));
     if (!path) return fallback;
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<ToolCategories>;
+    const parsed = JSON.parse(
+      readFileSync(path, "utf-8"),
+    ) as Partial<ToolCategories>;
     if (
-      !Array.isArray(parsed.layer_1_skip?.tools)
-      || !Array.isArray(parsed.layer_2_shell?.tools)
+      !Array.isArray(parsed.layer_1_skip?.tools) ||
+      !Array.isArray(parsed.layer_2_shell?.tools)
     ) {
       throw new Error("tool category lists are missing");
     }
     return parsed as ToolCategories;
   } catch (error) {
-    console.warn(`[tokenless] Failed to load tool categories: ${String(error)}`);
+    console.warn(
+      `[tokenless] Failed to load tool categories: ${String(error)}`,
+    );
     return fallback;
   }
 }
@@ -197,11 +226,11 @@ function runOperation(
     });
     const response = JSON.parse(stdout) as Record<string, unknown>;
     if (
-      response.protocol_version !== 2
-      || response.operation !== operation
-      || typeof response.result !== "object"
-      || response.result === null
-      || Array.isArray(response.result)
+      response.protocol_version !== 2 ||
+      response.operation !== operation ||
+      typeof response.result !== "object" ||
+      response.result === null ||
+      Array.isArray(response.result)
     ) {
       return null;
     }
@@ -211,13 +240,19 @@ function runOperation(
   }
 }
 
-function tryEnvCheck(toolName: string): { status: string; diagnostic: string } | null {
+function tryEnvCheck(
+  toolName: string,
+): { status: string; diagnostic: string } | null {
   try {
-    const result = execFileSync(tokenlessPath, ["env-check", "--tool", toolName, "--json"], {
-      encoding: "utf-8",
-      timeout: 3_000,
-      env: process.env,
-    }).trim();
+    const result = execFileSync(
+      tokenlessPath,
+      ["env-check", "--tool", toolName, "--json"],
+      {
+        encoding: "utf-8",
+        timeout: 3_000,
+        env: process.env,
+      },
+    ).trim();
     const parsed = JSON.parse(result) as { status?: string };
     const status = parsed.status || "UNKNOWN";
     if (status === "UNKNOWN" || status === "READY") return null;
@@ -227,110 +262,135 @@ function tryEnvCheck(toolName: string): { status: string; diagnostic: string } |
       ["env-check", "--tool", toolName, "--fix", "--json"],
       { encoding: "utf-8", timeout: 10_000, env: process.env },
     ).trim();
-    const fixed = JSON.parse(fixResult) as { status?: string; diagnostic?: string };
+    const fixed = JSON.parse(fixResult) as {
+      status?: string;
+      diagnostic?: string;
+    };
     if (fixed.status === "READY") return null;
     return {
       status: fixed.status || "NOT_READY",
-      diagnostic: fixed.diagnostic
-        || `[tokenless:ready] ${toolName}: NOT_READY. Skip retry.`,
+      diagnostic:
+        fixed.diagnostic ||
+        `[tokenless:ready] ${toolName}: NOT_READY. Skip retry.`,
     };
   } catch {
     return null;
   }
 }
 
-function contentSlot(message: unknown): ContentSlot | null {
-  if (typeof message === "string") {
-    return { kind: "string", content: message, replaceWithText: true };
-  }
-  if (typeof message !== "object" || message === null) return null;
-
-  const messageObject = message as Record<string, unknown>;
-  if (!Array.isArray(message) && messageObject.role === "toolResult") {
-    const content = messageObject.content;
-    if (!Array.isArray(content) || content.length !== 1) return null;
-    const block = content[0];
-    if (
-      typeof block !== "object"
-      || block === null
-      || block.type !== "text"
-      || typeof block.text !== "string"
-    ) {
-      return null;
-    }
-    return {
-      kind: "tool_text",
-      content: block.text,
-      replaceWithText: true,
-      message: messageObject,
-      block: block as TextBlock,
-    };
-  }
-
-  return {
-    kind: "structured",
-    content: JSON.stringify(message),
-    replaceWithText: false,
-    message: message as Record<string, unknown> | unknown[],
-  };
-}
-
-function applyOutput(slot: ContentSlot, output: string): unknown | null {
-  if (slot.kind === "string") return output;
-  if (slot.kind === "tool_text") {
-    return {
-      ...slot.message,
-      content: [{ ...slot.block, text: output }],
-    };
-  }
-
-  try {
-    const parsed = JSON.parse(output) as unknown;
-    if (typeof parsed !== "object" || parsed === null) return null;
-    if (Array.isArray(parsed) !== Array.isArray(slot.message)) return null;
-    return parsed;
-  } catch {
+function singleTextBlock(result: unknown): TextBlock | null {
+  if (typeof result !== "object" || result === null || Array.isArray(result))
     return null;
-  }
+  const content = (result as ToolResult).content;
+  if (!Array.isArray(content) || content.length !== 1) return null;
+  const block = content[0];
+  if (
+    typeof block !== "object" ||
+    block === null ||
+    (block as TextBlock).type !== "text" ||
+    typeof (block as TextBlock).text !== "string"
+  )
+    return null;
+  return block as TextBlock;
 }
 
-function appendDiagnostic(slot: ContentSlot, diagnostic: string): unknown | null {
-  if (!diagnostic) return null;
-  if (slot.kind === "string") return `${slot.content}\n\n${diagnostic}`;
-  if (slot.kind === "tool_text") {
-    return {
-      ...slot.message,
-      content: [slot.block, { type: "text" as const, text: diagnostic }],
-    };
-  }
-  return null;
+function toolFailed(event: ToolResultEvent): boolean {
+  if (event.isError === true) return true;
+  const details = event.result.details;
+  if (typeof details !== "object" || details === null || Array.isArray(details))
+    return false;
+  const metadata = details as Record<string, unknown>;
+  // Middleware runs before the host folds structured failure metadata into isError.
+  if (
+    metadata.ok === false ||
+    metadata.success === false ||
+    metadata.timedOut === true ||
+    metadata.error
+  )
+    return true;
+  if (
+    typeof metadata.exitCode === "number" &&
+    Number.isFinite(metadata.exitCode) &&
+    metadata.exitCode !== 0
+  )
+    return true;
+  if (metadata.ok === true || metadata.success === true) return false;
+  const status =
+    typeof metadata.status === "string"
+      ? metadata.status.trim().toLowerCase()
+      : "";
+  return [
+    "error",
+    "failed",
+    "failure",
+    "timeout",
+    "timed_out",
+    "blocked",
+    "denied",
+    "forbidden",
+    "unavailable",
+    "approval-unavailable",
+    "disabled",
+    "aborted",
+    "cancelled",
+    "canceled",
+    "killed",
+    "invalid",
+  ].includes(status);
 }
 
 export default {
   id: "tokenless",
   name: "Tokenless",
   version: "1.0.0",
-  description: "Protocol v2 RTK rewriting and PostTool optimization for OpenClaw",
+  description:
+    "Protocol v2 RTK rewriting and PostTool optimization for OpenClaw",
   register(api: any) {
     const pluginConfig = api.pluginConfig ?? {};
     const rtkEnabled = pluginConfig.rtk_enabled !== false;
     const postToolEnabled = pluginConfig.post_tool_enabled !== false;
+    const warn = (message: string): void => {
+      try {
+        if (typeof api.logger?.warn === "function") api.logger.warn(message);
+        else console.warn(message);
+      } catch {
+        // Logging must not turn a failed compression into a failed tool call.
+      }
+    };
     const toolReadyEnabled = pluginConfig.tool_ready_enabled !== false;
     const verbose = pluginConfig.verbose === true;
     const available = checkTokenless();
+    let postToolActive = postToolEnabled && available;
+    if (
+      postToolActive &&
+      typeof api.registerAgentToolResultMiddleware !== "function"
+    ) {
+      warn(
+        "[tokenless] PostTool disabled: OpenClaw 2026.6.6 or newer with tool-result middleware is required.",
+      );
+      postToolActive = false;
+    }
 
     const sessionMap = new Map<string, string>();
     const callStates = new Map<string, CallState>();
     const categories = loadToolCategories();
-    const fileTools = new Set(categories.layer_1_skip.tools.map((tool) => tool.toLowerCase()));
-    const shellTools = new Set(categories.layer_2_shell.tools.map((tool) => tool.toLowerCase()));
+    const fileTools = new Set(
+      categories.layer_1_skip.tools.map((tool) => tool.toLowerCase()),
+    );
+    const shellTools = new Set(
+      categories.layer_2_shell.tools.map((tool) => tool.toLowerCase()),
+    );
 
     const sessionIdFor = (ctx: HookContext): string => {
       if (ctx.sessionId) {
         if (ctx.sessionKey) sessionMap.set(ctx.sessionKey, ctx.sessionId);
         return ctx.sessionId;
       }
-      return (ctx.sessionKey && sessionMap.get(ctx.sessionKey)) || ctx.sessionKey || "";
+      return (
+        (ctx.sessionKey && sessionMap.get(ctx.sessionKey)) ||
+        ctx.sessionKey ||
+        ""
+      );
     };
     const stateKey = (context: CallContext): string =>
       `${context.sessionId}\0${context.toolCallId}`;
@@ -344,12 +404,20 @@ export default {
         callStates.delete(oldest);
       }
     };
-    const rememberState = (context: CallContext, patch: Partial<CallState>): void => {
+    const rememberState = (
+      context: CallContext,
+      patch: Partial<CallState>,
+    ): void => {
       pruneStates();
       const key = stateKey(context);
       const previous = callStates.get(key);
       callStates.delete(key);
-      callStates.set(key, { optimization: "none", ...previous, ...patch, createdAt: Date.now() });
+      callStates.set(key, {
+        optimization: "none",
+        ...previous,
+        ...patch,
+        createdAt: Date.now(),
+      });
     };
     const consumeState = (context: CallContext): CallState | undefined => {
       if (!context.toolCallId) return undefined;
@@ -370,10 +438,11 @@ export default {
     api.on(
       "session_end",
       (event: { sessionId?: string; sessionKey?: string }) => {
-        const sessionId = event.sessionId
-          || (event.sessionKey && sessionMap.get(event.sessionKey))
-          || event.sessionKey
-          || "";
+        const sessionId =
+          event.sessionId ||
+          (event.sessionKey && sessionMap.get(event.sessionKey)) ||
+          event.sessionKey ||
+          "";
         if (event.sessionKey) sessionMap.delete(event.sessionKey);
         for (const key of callStates.keys()) {
           if (key.startsWith(`${sessionId}\0`)) callStates.delete(key);
@@ -387,14 +456,17 @@ export default {
         (event: { toolName: string }) => {
           const result = tryEnvCheck(event.toolName);
           if (!result) return;
-          if (verbose) console.log(`[tokenless:ready] ${event.toolName}: ${result.status}`);
+          if (verbose)
+            console.log(
+              `[tokenless:ready] ${event.toolName}: ${result.status}`,
+            );
           return { contextPrefix: result.diagnostic };
         },
         { priority: 5 },
       );
     }
 
-    if ((rtkEnabled || postToolEnabled) && available) {
+    if ((rtkEnabled || postToolActive) && available) {
       api.on(
         "before_tool_call",
         (
@@ -413,7 +485,7 @@ export default {
           if (!context.toolCallId || typeof command !== "string") return;
           // Core reports a plain file print (`cat page.html`) as file_read from
           // the command line, so the page stays verbatim while data still compresses.
-          if (postToolEnabled && shellTools.has(event.toolName.toLowerCase())) {
+          if (postToolActive && shellTools.has(event.toolName.toLowerCase())) {
             rememberState(context, { command });
           }
           if (!rtkEnabled || event.toolName !== "exec") return;
@@ -432,23 +504,23 @@ export default {
             context,
           );
           if (
-            result?.action !== "replace_arguments"
-            || result.output_optimization !== "rtk"
-            || typeof result.arguments !== "object"
-            || result.arguments === null
-            || Array.isArray(result.arguments)
+            result?.action !== "replace_arguments" ||
+            result.output_optimization !== "rtk" ||
+            typeof result.arguments !== "object" ||
+            result.arguments === null ||
+            Array.isArray(result.arguments)
           ) {
             return;
           }
           const argumentsResult = result.arguments as Record<string, unknown>;
           if (
-            typeof argumentsResult.command !== "string"
-            || argumentsResult.command === event.params.command
+            typeof argumentsResult.command !== "string" ||
+            argumentsResult.command === event.params.command
           ) {
             return;
           }
 
-          if (postToolEnabled) {
+          if (postToolActive) {
             rememberState(context, {
               optimization: "rtk",
               command: argumentsResult.command,
@@ -461,70 +533,103 @@ export default {
       );
     }
 
-    if (postToolEnabled && available) {
-      api.on(
-        "tool_result_persist",
-        (event: ToolResultEvent, ctx: HookContext) => {
-          const context: CallContext = {
-            sessionId: sessionIdFor(ctx),
-            toolCallId: ctx.toolCallId || event.toolCallId || "",
-          };
-          const state = consumeState(context);
-          if (event.isSynthetic) return;
-
-          const slot = contentSlot(event.message);
-          if (slot === null) return;
-          const toolName = event.toolName || ctx.toolName || "";
-          const normalizedToolName = toolName.toLowerCase();
-          const contentOrigin = fileTools.has(normalizedToolName)
-            ? "file_content"
-            : shellTools.has(normalizedToolName)
-              ? "command_output"
-              : "api_response";
-          const isError = slot.kind === "tool_text" && slot.message.isError === true;
-
-          const input: Record<string, unknown> = {
-            result_kind: "tool",
-            tool_name: toolName,
-            content: slot.content,
-            status: isError ? "error" : "success",
-            content_origin: contentOrigin,
-            output_optimization: state?.optimization ?? "none",
-            capabilities: {
-              replace_output: true,
-              // The trusted operator CLI does not enforce Agent Marker visibility.
-              recovery: { kind: 'none' },
-              replace_with_text: slot.replaceWithText,
-            },
-          };
-          if (contentOrigin === "command_output" && state?.command !== undefined) {
-            input.command = state.command;
-          }
-          const result = runOperation("post_tool", input, context);
-          if (result === null) return;
-
-          if (result.disposition === "tool_error") {
-            const diagnostic = typeof result.additional_context === "string"
-              ? result.additional_context
-              : "";
-            const message = appendDiagnostic(slot, diagnostic);
-            return message === null ? undefined : { message };
-          }
-          if (result.disposition !== "applied" || typeof result.output !== "string") return;
-
-          const message = applyOutput(slot, result.output);
-          if (message === null) return;
-          if (verbose) console.log(`[tokenless:post-tool] optimized ${toolName}`);
-          return { message };
-        },
-        { priority: 10 },
-      );
+    if (postToolActive) {
+      try {
+        api.registerAgentToolResultMiddleware(
+          (event: ToolResultEvent, ctx: HookContext) => {
+            try {
+              if (
+                typeof event?.toolName !== "string" ||
+                !event.toolName ||
+                typeof event.toolCallId !== "string" ||
+                !event.toolCallId
+              )
+                return;
+              const context: CallContext = {
+                sessionId: sessionIdFor(ctx),
+                toolCallId: event.toolCallId,
+              };
+              const state = consumeState(context);
+              const block = singleTextBlock(event.result);
+              if (block === null) return;
+              const toolName = event.toolName;
+              const normalizedToolName = toolName.toLowerCase();
+              const contentOrigin = fileTools.has(normalizedToolName)
+                ? "file_content"
+                : shellTools.has(normalizedToolName)
+                  ? "command_output"
+                  : "api_response";
+              const input: Record<string, unknown> = {
+                result_kind: "tool",
+                tool_name: toolName,
+                content: block.text,
+                status: toolFailed(event) ? "error" : "success",
+                content_origin: contentOrigin,
+                output_optimization: state?.optimization ?? "none",
+                capabilities: {
+                  replace_output: true,
+                  // Operator retrieval does not enforce Agent Marker visibility.
+                  recovery: { kind: "none" },
+                  replace_with_text: true,
+                },
+              };
+              if (contentOrigin === "command_output") {
+                const command =
+                  typeof event.args?.command === "string"
+                    ? event.args.command
+                    : state?.command;
+                if (command !== undefined) input.command = command;
+              }
+              const result = runOperation("post_tool", input, context);
+              if (result === null) return;
+              if (result.disposition === "tool_error") {
+                if (
+                  typeof result.additional_context !== "string" ||
+                  !result.additional_context
+                )
+                  return;
+                return {
+                  result: {
+                    ...event.result,
+                    content: [
+                      block,
+                      { type: "text", text: result.additional_context },
+                    ],
+                  },
+                };
+              }
+              if (
+                result.disposition !== "applied" ||
+                typeof result.output !== "string"
+              )
+                return;
+              if (verbose)
+                console.log(`[tokenless:post-tool] optimized ${toolName}`);
+              return {
+                result: {
+                  ...event.result,
+                  content: [{ ...block, text: result.output }],
+                },
+              };
+            } catch {
+              // The host turns thrown middleware errors into failed tool results.
+              return;
+            }
+          },
+          { runtimes: ["openclaw"] },
+        );
+      } catch {
+        postToolActive = false;
+        warn(
+          "[tokenless] PostTool disabled: OpenClaw rejected tool-result middleware registration.",
+        );
+      }
     }
 
     if (verbose) {
       const features = [
         rtkEnabled && available ? "pre-tool" : null,
-        postToolEnabled && available ? "post-tool" : null,
+        postToolActive ? "post-tool" : null,
       ].filter(Boolean);
       console.log(
         `[tokenless] OpenClaw plugin registered — active features: ${features.join(", ") || "none"}`,

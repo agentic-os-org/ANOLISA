@@ -305,7 +305,7 @@ OpenClaw Plugin 还提供框架级选项：
 |------|------|
 | `rtk_enabled` | 通过 RTK 改写支持的 Shell 命令 |
 | `tool_ready_enabled` | OpenClaw 侧的 Tool Ready 注册门槛 |
-| `post_tool_enabled` | 优化支持的持久化工具结果 |
+| `post_tool_enabled` | 在模型请求前替换支持的实时工具文本 |
 | `verbose` | Plugin 诊断日志 |
 
 OpenClaw Plugin 不压缩工具 Schema，也不提供内容恢复。无法在不恢复内容的情况下安全优化的
@@ -318,7 +318,13 @@ Tokenless 已硬关闭底层检查，Tool Ready 选项当前没有实际效果�
 控制 Adapter。
 
 这些值由 OpenClaw Plugin 配置管理，不属于 `~/.tokenless/config.json`。Adapter 要求
-OpenClaw Plugin API 2026.4.22 或更高版本。修改后按 OpenClaw 提示重启 gateway。
+OpenClaw 2026.6.6 或更高版本，且插件须显式启用。Manifest 声明
+`contracts.agentToolResultMiddleware: ["openclaw"]`；不支持或无法识别的版本在安装前被拒绝。
+运行时缺少 middleware 时，PostTool 告警并关闭，不回退到仅持久化压缩。修改后按 OpenClaw
+提示重启 gateway。旧版宿主可能因注册 middleware 而在 Tokenless 收到结果之前截断
+内容，Fail-open 无法撤销该预处理；符合 API 要求的宿主仍可在此限制内使用。
+建议的上游修复见 [OpenClaw 兼容说明](framework-integration.md#openclaw)。设置
+`post_tool_enabled: false` 可停止 Tokenless 注册结果 middleware，RTK 仍可独立配置。
 
 ## 相关文档
 

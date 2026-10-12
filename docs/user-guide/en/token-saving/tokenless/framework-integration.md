@@ -11,7 +11,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
 | cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
-| OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
+| OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces single-text tool results before model consumption | Core-selected for replaceable text | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
@@ -313,7 +313,24 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. OpenClaw 2026.6.6 or later is required. Explicitly enable the Tokenless plugin so its declared tool-result middleware can replace text before the same-turn model request. Response compression and RTK rewriting default to enabled; Core selects eligible lossless TOON candidates. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+
+Tokenless processes only the result delivered by OpenClaw. On legacy hosts such as
+2026.8.2, registering any applicable result middleware causes the host to cap each
+text block at 100,000 UTF-16 code units before the callback, even if the middleware
+returns no replacement. Large `details` may also be truncated, losing fields such
+as exit status. Fail-open preserves this received result; it cannot recover text
+or metadata already removed by the host. A clipped JSON document may therefore
+pass through without compression. These hosts remain supported within that limit.
+
+For full native text input at this boundary, prefer an OpenClaw build containing
+[upstream commit `2f620b970a04`](https://github.com/openclaw/openclaw/commit/2f620b970a0458531588d6c8067540164197580e).
+The tested build and the earlier release both report `2026.10.2`, so the version
+string alone does not establish that the fix is present. Legacy nested
+`toolResult` normalization, individual tools and downstream model-context budgets
+can still limit output. Tokenless does not automatically read a saved full-output
+file or restore a discarded tail. Set `post_tool_enabled: false` to stop Tokenless
+from registering this middleware; other plugins may still register their own.
 
 The optional `selective-claw` context engine has its own configuration under
 `plugins.entries.selective-claw.config`, separate from the response adapter:

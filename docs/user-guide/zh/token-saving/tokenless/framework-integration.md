@@ -10,7 +10,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
 | cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
-| OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
+| OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 在模型消费前替换单文本工具结果 | Core 为可替换文本选择 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
@@ -291,7 +291,24 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 
 ### OpenClaw
 
-安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写，默认关闭 TOON。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
+要求 OpenClaw 2026.6.6 或更高版本，并显式启用 Tokenless 插件。插件通过声明的工具结果
+middleware，在同轮模型请求之前替换支持的文本结果；不另外压缩持久化副本。
+
+安装脚本会在旧版宿主上使用上文说明的 OpenClaw unsafe-install 覆盖参数。确认风险并安装后，重启 Gateway。Plugin 代码默认启用响应压缩和 RTK 重写；Core 会选择符合条件的无损 TOON 候选。由于底层检查已硬关闭，Plugin 的 Tool Ready 选项当前不会生效。
+
+Tokenless 只处理 OpenClaw 交付的结果。2026.8.2 等旧版宿主只要注册了适用的结果
+middleware，就会在回调前将每个文本块裁剪到 100,000 个 UTF-16 Code Unit，即使
+middleware 不返回替换内容也是如此。过大的 `details` 也可能被截断，丢失退出状态等
+字段。Fail-open 保留的是收到的结果，无法恢复宿主已经移除的文本或元数据。因此，被
+截断的 JSON 可能直接透传而不压缩。这些宿主仍在该限制内受支持。
+
+如需在此边界接收完整的原生文本结果，建议使用包含
+[上游提交 `2f620b970a04`](https://github.com/openclaw/openclaw/commit/2f620b970a0458531588d6c8067540164197580e)
+的 OpenClaw 构建。已验证构建和此前发布版均报告 `2026.10.2`，仅凭版本字符串不能
+确认修复是否存在。旧式嵌套 `toolResult` 归一化、工具自身和下游模型上下文预算仍可能
+限制输出。Tokenless 不会自动读取保存完整输出的文件，也不能恢复已丢弃的尾部。
+设置 `post_tool_enabled: false` 可停止 Tokenless 注册该 middleware；其他插件仍可能
+注册自己的 middleware。
 
 可选的 `selective-claw` 上下文引擎在 `plugins.entries.selective-claw.config` 中配置，
 与响应压缩适配器的配置相互独立：

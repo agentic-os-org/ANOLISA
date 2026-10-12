@@ -49,7 +49,7 @@ retrieval, and attribution.
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
-| OpenClaw plugin | — | RTK ✅, lossless transcript PostTool ✅, Schema/Retrieve unavailable in the host |
+| OpenClaw plugin | — | RTK ✅, lossless live PostTool ✅, Schema/Retrieve unavailable in the host |
 | copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅; Cosh-NG supports response compression and Marker-command recovery, while legacy copilot-shell remains lossless-only; Common BeforeModel passes schemas through without authorized Retrieve |
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Core-owned command rewriting/response/TOON ✅, Marker-command recovery ✅, Schema unavailable |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, Marker-command recovery ✅ |
@@ -570,13 +570,13 @@ String format `"jq"` is also supported (auto-converts to object).
 
 ## OpenClaw Plugin
 
-The plugin translates two OpenClaw events into Protocol v2 lifecycle operations:
+The plugin translates OpenClaw tool hooks and live result middleware into Protocol v2 operations:
 
 | Hook | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `before_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | PreTool | `before_tool_call` | Sends `exec` arguments to Core and applies the returned RTK rewrite | ✅ Active |
-| PostTool | `tool_result_persist` | Rewrites supported OpenClaw-owned transcript tool results | ✅ Active |
+| PostTool | `registerAgentToolResultMiddleware` | Replaces supported tool text before the same-turn model request | ✅ Active |
 | BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor marker-authorized recovery | — |
 
 Core owns RTK execution, JSON detection, cleanup, TOON selection, thresholds, diagnostics, and final
@@ -584,25 +584,32 @@ arbitration. The plugin carries Core's per-call `output_optimization` from PreTo
 PostTool request, so RTK output is not compressed twice. The local CLI recovery command is a trusted
 operator entry rather than Agent authorization, so the plugin applies only lossless candidates.
 
-`tool_result_persist` is a synchronous OpenClaw transcript seam. It can replace a persisted string,
-a structured value, or a single text block while preserving the surrounding Tool Result envelope;
-media and multi-block results pass through. It does not replace a tool result already consumed by
-the model in the same turn, and it does not cover non-OpenClaw transcript implementations.
+The plugin declares `contracts.agentToolResultMiddleware: ["openclaw"]` and must be explicitly
+enabled in OpenClaw. PostTool replaces a single text block while preserving the rest of the tool
+result; media and multi-block results pass through. It does not register a separate transcript
+compression hook, so persistence does not compress or count the same result again.
 
 Both operations use the single `tokenless compress` entry point and fail open if Tokenless is
-missing or returns an invalid response.
+missing or returns an invalid response. For PostTool, fail-open retains the result received
+from the host, including any prior truncation. Legacy hosts such as 2026.8.2 cap text at
+100,000 UTF-16 code units when middleware is registered. They remain supported with this
+limit; builds containing upstream commit `2f620b970a04` are recommended. See the
+[OpenClaw compatibility notes](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#openclaw)
+for host limits and how to disable PostTool.
 
 ### Configuration
 
-The adapter requires OpenClaw Plugin API `2026.4.22` or newer; package metadata enforces this
-minimum during installation on hosts that support compatibility checks.
+The adapter requires OpenClaw `2026.6.6` or newer. The install script rejects older or
+unrecognized versions before installation, and package metadata declares the same minimum.
+If the runtime middleware API is missing or registration throws, PostTool is disabled with a
+warning; PreTool can continue. There is no transcript-only fallback.
 
 Options in `openclaw.plugin.json`:
 
 | Option | Default | Description |
 |---|---|---|
 | `rtk_enabled` | `true` | Enable RTK command rewriting |
-| `post_tool_enabled` | `true` | Enable Protocol v2 PostTool handling of persisted tool results |
+| `post_tool_enabled` | `true` | Enable Protocol v2 PostTool replacement of live tool results |
 | `tool_ready_enabled` | `true` | Register the currently hard-disabled Tool Ready hook |
 | `verbose` | `false` | Log lifecycle rewrites and applied PostTool results |
 
@@ -955,6 +962,21 @@ transformed. Tool Ready remains hard-disabled.
 For installed-package checks and optional real Agent tasks, see the
 [release regression suite](tests/release_regression/README.md). It reports
 tool-output savings and retrieval overhead separately.
+
+To check OpenClaw's live delivery boundary with a locally scripted model, build the
+CLI and plugin, then run the command matching your local Docker image:
+
+```bash
+python3 tests/test-openclaw-gateway.py --image tokenless-test-agent-openclaw:2026.8.2 --host-output-policy legacy
+python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970a04 --host-output-policy normalized
+```
+
+The image must provide the corresponding OpenClaw build and Python 3.11+. Use
+`legacy` for the documented 2026.8.2 image, or `normalized` for a build whose source
+includes upstream fix `2f620b970a04`; select from source provenance, not the version
+string alone. The test checks passthrough, immediate replacement, persistence,
+single-count statistics, and Core failure recovery. It prints the evidence directory
+and makes no cloud requests.
 
 | Target | Description |
 |---|---|

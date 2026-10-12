@@ -44,6 +44,27 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
+OpenClaw 2026.6.6 或更高版本通过已声明且显式启用的工具结果 middleware，在模型消费前
+调用 PostTool。Adapter 保留结果信封，只处理单文本结果，声明 `recovery.kind = none`，
+并保留逐调用 RTK 归属信息。不再通过单独的持久化 hook 重复处理结果。Adapter 捕获压缩
+失败并保留收到的宿主结果，因为宿主会把 middleware 抛出的异常转为工具失败。
+旧版 middleware 预处理可能已裁剪文本或元数据。Tokenless 不会在 API 最低版本之上
+额外拒绝这些宿主，也不会重建缺失内容。仅 `applied` 压缩替换文本；工具错误诊断仍可
+追加上下文。详见[宿主兼容边界](../../../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
+
+构建 CLI 和 OpenClaw Adapter 后，可在 `src/tokenless` 使用本地宿主镜像运行可选容器回归：
+
+```bash
+python3 tests/test-openclaw-gateway.py --image <legacy-image> --host-output-policy legacy
+python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-policy normalized
+```
+
+根据镜像的源码来源选择预期策略，不依赖版本字符串。真实 Gateway 使用本地脚本模型，
+不发送云端请求。测试覆盖普通 CSV、150,000 字符纯文本／JSON 结果、失败透传、首次
+消费、历史重放、持久化和统计。旧版截断作为预期限制验证；normalized 策略要求完整
+原生输入进入 middleware，并无损交付 JSON 候选。此测试验证传输行为，不验证模型
+回答质量或计费节省。
+
 ## 搜索路径共享
 
 PostTool 仅在搜索路径共享已开启、来源为 `api_response` 且支持文本替换时，将识别为

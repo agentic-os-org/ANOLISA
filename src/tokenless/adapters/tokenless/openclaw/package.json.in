@@ -7,7 +7,7 @@
   "openclaw": {
     "extensions": ["./dist/index.js"],
     "compat": {
-      "pluginApi": ">=2026.4.22"
+      "pluginApi": ">=2026.6.6"
     }
   },
   "scripts": {

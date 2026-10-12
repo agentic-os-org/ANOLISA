@@ -49,6 +49,31 @@ tool-name collisions fail fast. Normal Core dispositions such as passthrough, no
 recoverability unavailable return typed results. A candidate is applied only when it is strictly
 smaller; schema and response truncation must also remain retrievable.
 
+OpenClaw 2026.6.6 or later uses declared, explicitly enabled tool-result middleware to call
+PostTool before model consumption. The adapter preserves the result envelope and handles only
+single-text results, declares `recovery.kind = none`, and retains per-call RTK attribution.
+No separate persistence hook reprocesses the result. Adapter failures retain the received
+host result; the adapter catches them because the host treats thrown middleware errors as
+tool failures. Legacy middleware preprocessing can already have clipped text or metadata.
+Tokenless neither rejects such hosts above the API minimum nor reconstructs missing content.
+Only `applied` compression replaces text; tool-error diagnostics may still append context.
+See the [host compatibility boundary](../../../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#openclaw).
+
+After building the CLI and OpenClaw adapter, run the optional container regression from
+`src/tokenless` with a local host image:
+
+```bash
+python3 tests/test-openclaw-gateway.py --image <legacy-image> --host-output-policy legacy
+python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-policy normalized
+```
+
+Select the expected policy from the image's source provenance, not its version string.
+The real Gateway uses a scripted local model with no cloud requests. The test covers ordinary
+CSV and 150,000-character plain/JSON results, failure passthrough, first consumption, replay,
+persistence and statistics. Legacy truncation is an expected limitation; the normalized policy
+requires full native input at middleware entry and lossless JSON candidate delivery. This
+checks transport behavior, not model answer quality or billing savings.
+
 ## Search path sharing
 
 PostTool routes detected `search_results` through `SearchResultsCompressor` only when search path

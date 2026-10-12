@@ -79,12 +79,12 @@ Cleanup。Runtime 最后仍只执行一次全局字符/Token 仲裁和一次 Sta
 
 ## 四、集成路径
 
-### 路径 1：OpenClaw 插件（`tool_result_persist` hook）
+### 路径 1：OpenClaw 插件（实时工具结果 middleware）
 
 ```
 工具执行完成
    ↓
-OpenClaw 触发 tool_result_persist 事件
+OpenClaw 在模型消费前调用已声明的 agentToolResultMiddleware
    ↓
 Plugin 按 Tool Call ID 消费 PreTool 输出优化状态
    ↓
@@ -94,7 +94,7 @@ execFileSync("tokenless", ["compress"], { input: Request, timeout: 8s })
    ↓
 Core 执行状态路由、内容域 Pipeline、TOON 与最终仲裁
    ↓
-Plugin 只重建宿主允许替换的 Tool Result Slot
+Plugin 通过 { result } 替换单文本 Tool Result，保留其余元数据
 ```
 
 OpenClaw 的 PreTool 同样调用一次 `tokenless compress`，并把 Core 返回的
@@ -104,9 +104,17 @@ OpenClaw 的 PreTool 同样调用一次 `tokenless compress`，并把 Core 返�
 
 OpenClaw 不提供 Marker 授权恢复路径，因此需要恢复的 Lossy Candidate 以
 `recoverability_unavailable` 透传。本地 `tokenless retrieve` 是受信运维入口，不能替代 Agent
-授权。`tool_result_persist` 只同步改写 OpenClaw 自己持久化的 transcript；它不替换同一轮模型
-已经收到的实时结果。Plugin 只处理 String、结构化 Slot 或单个 Text Block，并保留 Tool Result
-Envelope；Media 和多个 Block 原样透传。
+授权。插件要求 OpenClaw 2026.6.6 或更高版本，Manifest 必须声明
+`contracts.agentToolResultMiddleware: ["openclaw"]`，且插件须显式启用。
+`registerAgentToolResultMiddleware` 返回的结果直接进入同轮模型请求，并由宿主持久化；
+插件不再注册 `tool_result_persist`，避免重复压缩与统计。仅单个 Text Block 可以替换，
+其余 Tool Result 元数据保留；结构化、Media 和多个 Block 原样透传。
+安装器拒绝旧版和无法识别的版本。运行时 API 缺失或注册失败时，PostTool 明确关闭，
+PreTool 可以继续；Core 失败、超时或响应非法时，Adapter 不返回替换内容，保留宿主
+交付的结果。2026.8.2 等旧版宿主会在 middleware 回调前裁剪到 100,000 个 UTF-16
+Code Unit；Fail-open 无法恢复被宿主丢弃的内容或元数据。它们仍在此限制内受支持，
+建议使用包含上游提交 `2f620b970a04` 的构建，详见
+[OpenClaw 兼容说明](../../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
 
 ### 路径 2：共享 PostTool Hook（Protocol v2）
 
@@ -403,7 +411,7 @@ Schema、字符串、深度、普通数组和 BuildLog 的省略提示使用同�
 
 所有集成路径均采用 fail-open 策略：
 
-- **OpenClaw 插件**：Protocol v2 进程失败、非法响应或不能安全重建 Slot 时，Hook 不返回值 → 原始结果透传
+- **OpenClaw 插件**：Protocol v2 进程失败、非法响应或不能安全重建 Slot 时，Hook 不返回值 → 宿主交付的结果透传（不恢复宿主此前的截断）
 - **copilot-shell hook**：任何失败点（依赖缺失、压缩失败、输出为空）均 `exit 0` 且不输出 stdout → 原始结果透传
 - **CLI**：错误输出到 stderr，调用方可检查退出码决定是否回退
 
