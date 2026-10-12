@@ -9,6 +9,41 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-11
+
+### Added
+
+- Expired SQLite Stash payloads are now reclaimed during successful writes, so compression-only workloads no longer require retrieval to clean up old payloads. This does not immediately shrink the database file or securely erase deleted data ([#3565](https://github.com/agentic-os-org/ANOLISA/pull/3565)).
+
+### Changed
+
+- Complete HTML page rendering is now enabled by default in the CLI, Runtime, and Python SDK. Disable it with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; an empty environment value keeps the default. Git diff cropping remains opt-in ([#3473](https://github.com/agentic-os-org/ANOLISA/pull/3473)).
+
+### Fixed
+
+- Plain shell file reads such as `cat page.html` now keep HTML source verbatim across adapters that supply the command, including OpenClaw, DSH, QwenPaw, and AgentScope. JSON, tables, and other supported file data can still compress ([#3481](https://github.com/agentic-os-org/ANOLISA/pull/3481)).
+- A single leading byte-order mark no longer prevents HTML, JSON, tables, or stack traces from reaching their matching content handlers; recoverable transformations retain the original bytes ([#3486](https://github.com/agentic-os-org/ANOLISA/pull/3486), [#4888](https://github.com/agentic-os-org/ANOLISA/pull/4888)).
+- Bracketed tool output that is not one valid JSON document, including concatenated documents and NDJSON, now passes through unchanged instead of failing the PostTool call ([#4159](https://github.com/agentic-os-org/ANOLISA/pull/4159)).
+- Build/test commands wrapped in `env -i` or `env -u`, or using a Cargo `+toolchain`, retain their native output for build-log compression instead of being handed to RTK ([#4270](https://github.com/agentic-os-org/ANOLISA/pull/4270)).
+- RTK rewriting now enforces its deadline even when descendants keep stdout open after the parent exits, and cleans up the owned process group ([#3552](https://github.com/agentic-os-org/ANOLISA/pull/3552)).
+- Concurrent hooks can initialize or migrate the stats database without racing to add the same columns; failed migrations roll back together ([#3607](https://github.com/agentic-os-org/ANOLISA/pull/3607)).
+- Stats history and session-diff reports now order records by their actual timestamp, including mixed UTC offsets and sub-millisecond differences, so newest-record limits and compression chains remain correct ([#3848](https://github.com/agentic-os-org/ANOLISA/pull/3848)).
+- Failed stats and retrieval-event writes now emit a `[tokenless-stats]` warning while compression and retrieval continue, including when stderr itself is unwritable ([#3587](https://github.com/agentic-os-org/ANOLISA/pull/3587)).
+- Clean AgentScope 1.x installations now include the `greenlet` dependency required by newer SQLAlchemy versions. Positional application postprocessors are also chained correctly before Tokenless processing ([#3496](https://github.com/agentic-os-org/ANOLISA/pull/3496), [#3706](https://github.com/agentic-os-org/ANOLISA/pull/3706)).
+- Hermes preserves the full error envelope for failed or stopped shell calls, retaining diagnostics that may exist outside the output field ([#3815](https://github.com/agentic-os-org/ANOLISA/pull/3815)).
+- OpenCode forwards nonzero Bash exit codes for diagnosis, cleans up timed-out hooks and their descendants, and enforces the 1 MiB hook-output limit in UTF-8 bytes. Oversized hook responses leave the original tool output intact ([#4398](https://github.com/agentic-os-org/ANOLISA/pull/4398), [#3818](https://github.com/agentic-os-org/ANOLISA/pull/3818), [#4757](https://github.com/agentic-os-org/ANOLISA/pull/4757)).
+- OpenCode host edits to a returned tool schema no longer affect the cached schema used by later calls ([#4731](https://github.com/agentic-os-org/ANOLISA/pull/4731)).
+- Qwen Code adapter installation with `--dry-run` no longer invokes the host CLI, stamps manifests, or changes the active extension link ([#4397](https://github.com/agentic-os-org/ANOLISA/pull/4397)).
+- `npm rebuild` can now replace dangling `tokenless` and `rtk` launcher symlinks and complete repeated runs ([#4711](https://github.com/agentic-os-org/ANOLISA/pull/4711)).
+- OpenClaw binary discovery now skips same-named directories in `PATH`, allowing a later executable or executable symlink to be found ([#4855](https://github.com/agentic-os-org/ANOLISA/pull/4855)).
+- Selective-Claw turn recall now combines live and archived turns in request order and stays bound to the host session, preventing interleaved conversations from redirecting `expand_turn` ([#4670](https://github.com/agentic-os-org/ANOLISA/pull/4670), [#4782](https://github.com/agentic-os-org/ANOLISA/pull/4782)).
+- Selective-Claw keeps leading system or implicit turns distinct from later user turns and migrates older archives to matching ordinal turn IDs ([#4673](https://github.com/agentic-os-org/ANOLISA/pull/4673), [#4693](https://github.com/agentic-os-org/ANOLISA/pull/4693)).
+- Selective-Claw makes existing archive messages searchable when first creating its full-text index ([#4689](https://github.com/agentic-os-org/ANOLISA/pull/4689)).
+- Repeated Selective-Claw lifecycle calls no longer duplicate replacement conversation history, including after an engine restart ([#4700](https://github.com/agentic-os-org/ANOLISA/pull/4700)).
+- Selective-Claw restores structured host messages from the archive, preserving tool identities, content blocks, role aliases, and metadata when assembling stored context ([#4699](https://github.com/agentic-os-org/ANOLISA/pull/4699)).
+- Selective-Claw persists summaries for turns without a user message and includes summaries and fallback previews in context token estimates ([#4698](https://github.com/agentic-os-org/ANOLISA/pull/4698), [#4662](https://github.com/agentic-os-org/ANOLISA/pull/4662)).
+- Selective-Claw now honors OpenClaw `pluginConfig` options and expands `~/` archive paths, including the disabled registration setting ([#4822](https://github.com/agentic-os-org/ANOLISA/pull/4822)).
+
 ## [0.8.4] - 2026-09-22
 
 ### Added

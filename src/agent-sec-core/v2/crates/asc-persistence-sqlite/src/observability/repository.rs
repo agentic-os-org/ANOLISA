@@ -99,7 +99,7 @@ const SELECT_COLUMNS: &str = "id, hook, observed_at, observed_at_epoch, session_
 pub struct ObservabilityEventRepository;
 
 impl RecordRepository for ObservabilityEventRepository {
-    type Record = ObservabilityRecord;
+    type Record = (ObservabilityRecord, u32);
 
     fn tables(&self) -> &'static [TableSpec] {
         OBSERVABILITY_TABLES
@@ -114,8 +114,9 @@ impl RecordRepository for ObservabilityEventRepository {
     fn insert_or_raise(
         &self,
         conn: &Connection,
-        record: &ObservabilityRecord,
+        (record, uid): &Self::Record,
     ) -> Result<bool, KernelError> {
+        check_schema(conn)?;
         let metrics_json = record
             .metrics()
             .to_json_string()
@@ -128,8 +129,8 @@ impl RecordRepository for ObservabilityEventRepository {
 
         conn.execute(
             "INSERT INTO observability_events (hook, observed_at, observed_at_epoch, session_id, \
-             run_id, metrics_json, metadata_json, call_id, tool_call_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             run_id, metrics_json, metadata_json, call_id, tool_call_id, uid) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 record.hook().as_str(),
                 record.observed_at_iso(),
@@ -140,6 +141,7 @@ impl RecordRepository for ObservabilityEventRepository {
                 metadata_json,
                 metadata.call_id,
                 metadata.tool_call_id,
+                uid,
             ],
         )?;
         Ok(true)
@@ -385,7 +387,7 @@ fn count_of(row: &Row<'_>, index: usize) -> Result<u64, KernelError> {
 /// Falls back `user_input` → `prompt` → `None`, and truncates to
 /// [`USER_INPUT_PREVIEW_LIMIT`]. Unparseable JSON yields `None` so the UI can
 /// render a placeholder instead of failing the whole list.
-fn extract_user_input_preview(metrics_json: &str) -> Option<String> {
+pub(crate) fn extract_user_input_preview(metrics_json: &str) -> Option<String> {
     let Ok(Value::Object(metrics)) = serde_json::from_str::<Value>(metrics_json) else {
         return None;
     };
@@ -411,4 +413,15 @@ fn preview_text(value: &Value) -> Option<String> {
         Value::Object(map) if !map.is_empty() => Some(value.to_string()),
         _ => None,
     }
+}
+
+/// Rejects unsupported schema revisions before admitting reads or writes.
+pub(crate) fn check_schema(conn: &Connection) -> Result<(), KernelError> {
+    let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != asc_observability::OBSERVABILITY_SQLITE_SCHEMA_VERSION {
+        return Err(KernelError::Malformed(format!(
+            "unsupported observability schema revision {version}"
+        )));
+    }
+    Ok(())
 }

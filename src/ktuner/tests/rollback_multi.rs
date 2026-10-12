@@ -1,7 +1,7 @@
 //! CLI contract for the repeatable `ktuner rollback <param>…` positionals: the
 //! added arguments must leave the existing invocations and their error bodies
-//! exactly as they were, and combining them with `--list` must stay a usage
-//! error rather than being silently ignored. The restoration itself is covered
+//! exactly as they were, and combined with `--list` they narrow the read-only
+//! preview to the entries they name. The restoration itself is covered
 //! by the engine's private-fixture tests; this file deliberately never runs a
 //! rollback that could reach a real ledger.
 use std::process::{Command, Output};
@@ -24,31 +24,6 @@ fn error_body(message: &str) -> String {
 
 #[test]
 fn rollback_multi_param_cli_contract() {
-    // `--list` keeps its read-only preview of the whole pending set, so the
-    // positionals are refused as a usage error (the README's stderr JSON,
-    // exit 2) instead of answering a different question than the one asked.
-    // One positional keeps that message byte for byte; several name every
-    // argument in the order given.
-    for (arguments, named) in [
-        (
-            &["rollback", "--list", "vm.swappiness"][..],
-            "vm.swappiness",
-        ),
-        (
-            &["rollback", "--list", "vm.swappiness", "net.core.somaxconn"][..],
-            "vm.swappiness net.core.somaxconn",
-        ),
-    ] {
-        let out = ktuner(arguments);
-        assert_eq!(out.status.code(), Some(2), "{arguments:?}");
-        assert!(out.stdout.is_empty(), "{arguments:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            error_body(&format!("rollback --list takes no parameter (got {named})")),
-            "{arguments:?} must answer the documented usage error"
-        );
-    }
-
     // A caller who cannot reach the ledger is answered before anything runs,
     // and a batch asks the question a single parameter asked: the root gate
     // precedes the batch, so every arity answers identical bytes.
@@ -56,6 +31,8 @@ fn rollback_multi_param_cli_contract() {
         for arguments in [
             &["rollback"][..],
             &["rollback", "--list"][..],
+            &["rollback", "--list", "vm.swappiness"][..],
+            &["rollback", "--list", "vm.swappiness", "net.core.somaxconn"][..],
             &["rollback", "vm.swappiness"][..],
             &["rollback", "vm.swappiness", "net.core.somaxconn"][..],
             &[

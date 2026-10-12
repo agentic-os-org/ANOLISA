@@ -346,6 +346,59 @@ async fn dproc_removed_probe_option_rejects_before_binding_socket() {
     assert!(read_stderr(&running.directory).contains("unknown argument: --agent-probes"));
 }
 
+/// DPROC-QRY-001: optional index failure is diagnosed without preventing admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_binds_when_optional_query_indexes_fail() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let data_dir = directory.join("data");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data_dir)
+        .unwrap();
+    let db = data_dir.join("security-events.db");
+    let writer = asc_persistence_sqlite::security_events::SqliteEventWriter::new(&db).unwrap();
+    writer.probe().unwrap();
+    writer.close();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE idx_security_uid_time (id INTEGER)")
+        .unwrap();
+    let child = configured_command(&directory)
+        .env("AGENT_SEC_DATA_DIR", &data_dir)
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    wait_for_socket(&mut running).await;
+    assert!(data_dir.join("security-events.db").exists());
+    let stderr = read_stderr(&running.directory);
+    assert!(
+        stderr.contains("security query indexes unavailable"),
+        "{stderr}"
+    );
+
+    let signal = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(running.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(signal.success());
+    assert!(wait_for_exit(&mut running).await.success());
+}
+
 async fn run_binary_scenario(configure_admin: bool) {
     let directory = create_runtime_directory();
     let socket_path = directory.join("daemon.sock");

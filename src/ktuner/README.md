@@ -4,30 +4,36 @@
 
 Agent-facing kernel parameter tuning engine for ANOLISA. Evaluates 207 rules against the running system and outputs structured JSON recommendations. Designed to be called by cosh/agent via `ktuner <command> [options]`.
 
+Disk `rq_affinity` advice respects `threadirqs` boot parameters and PREEMPT_RT. Quoted parameter values do not introduce flags or a `--` separator; parameters after the actual separator are arguments to init.
+
 ## Usage
 
 ```bash
 # Diagnose — output score + recommendations
 ktuner check
 ktuner check --category net
+ktuner check --category net --category mem   # repeatable: keep the union
 ktuner check --conservative    # high-confidence only
 
 # Apply recommendations (requires root)
 sudo ktuner tune --dry-run     # preview, no changes
 sudo ktuner tune               # apply all
 sudo ktuner tune --conservative
+sudo ktuner tune --category net --category mem   # apply only these categories
 sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
+sudo ktuner tune --only vm.swappiness   # apply only the named parameters
 
 # Fix a single parameter (requires root)
 sudo ktuner fix <param>        # e.g. sudo ktuner fix vm.swappiness
 sudo ktuner fix <param> --dry-run   # preview one parameter, no changes
 
-# Explain why a parameter should change
-ktuner why <param>             # e.g. ktuner why net.core.somaxconn
+# Explain why one or more parameters should change (one diagnosis per run)
+ktuner why <param> [<param>…]  # e.g. ktuner why net.core.somaxconn vm.swappiness
 
 # Undo changes (requires root)
 sudo ktuner rollback          # destructive + terminal (deletes the ledger)
 sudo ktuner rollback --list   # read-only preview of what rollback would restore
+sudo ktuner rollback --list <param> [<param>…]  # preview only what rolling back these would restore
 sudo ktuner rollback <param> [<param>…]  # restore the recorded parameters named, e.g. vm.dirty_bytes
 ```
 
@@ -94,6 +100,68 @@ the tuned values on the next boot, and a ledger that survived keeps
 }
 ```
 
+`--category` is repeatable: every value keeps its own category (the same
+names as before), and the entries shown are the union of the named
+categories, so `check --category net --category mem` is one run over both —
+and `tune --category net --category mem` plans the same union. Repeating the
+aliases of one category (`net`, `network`, `网络`) keeps each entry once, and
+a value that names no category is rejected (exit 2) instead of being ignored.
+
+### why output
+
+`ktuner why <param>` explains one parameter. A parameter the rules recommend
+carries the same fields `check` publishes for it, plus `skip_reason` when no
+write path would take it; one already at its recommended value — or outside the
+rules, read from its own sysfs/sysctl file — answers with its current value and
+exits `0`:
+
+```json
+{
+  "current": "Linux",
+  "param": "kernel.ostype",
+  "status": "optimal"
+}
+```
+
+Two or more parameters are answered in one run, from one diagnosis: running the
+command once per parameter gathered the whole system every time, and two
+diagnoses could disagree if the kernel moved between them. The body carries
+`count` and `params` — one entry per parameter, in the order given and
+deduplicated by the same alias policy `fix` and `tune --exclude/--only` use
+(`vm/swappiness` and `vm.swappiness` answer once; sysfs identities such as
+`block/sda/scheduler` stay verbatim). Each entry is exactly the object that
+parameter answers alone:
+
+```json
+{
+  "count": 2,
+  "params": [
+    {
+      "current": "60",
+      "param": "vm.swappiness",
+      "status": "optimal"
+    },
+    {
+      "category": "performance",
+      "confidence": "high",
+      "current": "4096 131072 6291456",
+      "param": "net.ipv4.tcp_rmem",
+      "reason": "万兆网卡场景下增大 TCP 接收缓冲区上限，充分利用带宽-延迟积",
+      "recommended": "4096 131072 16777216",
+      "subcategory": "network",
+      "writable": true
+    }
+  ]
+}
+```
+
+`why` exits `1` when at least one entry is a recommendation and `0` when every
+entry is optimal — the 0/1 vocabulary `check` uses on the same parameters. A
+parameter that cannot be found, or whose value cannot be read, refuses the
+whole command with the error a single parameter gets (`2`, stderr JSON naming
+the parameter, nothing on stdout): a batch never answers half a question, so a
+typo cannot drop the rest of the batch behind a successful exit.
+
 ### tune output
 
 ```json
@@ -145,12 +213,44 @@ recording that cleared original in the ledger (so `rollback` restores it) and
 persists only the written half, which reproduces the same cleared state at
 boot; the built-in rules never plan both halves of a pair at once.
 
+`tune --only <param>` (repeatable) keeps only the named recommendations in the
+plan: it accepts the same spellings as `fix`/`why`, applies after the
+`--category`/`--conservative` filters, and is the mirror of `--exclude`, with
+which it is mutually exclusive — a run that carries both is a usage error
+(exit 2, stderr JSON). Every in-scope entry the selection does not name is
+left out exactly like an exclusion (not written, not recorded in the ledger,
+not persisted) and is reported in `would_skip` with the reason `not_selected`,
+which outranks `unwritable` and `runtime_dangerous` so the counts do not drift
+with the environment. A name that matches no recommendation in scope is not
+an error: it is echoed in `unmatched_only`, in the spelling given — an empty
+plan reports every given name. With nothing selected the run answers `status:
+"blocked"` and exits 1 like any other plan with nothing applicable;
+`blocked_not_selected` joins the short-circuit counts and the four add up to
+`recommendations`.
+
+```json
+{"blocked": 11, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "net.core.netdev_max_backlog", "reason": "not_selected"}, ...]}
+```
+
+An unmatched name cannot select anything, so a plan selected only by unmatched
+names has nothing applicable and reports its own count key:
+
+```json
+{"applied": 0, "blocked": 53, "blocked_not_selected": 53, "blocked_runtime_dangerous": 0, "blocked_unwritable": 0, "dry_run": true, "recommendations": 53, "status": "blocked", "unmatched_only": ["vm.swappiness", "no_such_ktuner_param"], "would_apply": [], "would_skip": [ ... ]}
+```
+
+`--only` narrows the plan like `--exclude` and, like it, does not reach the
+kernel's own side effects: writing one half of a mutually exclusive pair still
+zeroes the other half (`mm/page-writeback.c`, `mm/util.c`), so a parameter the
+selection left out is cleared in the kernel when its counterpart is written.
+The ledger still records the cleared original and `rollback` restores it.
+
 `tune --dry-run` previews the plan instead; `status` uses the same
 vocabulary as the short-circuit path (`planned` here; `optimal`/`blocked`
 when there is nothing to apply). `would_apply` lists the entries a real run
 would write, `would_skip` names the ones this run leaves out (with the
-reason: `unwritable`, `runtime_dangerous`, or `excluded` for an `--exclude`
-name), and `blocked` stays their count:
+reason: `unwritable`, `runtime_dangerous`, or `excluded` / `not_selected` for
+a name a selection left out), and `blocked` stays their count:
 
 ```json
 {"blocked": 1, "dry_run": true, "status": "planned", "would_apply": [ ... ], "would_skip": [{"param": "vm.nr_hugepages", "reason": "runtime_dangerous"}]}
@@ -286,9 +386,8 @@ records of the ones that did not (with their twins), exits `1` and reports
 persisted file. One name the ledger does not record refuses the whole command
 before anything is written (`2`, stderr JSON), the same command error a single
 parameter gets: skipping the miss would let a typo drop the rest of the batch
-while the run still exited `0`. `rollback` with no parameter, `rollback --list`,
-and `rollback --list` combined with any parameter (still a usage error) are
-unchanged.
+while the run still exited `0`. `rollback` with no parameter and `rollback --list`
+are unchanged; `rollback --list <param>…` previews a batch (see below).
 
 ### rollback --list output
 
@@ -317,6 +416,34 @@ reports `live: null` and `drifted: null`: an unreadable value is not an error an
 changes the exit code. The listing is a snapshot — the kernel can change between the preview and
 the rollback. Plain `ktuner rollback` is unchanged: it restores, finalizes the ledger, and
 cleans up.
+
+`sudo ktuner rollback --list <param> [<param>…]` narrows the preview to what
+`rollback <param> [<param>…]` would restore. The names resolve exactly as the restore resolves
+them (the same spellings, the same lookup), so the listing is each named entry plus the mutually
+exclusive twin the ledger recorded for it, which the restore takes along; an entry named twice,
+or under two spellings, is listed once. The body has the same keys and entry fields as the
+unfiltered listing, in the same param order — `rollback --list vm/swappiness vm.dirty_bytes`:
+
+```json
+{"count": 3, "pending": [
+  {"applied": "1073741824", "drifted": false, "live": "1073741824", "param": "vm.dirty_bytes", "previous": "0"},
+  {"applied": "0", "drifted": false, "live": "0", "param": "vm.dirty_ratio", "previous": "20"},
+  {"applied": "1", "drifted": false, "live": "1", "param": "vm.swappiness", "previous": "60"}
+]}
+```
+
+A name the ledger does not record is the same command error the restore reports (`2`, stderr
+JSON, nothing on stdout), so a preview never promises a rollback that would refuse; with no
+ledger every name is unrecorded. Nothing is written in either case. Before this, `--list` with
+any parameter was a usage error.
+
+`sudo ktuner rollback --list --drifted` narrows that listing to the entries whose `drifted` is
+`true` — the changes something else undid. The shape is unchanged and `count` is the filtered count,
+so the command answers "what did I lose?" directly. An entry whose path could not be read (`drifted:
+null`) is **not** listed: an unreadable value is not evidence of drift, and the plain `--list` still
+shows those entries. With names, the names narrow the preview first and the drift filter applies to
+what remains. `--drifted` without `--list` is a usage error (stderr JSON, exit 2), refused before
+the root gate like the other argument errors.
 
 ### error output (stderr)
 

@@ -13,6 +13,10 @@ name = "agent-sec-cli"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { workspace = true }
+crossterm = { workspace = true }
+signal-hook = { workspace = true }
+unicode-width = { workspace = true }
 asc-action-types = { workspace = true }
 asc-capability-prompt-scan = { workspace = true }
 asc-model-client = { workspace = true }
@@ -24,7 +28,7 @@ asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
 asc-policy-types = { workspace = true }
-chrono = { workspace = true }
+asc-security-events = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -32,8 +36,8 @@ thiserror = { workspace = true }
 unicode-properties = { workspace = true }
 
 [dev-dependencies]
+asc-persistence-sqlite = { workspace = true }
 asc-capability-skill-sec = { workspace = true }
-asc-security-events = { workspace = true }
 asc-action-runtime = { workspace = true, features = ["testing"] }
 asc-capability-pii-scan = { workspace = true }
 tokio = { workspace = true }
@@ -43,7 +47,6 @@ asc-daemon-handler = { workspace = true }
 asc-daemon-service = { workspace = true }
 asc-pap = { workspace = true }
 asc-pap-repository-memory = { workspace = true }
-asc-persistence-sqlite = { workspace = true }
 asc-telemetry = { workspace = true }
 uuid = { workspace = true }
 

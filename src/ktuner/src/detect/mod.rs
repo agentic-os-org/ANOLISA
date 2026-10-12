@@ -559,11 +559,11 @@ fn read_cgroup_memory_limit_kb() -> u64 {
 }
 
 /// The memory limit that binds a process: the smallest real limit from its
-/// own cgroup up to the mount root, 0 when nothing on that chain limits
-/// memory.
+/// accounting chain, 0 when nothing on that chain limits memory. A legacy v1
+/// parent with hierarchy disabled is outside that accounting chain.
 ///
-/// The root file alone is not the process's limit. Limits are inherited — a
-/// child cgroup can never exceed its ancestors — so the binding limit is the
+/// The root file alone is not the process's limit. Within a hierarchy, limits
+/// are inherited, so the binding limit is the
 /// minimum over the chain: a systemd unit with `MemoryMax=4G` on a 64 GB
 /// host, or a `--memory 2g` container run with host-shared cgroup
 /// namespaces, keeps its deeper `memory.max` while the root file still reads
@@ -652,9 +652,10 @@ fn cgroup_v1_relative_path(content: &str) -> Option<String> {
 }
 
 /// Walk the cgroup chain from `rel` up to `root`, reading `file` at every
-/// level; the effective value is the smallest real one seen, because a child
-/// can never exceed its ancestors. Levels with no value (the v2 `max`
-/// sentinel, the v1 unlimited constant, unparsable content) are skipped.
+/// level; the effective value is the smallest real one seen. A v1 memory walk
+/// stops before a parent that disables hierarchical accounting. Levels with no
+/// value (the v2 `max` sentinel, the v1 unlimited constant, unparsable content)
+/// are skipped.
 /// `None` when no level of the chain offers the file at all, so the caller
 /// can fall back to the next hierarchy. `parse` sets the unit: the memory
 /// walks read kilobytes, the cpuset walk reads the CPUs in a mask.
@@ -668,10 +669,20 @@ fn chain_min_value(root: &Path, rel: &str, file: &str, parse: fn(&str) -> u64) -
     {
         return None;
     }
-    let mut dir = root.join(rel);
+    let own_dir = root.join(rel);
+    let mut dir = own_dir.clone();
     let mut saw_limit_file = false;
     let mut best: u64 = 0;
     loop {
+        // Legacy v1 children are charged to a parent only while that parent
+        // enables hierarchy. Unknown state keeps the existing ancestor walk.
+        if file == "memory.limit_in_bytes"
+            && dir != own_dir
+            && fs::read_to_string(dir.join("memory.use_hierarchy"))
+                .is_ok_and(|state| state.trim() == "0")
+        {
+            break;
+        }
         if let Ok(content) = fs::read_to_string(dir.join(file)) {
             saw_limit_file = true;
             let kb = parse(&content);
@@ -3575,3 +3586,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cpu_hierarchy_tests.rs"]
 mod cpu_hierarchy_tests;
+
+#[cfg(test)]
+#[path = "memory_hierarchy_tests.rs"]
+mod memory_hierarchy_tests;

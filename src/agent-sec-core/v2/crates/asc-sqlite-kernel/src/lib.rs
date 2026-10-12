@@ -30,7 +30,8 @@ pub use connection::open_connection;
 pub use error::{KernelError, SCHEMA_ERROR_MARKERS, is_busy, is_corruption, is_schema};
 pub use fault::{Failure, Fault, FaultPolicy, Outcome, Phase, WriteFault};
 pub use maintenance::{
-    DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS, current_epoch, run_sqlite_maintenance_if_due,
+    DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS, current_epoch, run_sqlite_maintenance_detailed,
+    run_sqlite_maintenance_if_due,
 };
 pub use migration::SchemaMigrator;
 pub use path::{normalize_sqlite_path, sqlite_database_files};
@@ -40,7 +41,7 @@ pub use schema::{
     ColumnSpec, ExtraColumn, IndexSpec, TableSpec, ensure_schema, ensure_schema_if_needed,
     is_valid_identifier, warn_readonly_schema_readiness,
 };
-pub use sink::SqliteSink;
+pub use sink::{MaintenanceOutcome, SqliteSink};
 pub use store::SqliteStore;
 
 /// Compile-time assertion that `T` is `Send`.

@@ -14,6 +14,7 @@
 //! (treated as "SLS collection not active").
 
 use crate::trace::TraceContext;
+use crate::warn_stats;
 use crate::{StatsRecord, VERSION};
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -124,11 +125,11 @@ fn resolve_sls_path(env_val: Option<&str>) -> PathBuf {
         .and_then(|p| match validate_sls_path(&p) {
             Some(resolved) => Some(resolved),
             None => {
-                eprintln!(
+                warn_stats(&format!(
                     "tokenless-sls: TOKENLESS_SLS_PATH rejected (must be under \
                      /var/log/ or /tmp/, and must not contain '..'), \
                      falling back to default: {DEFAULT_SLS_PATH}"
-                );
+                ));
                 None
             }
         })
@@ -307,7 +308,7 @@ impl SlsWriter {
         let line = match serde_json::to_string(&sls_record) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("tokenless-sls: serialization error: {e}");
+                warn_stats(&format!("tokenless-sls: serialization error: {e}"));
                 return;
             }
         };
@@ -330,12 +331,12 @@ impl SlsWriter {
         }) {
             static WRITE_ERROR_WARNED: AtomicBool = AtomicBool::new(false);
             if !WRITE_ERROR_WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!(
+                warn_stats(&format!(
                     "tokenless-sls: write error to {}: {} \
                      (further write errors suppressed)",
                     self.path.display(),
                     e
-                );
+                ));
             }
         }
     }

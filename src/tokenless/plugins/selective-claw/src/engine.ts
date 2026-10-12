@@ -18,10 +18,21 @@ import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
 
-type ReconcileMessage = { role: string; content: string };
+type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
+
+function toolIdentity(message: AgentMessage): string | null {
+  if (!["tool", "toolResult", "tool_result"].includes(message.role)) return null;
+  // Compare stable tool semantics; replay timestamps do not identify a result.
+  return JSON.stringify([
+    message.toolCallId ?? null,
+    message.toolUseId ?? null,
+    message.toolName ?? null,
+    message.isError ?? null,
+  ]);
+}
 
 function messagesMatch(left: ReconcileMessage, right: ReconcileMessage): boolean {
-  return left.role === right.role && left.content === right.content;
+  return left.role === right.role && left.content === right.content && left.toolIdentity === right.toolIdentity;
 }
 
 function suffixOverlap(stored: ReconcileMessage[], incoming: ReconcileMessage[]): number {
@@ -246,9 +257,10 @@ export class SelectiveContextEngine implements ContextEngine {
     found: number;
     turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
   } {
+    const requestedTurns = [...new Set(turnSeqs)];
     const cache = this.turnMessagesCache.get(sessionId);
     const turnMap = new Map<number, Array<{ role: string; content: string }>>();
-    for (const seq of turnSeqs) {
+    for (const seq of requestedTurns) {
       const messages = cache?.get(seq);
       if (messages) {
         turnMap.set(seq, messages.map((message) => ({
@@ -258,7 +270,7 @@ export class SelectiveContextEngine implements ContextEngine {
       }
     }
 
-    const missingTurns = turnSeqs.filter((seq) => !turnMap.has(seq));
+    const missingTurns = requestedTurns.filter((seq) => !turnMap.has(seq));
     const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
     for (const m of storeMessages) {
       const arr = turnMap.get(m.turnSeq) ?? [];
@@ -266,7 +278,7 @@ export class SelectiveContextEngine implements ContextEngine {
       turnMap.set(m.turnSeq, arr);
     }
 
-    const result = turnSeqs
+    const result = requestedTurns
       .filter((ts) => turnMap.has(ts))
       .map((ts) => ({ turnSeq: ts, messages: turnMap.get(ts)! }));
 
@@ -274,10 +286,15 @@ export class SelectiveContextEngine implements ContextEngine {
   }
 
   private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
-    const stored = this.store.getMessages(sessionId);
+    const stored = this.store.getMessages(sessionId).map((message) => ({
+      role: message.role,
+      content: message.content,
+      toolIdentity: toolIdentity(this.restoreMessage(message)),
+    }));
     const incoming = messages.map((message) => ({
       role: this.normalizeRole(message.role),
       content: this.extractContent(message),
+      toolIdentity: toolIdentity(message),
     }));
 
     let matchLen = 0;

@@ -13,7 +13,7 @@ use std::time::Duration;
 use asc_action_runtime::Finalizer;
 use asc_daemon::{BootstrapConfig, scan_application, serve};
 use asc_daemon_core::{PeerCredentials, PrincipalPolicy, PrincipalRole};
-use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
+use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder, QueryHandler};
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_persistence_sqlite::security_events::SqliteEventWriter;
@@ -67,9 +67,9 @@ impl RunningDaemon {
                     Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
                 ),
             )
-            .with_security_queries(
+            .with_queries(QueryHandler::default().with_security_queries(
                 SqliteEventQuerySource::new(database).expect("query source opens"),
-            ),
+            )),
         );
         let shutdown = asc_daemon_service::ShutdownToken::new();
         let service_shutdown = shutdown.clone();
@@ -286,10 +286,10 @@ async fn a_policy_administrator_is_still_scoped_to_its_own_rows() {
     daemon.stop().await;
 }
 
-/// Root reads every owner and may narrow with the owner filter; this is the
-/// one widening the design grants. Skipped on single-UID runners.
+/// Root filters original session IDs and qualifies only response labels.
+/// Skipped on single-UID runners.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn root_reads_all_owners_and_narrows_with_the_owner_filter() {
+async fn root_queries_plain_sessions_and_labels_all_matching_uids() {
     if !is_root() {
         eprintln!("skipping: root acceptance requires root");
         return;
@@ -313,14 +313,48 @@ async fn root_reads_all_owners_and_narrows_with_the_owner_filter() {
 
     let narrowed = request_json(
         &daemon.socket_path,
-        &json!({"method": "sec.events.list", "params": {"owner_uid": FOREIGN_UID}}),
+        &json!({"method": "sec.events.list", "params": {"session_id": "session-shared"}}),
     )
     .await;
-    assert_eq!(narrowed["result"]["total"], json!(1));
+    assert_eq!(narrowed["result"]["total"], json!(3));
     assert_eq!(
         narrowed["result"]["items"][0]["event_id"],
         json!("foreign-1")
     );
+    assert_eq!(
+        narrowed["result"]["items"][0]["session_id"],
+        format!("{FOREIGN_UID}_session-shared")
+    );
+    let display_label = request_json(
+        &daemon.socket_path,
+        &json!({"method":"sec.events.list",
+            "params":{"session_id":format!("{FOREIGN_UID}_session-shared")}}),
+    )
+    .await;
+    assert_eq!(display_label["result"]["total"], 0);
+    let legacy = request_json(
+        &daemon.socket_path,
+        &json!({"method":"sec.events.list","caller":"agentsight",
+            "params":{"session_id":"session-shared"}}),
+    )
+    .await;
+    assert_eq!(legacy["ok"], true);
+    assert_eq!(legacy["data"], narrowed["result"]);
+    let summary = request_json(
+        &daemon.socket_path,
+        &json!({"method":"sec.summary","params":{}}),
+    )
+    .await;
+    assert_eq!(summary["result"]["affected_sessions"], 2);
+
+    for field in ["uid", "owner_uid"] {
+        let rejected = request_json(
+            &daemon.socket_path,
+            &json!({"method":"sec.events.list","params":{field:0}}),
+        )
+        .await;
+        assert_eq!(rejected["error"]["code"], "invalid_request");
+    }
 
     daemon.stop().await;
 }
@@ -339,6 +373,8 @@ async fn malformed_query_parameters_are_rejected_over_the_socket() {
         (json!({"since": "not a timestamp"}), "invalid_argument"),
         (json!({"event_id": "own-1"}), "invalid_argument"),
         (json!({"ownerUid": 0}), "invalid_request"),
+        (json!({"owner_uid": 0}), "invalid_request"),
+        (json!({"uid": 0}), "invalid_request"),
         (json!({"limit": true}), "invalid_request"),
     ] {
         let response = request_json(
@@ -374,7 +410,7 @@ async fn an_unconfigured_query_store_fails_closed() {
     writer.write(&event);
     writer.close_at(1000.0);
 
-    // A dispatcher assembled without with_security_queries must reject every
+    // A dispatcher assembled without query storage must reject every
     // sec.* call rather than reading an arbitrary database.
     let socket_dir = tempfile::tempdir().expect("socket dir");
     let socket_path = socket_dir.path().join("daemon.sock");

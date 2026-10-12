@@ -34,6 +34,9 @@ pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
 /// Append one observability record using `OTel` attribution.
 pub const OBS_RECORD: &str = "obs.record";
 
+/// Check daemon responsiveness and process uptime.
+pub const DAEMON_HEALTH: &str = "daemon.health";
+
 /// Scan one Bash or Python snippet for pre-execution security issues.
 pub const ACTION_CODE_SCAN: &str = "action.code_scan";
 /// Detect personal information and credentials without authorizing an operation.
@@ -53,6 +56,26 @@ pub const SEC_EVENTS_LIST: &str = "sec.events.list";
 pub const SEC_EVENTS_GET: &str = "sec.events.get";
 /// Count the caller's own security events grouped by one field.
 pub const SEC_EVENTS_COUNT_BY: &str = "sec.events.count_by";
+
+/// Lists owner-qualified observability sessions.
+pub const OBS_SESSIONS_LIST: &str = "obs.sessions.list";
+/// Lists runs within one owner-qualified session.
+pub const OBS_RUNS_LIST: &str = "obs.runs.list";
+/// Lists observations and their same-owner security correlations.
+pub const OBS_TIMELINE_GET: &str = "obs.timeline.get";
+/// Read-only observability query inventory.
+pub const OBS_QUERY_METHODS: [&str; 3] = [OBS_SESSIONS_LIST, OBS_RUNS_LIST, OBS_TIMELINE_GET];
+
+/// Bounded read-only observability operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservabilityQueryMethod {
+    /// Owner-qualified session summaries.
+    Sessions,
+    /// Runs within a session.
+    Runs,
+    /// Observations and optional security correlations.
+    Timeline,
+}
 
 /// Complete PAP method inventory for this protocol version.
 pub const PAP_METHODS: [&str; 12] = [
@@ -173,6 +196,10 @@ pub enum QueryMethod {
 /// Closed daemon method identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodId {
+    /// Process health for any authenticated local peer.
+    Health,
+    /// Read-only owner-authorized observability query.
+    ObservabilityQuery(ObservabilityQueryMethod),
     /// PAP administration method.
     Pap(PapMethod),
     /// Action capability method.
@@ -216,7 +243,11 @@ impl MethodId {
             // peer. The query family adds row-level owner scoping inside its
             // handler, derived from the transport-authenticated principal
             // rather than from the request.
-            Self::Action(_) | Self::ObservabilityRecord | Self::Query(_) => Metadata {
+            Self::Health
+            | Self::Action(_)
+            | Self::ObservabilityRecord
+            | Self::Query(_)
+            | Self::ObservabilityQuery(_) => Metadata {
                 access: AccessPolicy::LocalUser,
             },
         }
@@ -226,6 +257,7 @@ impl MethodId {
 /// Resolves an exact wire method without inspecting its parameters.
 pub fn resolve(method: &str) -> Option<MethodId> {
     match method {
+        DAEMON_HEALTH => Some(MethodId::Health),
         POLICY_TEMPLATES_CREATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Create))),
         POLICY_TEMPLATES_UPDATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Update))),
         POLICY_TEMPLATES_GET => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Get))),
@@ -238,6 +270,13 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         POLICY_SCOPES_DELETE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Delete))),
         POLICY_BINDINGS_GET => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Get))),
         POLICY_BINDINGS_LIST => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::List))),
+        OBS_SESSIONS_LIST => Some(MethodId::ObservabilityQuery(
+            ObservabilityQueryMethod::Sessions,
+        )),
+        OBS_RUNS_LIST => Some(MethodId::ObservabilityQuery(ObservabilityQueryMethod::Runs)),
+        OBS_TIMELINE_GET => Some(MethodId::ObservabilityQuery(
+            ObservabilityQueryMethod::Timeline,
+        )),
         OBS_RECORD => Some(MethodId::ObservabilityRecord),
         ACTION_CODE_SCAN => Some(MethodId::Action(ActionMethod::CodeScan)),
         ACTION_PII_SCAN => Some(MethodId::Action(ActionMethod::PiiScan)),

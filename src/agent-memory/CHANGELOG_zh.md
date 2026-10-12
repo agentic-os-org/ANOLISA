@@ -7,6 +7,12 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.9] - 2026-10-11
+
+### 修复
+
+- **agent-memory**: 更新至 v0.2.9，定位 OpenClaw adapter 的二进制时要求路径指向可执行文件，用户将目录配置为 `binaryPath` 时会在启动阶段收到配置错误；即使 `PATH` 较早的条目中存在名为 `agent-memory` 的目录，也能继续找到后续有效的可执行文件或指向可执行文件的符号链接（#4855）
+
 ## [0.2.8] - 2026-09-20
 
 ### 新增

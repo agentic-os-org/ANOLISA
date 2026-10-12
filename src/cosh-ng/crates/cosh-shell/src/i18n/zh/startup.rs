@@ -22,6 +22,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::StartupAuthHintLine => {
             "\u{1f4a1} 尚未配置 AI：运行 /auth 即可解锁自然语言提问、失败分析与个性化推荐"
         }
+        MessageId::StartupUpgradeHintLine => {
+            "\u{1f4e6} 发现 cosh-ng 更新：{current} → {latest}，运行 `{command}` 升级，完成后重新登录"
+        }
+        MessageId::StartupUpgradeNoticeTitle => "cosh-ng 有可用更新",
         _ => return None,
     })
 }

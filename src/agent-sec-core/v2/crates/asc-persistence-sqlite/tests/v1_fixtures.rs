@@ -19,9 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use asc_observability::OBSERVABILITY_SQLITE_SCHEMA_VERSION;
 use asc_persistence_sqlite::QueryScope;
-use asc_persistence_sqlite::observability::OBSERVABILITY_TABLES;
 use asc_persistence_sqlite::security_events::{
     EventFilters, SECURITY_EVENTS_TABLES, SecurityEventsMigrator, SqliteEventReader,
 };
@@ -63,18 +61,6 @@ fn open_security(path: &Path) -> SqliteStore {
         SECURITY_EVENTS_TABLES,
         Some(Arc::new(SecurityEventsMigrator) as Arc<dyn SchemaMigrator>),
         "[security_events]",
-    )
-    .expect("store")
-}
-
-fn open_observability(path: &Path) -> SqliteStore {
-    SqliteStore::new(
-        path,
-        false,
-        OBSERVABILITY_SQLITE_SCHEMA_VERSION,
-        OBSERVABILITY_TABLES,
-        None,
-        "[observability]",
     )
     .expect("store")
 }
@@ -337,16 +323,4 @@ fn a_newer_schema_version_is_left_untouched() {
         before,
         "opening a future database must not modify the file"
     );
-}
-
-#[test]
-fn an_observability_fixture_keeps_its_only_revision() {
-    let (_dir, path) = staged("observability_v1");
-    let store = open_observability(&path);
-    let projected = store
-        .with_connection(false, |conn| Ok(project(conn, OBSERVABILITY_TABLES)))
-        .expect("connection")
-        .expect("store not disabled");
-
-    assert_eq!(projected, expected("observability_v1", "expected"));
 }

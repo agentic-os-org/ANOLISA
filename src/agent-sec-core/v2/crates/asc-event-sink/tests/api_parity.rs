@@ -447,7 +447,7 @@ const V1_TO_V2: &[(&str, &str, &str)] = &[
     (
         "observability.sqlite_writer.ObservabilitySqliteWriter",
         "asc_persistence_sqlite::observability::ObservabilitySqliteWriter",
-        "both write and write_or_raise",
+        "both write and write_or_raise require a trusted UID",
     ),
     (
         "observability.sqlite_reader.ObservabilityReader",

@@ -502,6 +502,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun Oct 11 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Enable HTML rendering by default while preserving shell-read page source
+- Reclaim expired Stash payloads on writes and improve stats reliability
+- Fix RTK deadlines, AgentScope callbacks, Hermes errors and OpenCode hook cleanup
+- Repair npm launchers and preserve Qwen Code dry-run state
+- Correct Selective-Claw recall, archive history, summaries and host configuration
+
 * Tue Sep 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.4-1
 - Add standalone installation and receipt-based uninstall with ownership protection
 - Preserve shared adapters during npm installs and recognize removed Codex plugins

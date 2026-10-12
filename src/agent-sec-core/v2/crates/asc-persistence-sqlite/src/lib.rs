@@ -105,3 +105,6 @@ mod tests {
             .collect()
     }
 }
+
+/// Strict owner-aware daemon query adapters.
+pub mod query;

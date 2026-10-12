@@ -10,6 +10,8 @@ ktuner 是规则引擎，不是 LLM：每条建议都来自读取 `/proc/sys` �
 
 它设计为被 cosh 及其他 ANOLISA 兼容 Agent 作为工具调用，但命令行同样可以手动使用。
 
+磁盘 `rq_affinity` 建议会考虑 `threadirqs` 启动参数和 PREEMPT_RT。引号内的参数值不会引入独立 flag 或 `--` 分隔符；实际分隔符后的参数属于 init。
+
 ---
 
 ## 安装
@@ -51,6 +53,7 @@ sudo install -o root -g root -m 755 target/release/ktuner /usr/local/bin/ktuner
 # 诊断 —— 只读，无需 root
 ktuner check                   # 分数 + 所有建议
 ktuner check --category net    # 仅某一类别
+ktuner check --category net --category mem   # 可重复，取并集
 ktuner check --conservative    # 仅高置信度建议
 
 # 预览改动但不应用（dry-run）
@@ -60,17 +63,19 @@ sudo ktuner tune --dry-run
 sudo ktuner tune               # 应用全部
 sudo ktuner tune --conservative
 sudo ktuner tune --exclude vm.dirty_ratio   # 应用其余全部、跳过这一项
+sudo ktuner tune --only vm.swappiness       # 只应用点名的参数
 
 # 修复单个参数
 sudo ktuner fix vm.swappiness
 sudo ktuner fix vm.swappiness --dry-run   # 预览单个参数，不做实际变更
 
-# 解释某个参数为何应该改
-ktuner why net.core.somaxconn
+# 解释参数为何应该改 —— 多个参数共用一份诊断
+ktuner why net.core.somaxconn vm.swappiness
 
 # 撤销 ktuner 做的所有改动，或点名的已记录参数
 sudo ktuner rollback          # 破坏性且终结：恢复并删除 ledger
 sudo ktuner rollback --list   # 只读预览回滚将恢复的内容
+sudo ktuner rollback --list vm.swappiness   # 只预览回滚 vm.swappiness 将恢复的内容
 sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记录参数
 ```
 
@@ -95,6 +100,16 @@ sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记�
 只恢复了一部分的批退役已落地的条目、保留其余以便重试并退出 `1`，而任一名字不在账本里就在
 动任何东西之前拒绝整条命令（`2`），与单参数版本同一条命令错误。
 
+`ktuner why <param>…` 解释一个或多个参数。单个参数保持原有的平铺形态：推荐项携带
+`check` 对同一参数发布的字段（没有任何写路径会采纳时带 `skip_reason`），已达推荐值的
+参数输出 `{"param": …, "current": …, "status": "optimal"}`。两个及以上参数在一次运行里
+回答、共用一份诊断——逐参数单独调用会让每个进程各跑一遍完整的系统诊断。输出携带
+`count` 与 `params`：按命令行顺序每个参数一条，按 `fix` 相同的别名政策去重
+（`vm/swappiness` 与 `vm.swappiness` 是同一参数；`block/sda/scheduler` 这类 sysfs
+身份保持原样），每个元素与该参数单独调用时的对象完全相同。至少一条是推荐项时 `why`
+退出 `1`，全部 optimal 时退出 `0`；找不到或读不到的参数以自身错误拒绝整条命令——
+退出 `2`、stderr JSON 点名该参数、stdout 为空——批处理绝不回答半个问题。
+
 `tune --exclude <param>`（可重复）把点名的建议移出计划：不写入、不进回滚账本、
 不持久化。排除在 `--category` 与 `--conservative` 过滤之后生效；被排除项在输出中
 以 `would_skip`（原因 `excluded`）列出，未命中范围内任何建议的名字则出现在
@@ -102,11 +117,20 @@ sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记�
 排除是 `blocked` 运行、退出码 `1`，与任何无可应用项的计划一致。互斥 sysctl 对中写入另一半时，内核仍会把
 被排除的一半清零；ktuner 记录被清零的原值，`rollback` 可以恢复。
 
+`tune --only <param>`（可重复）是 `--exclude` 的镜像——两者互斥，同时给出是
+命令错误（`2`）。只有点名的建议留在计划里；范围内其余条目出现在 `would_skip`
+中、原因为 `not_selected`，未命中范围内任何建议的名字回显在 `unmatched_only`
+中而不是让命令失败（什么都没选中是 `blocked` 运行、退出码 `1`）。与
+`--exclude` 一样，它只筛计划：写入互斥孪生的另一半时，内核仍会把被留下的
+一半清零。
+
 ---
 
 网络 conf 参数中的网卡身份区分大小写。`net/ipv4/conf/Br0.100/forwarding` 和 `net.ipv4.conf.Br0.100.forwarding` 指向同一网卡；`br0.100` 是不同的身份。IPv6 遵循相同规则。网卡包含字面点时，持久化记录使用首个分隔符为斜杠的 sysctl.d 键，让 systemd 保留这些点。此行为支持已有有效记录或自定义库推荐；当前内置规则不生成逐 VLAN 推荐。
 
-`sudo ktuner rollback --list` 也会报告当前实际状态：每个待回滚条目新增 `live`（此刻从该条目路径读到的值；路径读不到时为 `null`——设备已消失、模块未加载）和 `drifted`（`live` 是否仍与记录的 `applied` 一致；没有可比较的 live 值时为 `null`）。两个字段都是对现有形态的新增——`count`、`pending` 以及记录的 `param`/`applied`/`previous` 取值都不变——读不到值不算错误，命令仍以 `0` 退出。取值的呈现与比较与 ktuner 其他输出一致，sysfs 选项列表或多值 sysctl 不会被误报为漂移。
+`sudo ktuner rollback --list` 也会报告当前实际状态：每个待回滚条目新增 `live`（此刻从该条目路径读到的值；路径读不到时为 `null`——设备已消失、模块未加载）和 `drifted`（`live` 是否仍与记录的 `applied` 一致；没有可比较的 live 值时为 `null`）。两个字段都是对现有形态的新增——`count`、`pending` 以及记录的 `param`/`applied`/`previous` 取值都不变——读不到值不算错误，命令仍以 `0` 退出。取值的呈现与比较与 ktuner 其他输出一致，sysfs 选项列表或多值 sysctl 不会被误报为漂移。`sudo ktuner rollback --list --drifted` 把列表收窄到记录值与内核不再一致的条目——被别的写者改掉的那些；路径读不到的条目不在其中（不带 `--drifted` 的 `--list` 仍能看到），`--drifted` 不带 `--list` 是用法错误。
+
+`sudo ktuner rollback --list <param>…` 把这份预览收窄到 `rollback <param>…` 将恢复的内容：每个点名的条目，加上与它一起记录的互斥孪生，形态与顺序同完整列表。账本里没有的名字是与回滚相同的命令错误（`2`）。
 
 ## 权限边界
 

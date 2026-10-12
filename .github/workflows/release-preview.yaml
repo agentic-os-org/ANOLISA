@@ -145,6 +145,16 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ inputs.tokenless_source_tag }}
 
+      - name: Build ws-ckpt precompiled package
+        id: ws-ckpt-prebuilt
+        if: matrix.component == 'ws-ckpt'
+        uses: ./.github/actions/build-ws-ckpt-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
       - name: Build ANOLISA CLI precompiled package
         id: anolisa-prebuilt
         if: matrix.component == 'anolisa'
@@ -163,11 +173,13 @@ jobs:
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
           TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+          WS_CKPT_DIRECTORY: ${{ steps.ws-ckpt-prebuilt.outputs.artifact-directory }}
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
             tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            ws-ckpt) ARTIFACT_DIRECTORY="$WS_CKPT_DIRECTORY" ;;
             *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
           esac
           if [ -z "$ARTIFACT_DIRECTORY" ]; then

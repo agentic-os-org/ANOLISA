@@ -119,7 +119,8 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
   root 身份不等于开放全部特权；
 - systemd 负责 start/stop/restart、资源限制、目录准备和故障拉起；
 - V2 RPM 首次安装或检测到尚未卸载的 V1 user unit 时，在运行中的 system manager 上执行 `systemctl enable --now agent-sec-core.service`；这使 V1 升级切换到 system service，同时纯 V2 重装保留管理员已有的服务状态。启动失败不使 RPM 事务失败，部署者应查询 service 状态和 journal。没有 system manager 的镜像构建或容器安装只完成文件安装，不尝试启动 daemon；
-- daemon 不自行 daemonize，不在启动路径隐式执行不可逆 migration；
+- daemon 不自行 daemonize；安装、跨目录数据导入与 owner mapping 应由显式迁移入口负责；
+  当前 obs 启动期 schema 收敛见本文 DPROC-QRY-001；
 - runtime 目录由 systemd RuntimeDirectory 创建；state/log 路径按各自存储契约管理；
 - 两个不同 UID/Agent 通过同一 system socket 访问并保持 owner-scope 隔离。
 
@@ -127,7 +128,8 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 
 - 默认 DaemonSet，每个目标 Node 恰有一个 Ready 实例；
 - Helm/manifest 明确 service account、security context、volume、resource 和 probe；
-- init job 或安装流程显式调用 asc-state-migrator；daemon 启动不偷偷升级状态；
+- 跨目录数据导入与 owner mapping 应由 init job 或安装流程显式调用 asc-state-migrator；
+  当前 obs 启动期 schema 1 → 2 收敛见本文 DPROC-QRY-001，不执行上述导入；
 - rollout、rollback、drain 和 Node replacement 分别留存证据。
 
 ### 4.3 CLI 与进程所有权
@@ -265,7 +267,11 @@ RPC error、SecurityEvent 或 telemetry。`agent-sec-daemon` binary 单元测试
 OTel 初始化后由 §11 的有界 hook 接管，仅输出固定诊断且不等待 stderr。
 
 该 slice 已由唯一的 concrete `DaemonDispatcher` 注册 first-version PAP daemon protocol，
-但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer
+并注册 `daemon.health`，供任意经过内核认证的本地调用方检查进程响应。
+返回 `status: "ok"`、`pid` 和从 dispatcher 初始化起计的 `uptime_seconds`；
+该快照不代表扫描模型、后台任务或存储的健康状态，也不包含 V1 的完整 jobs/queues 快照。
+`caller: "agentsight"` 沿用 V1 响应外壳，其余请求使用 V2 外壳。
+dispatcher 完成 envelope decode、request ID、kernel peer
 credentials 到 trusted Principal 的绑定、method allowlist、authorization 和 response
 encode；PAP 是其中一组显式注册的方法，不增加第二个 service dispatch 层。当前 composition
 root 使用 `RootManagedPrincipalPolicy`：UID 0 始终具有 PAP 管理权限。部署者可用
@@ -334,8 +340,25 @@ runner 工作目录的 owner、权限和 umask。
 服务 UID 与 root 是可信边界；客户端不得拥有目录写权限。显式 `--socket` 允许在另一
 安全目录建立隔离开发实例，不代表防止特权操作者故意创建第二个 namespace。
 
-当前正常退出包含 UDS drain 2s、SkillFS worker join 30s、reconciliation join 30s
-和 Tokio shutdown 1s 的上限；unit 另设 `TimeoutStopSec=75`，超时由 systemd 对 control group 发 SIGKILL。
+当前正常退出的停机预算：UDS drain 2s，随后 retention terminal join（65s）与 SkillFS
+worker join（65s）、reconciliation join（30s）并行等待、共享同一 65s stop deadline，再加
+Tokio shutdown 1s 与 telemetry shutdown 2s，合计约 70s；unit 另设 `TimeoutStopSec=75`（为
+security final pass 与观测余量保留），超时由 systemd 对 control group 发 SIGKILL。retention
+join 超时只跳过 security final pass（daemon 以 FAILURE 退出码报告该降级）；SkillFS worker
+drain 与 observability close 不受该超时影响，照常执行。
+
+security final pass 自身有明确的剩余预算：drains 完成后，final pass（含 observability
+同路径的 gated maintenance）必须在 stop deadline + Tokio shutdown 1s + 5s
+（`FINAL_PASS_BUDGET`）之内完成；剩余预算不足 2s（`FINAL_PASS_MIN_BUDGET`，见
+`SqliteSink::close_with_deadline`）时直接跳过该 pass、只关闭连接，gate marker 不前进，
+下次启动的 catch-up pass 补跑该 prune（与硬杀死同一恢复路径）。周期 pass 持续失败导致
+marker 未推进、final pass 需要重跑完整 prune 的场景因此被预算闸门挡住；在窗口内启动但
+超时的 pass 由 `TimeoutStopSec=75` 截断，同样落入硬杀死恢复路径。
+
+SIGTERM/SIGINT 在启动 catch-up 期间到达时不再挂起等待：信号任务先于 catch-up 启动，
+catch-up 与 shutdown 信号 `select!` 竞争；信号先到则放弃 admission（daemon 不进入
+serve，直接进入停机流程，退出码 0），in-flight catch-up pass 由 retention 任务继续
+持有直至终局 join，不会与 final pass 争抢 store mutex。
 SIGTERM/SIGINT 正常退出为 0，启动运行错误为 1，参数错误为 2；SIGHUP 消费但不 reload。
 `Restart=on-failure`、`RestartSec=2`、300s 内最多 5 次启动限制异常退出重启循环。
 Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 readiness 证据。
@@ -593,7 +616,7 @@ RPM 安装套件通过 914 项，并单独通过修正后的 systemd 生命周�
 ## [TARGET V2] 可观测采集存储接线（DPROC-022）
 
 `obs.record` 的 JSONL/SQLite writers 使用与安全事件相同的已解析 daemon 系统数据目录，
-显式装配、惰性初始化，无 HOME fallback。可观测双写仅通过 daemon 持有的
+显式装配，无 HOME fallback；obs schema 在启动时准备，JSONL 惰性初始化。可观测双写仅通过 daemon 持有的
 `ConfiguredObservabilitySinks` 实例，不提供进程全局可观测写入口。关闭时保留 sinks 到 transport/blocking drain
 之后再执行 close/保留期维护。具体路径、失败及有界关闭语义见
 [V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md#3-数据路径与生命周期)。
@@ -622,3 +645,46 @@ Scope update、Scope revision 参数及手动 Binding mutation 已移除，应�
 单进程 Scope/Binding 快照不构成 daemon 重启恢复证据。procfs/runtime/Adapter 的 scripted
 Client 组合验证自动 Binding 和清理；bootstrap SIGTERM 验证任务停止，CLI/UDS 验证权限与
 公开接口。本节不声明 RPM/systemd 实测、真实 AgentSight 或 kernel enforcement。
+
+## [TARGET V2 obs 已实现] 当前用户查询范围（DPROC-QRY-001）
+
+查询 reader 使用与 writer 一致的显式系统数据路径，由 daemon 装配；只读连接随每次查询结束关闭，writers 在请求 drain 后关闭。
+CLI/TUI 不直读数据库；普通用户按 UDS peer UID 过滤，root 可查询全部；非 root 的
+PolicyAdministrator 不获得跨 UID 查询权限。可观测数据在单次 INSERT 中持久化 peer UID，
+JSONL 同时写入可信顶层 `uid`。当前 obs schema revision 2 包含可空 UID 和归属索引；
+SQLite 与 JSONL writer 均强制携带可信 `uid: u32`，不提供无 UID writer。写入侧将所选数据库
+从 revision 1 升级到 2：缺少 UID 时添加可空列，历史记录保持 `NULL`，已有 UID 保持不变；
+列、索引与版本在同一事务收敛，失败回滚并可重试。非 root 的 UID 过滤不匹配历史 `NULL`；
+root 可查询这些记录，但不为其关联安全事件，不将未知归属当作 UID 0。
+该升级不执行 V1 per-user 数据发现、合并或 owner 推断，不替代 §6.2 的 state migrator。
+初始化或升级失败时 obs 查询不可用且采集显式报错。回退不支持 revision 2 的二进制前，
+须恢复升级前的配套数据库备份；不提供 schema 逆向迁移。
+存储失败边界和真实跨 UID 安装态验收见
+[V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)。
+三个 obs 查询和 CLI report/review 已接线，已有源码 CLI/daemon E2E 和 AgentSight 真实数据联调证据。
+2026-10-10 检查确认：宿主机运行 systemd，但当前账号无法免密 sudo，且未安装 V2 RPM；
+现有 root 调试容器的 PID 1 不是 systemd。因此本轮未执行安装态跨 UID/systemd 验证，
+已测范围及限制见查询设计 §9.2；库内 scope 测试和源码进程测试不作为安装态通过证据。
+
+启动边界：security SQLite 必要 schema 初始化失败仍阻止 READY；随后单独准备三项可选
+查询索引，失败记录具体原因并继续 admission，查询可能变慢。当前建索引仍在 READY 前同步
+执行；已有索引使用 IF NOT EXISTS，新索引需扫描/排序历史记录。大库首次启动成本未测量，
+此变更只隔离索引错误，不提供耗时上限或后台重建能力。obs 初始化失败的既有降级策略保持不变。
+
+DPROC-QRY-001 源码 fixture：
+`v2/crates/asc-event-sink/src/configured.rs::tests::query_index_failure_does_not_disable_required_storage`
+验证索引失败后仍可写安全事件；
+`v2/apps/asc-daemon/tests/bootstrap.rs::daemon_binds_when_optional_query_indexes_fail`
+在 root 分支验证真实二进制继续监听并输出诊断。非 root 执行仅验证 daemon 的启动身份拒绝，
+不算该启动场景通过。QRY-001..011 的逐项 fixture 映射见查询设计 §8，验证范围见 §9.2。
+
+
+DPROC-QRY-001 查询身份补充：所有查询的授权范围由 UDS peer UID 决定；
+root 为 All，普通用户固定 Own(peer_uid)。sec 按原始 session ID 筛选，root 返回所有
+UID 下的匹配记录；root 返回中的 `UID_session_id` 仅用于区分同名会话。
+obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒绝。
+可执行 fixture：`v2/apps/asc-cli/tests/observability_query.rs` 验证真实 peer、
+无 UID 的 report/review；`v2/crates/asc-persistence-sqlite/tests/owned_queries.rs` 验证 root
+组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
+`v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
+以上不替代安装态不同 UID/systemd 验收。

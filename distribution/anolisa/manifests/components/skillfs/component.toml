@@ -7,7 +7,7 @@ display_name = "SkillFS"
 description = "AI agent skill management via virtual filesystem"
 stability = "experimental"
 license = "Apache-2.0"
-repository = "https://github.com/alibaba/anolisa"
+repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"

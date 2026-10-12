@@ -159,6 +159,22 @@ Bash), probe failures, and
 parent environments that export function names POSIX startup cannot import all
 fall back automatically. Zsh is unaffected.
 
+## Login upgrade notice
+
+At login, `cosh-shell` checks for an available managed `cosh-ng` update in the
+background and shows a notice when it finds one. The check is enabled by
+default. Set `COSH_SHELL_UPGRADE_CHECK` to `off`, `0`, `false`, or `no`
+(case-insensitive) to disable it for the next session. Set
+`COSH_SHELL_UPGRADE_CHECK_CACHE` to override the cache file path; the default
+is `~/.copilot-shell/cosh/upgrade-check.json`.
+
+When `cosh-ng` was installed by `anolisa` in system scope with the default raw
+backend, the notice appears only for root sessions. A regular user cannot run
+the system-scope update check because it needs write access to
+`/var/cache/anolisa`, so the notice stays hidden. To check manually, run
+`sudo anolisa --install-mode system update cosh-ng --dry-run`. RPM-backend
+installations are not affected.
+
 ## Audit settings
 
 Audit settings come from the system file when it has an `[audit]` table;
@@ -214,6 +230,8 @@ required.
 | `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
 | `COSH_SHELL_LOGIN_IDENTITY` | `on`/`off` real login identity for the next Enhanced login shell (default on) |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
+| `COSH_SHELL_UPGRADE_CHECK` | Login upgrade notice check; enabled by default, set `off`, `0`, `false`, or `no` to disable |
+| `COSH_SHELL_UPGRADE_CHECK_CACHE` | Override the login upgrade notice cache path (default `~/.copilot-shell/cosh/upgrade-check.json`) |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |
 | `COSH_AUDIT_DIR` | Audit storage root |

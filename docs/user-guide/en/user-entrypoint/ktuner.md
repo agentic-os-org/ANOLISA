@@ -10,6 +10,8 @@ ktuner is a rule engine, not an LLM: every recommendation comes from a hard-code
 
 It is designed to be driven by cosh and other ANOLISA-compatible agents as a tool, but the CLI is equally usable by hand.
 
+Disk `rq_affinity` advice respects `threadirqs` boot parameters and PREEMPT_RT. Quoted parameter values do not introduce flags or a `--` separator; parameters after the actual separator are arguments to init.
+
 ---
 
 ## Installation
@@ -53,6 +55,7 @@ The examples below assume `ktuner` is on your `PATH`.
 # Diagnose — read-only, no root required
 ktuner check                   # score + all recommendations
 ktuner check --category net    # limit to one category
+ktuner check --category net --category mem   # categories may be repeated; the union is kept
 ktuner check --conservative    # high-confidence recommendations only
 
 # Preview changes without applying (dry-run)
@@ -62,17 +65,19 @@ sudo ktuner tune --dry-run
 sudo ktuner tune               # apply all
 sudo ktuner tune --conservative
 sudo ktuner tune --exclude vm.dirty_ratio   # apply all but this one
+sudo ktuner tune --only vm.swappiness       # apply only the named parameters
 
 # Fix a single parameter
 sudo ktuner fix vm.swappiness
 sudo ktuner fix vm.swappiness --dry-run   # preview one parameter, no changes
 
-# Explain why a parameter should change
-ktuner why net.core.somaxconn
+# Explain why parameters should change — several share one diagnosis
+ktuner why net.core.somaxconn vm.swappiness
 
 # Undo all changes ktuner made, or the recorded parameters named
 sudo ktuner rollback          # destructive + terminal: restores and deletes the ledger
 sudo ktuner rollback --list   # read-only preview of what rollback would restore
+sudo ktuner rollback --list vm.swappiness   # preview only what rolling back vm.swappiness would restore
 sudo ktuner rollback vm.swappiness net.core.somaxconn   # restore the recorded parameters named
 ```
 
@@ -106,6 +111,20 @@ retires the entries that landed, keeps the rest for a retry and exits `1`, and o
 name the ledger does not record refuses the whole command before anything is written
 (`2`), the same command error a single parameter gets.
 
+`ktuner why <param>…` explains one or several parameters. A single parameter keeps
+its flat body: a recommendation with the fields `check` publishes for it (`skip_reason`
+when no write path would take it), or `{"param": …, "current": …, "status": "optimal"}`
+for a parameter already at its recommended value. Two or more parameters are answered
+in one run, from one diagnosis — running the command once per parameter gathered the
+whole system each time. The body carries `count` and `params`: one entry per parameter,
+in the order given and deduplicated by the same alias policy `fix` uses
+(`vm/swappiness` and `vm.swappiness` are one parameter; sysfs identities such as
+`block/sda/scheduler` stay verbatim), and each entry is exactly the object that
+parameter answers alone. `why` exits `1` when at least one entry is a recommendation
+and `0` when every entry is optimal; a parameter that cannot be found or read refuses
+the whole command with its own error — exit `2`, stderr JSON naming the parameter,
+nothing on stdout — so a batch never answers half a question.
+
 `tune --exclude <param>` (repeatable) leaves a named recommendation out of the plan:
 nothing is written for it, nothing is recorded in the rollback ledger, and nothing is
 persisted. It applies after the `--category` and `--conservative` filters, and the
@@ -116,11 +135,21 @@ is a `blocked` run with exit code `1`, like any other plan with nothing applicab
 sysctl pair does not stop the kernel from zeroing it when the other half is written;
 ktuner records the cleared original so `rollback` can restore it.
 
+`tune --only <param>` (repeatable) is the mirror of `--exclude` — the two are
+mutually exclusive, and a run carrying both is a command error (`2`). Only the named
+recommendations stay in the plan; every other in-scope entry is listed in `would_skip`
+with reason `not_selected`, and a name that matches nothing in scope is echoed in
+`unmatched_only` instead of failing the run (selecting nothing is a `blocked` run,
+exit code `1`). Like `--exclude`, it filters the plan only: it does not stop the
+kernel from zeroing a mutually exclusive twin when the other half is written.
+
 ---
 
 For network conf parameters, interface identity is case-sensitive. Both `net/ipv4/conf/Br0.100/forwarding` and `net.ipv4.conf.Br0.100.forwarding` address the same interface; `br0.100` is a different identity. IPv6 follows the same rule. Persisted records for interfaces with literal dots use slash-first sysctl.d keys so systemd preserves those dots. This supports existing valid records or custom library recommendations; built-in rules do not currently generate per-VLAN recommendations.
 
-`sudo ktuner rollback --list` reports the live state as well: each pending entry adds `live` (the value read from the entry's path right now, or `null` when the path cannot be read — a device that is gone, a module that is not loaded) and `drifted` (whether `live` still matches the recorded `applied`; `null` when there is no live value to compare). Both fields are additions to the existing shape — `count`, `pending` and the recorded `param`/`applied`/`previous` values are unchanged — and an unreadable value is not an error: the command still exits `0`. Values are rendered and compared the same way as everywhere else in ktuner, so a sysfs option list or a multi-value sysctl is not mistaken for drift.
+`sudo ktuner rollback --list` reports the live state as well: each pending entry adds `live` (the value read from the entry's path right now, or `null` when the path cannot be read — a device that is gone, a module that is not loaded) and `drifted` (whether `live` still matches the recorded `applied`; `null` when there is no live value to compare). Both fields are additions to the existing shape — `count`, `pending` and the recorded `param`/`applied`/`previous` values are unchanged — and an unreadable value is not an error: the command still exits `0`. Values are rendered and compared the same way as everywhere else in ktuner, so a sysfs option list or a multi-value sysctl is not mistaken for drift. `sudo ktuner rollback --list --drifted` narrows that listing to the entries whose recorded value no longer matches the kernel — the changes something else undid; entries whose path cannot be read are not listed (the plain `--list` still shows them), and `--drifted` without `--list` is a usage error.
+
+`sudo ktuner rollback --list <param>…` narrows that preview to what `rollback <param>…` would restore: each named entry plus the mutually exclusive twin recorded with it, in the same shape and order as the full listing. A name the ledger does not record is the same command error (`2`) the restore reports.
 
 ## Permission Boundary
 

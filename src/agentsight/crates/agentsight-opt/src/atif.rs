@@ -46,7 +46,7 @@ pub struct AtifTrajectory {
     pub schema_version: String,
     /// Informational only (run-scoped); ATIF v1.7 relaxed it to optional, and
     /// nothing in this crate reads it.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_session_id")]
     pub session_id: String,
     #[serde(default)]
     pub agent: Option<AtifAgent>,
@@ -201,6 +201,13 @@ pub struct AtifFinalMetrics {
     pub total_steps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
+}
+
+fn de_session_id<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 // ─── Parsing & helpers ───────────────────────────────────────────────────────

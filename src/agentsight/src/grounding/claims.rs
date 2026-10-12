@@ -244,6 +244,34 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
             }
         }
     }
+    // In valid JSON, a comma separates values rather than grouping digits.
+    // Replace only numeric claims so the existing literal/quote extraction
+    // remains intact; string values still use the human-text numeric rules.
+    if let Ok(value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) =
+        serde_json::from_str::<serde_json::Value>(text)
+    {
+        claims.retain(|claim| claim.class != ClaimClass::Number);
+        let mut pending = vec![&value];
+        while let Some(value) = pending.pop() {
+            match value {
+                serde_json::Value::Number(number) => {
+                    if let Some(claim) = as_number(&number.to_string()) {
+                        claims.push(claim);
+                    }
+                }
+                serde_json::Value::String(text) => {
+                    claims.extend(
+                        extract_claims(text)
+                            .into_iter()
+                            .filter(|claim| claim.class == ClaimClass::Number),
+                    );
+                }
+                serde_json::Value::Array(values) => pending.extend(values.iter().rev()),
+                serde_json::Value::Object(values) => pending.extend(values.values().rev()),
+                _ => {}
+            }
+        }
+    }
     dedup(claims)
 }
 

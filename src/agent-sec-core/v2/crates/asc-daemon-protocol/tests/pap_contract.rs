@@ -482,3 +482,32 @@ where
     let encoded = serde_json::to_value(value).unwrap();
     assert_eq!(serde_json::from_value::<T>(encoded).unwrap(), *value);
 }
+
+/// QRY-002 (obs subset): every published obs query name resolves exactly once.
+#[test]
+fn observability_query_method_inventory_matches_dispatch() {
+    use asc_daemon_protocol::method::{AccessPolicy, MethodId, ObservabilityQueryMethod};
+    let methods = [
+        ObservabilityQueryMethod::Sessions,
+        ObservabilityQueryMethod::Runs,
+        ObservabilityQueryMethod::Timeline,
+    ];
+    assert_eq!(method::OBS_QUERY_METHODS.len(), methods.len());
+    assert_eq!(
+        method::OBS_QUERY_METHODS
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        methods.len()
+    );
+    for (wire, expected) in method::OBS_QUERY_METHODS.into_iter().zip(methods) {
+        assert_eq!(
+            method::resolve(wire),
+            Some(MethodId::ObservabilityQuery(expected))
+        );
+        assert_eq!(
+            method::metadata(wire).unwrap().access,
+            AccessPolicy::LocalUser
+        );
+    }
+}

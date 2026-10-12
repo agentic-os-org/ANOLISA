@@ -1269,162 +1269,172 @@ mod tests {
 
     #[test]
     fn test_run_once_checkpoints_before_next_upload() {
-        for code in [200, 404, 400] {
-            let dir = TempDir::new().unwrap();
-            let up = test_uploader(&dir);
-            write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
-            write_lines(&up.jsonl_path("skillfs"), "{\"b\":2}\n");
-            let (_, cosh_offset) = up.collect_component("cosh", None).unwrap().unwrap();
-            let expected = Offsets::from([("cosh".to_string(), cosh_offset)]);
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            for code in [200, 404, 400] {
+                let dir = TempDir::new().unwrap();
+                let up = test_uploader(&dir);
+                write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+                write_lines(&up.jsonl_path("skillfs"), "{\"b\":2}\n");
+                let (_, cosh_offset) = up.collect_component("cosh", None).unwrap().unwrap();
+                let expected = Offsets::from([("cosh".to_string(), cosh_offset)]);
 
-            let mut calls = 0;
-            let result = up.run_once_with_post(|url, _| {
-                calls += 1;
-                if calls == 1 {
-                    assert!(url.ends_with("/logstores/cosh/track"));
-                    assert!(!up.config.offsets_path.exists());
-                    if code == 200 {
-                        Ok(())
+                let mut calls = 0;
+                let result = up.run_once_with_post(|url, _| {
+                    calls += 1;
+                    if calls == 1 {
+                        assert!(url.ends_with("/logstores/cosh/track"));
+                        assert!(!up.config.offsets_path.exists());
+                        if code == 200 {
+                            Ok(())
+                        } else {
+                            Err(UploaderError::Http {
+                                code,
+                                url: url.to_string(),
+                            })
+                        }
                     } else {
-                        Err(UploaderError::Http {
-                            code,
-                            url: url.to_string(),
+                        assert!(url.ends_with("/logstores/skillfs/track"));
+                        assert_eq!(up.load_offsets(), expected, "HTTP {code}");
+                        Err(UploaderError::Network {
+                            reason: "simulated stalled request".to_string(),
                         })
                     }
-                } else {
-                    assert!(url.ends_with("/logstores/skillfs/track"));
-                    assert_eq!(up.load_offsets(), expected, "HTTP {code}");
-                    Err(UploaderError::Network {
-                        reason: "simulated stalled request".to_string(),
-                    })
-                }
-            });
-            assert!(matches!(result, Err(UploaderError::Network { .. })));
-            assert_eq!(calls, 2);
-            assert_eq!(up.load_offsets(), expected);
+                });
+                assert!(matches!(result, Err(UploaderError::Network { .. })));
+                assert_eq!(calls, 2);
+                assert_eq!(up.load_offsets(), expected);
 
-            let restarted = test_uploader(&dir);
-            let mut retries = 0;
-            restarted
-                .run_once_with_post(|url, _| {
-                    retries += 1;
-                    assert!(url.ends_with("/logstores/skillfs/track"));
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(retries, 1);
-            let mut completed = expected;
-            let (_, skillfs_offset) = up.collect_component("skillfs", None).unwrap().unwrap();
-            completed.insert("skillfs".to_string(), skillfs_offset);
-            assert_eq!(restarted.load_offsets(), completed);
-        }
+                let restarted = test_uploader(&dir);
+                let mut retries = 0;
+                restarted
+                    .run_once_with_post(|url, _| {
+                        retries += 1;
+                        assert!(url.ends_with("/logstores/skillfs/track"));
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(retries, 1);
+                let mut completed = expected;
+                let (_, skillfs_offset) = up.collect_component("skillfs", None).unwrap().unwrap();
+                completed.insert("skillfs".to_string(), skillfs_offset);
+                assert_eq!(restarted.load_offsets(), completed);
+            }
+        });
     }
 
     #[test]
     fn test_run_once_preserves_retryable_offsets_and_continues() {
-        for code in [None, Some(503)] {
-            let dir = TempDir::new().unwrap();
-            let up = test_uploader(&dir);
-            let path = up.jsonl_path("cosh");
-            write_lines(&path, "{\"a\":1}\n");
-            let (_, stored) = up.collect_component("cosh", None).unwrap().unwrap();
-            up.save_offsets(&Offsets::from([("cosh".to_string(), stored.clone())]))
-                .unwrap();
-            write_lines(&path, "{\"a\":1}\n{\"b\":2}\n");
-            write_lines(&up.jsonl_path("skillfs"), "{\"c\":3}\n");
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            for code in [None, Some(503)] {
+                let dir = TempDir::new().unwrap();
+                let up = test_uploader(&dir);
+                let path = up.jsonl_path("cosh");
+                write_lines(&path, "{\"a\":1}\n");
+                let (_, stored) = up.collect_component("cosh", None).unwrap().unwrap();
+                up.save_offsets(&Offsets::from([("cosh".to_string(), stored.clone())]))
+                    .unwrap();
+                write_lines(&path, "{\"a\":1}\n{\"b\":2}\n");
+                write_lines(&up.jsonl_path("skillfs"), "{\"c\":3}\n");
 
-            let mut calls = 0;
-            let result = up.run_once_with_post(|url, body| {
-                calls += 1;
-                if url.ends_with("/logstores/cosh/track") {
-                    let body: Value = serde_json::from_str(body).unwrap();
-                    assert_eq!(body["__logs__"].as_array().unwrap().len(), 1);
-                    assert_eq!(body["__logs__"][0]["b"], "2");
-                    match code {
-                        Some(code) => Err(UploaderError::Http {
-                            code,
-                            url: url.to_string(),
-                        }),
-                        None => Err(UploaderError::Network {
-                            reason: "simulated timeout".to_string(),
-                        }),
+                let mut calls = 0;
+                let result = up.run_once_with_post(|url, body| {
+                    calls += 1;
+                    if url.ends_with("/logstores/cosh/track") {
+                        let body: Value = serde_json::from_str(body).unwrap();
+                        assert_eq!(body["__logs__"].as_array().unwrap().len(), 1);
+                        assert_eq!(body["__logs__"][0]["b"], "2");
+                        match code {
+                            Some(code) => Err(UploaderError::Http {
+                                code,
+                                url: url.to_string(),
+                            }),
+                            None => Err(UploaderError::Network {
+                                reason: "simulated timeout".to_string(),
+                            }),
+                        }
+                    } else {
+                        assert!(url.ends_with("/logstores/skillfs/track"));
+                        Ok(())
                     }
-                } else {
-                    assert!(url.ends_with("/logstores/skillfs/track"));
-                    Ok(())
+                });
+                match code {
+                    Some(_) => {
+                        assert!(matches!(result, Err(UploaderError::Http { code: 503, .. })))
+                    }
+                    None => assert!(matches!(result, Err(UploaderError::Network { .. }))),
                 }
-            });
-            match code {
-                Some(_) => assert!(matches!(result, Err(UploaderError::Http { code: 503, .. }))),
-                None => assert!(matches!(result, Err(UploaderError::Network { .. }))),
+                assert_eq!(calls, 2);
+                let (_, skillfs_offset) = up.collect_component("skillfs", None).unwrap().unwrap();
+                assert_eq!(
+                    up.load_offsets(),
+                    Offsets::from([
+                        ("cosh".to_string(), stored),
+                        ("skillfs".to_string(), skillfs_offset),
+                    ])
+                );
             }
-            assert_eq!(calls, 2);
-            let (_, skillfs_offset) = up.collect_component("skillfs", None).unwrap().unwrap();
-            assert_eq!(
-                up.load_offsets(),
-                Offsets::from([
-                    ("cosh".to_string(), stored),
-                    ("skillfs".to_string(), skillfs_offset),
-                ])
-            );
-        }
+        });
     }
 
     #[test]
     fn test_run_once_retries_http_408_429_instead_of_dropping() {
-        // 408 Request Timeout and 429 Too Many Requests are retryable per
-        // RFC 9110: the offset must stay put so the buffered batch is resent
-        // next round instead of being silently dropped.
-        for code in [408, 429] {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            // 408 Request Timeout and 429 Too Many Requests are retryable per
+            // RFC 9110: the offset must stay put so the buffered batch is resent
+            // next round instead of being silently dropped.
+            for code in [408, 429] {
+                let dir = TempDir::new().unwrap();
+                let up = test_uploader(&dir);
+                write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+
+                let result = up.run_once_with_post(|_, _| {
+                    Err(UploaderError::Http {
+                        code,
+                        url: "https://example.invalid/track".to_string(),
+                    })
+                });
+                assert!(matches!(result,
+                    Err(UploaderError::Http { code: c, .. }) if c == code));
+                // Retryable: no offset was recorded, so nothing was consumed.
+                assert!(up.load_offsets().is_empty());
+            }
+
+            // Positive control: a genuinely permanent 400 still advances.
             let dir = TempDir::new().unwrap();
             let up = test_uploader(&dir);
             write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
-
-            let result = up.run_once_with_post(|_, _| {
+            up.run_once_with_post(|_, _| {
                 Err(UploaderError::Http {
-                    code,
+                    code: 400,
                     url: "https://example.invalid/track".to_string(),
                 })
-            });
-            assert!(matches!(result,
-                Err(UploaderError::Http { code: c, .. }) if c == code));
-            // Retryable: no offset was recorded, so nothing was consumed.
-            assert!(up.load_offsets().is_empty());
-        }
-
-        // Positive control: a genuinely permanent 400 still advances.
-        let dir = TempDir::new().unwrap();
-        let up = test_uploader(&dir);
-        write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
-        up.run_once_with_post(|_, _| {
-            Err(UploaderError::Http {
-                code: 400,
-                url: "https://example.invalid/track".to_string(),
             })
-        })
-        .unwrap();
-        assert_eq!(up.load_offsets().len(), 1);
+            .unwrap();
+            assert_eq!(up.load_offsets().len(), 1);
+        });
     }
 
     #[test]
     fn test_run_once_stops_on_checkpoint_failure() {
-        let dir = TempDir::new().unwrap();
-        let mut up = test_uploader(&dir);
-        write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
-        write_lines(&up.jsonl_path("skillfs"), "{\"b\":2}\n");
-        let blocked = dir.path().join("not-a-directory");
-        fs::write(&blocked, "").unwrap();
-        up.config.offsets_path = blocked.join("offsets.json");
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let mut up = test_uploader(&dir);
+            write_lines(&up.jsonl_path("cosh"), "{\"a\":1}\n");
+            write_lines(&up.jsonl_path("skillfs"), "{\"b\":2}\n");
+            let blocked = dir.path().join("not-a-directory");
+            fs::write(&blocked, "").unwrap();
+            up.config.offsets_path = blocked.join("offsets.json");
 
-        let mut calls = 0;
-        let result = up.run_once_with_post(|url, _| {
-            calls += 1;
-            assert!(url.ends_with("/logstores/cosh/track"));
-            Ok(())
+            let mut calls = 0;
+            let result = up.run_once_with_post(|url, _| {
+                calls += 1;
+                assert!(url.ends_with("/logstores/cosh/track"));
+                Ok(())
+            });
+            assert!(matches!(result, Err(UploaderError::Io(_))));
+            assert_eq!(calls, 1);
+            assert!(!up.config.offsets_path.exists());
         });
-        assert!(matches!(result, Err(UploaderError::Io(_))));
-        assert_eq!(calls, 1);
-        assert!(!up.config.offsets_path.exists());
     }
 
     #[test]
@@ -1618,134 +1628,138 @@ mod tests {
 
     #[test]
     fn retry_pinned_offset_slices_wrong_rotated_file() {
-        // A double rotation while a retryable failure pins the offset
-        // leaves the pinned offset describing a deleted file. On a
-        // sequentially-allocating filesystem (ext4, per the v100
-        // reproduction) the deleted file's inode is recycled for the new
-        // `.jsonl.1`, so the drain's inode check alone cannot tell the
-        // files apart and the pinned byte offset slices the new rotated
-        // file mid-line: its first line never ships intact. Inode reuse is
-        // not deterministically reproducible on every filesystem, so the
-        // post-recycling offsets.json is modeled directly (the pinned byte
-        // offset is kept, its inode re-pointed at the file that received
-        // the recycled inode).
-        let dir = TempDir::new().unwrap();
-        let up = test_uploader(&dir);
-        let path = up.jsonl_path("cosh");
-        let rotated = up.rotated_path("cosh");
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            // A double rotation while a retryable failure pins the offset
+            // leaves the pinned offset describing a deleted file. On a
+            // sequentially-allocating filesystem (ext4, per the v100
+            // reproduction) the deleted file's inode is recycled for the new
+            // `.jsonl.1`, so the drain's inode check alone cannot tell the
+            // files apart and the pinned byte offset slices the new rotated
+            // file mid-line: its first line never ships intact. Inode reuse is
+            // not deterministically reproducible on every filesystem, so the
+            // post-recycling offsets.json is modeled directly (the pinned byte
+            // offset is kept, its inode re-pointed at the file that received
+            // the recycled inode).
+            let dir = TempDir::new().unwrap();
+            let up = test_uploader(&dir);
+            let path = up.jsonl_path("cosh");
+            let rotated = up.rotated_path("cosh");
 
-        // Round 1 ships file A's only line; the offset pins at its length.
-        write_lines(&path, "{\"a\":1}\n");
-        up.run_once_with_post(|_, _| Ok(())).unwrap();
-        let pinned = up.load_offsets()["cosh"].clone();
-        assert_eq!(pinned.offset, 8);
+            // Round 1 ships file A's only line; the offset pins at its length.
+            write_lines(&path, "{\"a\":1}\n");
+            up.run_once_with_post(|_, _| Ok(())).unwrap();
+            let pinned = up.load_offsets()["cosh"].clone();
+            assert_eq!(pinned.offset, 8);
 
-        // A retryable server failure (503 — 408/429 are not yet carved out
-        // as retryable on this branch's base) keeps the offset pinned
-        // while more data lands in A and the two rotations happen
-        // underneath it.
-        let mut a = OpenOptions::new().append(true).open(&path).unwrap();
-        a.write_all(b"{\"a\":2}\n").unwrap();
-        up.run_once_with_post(|_, _| {
-            Err(UploaderError::Http {
-                code: 503,
-                url: "https://example.invalid/track".to_string(),
+            // A retryable server failure (503 — 408/429 are not yet carved out
+            // as retryable on this branch's base) keeps the offset pinned
+            // while more data lands in A and the two rotations happen
+            // underneath it.
+            let mut a = OpenOptions::new().append(true).open(&path).unwrap();
+            a.write_all(b"{\"a\":2}\n").unwrap();
+            up.run_once_with_post(|_, _| {
+                Err(UploaderError::Http {
+                    code: 503,
+                    url: "https://example.invalid/track".to_string(),
+                })
             })
-        })
-        .unwrap_err();
-        assert_eq!(up.load_offsets()["cosh"], pinned);
+            .unwrap_err();
+            assert_eq!(up.load_offsets()["cosh"], pinned);
 
-        // Double rotation: A → .jsonl.1 → deleted, B → .jsonl.1, C active.
-        fs::rename(&path, &rotated).unwrap();
-        write_lines(&path, "{\"v\":\"b1\"}\n{\"v\":\"b2\"}\n");
-        let graveyard = dir.path().join("cosh.jsonl.2");
-        fs::rename(&rotated, &graveyard).unwrap();
-        fs::rename(&path, &rotated).unwrap();
-        fs::remove_file(&graveyard).unwrap();
-        write_lines(&path, "{\"v\":\"c1\"}\n");
+            // Double rotation: A → .jsonl.1 → deleted, B → .jsonl.1, C active.
+            fs::rename(&path, &rotated).unwrap();
+            write_lines(&path, "{\"v\":\"b1\"}\n{\"v\":\"b2\"}\n");
+            let graveyard = dir.path().join("cosh.jsonl.2");
+            fs::rename(&rotated, &graveyard).unwrap();
+            fs::rename(&path, &rotated).unwrap();
+            fs::remove_file(&graveyard).unwrap();
+            write_lines(&path, "{\"v\":\"c1\"}\n");
 
-        // A's inode was recycled for the new .jsonl.1 (B): the pinned
-        // offset now claims B's inode at A's byte position.
-        let mut offsets = up.load_offsets();
-        offsets.insert(
-            "cosh".to_string(),
-            FileOffset {
-                inode: inode_of(&fs::metadata(&rotated).unwrap()),
-                offset: pinned.offset,
-            },
-        );
-        up.save_offsets(&offsets).unwrap();
+            // A's inode was recycled for the new .jsonl.1 (B): the pinned
+            // offset now claims B's inode at A's byte position.
+            let mut offsets = up.load_offsets();
+            offsets.insert(
+                "cosh".to_string(),
+                FileOffset {
+                    inode: inode_of(&fs::metadata(&rotated).unwrap()),
+                    offset: pinned.offset,
+                },
+            );
+            up.save_offsets(&offsets).unwrap();
 
-        // The next round must ship B whole — b1 included — plus C, with no
-        // mid-line fragment. Applying the pinned offset would ship
-        // [{raw:"\"}"},{v:"b2"},{v:"c1"}] and never ship b1.
-        let mut bodies = Vec::new();
-        up.run_once_with_post(|_, body| {
-            bodies.push(body.to_string());
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(bodies.len(), 1);
-        let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
-        let logs = parsed["__logs__"].as_array().unwrap();
-        let shipped: Vec<String> = logs
-            .iter()
-            .map(|log| match log.get("v").and_then(Value::as_str) {
-                Some(v) => v.to_string(),
-                None => format!("raw:{}", log["raw"].as_str().unwrap_or("?")),
+            // The next round must ship B whole — b1 included — plus C, with no
+            // mid-line fragment. Applying the pinned offset would ship
+            // [{raw:"\"}"},{v:"b2"},{v:"c1"}] and never ship b1.
+            let mut bodies = Vec::new();
+            up.run_once_with_post(|_, body| {
+                bodies.push(body.to_string());
+                Ok(())
             })
-            .collect();
-        assert_eq!(shipped, vec!["b1", "b2", "c1"]);
+            .unwrap();
+            assert_eq!(bodies.len(), 1);
+            let parsed: Value = serde_json::from_str(&bodies[0]).unwrap();
+            let logs = parsed["__logs__"].as_array().unwrap();
+            let shipped: Vec<String> = logs
+                .iter()
+                .map(|log| match log.get("v").and_then(Value::as_str) {
+                    Some(v) => v.to_string(),
+                    None => format!("raw:{}", log["raw"].as_str().unwrap_or("?")),
+                })
+                .collect();
+            assert_eq!(shipped, vec!["b1", "b2", "c1"]);
+        });
     }
 
     #[test]
     fn retry_pinned_offset_slices_recycled_active_file() {
-        // The same-file flavor observed on v100: the deleted A's inode was
-        // recycled for the NEW ACTIVE file, so the pinned offset routes
-        // through the same-inode branch and only the mid-line tail of the
-        // fresh file would ship (the head before the pinned byte is never
-        // read). The recycled state is modeled directly, as above.
-        let dir = TempDir::new().unwrap();
-        let up = test_uploader(&dir);
-        let path = up.jsonl_path("cosh");
-        let rotated = up.rotated_path("cosh");
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            // The same-file flavor observed on v100: the deleted A's inode was
+            // recycled for the NEW ACTIVE file, so the pinned offset routes
+            // through the same-inode branch and only the mid-line tail of the
+            // fresh file would ship (the head before the pinned byte is never
+            // read). The recycled state is modeled directly, as above.
+            let dir = TempDir::new().unwrap();
+            let up = test_uploader(&dir);
+            let path = up.jsonl_path("cosh");
+            let rotated = up.rotated_path("cosh");
 
-        // Round 1 ships A and pins the offset at 8.
-        write_lines(&path, "{\"a\":1}\n");
-        up.run_once_with_post(|_, _| Ok(())).unwrap();
-        let pinned = up.load_offsets()["cosh"].clone();
-        assert_eq!(pinned.offset, 8);
+            // Round 1 ships A and pins the offset at 8.
+            write_lines(&path, "{\"a\":1}\n");
+            up.run_once_with_post(|_, _| Ok(())).unwrap();
+            let pinned = up.load_offsets()["cosh"].clone();
+            assert_eq!(pinned.offset, 8);
 
-        // Double rotation underneath the pinned offset: A → deleted, the
-        // quiet middle generation B → .jsonl.1, fresh active C long enough
-        // to reach past the pinned byte.
-        fs::rename(&path, &rotated).unwrap();
-        write_lines(&path, "");
-        let graveyard = dir.path().join("cosh.jsonl.2");
-        fs::rename(&rotated, &graveyard).unwrap();
-        fs::rename(&path, &rotated).unwrap();
-        fs::remove_file(&graveyard).unwrap();
-        write_lines(&path, "{\"v\":\"c1\"}\n{\"v\":\"c2\"}\n");
+            // Double rotation underneath the pinned offset: A → deleted, the
+            // quiet middle generation B → .jsonl.1, fresh active C long enough
+            // to reach past the pinned byte.
+            fs::rename(&path, &rotated).unwrap();
+            write_lines(&path, "");
+            let graveyard = dir.path().join("cosh.jsonl.2");
+            fs::rename(&rotated, &graveyard).unwrap();
+            fs::rename(&path, &rotated).unwrap();
+            fs::remove_file(&graveyard).unwrap();
+            write_lines(&path, "{\"v\":\"c1\"}\n{\"v\":\"c2\"}\n");
 
-        // A's inode was recycled for the new active file C.
-        let stored = FileOffset {
-            inode: inode_of(&fs::metadata(&path).unwrap()),
-            offset: pinned.offset,
-        };
+            // A's inode was recycled for the new active file C.
+            let stored = FileOffset {
+                inode: inode_of(&fs::metadata(&path).unwrap()),
+                offset: pinned.offset,
+            };
 
-        // The pinned offset must not be applied to C: C must ship whole
-        // from its beginning. Applying it would slice C at byte 8 and
-        // upload only [{raw:"\"}"},{v:"c2"}].
-        let (lines, off) = up
-            .collect_component("cosh", Some(&stored))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            lines,
-            vec!["{\"v\":\"c1\"}".to_string(), "{\"v\":\"c2\"}".to_string()]
-        );
-        assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
-        assert_eq!(off.offset, 22);
+            // The pinned offset must not be applied to C: C must ship whole
+            // from its beginning. Applying it would slice C at byte 8 and
+            // upload only [{raw:"\"}"},{v:"c2"}].
+            let (lines, off) = up
+                .collect_component("cosh", Some(&stored))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                lines,
+                vec!["{\"v\":\"c1\"}".to_string(), "{\"v\":\"c2\"}".to_string()]
+            );
+            assert_eq!(off.inode, inode_of(&fs::metadata(&path).unwrap()));
+            assert_eq!(off.offset, 22);
+        });
     }
 
     #[test]

@@ -286,7 +286,7 @@ impl CentralLog {
     /// the OS buffer accepts it.
     ///
     /// The same lock also covers terminating a torn trailing record left
-    /// behind by a crashed predecessor (see [`terminate_torn_tail`]):
+    /// behind by a crashed predecessor (see `terminate_torn_tail`):
     /// a crash or ENOSPC cuts the write before its newline lands, and
     /// splicing the new record onto that fragment would glue the two
     /// into one line the per-line tolerance in [`CentralLog::query`]

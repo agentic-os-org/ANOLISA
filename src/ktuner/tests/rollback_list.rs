@@ -156,3 +156,235 @@ fn rollback_list_reports_live_drift_without_extra_output() {
     assert_eq!(pending[2]["live"], "1");
     assert_eq!(pending[2]["drifted"], false);
 }
+
+/// End-to-end contract for `--list <param>...` on the same kind of private
+/// fixture: the named entries — any accepted spelling, plus the mutually
+/// exclusive twin the restore takes along — come back in the unfiltered
+/// listing's shape and order, and a name the ledger does not record is the
+/// restore's command error (exit 2, stderr JSON, nothing on stdout) with the
+/// ledger left byte for byte as it was.
+#[test]
+#[ignore = "requires root and mount namespaces; writes only isolated fixture files"]
+fn rollback_list_narrows_to_the_named_entries() {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    assert_eq!(unsafe { libc::geteuid() }, 0, "requires root");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let scratch =
+        std::env::temp_dir().join(format!("ktuner-list-filter-{}-{nonce}", std::process::id()));
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch = Scratch(scratch);
+    fs::create_dir_all(scratch.0.join("varlib/ktuner")).expect("ledger directory");
+    fs::create_dir(scratch.0.join("etc")).expect("isolated persistence directory");
+
+    let swappiness = scratch.0.join("swappiness");
+    let bytes = scratch.0.join("dirty_bytes");
+    let ratio = scratch.0.join("dirty_ratio");
+    let somaxconn = scratch.0.join("somaxconn");
+    fs::write(&swappiness, "1").expect("live value");
+    fs::write(&bytes, "1073741824").expect("live value");
+    fs::write(&ratio, "0").expect("live value");
+    fs::write(&somaxconn, "4096").expect("live value");
+    let ledger = scratch.0.join("varlib/ktuner/rollback.json");
+    fs::write(
+        &ledger,
+        serde_json::json!({"version": 1, "entries": {
+            "vm.swappiness": {"previous": "60", "applied": "1", "path": swappiness},
+            "vm.dirty_bytes": {"previous": "0", "applied": "1073741824", "path": bytes},
+            "vm.dirty_ratio": {"previous": "20", "applied": "0", "path": ratio},
+            "net.core.somaxconn": {"previous": "128", "applied": "4096", "path": somaxconn},
+        }})
+        .to_string(),
+    )
+    .expect("ledger");
+    let ledger_before = fs::read(&ledger).expect("ledger bytes");
+
+    let list = |params: &[&str]| {
+        Command::new("unshare")
+            .args([
+                "--mount",
+                "--propagation",
+                "private",
+                "sh",
+                "-c",
+                "mount --bind \"$1\" /var/lib && mount --bind \"$2\" /etc && \
+                 bin=\"$3\" && shift 3 && exec \"$bin\" rollback --list \"$@\"",
+                "rollback-list-filter-test",
+            ])
+            .arg(scratch.0.join("varlib"))
+            .arg(scratch.0.join("etc"))
+            .arg(env!("CARGO_BIN_EXE_ktuner"))
+            .args(params)
+            .output()
+            .expect("run isolated rollback --list")
+    };
+
+    let out = list(&["vm/swappiness", "vm.dirty_bytes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(
+        body.as_object().unwrap().len(),
+        2,
+        "the unfiltered listing's top-level keys, nothing added: {body}"
+    );
+    assert_eq!(body["count"], 3, "{body}");
+    let params: Vec<&str> = body["pending"]
+        .as_array()
+        .expect("pending is an array")
+        .iter()
+        .map(|entry| entry["param"].as_str().expect("param"))
+        .collect();
+    assert_eq!(
+        params,
+        ["vm.dirty_bytes", "vm.dirty_ratio", "vm.swappiness"],
+        "named entries plus the recorded twin, in param order: {body}"
+    );
+    assert_eq!(body["pending"][2]["live"], "1");
+    assert_eq!(body["pending"][2]["drifted"], false);
+
+    let out = list(&["vm.swappiness", "vm.typo"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let error: Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(
+        error["error"], "parameter not recorded in the rollback ledger: vm.typo",
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&ledger).expect("ledger bytes"),
+        ledger_before,
+        "the preview never writes the ledger"
+    );
+}
+
+/// End-to-end contract for `--list --drifted`: on the same kind of private
+/// fixture, the listing keeps only the entries whose live value is known to
+/// differ from the recorded one. A matching entry and an entry whose path
+/// cannot be read (`drifted: null` — an unreadable value is not evidence of
+/// drift) are both left out, the shape and order are the unfiltered ones, and
+/// `count` is the filtered count; the plain listing still shows all three.
+#[test]
+#[ignore = "requires root and mount namespaces; writes only isolated fixture files"]
+fn rollback_list_drifted_keeps_only_known_drift() {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    assert_eq!(unsafe { libc::geteuid() }, 0, "requires root");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!(
+        "ktuner-list-drifted-{}-{nonce}",
+        std::process::id()
+    ));
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch = Scratch(scratch);
+    fs::create_dir_all(scratch.0.join("varlib/ktuner")).expect("ledger directory");
+    fs::create_dir(scratch.0.join("etc")).expect("isolated persistence directory");
+
+    let ratio = scratch.0.join("dirty_ratio");
+    let swappiness = scratch.0.join("swappiness");
+    let gone = scratch.0.join("device-gone");
+    fs::write(&ratio, "20").expect("live value");
+    fs::write(&swappiness, "1").expect("live value");
+    let ledger = scratch.0.join("varlib/ktuner/rollback.json");
+    fs::write(
+        &ledger,
+        serde_json::json!({"version": 1, "entries": {
+            "vm.dirty_ratio": {"previous": "20", "applied": "0", "path": ratio},
+            "vm.swappiness": {"previous": "60", "applied": "1", "path": swappiness},
+            "block/sda/scheduler": {"previous": "mq-deadline", "applied": "none", "path": gone},
+        }})
+        .to_string(),
+    )
+    .expect("ledger");
+
+    let list = |extra: &[&str]| {
+        Command::new("unshare")
+            .args([
+                "--mount",
+                "--propagation",
+                "private",
+                "sh",
+                "-c",
+                "mount --bind \"$1\" /var/lib && mount --bind \"$2\" /etc && \
+                 bin=\"$3\" && shift 3 && exec \"$bin\" rollback --list \"$@\"",
+                "rollback-list-drifted-test",
+            ])
+            .arg(scratch.0.join("varlib"))
+            .arg(scratch.0.join("etc"))
+            .arg(env!("CARGO_BIN_EXE_ktuner"))
+            .args(extra)
+            .output()
+            .expect("run isolated rollback --list")
+    };
+
+    // The filtered listing: only vm.dirty_ratio drifted (applied 0, live 20);
+    // vm.swappiness still matches and the missing path cannot be read.
+    let out = list(&["--drifted"]);
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let body: Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(body["count"], 1);
+    let pending = body["pending"].as_array().expect("pending is an array");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["param"], "vm.dirty_ratio");
+    assert_eq!(pending[0]["drifted"], true);
+    assert_eq!(pending[0]["live"], "20");
+    assert_eq!(pending[0]["applied"], "0");
+    assert_eq!(pending[0]["previous"], "20");
+
+    // The plain listing is unchanged: all three entries, same shape.
+    let out = list(&[]);
+    assert!(out.status.success());
+    let body: Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(body["count"], 3);
+    let pending = body["pending"].as_array().expect("pending is an array");
+    let params: Vec<&str> = pending
+        .iter()
+        .map(|entry| entry["param"].as_str().expect("param is a string"))
+        .collect();
+    assert_eq!(
+        params,
+        vec!["block/sda/scheduler", "vm.dirty_ratio", "vm.swappiness"]
+    );
+    assert_eq!(body["pending"][0]["drifted"], Value::Null);
+    assert_eq!(body["pending"][1]["drifted"], true);
+    assert_eq!(body["pending"][2]["drifted"], false);
+}

@@ -1507,16 +1507,16 @@ pub fn compile_with_labels(
     }
     for rule in &pol.rules {
         for cl in &rule.clauses {
-            if let Some(arg) = &cl.target.arg {
-                if arg.len() >= ARG {
-                    return Err(format!(
-                        "rule '{}': exec argument is {} bytes, exceeds the {} byte ABI limit (ARG={})",
-                        rule.name,
-                        arg.len(),
-                        ARG - 1,
-                        ARG
-                    ));
-                }
+            if let Some(arg) = &cl.target.arg
+                && arg.len() >= ARG
+            {
+                return Err(format!(
+                    "rule '{}': exec argument is {} bytes, exceeds the {} byte ABI limit (ARG={})",
+                    rule.name,
+                    arg.len(),
+                    ARG - 1,
+                    ARG
+                ));
             }
             for op in op_lowers(cl.op)? {
                 let op = *op;

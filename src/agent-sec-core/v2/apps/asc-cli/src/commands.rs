@@ -58,6 +58,17 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    pub(crate) fn run_observability_query(
+        &self,
+        socket: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Option<std::io::Result<u8>> {
+        match self {
+            Self::Observability(command) => command.run_query(socket, timeout),
+            _ => None,
+        }
+    }
+
     pub(crate) fn request(&self) -> Result<DaemonRequest, InputError> {
         match self {
             Self::Observability(command) => command.request(),
@@ -103,6 +114,13 @@ impl Command {
             // so only the scan-prompt command has one.
             _ => Err(InputError::LocalCommand),
         }
+    }
+
+    pub(crate) const fn is_observability_schema(&self) -> bool {
+        matches!(
+            self,
+            Self::Observability(observability::ObservabilityCommand::Schema)
+        )
     }
 
     pub(crate) const fn is_observability_record(&self) -> bool {
