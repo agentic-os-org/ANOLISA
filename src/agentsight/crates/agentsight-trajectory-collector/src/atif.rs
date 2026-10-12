@@ -73,7 +73,7 @@ pub fn convert_qoder_events(
             // (overwriting each other when several events arrived), hiding
             // them from analyzers that pair a step's results with its calls.
             if !tool_results.is_empty() && !mixed_event {
-                merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+                let _ = merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
                 i += 1;
                 continue;
             }
@@ -81,23 +81,13 @@ pub fn convert_qoder_events(
             // Regular user message
             step_id += 1;
             let text = extract_text_from_content(&content);
-            // A mixed event's observation attaches to the previous step
-            // exactly like a pure result carrier (with the
-            // result_timestamp enrichment); when there is no previous step
-            // (e.g. replayed context) it rides on the user step itself.
+            // Mixed replies answer their issuing calls too. Keep unmatched
+            // replayed results on the user step, without replacing earlier
+            // observations or attaching known results to intervening text.
             let observation = if mixed_event {
-                match (
-                    steps.last_mut(),
-                    observation_from_tool_results(&tool_results),
-                ) {
-                    (Some(prev), Some(obs)) => {
-                        let timestamps = result_timestamps_for(&tool_results, result_ts);
-                        enrich_result_timestamps(prev, &timestamps);
-                        prev.observation = Some(obs);
-                        None
-                    }
-                    (_, obs) => obs,
-                }
+                let unmatched =
+                    merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+                observation_from_tool_results(&unmatched)
             } else {
                 None
             };
@@ -542,36 +532,6 @@ fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option
     Some(Observation { results })
 }
 
-/// Map every extracted result id to the event timestamp.
-fn result_timestamps_for(
-    tool_results: &[ExtractedToolResult],
-    ts: Option<&str>,
-) -> HashMap<String, String> {
-    match ts {
-        Some(ts) => tool_results
-            .iter()
-            .map(|tr| (tr.tool_use_id.clone(), ts.to_string()))
-            .collect(),
-        None => HashMap::new(),
-    }
-}
-
-/// Write `result_timestamp` into the matching `ToolCall.extra` entries.
-fn enrich_result_timestamps(step: &mut Step, timestamps: &HashMap<String, String>) {
-    if let Some(tcs) = step.tool_calls.as_mut() {
-        for tc in tcs.iter_mut() {
-            if let Some(ts) = timestamps.get(&tc.tool_call_id) {
-                let mut extra = tc.extra.take().unwrap_or_default();
-                extra.insert(
-                    "result_timestamp".into(),
-                    serde_json::Value::String(ts.clone()),
-                );
-                tc.extra = Some(extra);
-            }
-        }
-    }
-}
-
 /// A tool_result block extracted from a user-message `content` array.
 #[derive(Debug, Clone)]
 struct ExtractedToolResult {
@@ -659,11 +619,13 @@ fn has_text_block(content: &serde_json::Value) -> bool {
 /// calls (`agentsight-opt::trace`), so results are merged into the owning
 /// agent step instead of replacing its observation or landing on a user step.
 /// Results the scan already collected are extended, never overwritten.
+/// Returns unowned results for a mixed user event to retain as replayed context.
 fn merge_tool_results_into_agent_steps(
     steps: &mut [Step],
     tool_results: &[ExtractedToolResult],
     timestamp: Option<&str>,
-) {
+) -> Vec<ExtractedToolResult> {
+    let mut unmatched = Vec::new();
     for tr in tool_results {
         // Most recent owner wins: each call is issued by exactly one step, and
         // searching backwards also covers results arriving after an
@@ -675,8 +637,9 @@ fn merge_tool_results_into_agent_steps(
                         .any(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
                 })
         }) else {
-            // No step owns the call (a transcript starting with results), so
-            // there is no meaningful step to attach it to.
+            // The mixed-event caller can retain replayed context on its user
+            // step; result-only carriers keep the existing discard policy.
+            unmatched.push(tr.clone());
             continue;
         };
 
@@ -719,6 +682,7 @@ fn merge_tool_results_into_agent_steps(
             }
         }
     }
+    unmatched
 }
 
 #[cfg(test)]
