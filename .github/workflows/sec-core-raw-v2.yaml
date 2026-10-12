@@ -20,6 +20,11 @@ on:
       - '!src/agent-sec-core/tests/integration-test/**'
   workflow_dispatch:
 
+# Only superseded PR runs share a group; pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   raw-install-e2e:
     name: Build, install, and test V2 raw package
