@@ -178,6 +178,30 @@ describe("Integration: gateway lifecycle simulation", () => {
   // ─── 3. 摘要生成（afterTurn） ───
 
   describe("3. summary generation (afterTurn)", () => {
+    it("reuses system turn summaries after restarting the engine", async () => {
+      const messages: AgentMessage[] = [
+        { role: "system", content: "workspace instructions" },
+        ...buildMessages(4),
+      ];
+      await engine.afterTurn({ sessionId: SESSION, messages });
+      expect(engine.getStore().getTurnSummaries(SESSION).map((summary) => summary.turnSeq)).toEqual([1, 2]);
+
+      const restored = new SelectiveContextEngine(db, {
+        freshTailTurns: FRESH_TAIL, dbPath: ":memory:", enabled: true,
+      });
+      let summarizeCalls = 0;
+      restored.setSummarizeFn(async () => {
+        summarizeCalls++;
+        return "unexpected replacement";
+      });
+      await restored.afterTurn({ sessionId: SESSION, messages: [] });
+      const result = await restored.assemble({ sessionId: SESSION, messages: [], tokenBudget: 100000 });
+
+      expect(summarizeCalls).toBe(0);
+      expect(result.messages[0].content).toContain("Turn 1: Summary: system: workspace instructions");
+      expect(result.messages[0].content).toContain("Turn 2: Summary: user: question about topic 1");
+    });
+
     it("generates summaries for turns outside freshTailTurns", async () => {
       const messages = buildMessages(6);
       await engine.afterTurn({ sessionId: SESSION, messages });

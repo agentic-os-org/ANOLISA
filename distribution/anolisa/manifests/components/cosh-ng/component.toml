@@ -7,7 +7,7 @@ display_name = "cosh-ng"
 description = "Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface"
 stability = "experimental"
 license = "Apache-2.0"
-repository = "https://github.com/alibaba/anolisa"
+repository = "https://github.com/agentic-os-org/ANOLISA"
 conflicts = ["cosh"]
 
 [component.contract]

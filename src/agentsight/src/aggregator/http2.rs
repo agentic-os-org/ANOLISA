@@ -1175,7 +1175,16 @@ impl Http2StreamAggregator {
 
     /// Release the side maps belonging to a stream that is no longer retained.
     fn discard_side_state(&mut self, stream_id: StreamId) {
-        self.continuation_buffers.remove(&stream_id);
+        // A buffered continuation block is bytes the peer's encoder already
+        // accounted for — its dynamic-table insertions were applied on the
+        // wire — while our decoder never decoded them. Dropping the buffer
+        // must reset that direction's decoder, exactly like a decode error or
+        // an oversized block: a later block referencing the lost indices
+        // would otherwise resolve them against stale entries (wrong `:path`,
+        // `:status`, content-type) instead of failing closed.
+        if let Some(buffer) = self.continuation_buffers.remove(&stream_id) {
+            self.reset_hpack_decoder(stream_id.connection_id, buffer.direction);
+        }
         self.decoded_headers_store.remove(&stream_id);
         self.last_activity.pop(&stream_id);
     }
@@ -1210,8 +1219,13 @@ impl Http2StreamAggregator {
             stream.decoded_response_headers = pair.response;
         }
         // Defensive cleanup: a malformed or aborted stream could leave a stale
-        // continuation buffer behind; remove it when the stream completes.
-        self.continuation_buffers.remove(&stream_id);
+        // continuation buffer behind; remove it when the stream completes. The
+        // buffer holds an undecoded block whose dynamic-table insertions the
+        // peer's encoder applied, so dropping it resets the decoder like every
+        // other drop path rather than leaving a stale table behind.
+        if let Some(buffer) = self.continuation_buffers.remove(&stream_id) {
+            self.reset_hpack_decoder(stream_id.connection_id, buffer.direction);
+        }
         self.last_activity.pop(&stream_id);
         stream
     }
@@ -1262,6 +1276,12 @@ impl Http2StreamAggregator {
     }
 
     /// Process a single frame within the context of a stream state
+    ///
+    /// The receiver is part of the state-handler shape (like `stream_from_state`)
+    /// and stays unused except for the `WaitingRequestData` re-entry, where a
+    /// response frame that beat the request's END_STREAM is handed to the
+    /// `RequestComplete` arm instead of being dropped.
+    #[allow(clippy::only_used_in_recursion)]
     fn process_frame_in_state(
         &self,
         state: Http2StreamState,
@@ -1309,8 +1329,27 @@ impl Http2StreamAggregator {
                         request_headers,
                         request_data_frames,
                     }
+                } else if request_headers.is_some() {
+                    // A server may answer before the client has sent the whole
+                    // request (RFC 7540 §8.1) — a gateway rejecting an upload
+                    // with 429/413/401 does exactly that. The request head we
+                    // already captured is enough to aggregate the response, so
+                    // re-enter through `RequestComplete` instead of dropping
+                    // the frame: dropping it lost the whole call, because the
+                    // client then aborts the upload with RST_STREAM and no
+                    // later frame ever completed the stream.
+                    self.process_frame_in_state(
+                        Http2StreamState::RequestComplete {
+                            request_headers,
+                            request_data_frames,
+                        },
+                        frame,
+                        direction,
+                        stream_id,
+                    )
                 } else {
-                    // Unexpected response before request complete, stay in waiting state
+                    // No request head at all (response-only capture): keep
+                    // waiting, there is nothing to pair the answer with yet.
                     Http2StreamState::WaitingRequestData {
                         request_headers,
                         request_data_frames,
@@ -2146,6 +2185,45 @@ mod tests {
         assert_eq!(stream.response_data_frames.len(), 0);
     }
 
+    /// RFC 7540 §8.1 lets a server answer before the client has sent the whole
+    /// request — the shape of a gateway rejecting an upload (429/413/401) — so a
+    /// response frame that arrives while the request body is still in flight
+    /// must not be discarded. Dropping it lost the call: the response frames
+    /// were gone, and the stream sat in `WaitingRequestData` until LRU eviction
+    /// because the client aborts such an upload with RST_STREAM. The HTTP/1
+    /// aggregator completes the pending request in the same situation.
+    #[test]
+    fn test_response_before_request_end_stream_is_aggregated() {
+        let mut aggregator = Http2StreamAggregator::new();
+
+        // Request HEADERS without END_STREAM plus a DATA frame without
+        // END_STREAM: the upload is still open when the answer arrives.
+        let req_event = create_test_event(1234, 0x1000, 1, 1000);
+        let req_headers = create_test_frame(1, 1, 0x04, vec![], req_event.clone());
+        let req_data = create_test_frame(1, 0, 0x00, b"{\"key\":\"value\"}".to_vec(), req_event);
+        assert!(
+            aggregator
+                .process_frames(vec![req_headers, req_data])
+                .is_empty()
+        );
+
+        let resp_event = create_test_event(1234, 0x1000, 0, 2000);
+        let mut encoder = Encoder::new();
+        let encoded = encoder.encode([(b":status".as_slice(), b"429".as_slice())]);
+        let resp_headers = create_test_frame(1, 1, 0x05, encoded, resp_event);
+
+        let completed = aggregator.process_frames(vec![resp_headers]);
+        assert_eq!(
+            completed.len(),
+            1,
+            "a response that arrives before the request's END_STREAM must be aggregated"
+        );
+        assert_eq!(completed[0].status_code(), 429);
+        assert_eq!(completed[0].request_data_frames.len(), 1);
+        assert!(completed[0].request_complete);
+        assert!(completed[0].response_complete);
+    }
+
     #[test]
     fn test_metrics_include_http2_stream_payload_and_lru_evictions() {
         let mut aggregator = Http2StreamAggregator::with_capacity(1);
@@ -2769,6 +2847,93 @@ mod tests {
             create_test_frame(1, 1, 0x00, head.to_vec(), event.clone()),
             create_test_frame(1, 9, 0x04, tail.to_vec(), event),
         ]);
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
+    }
+
+    /// Regression: a stream that never receives END_HEADERS can still complete —
+    /// a capture gap that lost the CONTINUATION records, or a malformed sender,
+    /// lets DATA finish the stream — and `finalize_stream`'s defensive cleanup
+    /// then dropped the buffered, undecoded block without resetting the
+    /// connection's HPACK decoder. The peer's encoder had applied the block's
+    /// dynamic-table insertions, so the stale table resolved later dynamic
+    /// indices to the wrong entries — the same silent corruption the size-drop
+    /// paths were fixed for, on a path that needs no oversized block at all.
+    #[test]
+    fn abandoned_continuation_completion_does_not_leave_stale_hpack_state() {
+        let conn_id = ConnectionId {
+            pid: 830,
+            ssl_ptr: 0x8300,
+        };
+        let mut aggregator = Http2StreamAggregator::new();
+        let mut encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut encoder);
+
+        // A block small enough to buffer, whose only insertion is (x-final,
+        // FINAL_VALUE): the encoder's dynamic index 62 is x-final afterwards.
+        let abandoned = encoder.encode([(&b"x-final"[..], FINAL_VALUE.as_bytes())]);
+        assert!(abandoned.len() <= MAX_CONTINUATION_BUFFER);
+        let event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        // HEADERS flags 0x00: no END_HEADERS, no END_STREAM — buffered.
+        aggregator.process_frames(vec![create_test_frame(
+            1,
+            1,
+            0x00,
+            abandoned,
+            event.clone(),
+        )]);
+        // DATA with END_STREAM finishes the request side without the header
+        // block ever being decoded.
+        aggregator.process_frames(vec![create_test_frame(1, 0, 0x01, b"{}".to_vec(), event)]);
+        // A self-contained response completes the stream; the defensive
+        // cleanup in finalize_stream drops the pending buffer.
+        let mut resp_encoder = Encoder::new();
+        let resp = resp_encoder.encode([(&b":status"[..], &b"200"[..])]);
+        let resp_event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 0, 2000);
+        let completed =
+            aggregator.process_frames(vec![create_test_frame(1, 1, 0x05, resp, resp_event)]);
+        assert_eq!(completed.len(), 1);
+        assert!(
+            !aggregator
+                .continuation_buffers
+                .contains_key(&StreamId::new(conn_id, 1))
+        );
+
+        assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
+    }
+
+    /// Regression: the periodic idle sweep drops a stream abandoned mid-block
+    /// (the peer stopped sending CONTINUATIONs) through `discard_side_state`,
+    /// which removed the buffered, undecoded fragments without resetting the
+    /// connection's HPACK decoder — the same stale dynamic table the size-drop
+    /// paths leave behind.
+    #[test]
+    fn abandoned_continuation_idle_eviction_does_not_leave_stale_hpack_state() {
+        let conn_id = ConnectionId {
+            pid: 840,
+            ssl_ptr: 0x8400,
+        };
+        let mut aggregator = Http2StreamAggregator::with_limits(
+            DEFAULT_CONNECTION_CAPACITY * 4,
+            DEFAULT_MAX_STREAM_BYTES,
+            Duration::from_millis(1),
+        );
+        let mut encoder = Encoder::new();
+        prime_sentinel_decoder(&mut aggregator, conn_id, &mut encoder);
+
+        let abandoned = encoder.encode([(&b"x-final"[..], FINAL_VALUE.as_bytes())]);
+        assert!(abandoned.len() <= MAX_CONTINUATION_BUFFER);
+        let event = create_test_event(conn_id.pid, conn_id.ssl_ptr, 1, 1000);
+        aggregator.process_frames(vec![create_test_frame(1, 1, 0x00, abandoned, event)]);
+
+        // Let the idle timeout lapse, then run the periodic sweep.
+        std::thread::sleep(Duration::from_millis(5));
+        aggregator.evict_idle_and_oversized();
+        assert!(
+            !aggregator
+                .continuation_buffers
+                .contains_key(&StreamId::new(conn_id, 1))
+        );
 
         assert_decoder_survived_dropped_block(&mut aggregator, conn_id, &mut encoder);
     }

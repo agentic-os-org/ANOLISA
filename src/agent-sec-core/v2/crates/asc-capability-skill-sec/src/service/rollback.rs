@@ -87,6 +87,9 @@ impl SkillSecService {
 
             if let Err(error) = backup.unchanged(directory, &original, deadline) {
                 self.remove_intent(root, Instant::now() + Duration::from_secs(5))?;
+                // The backup is retained: it may be the only copy of the
+                // tree's unrecorded state, and an aborted attempt is exactly
+                // the recovery state an operator may still want to inspect.
                 return Err(error);
             }
             if source_links(directory, deadline)? != links || intent.backup_links != links {
@@ -119,6 +122,10 @@ impl SkillSecService {
                 return Err(error);
             }
             self.remove_intent(root, deadline)?;
+            // The backup of the pre-rollback tree is deliberately retained:
+            // it can be the only copy of unrecorded changes, nested metadata
+            // or link text not present in the signed snapshot, and the
+            // rollbackBackup path in the result names it for inspection.
             let activation = refresh_locked(&ledger, directory, key, root, deadline);
             let mut result = decision_payload(&manifest, &activation, true);
             result["rollbackBackup"] = json!(
@@ -175,6 +182,11 @@ impl SkillSecService {
         let state = Directory::open(&self.config.state_dir)?;
         let bytes = match state.read(&intent_name(root), MAX_RECORD_BYTES, deadline) {
             Ok(bytes) => bytes,
+            // No intent: backups are retained. Absence of an intent alone is
+            // not proof that a backup is disposable — a successful rollback
+            // also removes its intent, and its retained backup is exactly
+            // the inspection copy the design keeps. Crash leftovers are
+            // left for explicit, operator-authorized cleanup.
             Err(error) if missing(&error) => return Ok(false),
             Err(error) => return Err(error),
         };
@@ -188,6 +200,14 @@ impl SkillSecService {
             ));
         }
         if !intent.replace_started {
+            // The replacement never began, so the live tree was never touched
+            // by this rollback — nothing to undo, and the intent alone is
+            // dropped. Its backup is still retained: replace_started=false
+            // proves this rollback did not begin replacing files, but it does
+            // not prove the live tree still duplicates the backup — an
+            // external editor can change live files between the crash and
+            // this reconcile, so the copy may be the only record of the
+            // pre-edit tree and stays available for inspection.
             self.remove_intent(root, deadline)?;
             return Ok(true);
         }
@@ -214,6 +234,10 @@ impl SkillSecService {
             restore_links(directory, &intent.backup_links, deadline)?;
         }
         self.remove_intent(root, deadline)?;
+        // Whether the interrupted rollback was completed (committed) or undone
+        // (source restored), the backup is retained: recovery may not have
+        // been the outcome the operator wanted, and this copy is the only
+        // record of the tree that was replaced.
         Ok(true)
     }
 
@@ -426,6 +450,72 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn reconcile_keeps_backups_that_no_intent_references() {
+        // A backup with no live intent is not provably disposable: a
+        // successful rollback also removes its intent while deliberately
+        // retaining the backup as the inspection copy of the replaced tree,
+        // and a crash between commit and intent cleanup is indistinguishable
+        // from that. Absence of an intent alone must never select a backup
+        // for deletion — explicit, operator-authorized cleanup is the only
+        // path that may remove one.
+        let (_temp, service, root) = fixture();
+        service
+            .certify(&root, "fixture", None, &json!([]), deadline())
+            .unwrap();
+        let backups = root.io_dir.join(".skill-meta/backups");
+        let retained = backups.join(format!("rollback-{}", "0".repeat(64)));
+        fs::create_dir_all(&retained).unwrap();
+        fs::write(retained.join("run.sh"), "retained recovery copy").unwrap();
+
+        service.reconcile(&root, deadline()).unwrap();
+
+        assert!(
+            retained.join("run.sh").exists(),
+            "a backup with no intent must survive reconcile (it may be a \
+             successful rollback's deliberately retained inspection copy)"
+        );
+    }
+
+    #[test]
+    fn a_successful_rollbacks_backup_survives_later_reconciles() {
+        // The reviewer-requested invariant: after a committed rollback the
+        // intent is gone but the backup stays, and repeated reconciles with
+        // no intent keep it — it can be the only copy of unrecorded changes
+        // that were in the replaced tree.
+        let (_temp, service, root) = fixture();
+        service
+            .certify(&root, "fixture", None, &json!([]), deadline())
+            .unwrap();
+        fs::write(root.io_dir.join("run.sh"), "edited before rollback\n").unwrap();
+        let result = service
+            .decide(
+                &root,
+                DecisionAction::Rollback,
+                Some("v000001"),
+                None,
+                deadline(),
+            )
+            .unwrap();
+        let backup = PathBuf::from(result["rollbackBackup"].as_str().unwrap());
+        assert!(
+            backup.join("run.sh").exists(),
+            "a successful rollback retains its backup for inspection"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("run.sh")).unwrap(),
+            "edited before rollback\n"
+        );
+
+        service.reconcile(&root, deadline()).unwrap();
+        service.reconcile(&root, deadline()).unwrap();
+
+        assert!(
+            backup.join("run.sh").exists(),
+            "the retained backup must survive later reconciles with no intent"
+        );
+    }
+
+    #[test]
     fn reconcile_restores_interrupted_root_even_without_skill_md() {
         let (_temp, service, root) = fixture();
         service
@@ -506,7 +596,7 @@ mod tests {
             .unwrap();
         manifest.version_id = "v000002".into();
         key.sign_manifest(&mut manifest).unwrap();
-        service
+        let intent = service
             .begin_rollback(&root, &ledger, &backup, &manifest, deadline())
             .unwrap();
         fs::write(root.io_dir.join("run.sh"), "later edits").unwrap();
@@ -514,6 +604,21 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.io_dir.join("run.sh")).unwrap(),
             "later edits"
+        );
+        // The never-started intent is dropped, but its backup stays: the
+        // prepared flag proves this rollback never replaced files, not that
+        // the live tree still duplicates the copy (the edit above already
+        // diverged them), so the pre-edit tree remains inspectable.
+        assert!(!service.config.state_dir.join(intent_name(&root)).exists());
+        let retained = ledger
+            .meta
+            .path
+            .join("backups")
+            .join(&intent.backup_name)
+            .join("run.sh");
+        assert!(
+            retained.exists(),
+            "a prepared intent's backup must stay available for inspection"
         );
         let mut intent = service
             .begin_rollback(&root, &ledger, &backup, &manifest, deadline())
@@ -543,6 +648,68 @@ mod tests {
             "later edits"
         );
         assert!(service.config.state_dir.join(intent_name(&root)).exists());
+    }
+
+    /// The reviewer's exact counterexample: a prepared backup can hold the
+    /// only copy of an unrecorded tree. Certify A, edit the source to an
+    /// unrecorded B, begin a rollback (backup captures B, replacement never
+    /// starts), then an external editor changes the live tree to C before
+    /// reconcile. Reconcile must leave C live and B inspectable in the
+    /// retained backup — the prepared flag alone cannot prove the live tree
+    /// still duplicates the backup.
+    #[test]
+    fn a_prepared_backups_unrecorded_tree_survives_later_edits_and_reconcile() {
+        let (_temp, service, root) = fixture();
+        // Certify A.
+        service
+            .certify(&root, "fixture", None, &json!([]), deadline())
+            .unwrap();
+        let directory = Directory::open(&root.io_dir).unwrap();
+        let ledger = required_ledger(&directory).unwrap();
+        let key = KeyStore::open(&service.config.state_dir)
+            .unwrap()
+            .load()
+            .unwrap();
+        // Unrecorded B: edit the source after the signed version.
+        fs::write(root.io_dir.join("run.sh"), "unrecorded B").unwrap();
+        let backup = Content::capture_backup(&directory, deadline()).unwrap();
+        let mut manifest = ledger
+            .latest(&key, &root.identity, true, deadline())
+            .unwrap()
+            .unwrap();
+        manifest.version_id = "v000002".into();
+        key.sign_manifest(&mut manifest).unwrap();
+        // The prepared intent persists a backup of B; replacement never began.
+        let intent = service
+            .begin_rollback(&root, &ledger, &backup, &manifest, deadline())
+            .unwrap();
+        // External editor changes live to C while the daemon is down.
+        fs::write(root.io_dir.join("run.sh"), "external C").unwrap();
+
+        service.reconcile(&root, deadline()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.io_dir.join("run.sh")).unwrap(),
+            "external C",
+            "a never-started rollback must not undo later external edits"
+        );
+        assert!(
+            !service.config.state_dir.join(intent_name(&root)).exists(),
+            "the prepared intent itself is dropped"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                ledger
+                    .meta
+                    .path
+                    .join("backups")
+                    .join(&intent.backup_name)
+                    .join("run.sh")
+            )
+            .unwrap(),
+            "unrecorded B",
+            "the backup is the only copy of the unrecorded tree and must stay inspectable"
+        );
     }
 
     #[test]

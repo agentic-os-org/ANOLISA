@@ -104,7 +104,8 @@ function binaryIn(directory: string | null, name: string): string {
 
 function isExecutable(path: string): boolean {
   try {
-    return existsSync(path) && (statSync(path).mode & 0o111) !== 0;
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
   } catch {
     return false;
   }

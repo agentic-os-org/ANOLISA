@@ -7,7 +7,7 @@
  * Minimal runtime admission path for policy deltas.
  *
  * User space can enqueue cap_delta_request records into cap_req. The kernel
- * drains them from a dedicated getpid tracepoint tick, checks only
+ * drains them from a dedicated membarrier tracepoint tick, checks only
  * masks/scope/target, and applies accepted monotonic deltas to cap_state. No
  * DSL/YAML/roles live here.
  */
@@ -68,9 +68,23 @@ struct cap_delta_request {
 	__u64 add_gate_mask;
 };
 
+/* User space submits exactly one record per self-triggered drain under the
+ * append lock, so a single-slot mailbox provides the control channel on every
+ * supported kernel. Must match CAP_REQ_MAILBOX_BYTES in src/lib.rs.
+ */
+#define CAP_REQ_MAILBOX_BYTES 512
+
+struct cap_req_slot {
+	__u32 len;
+	__u32 _pad;
+	__u8 data[CAP_REQ_MAILBOX_BYTES];
+};
+
 struct {
-	__uint(type, BPF_MAP_TYPE_USER_RINGBUF);
-	__uint(max_entries, 64 * 1024);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct cap_req_slot);
 } cap_req SEC(".maps");
 
 struct {
@@ -101,10 +115,9 @@ struct {
 	__type(value, __u64);
 } cap_stats SEC(".maps");
 
-/* The pid that declared the next drain: userspace writes its own pid before
- * submitting to cap_req. The drain hook refuses to run for any other pid, so
- * a foreign syscall on the trigger tracepoint cannot consume the submitter's
- * records in a foreign capability context.
+/* The thread that declared the next drain: userspace writes its own tid before
+ * submitting to cap_req. The drain hook refuses to run for any other thread,
+ * so another syscall in the process cannot consume the record concurrently.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -362,10 +375,6 @@ struct cap_append_rule {
 	struct taint_rule entry;
 };
 
-struct cap_drain_ctx {
-	pid_t current_pid;
-};
-
 static __always_inline int
 cap_append_update_admit(const struct cap_append_update *r, pid_t current_pid)
 {
@@ -428,74 +437,77 @@ static __always_inline int cap_append_rule_entry(const struct cap_append_rule *r
 	return 0;
 }
 
-static long cap_request_cb(struct bpf_dynptr *dynptr, void *data)
-{
-	const __s32 *tag = bpf_dynptr_data(dynptr, 0, sizeof(__s32));
-	if (!tag) {
-		cap_count(CAP_STAT_DROP);
-		return 0;
-	}
+_Static_assert(sizeof(struct cap_append_update) <= CAP_REQ_MAILBOX_BYTES,
+	       "cap_append_update exceeds cap_req mailbox");
+_Static_assert(sizeof(struct cap_append_rule) <= CAP_REQ_MAILBOX_BYTES,
+	       "cap_append_rule exceeds cap_req mailbox");
+_Static_assert(sizeof(struct cap_delta_request) <= CAP_REQ_MAILBOX_BYTES,
+	       "cap_delta_request exceeds cap_req mailbox");
 
-	if (*tag == CAP_REQ_APPEND_UPDATE) {
-		const struct cap_append_update *r =
-			bpf_dynptr_data(dynptr, 0, sizeof(*r));
-		struct cap_drain_ctx *ctx = data;
-		if (!r || cap_append_update_admit(r, ctx->current_pid) != 0 ||
+static __always_inline void cap_drain_mailbox(pid_t current_pid)
+{
+	__u32 key = 0;
+	struct cap_req_slot *slot = bpf_map_lookup_elem(&cap_req, &key);
+
+	if (!slot || !slot->len)
+		return;
+	__u32 len = slot->len;
+	/* The thread-scoped drain gate ensures only the submitter can consume this
+	 * record. Clear it before evaluation so rejected records are not replayed.
+	 */
+	slot->len = 0;
+
+	if (len < sizeof(__s32) || len > CAP_REQ_MAILBOX_BYTES) {
+		cap_count(CAP_STAT_DROP);
+		return;
+	}
+	__s32 tag = *(const __s32 *)slot->data;
+
+	if (tag == CAP_REQ_APPEND_UPDATE) {
+		const struct cap_append_update *r = (const void *)slot->data;
+		if (len < sizeof(*r) || cap_append_update_admit(r, current_pid) != 0 ||
 		    cap_append_update_entry(r) != 0) {
 			cap_count(CAP_STAT_REJECT);
-			return 0;
+			return;
 		}
 		cap_count(CAP_STAT_ACCEPT);
-		return 0;
+		return;
 	}
-	if (*tag == CAP_REQ_APPEND_RULE) {
-		const struct cap_append_rule *r =
-			bpf_dynptr_data(dynptr, 0, sizeof(*r));
-		struct cap_drain_ctx *ctx = data;
-		if (!r || cap_append_rule_admit(r, ctx->current_pid) != 0 ||
+	if (tag == CAP_REQ_APPEND_RULE) {
+		const struct cap_append_rule *r = (const void *)slot->data;
+		if (len < sizeof(*r) || cap_append_rule_admit(r, current_pid) != 0 ||
 		    cap_append_rule_entry(r) != 0) {
 			cap_count(CAP_STAT_REJECT);
-			return 0;
+			return;
 		}
 		cap_count(CAP_STAT_ACCEPT);
-		return 0;
+		return;
 	}
 
-	/* Normal capability delta request (caller_pid > 0). */
-	{
-		const struct cap_delta_request *r;
-		struct cap_drain_ctx *ctx = data;
-
-		r = bpf_dynptr_data(dynptr, 0, sizeof(*r));
-		if (!r) {
-			cap_count(CAP_STAT_DROP);
-			return 0;
-		}
-		if (r->caller_pid != ctx->current_pid) {
-			cap_count(CAP_STAT_DROP);
-			return 0;
-		}
-		if (cap_apply_request(r) == 0)
-			cap_count(CAP_STAT_ACCEPT);
-		else
-			cap_count(CAP_STAT_REJECT);
+	const struct cap_delta_request *r = (const void *)slot->data;
+	if (len < sizeof(*r) || r->caller_pid != current_pid) {
+		cap_count(CAP_STAT_DROP);
+		return;
 	}
-	return 0;
+	if (cap_apply_request(r) == 0)
+		cap_count(CAP_STAT_ACCEPT);
+	else
+		cap_count(CAP_STAT_REJECT);
 }
 
 static __always_inline void cap_drain_current(void)
 {
 	__u32 slot = 0;
 	__s32 *pending = bpf_map_lookup_elem(&cap_pending_submitter, &slot);
-	__s32 current = bpf_get_current_pid_tgid() >> 32;
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__s32 current_tid = (__s32)pid_tgid;
+	__s32 current_pid = pid_tgid >> 32;
 
-	if (!pending || *pending != current)
+	if (!pending || *pending != current_tid)
 		return;
 
-	struct cap_drain_ctx ctx = {
-		.current_pid = current,
-	};
-	bpf_user_ringbuf_drain(&cap_req, cap_request_cb, &ctx, 0);
+	cap_drain_mailbox(current_pid);
+	*pending = 0;
 	cap_count(CAP_STAT_DRAIN);
 }
 

@@ -12,6 +12,30 @@ use super::{
     SAVE_CURSOR,
 };
 
+/// Publishes a prompt snapshot only after the current PTY batch is drained.
+pub(super) fn publish_prompt_snapshot_if_drained(parser: &OscParser, pty_drained: bool) {
+    if pty_drained {
+        parser.publish_quiescent_prompt_snapshot();
+    }
+}
+
+/// Applies prompt-boundary evidence before the runtime observes the cut.
+/// Occupancy held for unclassified input persists for the session.
+pub(super) fn apply_prompt_boundary_evidence(
+    parser: &mut OscParser,
+    prompt_replay: &mut PromptReplayTracker,
+    blocked_prompt_generation: &mut Option<u64>,
+) {
+    let hold_prompt_occupancy = prompt_replay.observe_prompt_boundary();
+    let has_unconsumed_submit = prompt_replay.has_unconsumed_submit();
+    *blocked_prompt_generation = (has_unconsumed_submit || hold_prompt_occupancy)
+        .then(|| prompt_replay.last_written_generation());
+
+    if hold_prompt_occupancy {
+        parser.push_shell_prompt_input_barrier();
+    }
+}
+
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
 /// are zero-width; other content is measured per Unicode width (CJK = 2).
 /// Keeps native erase math correct for multi-byte drafts (#1721 G9).
@@ -124,11 +148,12 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 // Any user bytes reaching the PTY invalidate the
                 // prompt-cwd report: submit-detection is a documented
                 // heuristic (CR/LF/Ctrl-O only), so a custom
-                // `accept-line` binding must not slip past the
-                // barrier. The parser collapses consecutive writes
-                // into one event per prompt.
-                parser.push_shell_pty_input_event();
-                prompt_replay.observe_user_write(generation, line_submits)
+                // `accept-line` binding must not slip past either
+                // evidence barrier. Repeated writes may collapse, so prompt
+                // occupancy remains closed until the shell proves it is idle.
+                parser.push_shell_pty_input_events();
+                parser.push_shell_prompt_submits(line_submits);
+                prompt_replay.observe_user_write(generation, line_submits);
             }
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),

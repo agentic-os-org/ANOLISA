@@ -26,7 +26,7 @@ fn main() {
 
     let rebuild = env::var_os("ACTPLANE_REBUILD_BPF").is_some();
 
-    if rebuild || !prebuilt_full.exists() {
+    if rebuild || !prebuilt_full.exists() || !prebuilt_inode.exists() {
         for f in [
             "process.bpf.c",
             "process.h",
@@ -48,35 +48,19 @@ fn main() {
         std::fs::create_dir_all(manifest.join("prebuilt")).ok();
         std::fs::copy(&built_full, &prebuilt_full)
             .unwrap_or_else(|e| panic!("copy {} -> prebuilt: {e}", built_full.display()));
-        // Also rebuild the inode-only variant if the Makefile target exists.
-        let _ = Command::new("make")
+        let status = Command::new("make")
             .arg("-C")
             .arg(&manifest)
             .arg("process-inode-only")
-            .status();
-        if built_inode.exists() {
-            std::fs::copy(&built_inode, &prebuilt_inode).ok();
-        }
+            .status()
+            .expect("run make -C bpf process-inode-only (ACTPLANE_REBUILD_BPF)");
+        assert!(status.success(), "make -C bpf process-inode-only failed");
+        std::fs::copy(&built_inode, &prebuilt_inode)
+            .unwrap_or_else(|e| panic!("copy {} -> prebuilt: {e}", built_inode.display()));
     }
 
-    // Full variant (always required).
-    let src_full = if prebuilt_full.exists() {
-        &prebuilt_full
-    } else {
-        &built_full
-    };
-    std::fs::copy(src_full, out.join("process.bpf.o"))
-        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", src_full.display()));
-
-    // Inode-only variant: fall back to the full variant if no separate build exists
-    // (ensures compilation succeeds even without the inode-only prebuilt).
-    let src_inode = if prebuilt_inode.exists() {
-        prebuilt_inode
-    } else if built_inode.exists() {
-        built_inode
-    } else {
-        src_full.clone()
-    };
-    std::fs::copy(&src_inode, out.join("process-inode-only.bpf.o"))
-        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", src_inode.display()));
+    std::fs::copy(&prebuilt_full, out.join("process.bpf.o"))
+        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", prebuilt_full.display()));
+    std::fs::copy(&prebuilt_inode, out.join("process-inode-only.bpf.o"))
+        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", prebuilt_inode.display()));
 }

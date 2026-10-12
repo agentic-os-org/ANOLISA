@@ -22,11 +22,10 @@ impl TestAdmission for asc_pap_repository_memory::ProcessLocalPapRepository {
         expected: &ExpectedBinding,
         desired: &BindingView,
     ) -> Result<bool, StoreError> {
-        use asc_pap::PapRepository;
         let Some(mut before) = self.get_binding_state(&expected.id)? else {
             return Ok(false);
         };
-        if !expected.matches(&before.binding) {
+        if !expected.matches(&before) {
             return Ok(false);
         }
         if before.binding == *desired {
@@ -40,7 +39,9 @@ impl TestAdmission for asc_pap_repository_memory::ProcessLocalPapRepository {
             let mut failed = before.clone();
             failed.binding.status.phase = asc_policy_types::binding::BindingStatus::ApplyFailed;
             self.compare_exchange_binding_state(&before, &BindingStateWrite::new(failed.clone()))?;
-            before = failed;
+            before = self
+                .get_binding_state(&expected.id)?
+                .ok_or(StoreError::Invalid)?;
         }
         if !matches!(
             desired.status.phase,
@@ -51,11 +52,12 @@ impl TestAdmission for asc_pap_repository_memory::ProcessLocalPapRepository {
             let mut next = before.clone();
             next.binding.status = desired.status.clone();
 
-            return Ok(self
-                .compare_exchange_binding_state(&before, &BindingStateWrite::new(next))?
-                == WriteResult::Applied);
+            return Ok(matches!(
+                self.compare_exchange_binding_state(&before, &BindingStateWrite::new(next))?,
+                WriteResult::Applied(_)
+            ));
         }
-        self.update_binding(Some(&before.binding), desired)
+        self.update_binding(Some(&(&before).into()), desired)
             .map(|_| true)
             .map_err(|_| StoreError::Invalid)
     }
@@ -65,6 +67,9 @@ pub fn write_phase(expected: &BindingStateSnapshot, write: &BindingStateWrite) -
     let Some(next) = &write.next else {
         return "finish";
     };
+    if next.preserve_observations_on_conflict {
+        return "finish";
+    }
     if !expected.binding.status.phase.is_reconciling()
         && next
             .status

@@ -6,7 +6,7 @@
 
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Client for querying Alibaba Cloud instance metadata and cloud-init datasource.
 ///
@@ -22,7 +22,8 @@ use std::sync::{Arc, OnceLock};
 #[derive(Clone)]
 pub struct MetadataClient {
     metadata_url_base: String,
-    cloud_init_all: Arc<OnceLock<Option<serde_json::Value>>>,
+    cloud_init_all: Arc<OnceLock<serde_json::Value>>,
+    cloud_init_attempted: Arc<Mutex<bool>>,
     /// Set after a curl transfer failure, not an HTTP error or empty value.
     /// All further `query_metadata` calls skip curl entirely. Shared by
     /// every clone: probes that receive a cloned client must observe and
@@ -38,6 +39,7 @@ impl MetadataClient {
         Self {
             metadata_url_base: metadata_url_base.trim_end_matches('/').to_string(),
             cloud_init_all: Arc::new(OnceLock::new()),
+            cloud_init_attempted: Arc::new(Mutex::new(false)),
             metadata_unreachable: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -58,7 +60,8 @@ impl MetadataClient {
     }
 
     /// Clear the unreachable latch so the next `query_metadata` probes the
-    /// endpoint again.
+    /// endpoint again. Also re-arm a failed cloud-init full-JSON lookup for
+    /// the next round; a successfully cached JSON value remains reusable.
     ///
     /// The latch exists to collapse the several keys probed *within* one
     /// uploader round (region-id, desktop-id, instance/instance-type) into
@@ -72,6 +75,10 @@ impl MetadataClient {
     /// is the intended cost.
     pub fn clear_unreachable(&self) {
         self.metadata_unreachable.store(false, Ordering::Relaxed);
+        *self
+            .cloud_init_attempted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
     }
 
     /// Query a metadata API key via curl.
@@ -208,23 +215,35 @@ impl MetadataClient {
         None
     }
 
-    /// Return cached `cloud-init query --all` JSON output.
+    /// Cache successful full-JSON lookups; collapse failures within one round.
     fn cloud_init_all(&self) -> Option<&serde_json::Value> {
-        self.cloud_init_all
-            .get_or_init(|| {
-                let output = Command::new("cloud-init")
-                    .args(["query", "--all"])
-                    .output()
-                    .ok()?;
-
-                if !output.status.success() {
-                    return None;
-                }
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                serde_json::from_str(&stdout).ok()
-            })
-            .as_ref()
+        if let Some(value) = self.cloud_init_all.get() {
+            return Some(value);
+        }
+        // Serialize initialization across clones. The mutex protects only an
+        // attempt flag; successful JSON is published separately and immutably,
+        // so recovering a poisoned flag cannot expose a partial JSON value.
+        let mut attempted = self
+            .cloud_init_attempted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = self.cloud_init_all.get() {
+            return Some(value);
+        }
+        if *attempted {
+            return None;
+        }
+        *attempted = true;
+        let output = Command::new("cloud-init")
+            .args(["query", "--all"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value = serde_json::from_str(&stdout).ok()?;
+        Some(self.cloud_init_all.get_or_init(|| value))
     }
 }
 
@@ -560,9 +579,11 @@ mod tests {
 
     #[test]
     fn test_query_unknown_key_returns_none() {
-        let client = MetadataClient::new("http://127.0.0.1:19999/no-such-endpoint");
-        // Metadata API is unreachable and this key should not exist in cloud-init.
-        assert!(client.query("__this_key_should_not_exist__").is_none());
+        with_cloud_init_disabled(|| {
+            let client = MetadataClient::new("http://127.0.0.1:19999/no-such-endpoint");
+            // Metadata API is unreachable and this key should not exist in cloud-init.
+            assert!(client.query("__this_key_should_not_exist__").is_none());
+        });
     }
 
     #[test]
@@ -585,5 +606,141 @@ mod tests {
         );
         assert_eq!(find_string_by_key(&json, "missing"), None);
         assert_eq!(find_string_by_key(&json, "v1"), None); // not a string
+    }
+
+    fn with_cloud_init_recovery(mode: &str, f: impl FnOnce(&std::path::Path)) {
+        // Reuse the existing helper's PATH mutex and its owned executable.
+        with_cloud_init_responses(&[], || {
+            let path = std::env::var_os("PATH").unwrap();
+            let directory = std::env::split_paths(&path).next().unwrap();
+            std::fs::write(directory.join("mode"), mode).unwrap();
+            std::fs::write(
+                directory.join("cloud-init"),
+                r#"#!/bin/sh
+root=$(dirname "$0")
+[ "$1" = query ] && [ "$2" = --all ] || exit 1
+printf 'attempt\n' >> "$root/attempts"
+if [ -f "$root/ready" ]; then
+    printf '%s\n' '{"ds":{"meta_data":{"nested":{"region-id":"synthetic-region","desktop-id":"synthetic-desktop"}}}}'
+    exit 0
+fi
+if [ "$(cat "$root/mode")" = malformed ]; then
+    printf 'invalid json\n'
+    exit 0
+fi
+exit 1
+"#,
+            ).unwrap();
+            f(&directory);
+        });
+    }
+
+    #[test]
+    fn cloud_init_failure_retries_next_round_across_clones() {
+        for mode in ["exit", "malformed"] {
+            with_cloud_init_recovery(mode, |directory| {
+                let client = MetadataClient::new("http://127.0.0.1:19999/unreachable");
+                let clone = client.clone();
+                assert_eq!(client.cloud_init_query_all_key("region-id"), None);
+                assert_eq!(clone.cloud_init_query_all_key("desktop-id"), None);
+                std::fs::write(directory.join("ready"), "ready").unwrap();
+                // Failure is bounded within the round, even after the command recovers.
+                assert_eq!(clone.cloud_init_query_all_key("region-id"), None);
+                assert_eq!(
+                    std::fs::read_to_string(directory.join("attempts"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    1
+                );
+                clone.clear_unreachable();
+                assert_eq!(
+                    client.cloud_init_query_all_key("region-id").as_deref(),
+                    Some("synthetic-region")
+                );
+                assert_eq!(
+                    clone.cloud_init_query_all_key("desktop-id").as_deref(),
+                    Some("synthetic-desktop")
+                );
+                assert_eq!(
+                    std::fs::read_to_string(directory.join("attempts"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    2
+                );
+                std::fs::remove_file(directory.join("ready")).unwrap();
+                client.clear_unreachable();
+                // A later round reuses the successful JSON instead of invoking the command.
+                assert_eq!(
+                    clone.cloud_init_query_all_key("region-id").as_deref(),
+                    Some("synthetic-region")
+                );
+                assert_eq!(
+                    std::fs::read_to_string(directory.join("attempts"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    2
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn region_probe_recovers_cloud_init_fallback_on_same_shared_client() {
+        with_cloud_init_recovery("exit", |directory| {
+            with_metadata_script(&["region-id", "region-id"], &[], |base| {
+                let client = MetadataClient::new(base);
+                let probe = crate::telemetry::common::RegionProbe::with_client(client.clone());
+                assert_eq!(probe.probe().unwrap().region_id, "cn-hangzhou");
+                std::fs::write(directory.join("ready"), "ready").unwrap();
+                assert_eq!(probe.probe().unwrap().region_id, "cn-hangzhou");
+                client.clear_unreachable();
+                let recovered = probe.probe().unwrap();
+                assert_eq!(recovered.region_id, "synthetic-region");
+                assert!(recovered.use_internal);
+                assert_eq!(
+                    std::fs::read_to_string(directory.join("attempts"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    2
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn cloud_init_all_is_initialized_once_by_concurrent_clones() {
+        for ready in [false, true] {
+            with_cloud_init_recovery("exit", |directory| {
+                if ready {
+                    std::fs::write(directory.join("ready"), "ready").unwrap();
+                }
+                let client = MetadataClient::new("http://127.0.0.1:19999/unreachable");
+                let barrier = std::sync::Barrier::new(8);
+                std::thread::scope(|scope| {
+                    for _ in 0..8 {
+                        let clone = client.clone();
+                        let barrier = &barrier;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            assert_eq!(
+                                clone.cloud_init_query_all_key("region-id").is_some(),
+                                ready
+                            );
+                        });
+                    }
+                });
+                assert_eq!(
+                    std::fs::read_to_string(directory.join("attempts"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    1
+                );
+            });
+        }
     }
 }

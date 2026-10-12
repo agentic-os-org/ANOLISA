@@ -201,8 +201,8 @@ rather than merely that a warning was logged.
 | `sqlite_store_rejects_explicit_empty_models` | 1:1 | `store::tests::rejects_an_empty_table_slice` |
 | `ensure_schema_does_not_downgrade_newer_schema` | merged | `v1_fixtures::a_newer_schema_version_is_left_untouched` |
 | `ensure_schema_if_needed_does_not_downgrade_newer_schema` | merged | `v1_fixtures::a_newer_schema_version_is_left_untouched` |
-| `ensure_schema_if_needed_skips_full_schema_when_current` | merged | `v1_fixtures::an_observability_fixture_keeps_its_only_revision` |
-| `ensure_schema_if_needed_trusts_current_version_fast_path` | merged | `v1_fixtures::an_observability_fixture_keeps_its_only_revision` |
+| `ensure_schema_if_needed_skips_full_schema_when_current` | merged | `owned_queries::initial_schema_is_revision_two_with_uid` (revision 2 with nullable historical ownership; writer requires UID) |
+| `ensure_schema_if_needed_trusts_current_version_fast_path` | merged | `owned_queries::initial_schema_is_revision_two_with_uid` (revision 2 with nullable historical ownership; writer requires UID) |
 | `ensure_schema_if_needed_force_repairs_current_version_schema` | 1:1 | `store::tests::repair_request_forces_convergence_and_survives_until_used` |
 | `ensure_schema_if_needed_runs_full_schema_when_version_mismatch` | 1:1 | `v1_fixtures::a_revision_one_database_converges_to_the_current_schema` |
 | `sqlite_schema_error_classification_uses_message` | 1:1 | `error::tests::schema_detection_uses_code_then_markers` |
@@ -511,7 +511,7 @@ Beyond v1: `record::tests::epoch_matches_v1_timestamp`,
 `sub_microsecond_precision_is_truncated_like_python`, `round_trips_through_json`,
 `column_json_helpers_match_wire_members`, `direct_construction_validates_the_same_way`,
 `hook::tests::sorted_names_match_v1_error_ordering`,
-`config::tests` (2), `schema_version::tests::schema_version_matches_v1`, and the
+`config::tests` (2), `schema_version::tests::schema_version_includes_uid_ownership`, and the
 two `summary::tests`.
 
 ## observability/test_writer.py (16) → `asc-event-log` + `asc-persistence-sqlite`
@@ -527,10 +527,10 @@ two `summary::tests`.
 | `observability_sqlite_write_or_raise_propagates_validation_errors_without_dispose` | 1:1 | `observability_store::a_malformed_record_surfaces_without_disposing_the_connection` |
 | `observability_sqlite_write_or_raise_disposes_on_io_error` | 1:1 | `observability::policy::tests::an_io_fault_disposes_and_propagates` |
 | `observability_sqlite_write_or_raise_disposes_on_corruption_retry_error` | 1:1 | `observability::policy::tests::a_failed_corruption_retry_disposes_only_for_a_database_fault` |
-| `observability_sqlite_columns_are_core_index_and_correlation_only` | split | `observability::table::tests::column_order_matches_v1`, `there_are_no_convergent_columns`, `there_is_exactly_one_table` |
+| `observability_sqlite_columns_are_core_index_and_correlation_only` | split | `observability::table::tests::columns_include_nullable_uid`, `legacy_convergence_adds_owner_column`, `there_is_exactly_one_table` |
 | `observability_sqlite_writer_prunes_on_close_not_write` | 1:1 | `observability_store::close_runs_retention_through_the_maintenance_gate` |
 | `observability_sqlite_writer_closes_through_maintenance_gate` | merged | `observability_store::close_runs_retention_through_the_maintenance_gate` |
-| `observability_sqlite_writer_uses_schema_version_fast_path` | 1:1 | `v1_fixtures::an_observability_fixture_keeps_its_only_revision` |
+| `observability_sqlite_writer_uses_schema_version_fast_path` | 1:1 | `owned_queries::initial_schema_is_revision_two_with_uid` (revision 2 with nullable historical ownership; writer requires UID) |
 | `record_observability_dual_writes_jsonl_and_sqlite` | 1:1 | `asc-event-sink configured::observability_tests::both_paths_receive_the_record` |
 | `observability_writer_indexes_llm_call_correlation_only` | merged | `observability_store::the_correlation_columns_follow_the_hook_metadata_shape` |
 | `observability_writer_indexes_tool_call_correlation_only` | merged | `observability_store::the_correlation_columns_follow_the_hook_metadata_shape` |

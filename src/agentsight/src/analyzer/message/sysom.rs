@@ -194,9 +194,14 @@ impl SysomParser {
 
     /// Parse a SysOM response body.
     ///
-    /// Accepts two formats:
-    /// 1. **Non-streaming**: `{ "choices": [...] }` (inner JSON already decoded by caller)
-    /// 2. **SSE / streaming**: JSON array of chunks — each chunk has the same
+    /// Accepts three formats:
+    /// 1. **Non-streaming envelope**: `{ "data": "<json-string>" }` — the
+    ///    SysOM POP API wraps the actual LLM response in `body.data` (see the
+    ///    module header). The inner JSON string is decoded first and parsed
+    ///    like a direct body.
+    /// 2. **Direct choices object**: `{ "choices": [...] }` (inner JSON
+    ///    already decoded by caller)
+    /// 3. **SSE / streaming**: JSON array of chunks — each chunk has the same
     ///    `choices` structure; the last non-empty chunk's content is used.
     pub fn parse_response(body: &serde_json::Value) -> Option<SysomResponse> {
         // Non-streaming: direct `choices` object
@@ -204,6 +209,18 @@ impl SysomParser {
             return serde_json::from_value::<SysomResponse>(body.clone())
                 .map_err(|e| log::trace!("[SysomParser] Failed to parse response: {e}"))
                 .ok();
+        }
+
+        // Non-streaming envelope: the POP API wraps the real LLM response in
+        // `body.data` as a JSON-encoded string. Nothing unwrapped it, so a
+        // non-streaming call's assistant content and tool_use parsed as
+        // `None` and the captured call recorded no output at all.
+        if let Some(inner) = body.get("data").and_then(|v| v.as_str()) {
+            return serde_json::from_str::<serde_json::Value>(inner)
+                .map_err(|e| log::trace!("[SysomParser] Failed to decode body.data: {e}"))
+                .ok()
+                .as_ref()
+                .and_then(Self::parse_response);
         }
 
         // Streaming: JSON array of SSE chunks — aggregate content and last tool_use
@@ -344,5 +361,81 @@ mod tests {
 
         let resp = SysomParser::parse_response(&chunks).unwrap();
         assert_eq!(resp.choices[0].message.content, "Hello there!");
+    }
+
+    /// The documented non-streaming envelope wraps the real LLM response in
+    /// `body.data` as a JSON-encoded string (see the module header). The
+    /// parser only looked at a direct `choices` object and at the SSE chunk
+    /// array, so a non-streaming call's assistant content and tool_use
+    /// parsed as `None` and the captured call recorded no output at all.
+    #[test]
+    fn test_parse_response_non_streaming_data_envelope() {
+        let inner = serde_json::json!({
+            "id": "chatcmpl-ns-1",
+            "choices": [{
+                "message": {
+                    "content": "Hello there!",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"/tmp/test.txt\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let body = serde_json::json!({ "data": inner.to_string() });
+
+        let resp = SysomParser::parse_response(&body)
+            .expect("the data envelope must be unwrapped and parsed");
+        assert_eq!(resp.choices[0].message.content, "Hello there!");
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-ns-1"));
+        let tool_use = resp.choices[0].message.tool_use.as_ref().unwrap();
+        assert_eq!(tool_use[0].function.name, "read_file");
+        assert_eq!(tool_use[0].id, "call_abc123");
+    }
+
+    /// End-to-end through `MessageParser::parse_by_path`, the path the
+    /// analyzer takes: a non-streaming SysOM call must parse both its
+    /// request (from `llmParamString`) and its response (from the `data`
+    /// envelope). Before the unwrap the response half stayed `None`.
+    #[test]
+    fn test_parse_by_path_non_streaming_data_envelope() {
+        use crate::analyzer::message::{MessageParser, ParsedApiMessage};
+
+        let parser = MessageParser::new();
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let request = serde_json::json!({ "llmParamString": params.to_string() });
+        let inner = serde_json::json!({
+            "choices": [{"message": {"content": "hi there", "tool_use": null}}]
+        });
+        let response = serde_json::json!({ "data": inner.to_string() });
+
+        match parser.parse_by_path(
+            "/api/v1/copilot/generate_copilot_response",
+            Some(&request),
+            Some(&response),
+        ) {
+            Some(ParsedApiMessage::SysomMessage { request, response }) => {
+                assert!(request.is_some(), "the request must still parse");
+                let resp = response.expect("the wrapped response must parse");
+                assert_eq!(resp.choices[0].message.content, "hi there");
+            }
+            other => panic!("expected SysomMessage, got {other:?}"),
+        }
+    }
+
+    /// An inner payload that is not JSON keeps the old outcome (`None`)
+    /// instead of panicking or half-parsing.
+    #[test]
+    fn test_parse_response_data_envelope_with_invalid_inner_json_is_none() {
+        let body = serde_json::json!({ "data": "not json" });
+        assert!(SysomParser::parse_response(&body).is_none());
     }
 }

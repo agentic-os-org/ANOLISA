@@ -4,6 +4,14 @@
 本批只有采集与落盘，不包含 Session/Run/Timeline 查询、report/review/schema 命令、
 插件切换或 OTLP/Collector 导出。V1 Python 仅用于生成回归 oracle，不是 V2 运行依赖。
 
+本分支后续增加的查询接口与 UDS UID 归属扩展见
+[V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)
+（obs 已实现）；当前 schema revision 2 包含可空 `uid` 与归属索引，
+SQLite 与 JSONL writer 均要求显式传入可信 `uid: u32`。写入侧将 revision 1 升级到 2，
+为缺少 UID 的旧表添加可空列，历史记录保持 `NULL`，不推断或补为 UID 0。
+下文首批采集验收是历史基线，
+本次查询扩展证据单列在该设计文档，不能将历史 PASS 等同于当前安装态验收。
+
 ## 1. CLI 兼容接口 [PRESERVE V1]
 
 ```bash
@@ -91,7 +99,11 @@ SQLite 或文件 writer。core 在请求的 OTel Context 中读取 metadata，�
 
 文件使用 daemon 已解析的系统数据目录，默认 `/var/log/agent-sec`，部署可用绝对路径
 `AGENT_SEC_DATA_DIR` 覆盖；不回退 HOME。文件为 `observability.jsonl` 和 `observability.db`，
-复用现有 owner-only writer。采集 writers 惰性初始化，存储故障由该次调用返回。
+复用现有仅所属 UID 可访问的文件权限。系统 obs schema 在启动时初始化或升级，JSONL 惰性创建；
+复用现有 SQLite 与 JSONL writer，写入均要求 peer UID；JSONL 写入顶层 `uid`，
+SQLite 将 UID 与新记录同次 INSERT，客户端不能指定或覆盖归属。数据库允许历史 `NULL` UID；
+非 root 查询只匹配自身 UID，root 全量查询包含历史无归属记录，且不为其关联安全事件。
+存储故障仍由调用显式返回，初始化或升级失败的查询返回 unavailable。
 
 1. 先写 JSONL；失败就不尝试 SQLite。
 2. 再写 SQLite；失败不撤销已追加的 JSONL。
@@ -119,10 +131,14 @@ E2E 文件：`tests/v2/e2e/test_observability_record_e2e.py`。
 这些是源码构建本地进程/真实文件与 SQLite 验收，不代表 RPM/systemd、跨 UID 授权或断电恢复验收。
 
 内部变化：新增 `ObservabilityRecordParams` / allowlisted `obs.record` / core service 与 sink port；
-复用 OTel carrier，现有 DB schema 和 JSONL record schema 不变。
+复用 OTel carrier 和现有领域 record；当前 writer 要求可信 UID，JSONL 新记录增加可信顶层 `uid`。
+DB schema revision 2 允许历史 `NULL` UID；revision 1 的列、索引与版本收敛在同一事务完成，
+失败时回滚并允许后续重试，已有 UID 不被覆盖。
 外部变化：V2 CLI 新增 V1 风格 record 命令；持久化由 daemon 执行，失败不启动 daemon 或回退本地。
 回滚先停止新 CLI 调用，再回退 daemon；旧 daemon 对该方法返回 unknown_method。
-本批不修改 V1、插件、包或存量数据，也不要求数据库逆向迁移。
+首批采集未修改 V1、插件、包或存量数据；后续 UID 扩展会升级已选定的 obs 数据库，
+不自动发现或合并 V1 per-user 数据。回退不支持 schema revision 2 的二进制前，
+须恢复升级前的配套数据库备份；不提供数据库逆向迁移。
 
 本次本地验收：上述 OBS-001..006、DPROC-022 均通过；涉及 9 个 Rust crate 的 350 项测试通过，
 采集/OTel E2E 与架构检查合计 23 项通过，Clippy、rustfmt、Python lint/格式检查通过。

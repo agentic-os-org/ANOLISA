@@ -5,8 +5,8 @@ use asc_cli::{
     Cli, InputError, Plan,
     capabilities::process_environment,
     output::{
-        render_binding_mutation, render_pii_scan, render_policy, render_prompt_warmup,
-        render_scan_code, render_scan_prompt, render_skill_sec, warn_multi_turn_incomplete,
+        render_pii_scan, render_policy, render_prompt_warmup, render_scan_code, render_scan_prompt,
+        render_skill_sec, warn_multi_turn_incomplete,
     },
 };
 
@@ -14,6 +14,23 @@ fn main() -> ExitCode {
     let cli = match Cli::parse_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => {
+            // Events diagnostics retain V1 wording and usage exit codes.
+            if let Some(input @ InputError::Events(_)) = std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<InputError>())
+            {
+                eprintln!("{input}");
+                return ExitCode::from(2);
+            }
+            if error.kind() == clap::error::ErrorKind::InvalidValue
+                && matches!(error.get(clap::error::ContextKind::InvalidValue), Some(clap::error::ContextValue::String(value)) if value.is_empty())
+                && let Some(clap::error::ContextValue::String(argument)) =
+                    error.get(clap::error::ContextKind::InvalidArg)
+                && let Some(option @ ("--event-type" | "--category")) =
+                    argument.split_whitespace().next()
+            {
+                eprintln!("Error: Option '{option}' requires an argument.");
+                return ExitCode::from(2);
+            }
             let code = if error.get(clap::error::ContextKind::Custom).is_some() {
                 1
             } else if error.use_stderr() {
@@ -77,9 +94,11 @@ fn main() -> ExitCode {
             println!("{result}");
             ExitCode::from(2)
         }
-        // Scan commands own their usage hints, so those errors render
-        // verbatim instead of behind the generic prefix.
-        Err(RunError::Input(input)) if input.is_usage_hint() => {
+        // Scan and events commands own their usage hints, so those errors
+        // render verbatim instead of behind the generic prefix.
+        Err(RunError::Input(input) | RunError::Events(asc_cli::EventsRunError::Input(input)))
+            if input.is_usage_hint() =>
+        {
             eprintln!("{input}");
             ExitCode::FAILURE
         }
@@ -107,8 +126,19 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
                 )
                 .map_err(RunError::Output);
         }
+        Plan::ObservabilitySchema => {
+            use std::io::Write;
+            let schema = asc_observability::observability_record_json_schema();
+            let text = serde_json::to_string_pretty(&schema)
+                .map_err(|error| RunError::Output(io::Error::other(error)))?;
+            writeln!(io::stdout().lock(), "{text}").map_err(RunError::Output)?;
+            return Ok(0);
+        }
         Plan::Daemon { socket } => socket,
     };
+    if let Some(result) = cli.run_observability_query(socket) {
+        return result.map_err(RunError::Output);
+    }
     // Scan-prompt resolves its own request batch (one per input line or
     // conversation payload) and prints diagnostics around them, so it owns
     // its transport loop instead of sharing the single-request path.
@@ -154,6 +184,18 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         }
         return Ok(exit_code);
     }
+    // Events owns its transport loop: pagination, count projection, and the
+    // v1 output contract cannot be served by the single-request path.
+    if let Some(events) = cli.events() {
+        return events
+            .run(
+                socket,
+                cli.timeout(),
+                &mut io::stdout().lock(),
+                &mut io::stderr(),
+            )
+            .map_err(RunError::Events);
+    }
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
@@ -179,14 +221,6 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
             .map_err(RunError::Output)
-    } else if matches!(
-        request.method.as_str(),
-        asc_daemon_protocol::method::POLICY_BINDINGS_CREATE
-            | asc_daemon_protocol::method::POLICY_BINDINGS_UPDATE
-            | asc_daemon_protocol::method::POLICY_BINDINGS_DELETE
-    ) {
-        render_binding_mutation(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
     } else {
         render_policy(&response, &mut io::stdout().lock(), &mut io::stderr())
             .map_err(RunError::Output)
@@ -197,6 +231,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
 enum RunError {
     #[error(transparent)]
     Input(#[from] InputError),
+    #[error(transparent)]
+    Events(#[from] asc_cli::EventsRunError),
     #[error(transparent)]
     Client(#[from] asc_daemon_client::ClientError),
     #[error(transparent)]

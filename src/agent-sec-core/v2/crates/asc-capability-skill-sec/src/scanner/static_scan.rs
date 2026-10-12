@@ -30,6 +30,22 @@ const SECRET_FILES: &[&str] = &[
 /// How many skipped directories the coverage finding lists before
 /// summarizing the remainder as a count.
 const LISTED_SKIPPED_DIRS: usize = 16;
+/// Extensions that denote private-key material: a file with one of these
+/// extensions is a private key by convention (a `ppk` is `PuTTYgen`'s
+/// private-key format). They sit outside `TEXT_EXTENSIONS`, so their content
+/// is never rule-scanned and without a dedicated finding such a file would
+/// pass the static scanner entirely even though it is exactly the credential
+/// class the scan exists to catch. Public certificate material (crt/cer/der)
+/// is deliberately absent.
+const PRIVATE_KEY_EXTENSIONS: &[&str] = &["key", "ppk"];
+/// Extensions that may hold private-key material but just as often hold only
+/// public certificates: `cert.pem` chains, JKS truststores, Java PKCS#12
+/// truststores, and `openssl pkcs12 -export -nokeys` archives share these
+/// extensions with their private-key counterparts, so the extension alone
+/// cannot establish that the file is a credential. Such files are still
+/// reported so they cannot pass the scanner silently, but at medium severity
+/// rather than the high that private-key material carries.
+const KEYSTORE_EXTENSIONS: &[&str] = &["jks", "keystore", "p12", "pem", "pfx"];
 
 struct Rule {
     id: String,
@@ -305,14 +321,19 @@ fn manifest_error(rule: &str, message: &str, title: &str, remediation: &str) -> 
 
 fn path_findings(path: &str, findings: &mut Vec<Finding>) {
     let filename = path.rsplit('/').next().unwrap_or(path);
-    if path.split('/').any(|part| part.starts_with('.')) {
-        if SECRET_FILES.contains(&filename) {
-            findings.push(item("secret-material-file", "high", "Skill contains a file name commonly used for secrets or credentials.", Some(path), None,
-                json!({"category":"credential_access","title":"Credential-like file included","remediation":"Remove secrets and credential files from the Skill package."})));
-        } else if path != ".clawhub/origin.json" {
-            findings.push(item("hidden-file", "medium", "Skill contains a hidden file or directory.", Some(path), None,
-                json!({"category":"filesystem","title":"Hidden file included","remediation":"Keep hidden files out of Skill packages unless they are documented and required."})));
-        }
+    if SECRET_FILES.contains(&filename) {
+        findings.push(item("secret-material-file", "high", "Skill contains a file name commonly used for secrets or credentials.", Some(path), None,
+            json!({"category":"credential_access","title":"Credential-like file included","remediation":"Remove secrets and credential files from the Skill package."})));
+    } else if path.split('/').any(|part| part.starts_with('.')) && path != ".clawhub/origin.json" {
+        findings.push(item("hidden-file", "medium", "Skill contains a hidden file or directory.", Some(path), None,
+            json!({"category":"filesystem","title":"Hidden file included","remediation":"Keep hidden files out of Skill packages unless they are documented and required."})));
+    }
+    if PRIVATE_KEY_EXTENSIONS.contains(&extension(path).as_str()) {
+        findings.push(item("key-material-file", "high", "Skill contains a file whose extension commonly denotes private-key material.", Some(path), None,
+            json!({"category":"credential_access","title":"Private-key material included","remediation":"Remove private keys from the Skill package."})));
+    } else if KEYSTORE_EXTENSIONS.contains(&extension(path).as_str()) {
+        findings.push(item("keystore-file", "medium", "Skill contains a file whose extension commonly denotes keystore or certificate material that may include private keys.", Some(path), None,
+            json!({"category":"credential_access","title":"Keystore or certificate file included","remediation":"Remove keystores and key material from the Skill package unless it is a public certificate."})));
     }
     if BINARY_EXTENSIONS.contains(&extension(path).as_str()) {
         findings.push(item("suspicious-binary-asset", "medium", "Skill contains a binary executable or bytecode-like asset.", Some(path), None,
@@ -561,5 +582,128 @@ mod tests {
             network(&json!({}), &[], &mut Vec::new(), Instant::now()),
             Err(SkillSecError::Timeout)
         ));
+    }
+
+    fn rules_for(path: &str) -> Vec<String> {
+        let mut findings = Vec::new();
+        path_findings(path, &mut findings);
+        findings.into_iter().map(|finding| finding.rule).collect()
+    }
+
+    fn level_for(path: &str, rule: &str) -> Option<ScanStatus> {
+        let mut findings = Vec::new();
+        path_findings(path, &mut findings);
+        findings
+            .into_iter()
+            .find(|finding| finding.rule == rule)
+            .map(|finding| finding.level)
+    }
+
+    #[test]
+    fn credential_files_are_flagged_without_a_hidden_parent() {
+        for path in ["id_rsa", "id_ed25519", "keys/id_rsa", ".env"] {
+            assert!(
+                rules_for(path).contains(&"secret-material-file".to_owned()),
+                "{path}"
+            );
+        }
+        // Hidden-path bookkeeping is unchanged: non-secret dot-paths still warn.
+        assert!(rules_for(".ssh/config").contains(&"hidden-file".to_owned()));
+        let clawhub = rules_for(".clawhub/origin.json");
+        assert!(clawhub.iter().all(|rule| rule != "hidden-file"));
+        assert!(rules_for(".clawhub/other.json").contains(&"hidden-file".to_owned()));
+    }
+
+    #[test]
+    fn private_key_extensions_flag_high_and_keystore_extensions_flag_medium() {
+        for path in ["server.key", "identity.ppk", "keys/SERVER.KEY"] {
+            assert_eq!(
+                level_for(path, "key-material-file"),
+                Some(ScanStatus::Deny),
+                "{path}"
+            );
+        }
+        // Ambiguous extensions still surface, but only at warn level: a JKS
+        // truststore or a cert-only PKCS#12 archive is not credential material.
+        for path in [
+            "truststore.jks",
+            "keys/app.keystore",
+            "backup.p12",
+            "cert.pem",
+            "wallet.pfx",
+        ] {
+            assert_eq!(
+                level_for(path, "keystore-file"),
+                Some(ScanStatus::Warn),
+                "{path}"
+            );
+            assert!(
+                !rules_for(path).contains(&"key-material-file".to_owned()),
+                "{path}"
+            );
+        }
+        for path in [
+            "cert.crt",
+            "cert.cer",
+            "readme.txt",
+            "run.sh",
+            "archive.tar.gz",
+        ] {
+            assert!(
+                !rules_for(path).contains(&"key-material-file".to_owned()),
+                "{path}"
+            );
+            assert!(
+                !rules_for(path).contains(&"keystore-file".to_owned()),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_certificates_do_not_trigger_a_high_severity_finding() {
+        // A public certificate named cert.pem must not produce a deny-level
+        // finding: extension alone cannot tell it from a private-key PEM.
+        let mut findings = Vec::new();
+        path_findings("cert.pem", &mut findings);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.level != ScanStatus::Deny)
+        );
+        // A certificate-only PFX (`openssl pkcs12 -export -nokeys` produces
+        // exactly that shape) is the same ambiguity in PKCS#12 form: it must
+        // surface as a warn-level keystore finding, never the deny-level
+        // key-material one.
+        let mut findings = Vec::new();
+        path_findings("public-export.pfx", &mut findings);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.level != ScanStatus::Deny),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == "keystore-file")
+        );
+        // A private key file keeps the high-severity credential finding.
+        assert_eq!(
+            level_for("server.key", "key-material-file"),
+            Some(ScanStatus::Deny)
+        );
+    }
+
+    #[test]
+    fn key_material_extension_matching_is_exact_and_case_insensitive() {
+        assert!(rules_for("keys/SERVER.KEY").contains(&"key-material-file".to_owned()));
+        assert_eq!(
+            level_for("CERT.PEM", "keystore-file"),
+            Some(ScanStatus::Warn)
+        );
+        assert!(!rules_for("server.keyboard").contains(&"key-material-file".to_owned()));
+        assert!(!rules_for("monkey").contains(&"key-material-file".to_owned()));
+        assert!(!rules_for("monkey").contains(&"keystore-file".to_owned()));
     }
 }

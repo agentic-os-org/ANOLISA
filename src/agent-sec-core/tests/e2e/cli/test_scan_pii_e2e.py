@@ -87,6 +87,10 @@ def _run_cli(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     data_dir.mkdir(parents=True, exist_ok=True)
+    if _V2:
+        # The test-owned parent must also pass the daemon's ancestor checks.
+        data_dir.parent.chmod(0o700)
+        data_dir.chmod(0o700)
     env = os.environ.copy()
     env["AGENT_SEC_DATA_DIR"] = str(data_dir)
     home_dir = data_dir / "home"
@@ -121,7 +125,7 @@ def _scan_endpoint(data_dir: Path, env: dict[str, str]):
     binary = shutil.which("agent-sec-daemon")
     assert binary, "V2 shared PII acceptance requires the installed Rust daemon"
     # Use a short private directory to stay within the UDS path-length limit.
-    with tempfile.TemporaryDirectory(prefix="pii-e2e-") as directory:
+    with tempfile.TemporaryDirectory(prefix="pii-e2e-", dir="/tmp") as directory:
         socket_path = Path(directory) / "daemon.sock"
         argv = [binary, "--socket", str(socket_path)]
         if _rules_path(data_dir).exists():
@@ -137,7 +141,13 @@ def _scan_endpoint(data_dir: Path, env: dict[str, str]):
                 and time.monotonic() < deadline
             ):
                 time.sleep(0.02)
-            assert socket_path.exists(), "owned V2 PII daemon did not start"
+            if not socket_path.exists():
+                process.terminate()
+                _, stderr = process.communicate(timeout=5)
+                raise AssertionError(
+                    "owned V2 PII daemon did not start "
+                    f"(rc={process.returncode}): {stderr.decode(errors='replace')}"
+                )
             yield ["--socket", str(socket_path)]
         finally:
             process.terminate()
@@ -171,8 +181,17 @@ def _load_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return data
 
 
+@pytest.fixture(params=[0o022, 0o002], ids=["umask022", "umask002"])
+def process_umask(request: pytest.FixtureRequest):
+    previous = os.umask(request.param)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 @pytest.mark.parametrize("mode", _MODES)
-def test_scan_pii_text_json(mode: str, tmp_path: Path) -> None:
+def test_scan_pii_text_json(mode: str, tmp_path: Path, process_umask: None) -> None:
     result = _run_cli(
         mode,
         "scan-pii",

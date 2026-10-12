@@ -16,7 +16,6 @@ use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_daemon_service::ShutdownToken;
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
 use asc_security_events::SecurityEvent;
 use asc_telemetry::TelemetryRecord;
 use serde_json::{Map, json};
@@ -205,10 +204,7 @@ async fn scenario(kind: Scenario, skill_sec: bool) {
     let finalizer = Finalizer::new(output.clone(), output.clone(), output.clone());
     let actions = controlled_actions(skill_sec, executor, finalizer);
     let dispatcher = Arc::new(DaemonDispatcher::new(
-        PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        ),
+        PapService::new(Arc::new(ProcessLocalPapRepository::default())),
         Arc::new(RootManagedPrincipalPolicy::default()),
         Arc::new(actions),
     ));

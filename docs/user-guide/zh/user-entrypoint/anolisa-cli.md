@@ -196,9 +196,25 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
-对于 OpenClaw 插件，执行 `adapter enable` 即同意插件声明的能力。ANOLISA
-仅在安装器 help 列出 `--accept-capabilities` 时添加该参数，dry-run 计划也
-遵循相同规则。Capability consent 不授予 `--allow-unsafe-plugin-install`
+对于 OpenClaw 插件，`adapter enable` 默认同意插件声明的能力。ANOLISA 仅在
+对应命令的 help 列出 `--accept-capabilities` 时，将该参数添加到安装和激活
+命令。可通过以下选项拒绝自动授予同意：
+
+```bash
+anolisa adapter enable tokenless openclaw --no-accept-capabilities
+anolisa --dry-run adapter enable tokenless openclaw --no-accept-capabilities
+```
+
+dry-run 计划中的两条命令均不带同意参数。此选项仅适用于 OpenClaw 插件
+adapter；其他框架和仅含 skill 的 adapter 会拒绝它。它不撤销 OpenClaw 中
+已经授予的能力，未提供同意参数的宿主仍按自身策略处理。
+`ANOLISA_ACCEPT_CAPABILITIES` 或 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 等环境
+设置不控制 `adapter enable`；此入口须使用 CLI 选项。
+
+若 OpenClaw 需要新的授权，其拒绝仍作为执行失败报告（`EXECUTION_FAILED`，
+退出码 1），adapter 收据会保留，可通过
+`anolisa adapter disable tokenless openclaw` 清理。在另行授权前，请审阅宿主
+报告的能力要求。Capability consent 不授予 `--allow-unsafe-plugin-install`
 权限；同意被拒绝时会单独诊断，不归为插件安全扫描拒绝。
 
 对于 OpenCode，可用以下命令管理已安装的 Tokenless 插件：

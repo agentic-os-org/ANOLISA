@@ -144,6 +144,8 @@ describe("pii-scan-user-input", () => {
     ["2026.5.12", "before_agent_run"],
     ["2026.9.2", "before_agent_run"],
     ["2026.10.1+build.1", "before_agent_run"],
+    ["2026.5.12-2", "before_agent_run"],
+    ["2026.7.1-2", "before_agent_run"],
     ["2027.1.1", "before_agent_run"],
     ["2026.5.12-beta.1", "before_dispatch"],
     ["2026.9.2-dev", "before_dispatch"],
@@ -203,12 +205,12 @@ describe("pii-scan-user-input", () => {
     }
   }
 
-  it("scans model-bound context without changing the event", async () => {
+  it("scans only the current prompt without changing the event", async () => {
     const { api, hooks } = createMockApi({}, "2026.9.2");
     piiScan.register(api);
     mockCli(scanResult("pass", []));
     const event = {
-      prompt: "current prompt",
+      prompt: "  current prompt\nwith whitespace  ",
       systemPrompt: "system text",
       senderId: "excluded-sender",
       messages: [
@@ -244,20 +246,50 @@ describe("pii-scan-user-input", () => {
     };
     const original = structuredClone(event);
     await hooks[0].handler(event);
-    assert.equal(
-      lastCliOpts?.stdin,
-      [
-        "system text",
-        "current prompt",
-        "history text",
-        "assistant text",
-        "reasoning text",
-        '{"command":"tool argument"}',
-        "tool result",
-      ].join("\n\n"),
-    );
+    assert.equal(lastCliOpts?.stdin, event.prompt);
     assert.deepEqual(event, original);
   });
+
+  it("blocks a sensitive prompt without blocking a later clean prompt on history", async () => {
+    const { api, hooks } = createMockApi(policyConfig("block"), "2026.9.2");
+    piiScan.register(api);
+    _setCliMock(async (_args, opts) =>
+      opts?.stdin?.includes("password=secret")
+        ? scanResult("deny", [denyFinding])
+        : scanResult("pass", []),
+    );
+    const context = {
+      systemPrompt: "password=secret",
+      messages: [{ role: "user", content: "password=secret" }],
+    };
+    assert.equal(
+      (await hooks[0].handler({ ...context, prompt: "password=secret" }))
+        ?.outcome,
+      "block",
+    );
+    assert.equal(
+      await hooks[0].handler({ ...context, prompt: "Hello" }),
+      undefined,
+    );
+  });
+
+  for (const prompt of [undefined, null, "", " \n ", 42]) {
+    it(`skips a missing or empty current prompt (${JSON.stringify(prompt)})`, async () => {
+      const { api, hooks } = createMockApi(policyConfig("block"), "2026.9.2");
+      piiScan.register(api);
+      mockCli(scanResult("deny", [denyFinding]));
+      assert.equal(
+        await hooks[0].handler({
+          prompt,
+          content: "password=secret",
+          systemPrompt: "password=secret",
+          messages: [{ role: "user", content: "password=secret" }],
+        }),
+        undefined,
+      );
+      assert.equal(lastCliArgs, undefined);
+    });
+  }
 
   it("skips empty model input and preserves the environment policy override", async () => {
     process.env.PII_CHECKER_MODE = "observe";
@@ -546,6 +578,7 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result?.requireApproval?.title, "PII Checker Security Review");
     assert.equal(result?.requireApproval?.severity, "critical");
+    assert.ok(result?.requireApproval?.description.length <= 256);
     assert.match(
       result?.requireApproval?.description,
       /检测到 1 项高风险敏感信息/,
@@ -567,6 +600,40 @@ describe("pii-scan-user-input", () => {
       result?.requireApproval?.description,
       /仅提醒|继续处理/,
     );
+  });
+
+  it("keeps summary-count approval bounded without exposing evidence", async () => {
+    const { hooks, logs } = registerHandlers(policyConfig("ask"));
+    const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+    assert.ok(beforeToolCall);
+    mockCli({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        verdict: "deny",
+        findings: [denyFinding, warnFinding],
+        summary: {
+          findings_truncated: true,
+          total: 12000,
+          by_severity: { deny: 8000, warn: 4000 },
+        },
+      }),
+      stderr: "",
+    });
+
+    const result = await beforeToolCall.handler({
+      toolName: "exec",
+      params: { command: "password=secret alice@example.com" },
+    }, {});
+
+    const description = result?.requireApproval?.description;
+    assert.equal(typeof description, "string");
+    assert.ok(description.length <= 256);
+    assert.match(description, /12000 项敏感信息（高风险 8000、一般风险 4000；明细已省略）/);
+    assert.match(description, /当前策略要求确认，请确认后继续/);
+    assert.doesNotMatch(JSON.stringify({ result, logs }), /password=secret|alice@example\.com/);
+    assert.doesNotMatch(description, /credential|password=\[REDACTED\]|a\*\*\*@example\.com/);
+    assert.equal(result.requireApproval.title, "PII Checker Security Review");
+    assert.equal(result.requireApproval.severity, "critical");
   });
 
   it("ask policy falls back to a warning before dispatch", async () => {

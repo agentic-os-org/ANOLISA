@@ -193,3 +193,37 @@ test('embedded document identities survive validation and render in the actual g
   assert.ok(JSON.stringify(page.renderAll()).includes('child'), 'the actual graph renders the embedded child');
   assert.equal(data.subagent_trajectories[0].trajectory_id, 'child/id');
 });
+
+const { buildTrajectoryTree, findNodeByRef } = require(process.env.AGENTSIGHT_TRAJECTORY_TREE_BUILD);
+
+test('an explicit subagent trajectory wins over a shared run session', () => {
+  const data = document({
+    trajectory_id: 'parent', session_id: 'shared-run',
+    subagent_trajectories: [document({ trajectory_id: 'child', session_id: 'shared-run' })],
+  });
+  const original = JSON.stringify(data);
+  const tree = buildTrajectoryTree(data);
+  assert.equal(findNodeByRef(tree, { trajectory_id: 'child', session_id: 'shared-run' }).doc.trajectory_id, 'child');
+  assert.equal(JSON.stringify(data), original);
+});
+
+test('missing explicit trajectories do not fall back to another document session', () => {
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent', session_id: 'shared-run',
+    subagent_trajectories: [document({ trajectory_id: 'child', session_id: 'shared-run' })],
+  }));
+  assert.equal(findNodeByRef(tree, { trajectory_id: 'missing', session_id: 'shared-run' }), null);
+});
+
+test('legacy session-only references and nested explicit references still resolve', () => {
+  const tree = buildTrajectoryTree(document({
+    trajectory_id: 'parent', session_id: 'run',
+    subagent_trajectories: [document({
+      trajectory_id: 'child', session_id: 'child-run',
+      subagent_trajectories: [document({ trajectory_id: 'nested', session_id: 'child-run' })],
+    })],
+  }));
+  assert.equal(findNodeByRef(tree, { session_id: 'run' }).doc.trajectory_id, 'parent');
+  assert.equal(findNodeByRef(tree, { trajectory_id: '', session_id: 'child-run' }).doc.trajectory_id, 'child');
+  assert.equal(findNodeByRef(tree, { trajectory_id: 'nested', session_id: 'child-run' }).doc.trajectory_id, 'nested');
+});

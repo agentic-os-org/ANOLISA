@@ -76,6 +76,9 @@ own. Agent Hook migration is delivered separately.
 
 %post -n agent-sec-cli
 %systemd_post agent-sec-core.service
+if [ -d /run/systemd/system ] && { [ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]; }; then
+    /usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || :
+fi
 
 %preun -n agent-sec-cli
 %systemd_preun agent-sec-core.service
@@ -239,6 +242,9 @@ rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild-v2 DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
+* Sun Oct 11 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 1.0.0-1
+- Update version to 1.0.0
+
 * Sun Sep 20 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.0-1
 - Update version to 0.13.0
 

@@ -11,9 +11,10 @@ const sandbox = mkdtempSync(join(tmpdir(), "tokenless-opencode-plugin-"));
 const runner = join(sandbox, "hook runner.sh");
 const log = join(sandbox, "hooks.log");
 
-async function assertHookTimeoutCleansUp(mode) {
-  const timeoutRunner = join(sandbox, `timeout-${mode}.sh`);
-  const pidFile = join(sandbox, `timeout-${mode}.pid`);
+async function assertHookCleansUp(mode, oversized = false) {
+  const trigger = oversized ? "oversize" : "timeout";
+  const timeoutRunner = join(sandbox, `${trigger}-${mode}.sh`);
+  const pidFile = join(sandbox, `${trigger}-${mode}.pid`);
   writeFileSync(
     timeoutRunner,
     `#!/usr/bin/env bash
@@ -23,6 +24,7 @@ sleep 60 &
 sleeper=$!
 printf '%s %s\\n' "$$" "$sleeper" > "$TOKENLESS_TEST_PID"
 printf '{}'
+${oversized ? "printf '%1048577s' ''" : ""}
 ${mode === "descendant" ? "exit 0" : 'wait "$sleeper"'}
 `,
   );
@@ -31,7 +33,7 @@ ${mode === "descendant" ? "exit 0" : 'wait "$sleeper"'}
     import { TokenlessPlugin } from ${JSON.stringify(pluginUrl)};
     const realSetTimeout = globalThis.setTimeout;
     globalThis.setTimeout = (callback, delay, ...args) =>
-      realSetTimeout(callback, delay === 15_000 ? 500 : delay, ...args);
+      realSetTimeout(callback, delay === 15_000 ? ${oversized ? 15_000 : 500} : delay, ...args);
     const hooks = await TokenlessPlugin();
     const output = { args: {} };
     await hooks["tool.execute.before"](
@@ -74,7 +76,7 @@ ${mode === "descendant" ? "exit 0" : 'wait "$sleeper"'}
     assert.ifError(child.error);
     assert.equal(child.status, 0, child.stderr);
     assert.equal(child.stdout.trim(), '{"args":{}}');
-    assert.deepEqual(livePids, [], `${mode} hook processes survived their timeout`);
+    assert.deepEqual(livePids, [], `${mode} hook processes survived ${trigger} cleanup`);
   } finally {
     for (const pid of livePids) {
       try {
@@ -105,6 +107,8 @@ case "$hook" in
   compress_response_hook.py)
     if [[ "$payload" == *'"is_error":true'* ]]; then
       printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"[tokenless:env] command failed"}}'
+    elif [[ -n "\${TOKENLESS_TEST_RESPONSE_SIZE:-}" ]]; then
+      node -e 'process.stdout.write(JSON.stringify({hookSpecificOutput:{updatedToolOutput:"界".repeat(Number(process.env.TOKENLESS_TEST_RESPONSE_SIZE))}}))'
     else
       printf '%s\\n' '{"hookSpecificOutput":{"updatedToolOutput":"compressed-response","additionalContext":"[tokenless:env] warning"}}'
     fi
@@ -185,12 +189,16 @@ try {
     description: "A very long tool description",
     parameters: { type: "object", title: "Bash", properties: {} },
   };
+  const originalParameters = definition.parameters;
   await hooks["tool.definition"]({ toolID: "bash" }, definition);
   assert.equal(definition.description, "compressed description");
   assert.deepEqual(definition.parameters, {
     type: "object",
     properties: { command: { type: "string" } },
   });
+  definition.parameters.properties.command.type = "number";
+  definition.parameters.properties.host_annotation = { type: "boolean" };
+  assert.deepEqual(originalParameters, { type: "object", title: "Bash", properties: {} });
 
   const repeatedDefinition = {
     description: "A very long tool description",
@@ -198,6 +206,23 @@ try {
   };
   await hooks["tool.definition"]({ toolID: "bash" }, repeatedDefinition);
   assert.equal(repeatedDefinition.description, "compressed description");
+  assert.deepEqual(repeatedDefinition.parameters, {
+    type: "object",
+    properties: { command: { type: "string" } },
+  });
+  assert.notStrictEqual(repeatedDefinition.parameters, definition.parameters);
+  assert.notStrictEqual(repeatedDefinition.parameters.properties, definition.parameters.properties);
+
+  repeatedDefinition.parameters.properties.command.description = "host-added metadata";
+  const thirdDefinition = {
+    description: "A very long tool description",
+    parameters: { type: "object", title: "Bash", properties: {} },
+  };
+  await hooks["tool.definition"]({ toolID: "bash" }, thirdDefinition);
+  assert.deepEqual(thirdDefinition.parameters, {
+    type: "object",
+    properties: { command: { type: "string" } },
+  });
 
   const circularArgs = {};
   circularArgs.self = circularArgs;
@@ -230,14 +255,36 @@ try {
   if (process.platform !== "win32") {
     const failures = [];
     for (const mode of ["descendant", "ignore-term"]) {
-      try {
-        await assertHookTimeoutCleansUp(mode);
-      } catch (error) {
-        failures.push(new Error(`${mode}: ${error.message}`, { cause: error }));
+      for (const oversized of [false, true]) {
+        try {
+          await assertHookCleansUp(mode, oversized);
+        } catch (error) {
+          failures.push(new Error(`${mode} (${oversized ? "oversize" : "timeout"}): ${error.message}`, { cause: error }));
+        }
       }
     }
     if (failures.length) throw new AggregateError(failures, "Hook cleanup failed");
   }
+
+  // Unicode output is bounded by UTF-8 bytes, not UTF-16 string length.
+  const cap = 1024 * 1024;
+  for (const [size, accepted] of [[349_000, true], [350_000, false]]) {
+    const text = "界".repeat(size);
+    const reply = JSON.stringify({ hookSpecificOutput: { updatedToolOutput: text } });
+    assert.equal(Buffer.byteLength(reply, "utf8") <= cap, accepted);
+    assert.ok(reply.length < cap, "both fixtures fit in the old string-length limit");
+    process.env.TOKENLESS_TEST_RESPONSE_SIZE = String(size);
+    const result = { output: "original tool output" };
+    await hooks["tool.execute.after"](
+      { tool: "read", sessionID: "unicode-session", callID: String(size), args: {} },
+      result,
+    );
+    assert.ok(
+      result.output === (accepted ? text : "original tool output"),
+      accepted ? "response within the byte cap should apply" : "oversized response should leave host output intact",
+    );
+  }
+  delete process.env.TOKENLESS_TEST_RESPONSE_SIZE;
 
   console.log("OpenCode plugin tests passed");
 } finally {

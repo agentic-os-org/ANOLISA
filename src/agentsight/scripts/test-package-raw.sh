@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verify AgentSight component-owned Linux and macOS raw packages.
 set -euo pipefail
+unset ENFORCER_BIN
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
@@ -70,6 +71,7 @@ write_metadata() {
 
 write_elf "$BIN_DIR/agentsight"
 write_elf "$BIN_DIR/agentsight-enforcer"
+sha256sum "$BIN_DIR/agentsight-enforcer" | cut -d ' ' -f 1 > "$BIN_DIR/agentsight-enforcer.sha256"
 write_metadata linux x86_64 \
     "$BIN_DIR/agentsight" "$BIN_DIR/agentsight-enforcer"
 
@@ -129,6 +131,41 @@ if AGENTSIGHT_SOURCE_DIR="$SOURCE_ROOT" \
     exit 1
 fi
 mv "$BIN_DIR/agentsight-enforcer.missing" "$BIN_DIR/agentsight-enforcer"
+
+# Neither missing nor stale receipts may be replaced by an implicit native build.
+mv "$BIN_DIR/agentsight-enforcer.sha256" "$TMP_ROOT/receipt"
+for receipt_state in missing stale; do
+    if [ "$receipt_state" = stale ]; then
+        printf '%064d\n' 0 > "$BIN_DIR/agentsight-enforcer.sha256"
+    fi
+    if AGENTSIGHT_SOURCE_DIR="$SOURCE_ROOT" \
+        AGENTSIGHT_BUILD_METADATA="$BUILD_METADATA" BIN_DIR="$BIN_DIR" \
+        DESTDIR="$TMP_ROOT/$receipt_state-receipt" TARGET_OS=linux TARGET_ARCH=x86_64 \
+        "$SOURCE_ROOT/packaging/raw/package.sh" stage >"$TMP_ROOT/receipt.out" 2>&1; then
+        printf 'ERROR: raw package accepted a %s receipt\n' "$receipt_state" >&2
+        exit 1
+    fi
+done
+mv "$TMP_ROOT/receipt" "$BIN_DIR/agentsight-enforcer.sha256"
+
+# Explicit private artifacts override BIN_DIR, including cross-build metadata.
+# Replacing the old shared location must not affect either independent payload.
+printf 'unattested shared replacement\n' > "$BIN_DIR/agentsight-enforcer"
+for invocation in one two; do
+    private_dir="$(mktemp -d "$TMP_ROOT/private.XXXXXXXX")"
+    private_bin="$private_dir/agentsight-enforcer"
+    write_elf "$private_bin"
+    printf '%s\n' "$invocation" >> "$private_bin"
+    sha256sum "$private_bin" | cut -d ' ' -f 1 > "$private_bin.sha256"
+    write_metadata linux x86_64 "$BIN_DIR/agentsight" "$private_bin"
+    ENFORCER_BIN="$private_bin" AGENTSIGHT_SOURCE_DIR="$SOURCE_ROOT" \
+        AGENTSIGHT_BUILD_METADATA="$BUILD_METADATA" BIN_DIR="$BIN_DIR" \
+        DESTDIR="$TMP_ROOT/private-$invocation" TARGET_OS=linux TARGET_ARCH=x86_64 \
+        "$SOURCE_ROOT/packaging/raw/package.sh" stage >/dev/null
+    cmp "$private_bin" "$TMP_ROOT/private-$invocation/bin/agentsight-enforcer"
+done
+! cmp -s "$TMP_ROOT/private-one/bin/agentsight-enforcer" \
+    "$TMP_ROOT/private-two/bin/agentsight-enforcer"
 
 write_macho "$BIN_DIR/agentsight"
 write_metadata macos aarch64 "$BIN_DIR/agentsight"

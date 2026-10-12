@@ -773,6 +773,36 @@ mod tests {
     }
 
     #[test]
+    fn a_marked_json_document_is_compressed_not_bypassed() {
+        // The detector skips one leading byte-order mark, so the marked page
+        // takes the JSON path; the parser must skip it too, or that routing
+        // turns a passthrough into a pipeline error. Recovery keeps the
+        // marked bytes exactly.
+        let plain = serde_json::to_string(&serde_json::json!({
+            "debug": "discarded noise",
+            "items": (0..12)
+                .map(|index| format!("item-{index}-{}", "x".repeat(80)))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let input = format!("\u{feff}{plain}");
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut config = build_log_config();
+        config.json.truncate_arrays_at = 2;
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+
+        assert_eq!(run.response.content_type, Some(ContentType::Json));
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert!(run.response.output.chars().count() < input.chars().count());
+        assert!(!run.response.output.contains('\u{feff}'));
+        // The JSON domain stashes the truncated tail for replay recovery;
+        // the uncompressed twin takes exactly this path, mark aside.
+        assert_eq!(run.response.stash_keys.len(), 1);
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn record_reduction_has_one_final_commit_and_protocol_operation() {
         let concrete = Arc::new(CountingStore::default());
         let store: Arc<dyn StashStore> = concrete.clone();

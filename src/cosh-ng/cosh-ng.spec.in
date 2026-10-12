@@ -17,7 +17,8 @@ BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
 Requires(post):   lua
 Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
-Requires(postun): /usr/bin/awk /usr/bin/cp /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm
+Requires(postun): /usr/bin/awk /usr/bin/cat /usr/bin/cp /usr/bin/dirname /usr/bin/id /usr/bin/mkdir /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm /usr/bin/rmdir /usr/bin/stat
+Requires(posttrans): /usr/bin/cat /usr/bin/dirname /usr/bin/id /usr/bin/rm /usr/bin/rmdir /usr/bin/stat
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell
@@ -155,40 +156,311 @@ end
 # still owns an executable there, its registration stays valid, so the line is
 # kept. Testing the file directly is fail-safe and avoids running rpm inside a
 # scriptlet: a nested query can fail under the transaction lock and would then
-# wrongly drop a still-valid line. A temp copy + atomic rename keeps a crash
-# from truncating the shared table, and cp --attributes-only preserves the
-# original mode/ownership/xattrs. If /etc/shells is an admin-managed symlink,
-# rewrite its target so the link relationship survives. The signal handler must
-# exit (not resume) -- otherwise the EXIT cleanup would delete the temp
-# mid-rewrite and the following cp/mv would clobber the file with an empty copy.
-if [ "$1" -eq 0 ] && [ ! -x "%{_bindir}/cosh" ]; then
+# wrongly drop a still-valid line.
+#
+# The rewrite stages into a private 0700 directory next to the target (same
+# filesystem, so mv is an atomic rename; cp --attributes-only keeps mode,
+# ownership and xattrs). The stage is registered under rpm's scriptlet state
+# directory before it is created and records its owner (boot_id + pid +
+# starttime), so a SIGKILL mid-rewrite leaves a residue the next cosh-ng
+# transaction can find and remove once that owner has provably exited -- even
+# if /etc/shells has been repointed in between. An owner whose liveness cannot
+# be verified is kept and reported. A sibling random-name temp file would have
+# no provable owner and must not be used.
+#
+# The rewrite also requires the target's directory chain to be owned by root
+# (or the scriptlet's own uid) with no group/other write bit; otherwise root
+# could be made to dereference a symlink another user planted there. The cosh
+# line then stays registered -- a stale entry is harmless compared to
+# clobbering a sudoers.d file.
+if [ "$1" -eq 0 ]; then
+  # BEGIN cosh-ng shells guard+reclaim (identical in %postun and %posttrans)
+  cosh_uid="$(id -u 2>/dev/null)" || cosh_uid=""
+  cosh_reg="%{_localstatedir}/lib/rpm-state/cosh-ng"
+  # Succeeds when $1 and every ancestor are owned by root or this uid and carry
+  # no group/other write bit (OpenSSH StrictModes; under rpm only root
+  # qualifies), so no other user can swap entries underneath us.
+  cosh_chain_safe() {
+    c_path="$1"
+    [ -n "$cosh_uid" ] || return 1
+    while :; do
+      c_meta="$(stat -c '%u %A' -- "$c_path" 2>/dev/null)" || return 1
+      case "${c_meta#* }" in ?????w*|????????w*) return 1 ;; esac
+      case "${c_meta%% *}" in 0|"$cosh_uid") : ;; *) return 1 ;; esac
+      [ "$c_path" = / ] && return 0
+      c_path="$(dirname -- "$c_path")"
+    done
+  }
+  # Every stage is registered here before it is created, so a stage stays
+  # discoverable even after /etc/shells is repointed or left dangling.
+  cosh_registry_ok() {
+    [ ! -L "$cosh_reg" ] && [ -d "$cosh_reg" ] \
+      && [ "$(stat -c '%u %a' -- "$cosh_reg" 2>/dev/null)" = "$cosh_uid 700" ] \
+      && cosh_chain_safe "$cosh_reg"
+  }
+  # Prints "dead", "alive", or "unknown: <reason>" for a recorded owner.
+  # Only a provably exited owner is "dead"; anything that cannot be verified
+  # (no /proc, unreadable stat, incomplete record) is "unknown" and kept.
+  cosh_owner_state() {
+    o_boot="$1"; o_pid="$2"; o_start="$3"
+    case "$o_pid" in ''|*[!0-9]*) echo "unknown: owner record has no usable pid"; return 0 ;; esac
+    o_cur="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || o_cur=""
+    [ -n "$o_cur" ] || { echo "unknown: boot_id is unreadable"; return 0; }
+    if [ -n "$o_boot" ] && [ "$o_boot" != "$o_cur" ]; then echo dead; return 0; fi
+    [ -e "/proc/$o_pid" ] || { echo dead; return 0; }
+    o_stat="$(cat "/proc/$o_pid/stat" 2>/dev/null)" || {
+      echo "unknown: /proc/$o_pid/stat is unreadable"; return 0; }
+    # starttime is procfs field 22, i.e. $20 once pid and (comm) are stripped
+    o_stat="${o_stat##*) }"
+    # shellcheck disable=SC2086  # split procfs stat fields on purpose
+    set -- $o_stat
+    case "$1" in Z|X) echo dead; return 0 ;; esac
+    if [ -n "$o_start" ] && [ "$o_start" != "${20}" ]; then echo dead; return 0; fi
+    if [ -n "$o_boot" ] && [ -n "$o_start" ]; then echo alive; return 0; fi
+    echo "unknown: owner identity is incomplete"
+  }
+  if cosh_registry_ok; then
+    for e in "$cosh_reg"/stage.??????????; do
+      [ -L "$e" ] && continue
+      [ -f "$e" ] || continue
+      s=""
+      read -r s < "$e" || :
+      if [ -z "$s" ]; then
+        # registered, then killed before the stage path was recorded
+        rm -f -- "$e"
+        continue
+      fi
+      case "$s" in
+        /*/.cosh-ng-shells."${e##*.}") : ;;
+        *)
+          echo "warning: cosh-ng: kept unrecognised stage registry entry $e." >&2
+          continue
+          ;;
+      esac
+      if [ ! -e "$s" ] && [ ! -L "$s" ]; then
+        # killed before the stage was created, or it is already gone
+        rm -f -- "$e"
+        continue
+      fi
+      if ! cosh_chain_safe "$(dirname -- "$s")"; then
+        echo "warning: cosh-ng: kept $s: its directory is not exclusively writable by root or uid $cosh_uid." >&2
+        continue
+      fi
+      [ -L "$s" ] && continue
+      [ -d "$s" ] || continue
+      [ "$(stat -c '%u %a' -- "$s" 2>/dev/null)" = "$cosh_uid 700" ] || continue
+      ok=1
+      for f in "$s"/* "$s"/.[!.]* "$s"/..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        case "${f##*/}" in owner|shells) : ;; *) ok=0; break ;; esac
+        [ -L "$f" ] && { ok=0; break; }
+        [ -f "$f" ] || { ok=0; break; }
+        [ "$(stat -c '%h' -- "$f" 2>/dev/null)" = 1 ] || { ok=0; break; }
+      done
+      [ "$ok" = 1 ] || continue
+      if [ -s "$s/owner" ]; then
+        read -r magic ver boot_kv pid_kv start_kv rest < "$s/owner" || continue
+        [ "$magic $ver" = "cosh-ng-shells-stage v1" ] || continue
+        [ -z "$rest" ] || continue
+        case "$boot_kv $pid_kv $start_kv" in "boot="*" pid="*" start="*) : ;; *) continue ;; esac
+        state="$(cosh_owner_state "${boot_kv#boot=}" "${pid_kv#pid=}" "${start_kv#start=}")"
+        case "$state" in
+          dead) : ;;
+          alive) continue ;;
+          *)
+            echo "warning: cosh-ng: kept $s (${state#unknown: }); remove it by hand once no cosh-ng transaction is running." >&2
+            continue
+            ;;
+        esac
+      elif [ -e "$s/shells" ]; then
+        # cosh-ng writes the owner record before any shells content
+        continue
+      fi
+      # An owner-less stage holds no shells payload; a writer still filling it
+      # fails closed on its next step, so removing it cannot lose data.
+      rm -f -- "$s/owner" "$s/shells"
+      rmdir -- "$s" 2>/dev/null || :
+      [ -e "$s" ] || rm -f -- "$e"
+    done
+  fi
+  # END cosh-ng shells guard+reclaim
   shells="%{_sysconfdir}/shells"
-  if [ -f "$shells" ]; then
+  if [ ! -x "%{_bindir}/cosh" ] && [ -f "$shells" ]; then
     target="$shells"
     if [ -L "$shells" ]; then
       target="$(readlink -f "$shells")" || target="$shells"
     fi
-    if ! tmp="$(mktemp "${target}.cosh-ng.XXXXXX")"; then
-      echo "error: cosh-ng: cannot update $shells: failed to create temporary file." >&2
-      exit 1
+    dir="$(dirname -- "$target")"
+    [ -e "$cosh_reg" ] || [ -L "$cosh_reg" ] || mkdir -m 0700 -- "$cosh_reg" 2>/dev/null || :
+    if ! cosh_chain_safe "$dir"; then
+      echo "warning: cosh-ng: $dir is not exclusively writable by root or uid $cosh_uid; left %{_bindir}/cosh in $shells." >&2
+    elif ! cosh_registry_ok; then
+      echo "warning: cosh-ng: cannot use stage registry $cosh_reg; left %{_bindir}/cosh in $shells." >&2
+    else
+      if ! entry="$(mktemp "$cosh_reg/stage.XXXXXXXXXX")"; then
+        echo "error: cosh-ng: cannot update $shells: failed to register staging directory." >&2
+        exit 1
+      fi
+      stage="$dir/.cosh-ng-shells.${entry##*.}"
+      # Drop the registration only once the stage itself is gone.
+      trap 'rm -f -- "$stage/shells" "$stage/owner"; rmdir -- "$stage" 2>/dev/null; [ -e "$stage" ] || rm -f -- "$entry"' EXIT
+      trap 'exit 1' INT TERM HUP
+      if ! printf '%s\n' "$stage" > "$entry" || ! mkdir -m 0700 -- "$stage"; then
+        echo "error: cosh-ng: cannot update $shells: failed to create staging directory." >&2
+        exit 1
+      fi
+      # An unreadable identity is recorded as empty, which the reclaim treats
+      # as unverifiable rather than as an exited owner.
+      owner_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || owner_boot=""
+      owner_start=""
+      if owner_stat="$(cat "/proc/$$/stat" 2>/dev/null)"; then
+        owner_stat="${owner_stat##*) }"
+        # shellcheck disable=SC2086  # split procfs stat fields on purpose
+        set -- $owner_stat
+        owner_start="${20-}"
+      fi
+      if ! printf 'cosh-ng-shells-stage v1 boot=%s pid=%s start=%s\n' \
+          "$owner_boot" "$$" "$owner_start" > "$stage/owner"; then
+        echo "error: cosh-ng: cannot update $shells: failed to record staging owner." >&2
+        exit 1
+      fi
+      if ! awk -v cosh="%{_bindir}/cosh" '$0 != cosh' "$target" > "$stage/shells"; then
+        echo "error: cosh-ng: cannot update $shells: failed to filter shell registration." >&2
+        exit 1
+      fi
+      if ! cp --attributes-only --preserve=mode,ownership,xattr "$target" "$stage/shells"; then
+        echo "error: cosh-ng: cannot update $shells: failed to preserve file metadata." >&2
+        exit 1
+      fi
+      if ! mv -f -- "$stage/shells" "$target"; then
+        echo "error: cosh-ng: cannot update $shells: failed to replace file." >&2
+        exit 1
+      fi
+      rm -f -- "$stage/owner"
+      rmdir -- "$stage" 2>/dev/null || :
+      [ -e "$stage" ] || rm -f -- "$entry"
+      trap - EXIT INT TERM HUP
     fi
-    trap 'rm -f "$tmp"' EXIT
-    trap 'exit 1' INT TERM HUP
-    if ! awk -v cosh="%{_bindir}/cosh" '$0 != cosh' "$target" > "$tmp"; then
-      echo "error: cosh-ng: cannot update $shells: failed to filter shell registration." >&2
-      exit 1
-    fi
-    if ! cp --attributes-only --preserve=mode,ownership,xattr "$target" "$tmp"; then
-      echo "error: cosh-ng: cannot update $shells: failed to preserve file metadata." >&2
-      exit 1
-    fi
-    if ! mv -f "$tmp" "$target"; then
-      echo "error: cosh-ng: cannot update $shells: failed to replace file." >&2
-      exit 1
-    fi
-    trap - EXIT INT TERM HUP
   fi
+  rmdir -- "$cosh_reg" 2>/dev/null || :
 fi
+
+%posttrans
+# Sweep any dead cosh-ng staging directory a prior aborted %postun left behind
+# (e.g. the scriptlet or its parent dnf was SIGKILL'd mid-rewrite). Stages are
+# found through the registry, not by scanning the current /etc/shells target,
+# so a residue is still reclaimed after the symlink was repointed.
+# BEGIN cosh-ng shells guard+reclaim (identical in %postun and %posttrans)
+cosh_uid="$(id -u 2>/dev/null)" || cosh_uid=""
+cosh_reg="%{_localstatedir}/lib/rpm-state/cosh-ng"
+# Succeeds when $1 and every ancestor are owned by root or this uid and carry
+# no group/other write bit (OpenSSH StrictModes; under rpm only root
+# qualifies), so no other user can swap entries underneath us.
+cosh_chain_safe() {
+  c_path="$1"
+  [ -n "$cosh_uid" ] || return 1
+  while :; do
+    c_meta="$(stat -c '%u %A' -- "$c_path" 2>/dev/null)" || return 1
+    case "${c_meta#* }" in ?????w*|????????w*) return 1 ;; esac
+    case "${c_meta%% *}" in 0|"$cosh_uid") : ;; *) return 1 ;; esac
+    [ "$c_path" = / ] && return 0
+    c_path="$(dirname -- "$c_path")"
+  done
+}
+# Every stage is registered here before it is created, so a stage stays
+# discoverable even after /etc/shells is repointed or left dangling.
+cosh_registry_ok() {
+  [ ! -L "$cosh_reg" ] && [ -d "$cosh_reg" ] \
+    && [ "$(stat -c '%u %a' -- "$cosh_reg" 2>/dev/null)" = "$cosh_uid 700" ] \
+    && cosh_chain_safe "$cosh_reg"
+}
+# Prints "dead", "alive", or "unknown: <reason>" for a recorded owner.
+# Only a provably exited owner is "dead"; anything that cannot be verified
+# (no /proc, unreadable stat, incomplete record) is "unknown" and kept.
+cosh_owner_state() {
+  o_boot="$1"; o_pid="$2"; o_start="$3"
+  case "$o_pid" in ''|*[!0-9]*) echo "unknown: owner record has no usable pid"; return 0 ;; esac
+  o_cur="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || o_cur=""
+  [ -n "$o_cur" ] || { echo "unknown: boot_id is unreadable"; return 0; }
+  if [ -n "$o_boot" ] && [ "$o_boot" != "$o_cur" ]; then echo dead; return 0; fi
+  [ -e "/proc/$o_pid" ] || { echo dead; return 0; }
+  o_stat="$(cat "/proc/$o_pid/stat" 2>/dev/null)" || {
+    echo "unknown: /proc/$o_pid/stat is unreadable"; return 0; }
+  # starttime is procfs field 22, i.e. $20 once pid and (comm) are stripped
+  o_stat="${o_stat##*) }"
+  # shellcheck disable=SC2086  # split procfs stat fields on purpose
+  set -- $o_stat
+  case "$1" in Z|X) echo dead; return 0 ;; esac
+  if [ -n "$o_start" ] && [ "$o_start" != "${20}" ]; then echo dead; return 0; fi
+  if [ -n "$o_boot" ] && [ -n "$o_start" ]; then echo alive; return 0; fi
+  echo "unknown: owner identity is incomplete"
+}
+if cosh_registry_ok; then
+  for e in "$cosh_reg"/stage.??????????; do
+    [ -L "$e" ] && continue
+    [ -f "$e" ] || continue
+    s=""
+    read -r s < "$e" || :
+    if [ -z "$s" ]; then
+      # registered, then killed before the stage path was recorded
+      rm -f -- "$e"
+      continue
+    fi
+    case "$s" in
+      /*/.cosh-ng-shells."${e##*.}") : ;;
+      *)
+        echo "warning: cosh-ng: kept unrecognised stage registry entry $e." >&2
+        continue
+        ;;
+    esac
+    if [ ! -e "$s" ] && [ ! -L "$s" ]; then
+      # killed before the stage was created, or it is already gone
+      rm -f -- "$e"
+      continue
+    fi
+    if ! cosh_chain_safe "$(dirname -- "$s")"; then
+      echo "warning: cosh-ng: kept $s: its directory is not exclusively writable by root or uid $cosh_uid." >&2
+      continue
+    fi
+    [ -L "$s" ] && continue
+    [ -d "$s" ] || continue
+    [ "$(stat -c '%u %a' -- "$s" 2>/dev/null)" = "$cosh_uid 700" ] || continue
+    ok=1
+    for f in "$s"/* "$s"/.[!.]* "$s"/..?*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      case "${f##*/}" in owner|shells) : ;; *) ok=0; break ;; esac
+      [ -L "$f" ] && { ok=0; break; }
+      [ -f "$f" ] || { ok=0; break; }
+      [ "$(stat -c '%h' -- "$f" 2>/dev/null)" = 1 ] || { ok=0; break; }
+    done
+    [ "$ok" = 1 ] || continue
+    if [ -s "$s/owner" ]; then
+      read -r magic ver boot_kv pid_kv start_kv rest < "$s/owner" || continue
+      [ "$magic $ver" = "cosh-ng-shells-stage v1" ] || continue
+      [ -z "$rest" ] || continue
+      case "$boot_kv $pid_kv $start_kv" in "boot="*" pid="*" start="*) : ;; *) continue ;; esac
+      state="$(cosh_owner_state "${boot_kv#boot=}" "${pid_kv#pid=}" "${start_kv#start=}")"
+      case "$state" in
+        dead) : ;;
+        alive) continue ;;
+        *)
+          echo "warning: cosh-ng: kept $s (${state#unknown: }); remove it by hand once no cosh-ng transaction is running." >&2
+          continue
+          ;;
+      esac
+    elif [ -e "$s/shells" ]; then
+      # cosh-ng writes the owner record before any shells content
+      continue
+    fi
+    # An owner-less stage holds no shells payload; a writer still filling it
+    # fails closed on its next step, so removing it cannot lose data.
+    rm -f -- "$s/owner" "$s/shells"
+    rmdir -- "$s" 2>/dev/null || :
+    [ -e "$s" ] || rm -f -- "$e"
+  done
+fi
+# END cosh-ng shells guard+reclaim
+rmdir -- "$cosh_reg" 2>/dev/null || :
 
 %changelog
 * Mon Jun 16 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.0-1

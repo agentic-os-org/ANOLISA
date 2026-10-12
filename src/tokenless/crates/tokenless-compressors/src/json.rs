@@ -310,6 +310,11 @@ fn build_candidate(
 }
 
 fn parse_input(input: &str) -> Result<(String, Value), JsonError> {
+    // The detector skips one leading byte-order mark, so a marked document
+    // is routed here; the parser must agree or that routing turns a
+    // passthrough into an error. serde_json rejects the mark, so skip it
+    // the same way. The stash still holds the original bytes.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let outer: Value = serde_json::from_str(input)?;
     if let Value::String(inner) = &outer
         && let Ok(value @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(inner)

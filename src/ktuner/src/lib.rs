@@ -12,6 +12,6 @@ pub use rules::{evaluate, Category, Confidence, EvalResult, Recommendation};
 pub use tuner::{
     apply, apply_one, apply_quiet, auto_rollback_on_degradation, classify_rollback,
     is_forbidden_param, param_to_path, rollback, rollback_param, rollback_preview, rollback_quiet,
-    AppliedFix, ApplyFailure, ApplyOutcome, ClampNote, RollbackOutcome, RollbackStatus,
-    WriteOutcome,
+    AppliedFix, ApplyFailure, ApplyOutcome, ClampNote, RollbackOutcome, RollbackPreview,
+    RollbackStatus, WriteOutcome,
 };

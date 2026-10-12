@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.17] - 2026-10-11
+
+### Added
+
+- Add `--no-accept-capabilities` to OpenClaw adapter activation to withhold
+  automatic capability consent during both installation and activation. Existing
+  authorization is unchanged; this does not enable an unsafe-install bypass
+  ([#3554](https://github.com/agentic-os-org/ANOLISA/pull/3554)).
+- Add the `sec-core` raw backend to the component catalog, allowing raw
+  installation when compatible artifacts are available in the release index
+  ([#6551](https://github.com/agentic-os-org/ANOLISA/pull/6551)).
+
+### Changed
+
+- Update the SkillFS version in the component catalog to `0.5.1`.
+- Update repository URLs to `agentic-os-org/ANOLISA` and correct the clone
+  directory in source-build instructions.
+- Correct Intel Mac installation guidance: the website installer accepts both
+  ARM Macs and Intel Macs running macOS 11 or later. Prebuilt and npm installation
+  requires a release containing `darwin-x64` artifacts.
+
+### Fixed
+
+- Validate configured RPM backends before install and preview preflight checks,
+  preserving explicit repository overrides and failing early on missing setup.
+- Limit installer permission changes to files installed by the current
+  operation, preserving existing shared files and directories. Newly created
+  installation paths remain accessible under `umask 077`.
+- Repair npm launchers whose previous targets are missing, restoring the
+  `anolisa` command.
+- Resolve explicit archive file paths accurately instead of choosing another
+  file with the same name. Distinguish local file-write errors from network
+  errors to avoid ineffective download retries.
+- Revalidate repository URLs after variable expansion and use independent
+  temporary files when updating repository configuration.
+- Redact sensitive URL information from raw repository and self-update terminal
+  errors.
+- Correct upgrade suggestions to use `anolisa update self` for the CLI and valid
+  `anolisa update <component>` commands for components.
+- Give Codex components separate marketplace directories to avoid interference,
+  and revoke the corresponding hook trust when disabling a plugin.
+- Verify host state after a failed Hermes disable operation, retaining plugin
+  files and management records when the plugin remains enabled so it can be
+  retried.
+- Recognize aliases of adapter parent directories while retaining checks on the
+  final plugin link. Honor only absolute `XDG_CONFIG_HOME` values.
+- Compare actual instants for `anolisa logs --since <RFC3339>`, handling time-zone
+  offsets, fractional seconds, and inclusive boundaries correctly.
+- Skip corrupt or truncated records during log queries and complete a torn
+  trailing record's newline before appending, preserving subsequent records.
+- Verify rotated log file identity before resuming telemetry reads. Retry
+  HTTP 408/429 uploads without advancing read offsets for failed batches.
+- Complete telemetry processing before exiting on SIGTERM, reducing the risk of
+  losing the final batch. Reset retryable metadata acquisition each round and
+  retry transient cloud-init failures in subsequent rounds.
+- Count CPUs correctly in lists containing multiple ranges or individual IDs.
+- Drain hook output while commands run to avoid pipe blockage causing false
+  timeouts, and let the privileged helper exit promptly after replying to a
+  shutdown request.
+- Reject unparseable schema versions when modifying registration state, and
+  preserve existing records and consent state when a record cannot be read.
+- Reject malformed or overflowing kernel version requirements rather than
+  treating them as satisfied.
+- Clarify that `cosh-ng` bug-report diagnostics must run inside the affected
+  cosh session.
+
 ## [0.3.16] - 2026-09-23
 
 ### Added

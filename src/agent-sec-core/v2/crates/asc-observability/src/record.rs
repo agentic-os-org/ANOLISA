@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 
 use crate::correlation::truncate_correlation_id;
 use crate::error::ObservabilityError;
-use crate::hook::{MetadataShape, ObservabilityHook, sorted_hook_names};
+use crate::hook::{ObservabilityHook, sorted_hook_names};
 
 /// Correlation metadata carried by every observability record.
 ///
@@ -86,21 +86,20 @@ impl ObservabilityMetadata {
 
     /// Drops fields the hook does not model, mirroring v1 `extra="ignore"`.
     fn conform_to(&mut self, hook: ObservabilityHook) -> Result<(), ObservabilityError> {
-        match hook.metadata_shape() {
-            MetadataShape::Common => {
-                self.tool_call_id = None;
-                self.call_id = None;
-            }
-            MetadataShape::ModelCall => {
-                self.tool_call_id = None;
-            }
-            MetadataShape::ToolCall => {
-                if self.tool_call_id.is_none() {
+        let fields = hook.metadata_shape().record_fields();
+        for (name, value) in [
+            ("toolCallId", &mut self.tool_call_id),
+            ("callId", &mut self.call_id),
+        ] {
+            match fields.iter().find(|(field, _)| *field == name) {
+                None => *value = None,
+                Some((_, false)) if value.is_none() => {
                     return Err(ObservabilityError::MissingMetadata {
-                        field: "toolCallId",
+                        field: name,
                         hook: hook.as_str().to_owned(),
                     });
                 }
+                _ => {}
             }
         }
         Ok(())

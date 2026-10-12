@@ -36,25 +36,14 @@ const FRAG_GAP_MIN_SECS: f64 = 3.0;
 
 /// Compute performance statistics from an ATIF trajectory.
 pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
-    let Some(origin) = trajectory.origin_ts() else {
-        return Ok(PerfStats {
-            wall_secs: 0.0,
-            tool_secs: 0.0,
-            model_secs: 0.0,
-            idle_secs: 0.0,
-            tool_count: 0,
-            tool_calls: vec![],
-            top_slow: vec![],
-            idle_gaps: vec![],
-            frag_idle_secs: 0.0,
-        });
-    };
+    let origin = trajectory.origin_ts();
 
     let tool_calls = collect_tool_calls_with(trajectory, CMD_TRUNCATE_CHARS);
 
     let wall_secs = trajectory
         .last_ts()
-        .map(|t| (t - origin).as_seconds_f64())
+        .zip(origin)
+        .map(|(t, origin)| (t - origin).as_seconds_f64())
         .unwrap_or(0.0);
 
     let tool_secs: f64 = tool_calls.iter().map(|c| c.dur).sum();
@@ -167,14 +156,19 @@ fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
         }
         let Some(end) = step.end_ts() else { continue };
 
-        for next in &steps[i + 1..] {
+        for (offset, next) in steps[i + 1..].iter().enumerate() {
             if next.is_agent() {
                 break; // interaction continued without user input
             }
             if next.is_user() {
                 // Next-turn user step: gap measured to its timestamp when
                 // recorded, else to the following agent step's request start.
-                let user_ts = next.end_ts();
+                let user_ts = next.end_ts().or_else(|| {
+                    steps[i + offset + 2..]
+                        .iter()
+                        .find(|step| step.is_agent())
+                        .and_then(|step| step.start_ts())
+                });
                 if let Some(u) = user_ts {
                     let dur = (u - end).as_seconds_f64();
                     if dur > threshold {

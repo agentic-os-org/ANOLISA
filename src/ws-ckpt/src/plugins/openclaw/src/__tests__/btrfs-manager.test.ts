@@ -594,18 +594,17 @@ describe("BtrfsManager with mocked executor", () => {
     expect(r).toBe(true);
   });
 
-  it("parseSnapshotList handles empty stdout", async () => {
+  it("parseSnapshotList rejects empty stdout", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
     exec.list = vi.fn().mockResolvedValue(ok(""));
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Invalid snapshot list JSON");
   });
 
-  it("parseSnapshotList handles invalid JSON", async () => {
+  it("parseSnapshotList rejects invalid JSON", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
@@ -614,11 +613,10 @@ describe("BtrfsManager with mocked executor", () => {
       .mockResolvedValueOnce(ok("not json"));  // listCheckpoints
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Invalid snapshot list JSON");
   });
 
-  it("parseSnapshotList handles non-array JSON", async () => {
+  it("parseSnapshotList rejects non-array JSON", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
@@ -627,7 +625,6 @@ describe("BtrfsManager with mocked executor", () => {
       .mockResolvedValueOnce(ok('{"not": "array"}'));
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("expected an array");
   });
 });

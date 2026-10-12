@@ -254,6 +254,7 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OC_INSTALL_FORCE",
     "FAKE_OC_INSTALL_ACCEPT",
     "FAKE_OC_ENABLE_ACCEPT",
+    "FAKE_OC_CONSENT_PREAUTHORIZED",
     "FAKE_OC_INSTALL_UNSAFE",
     "FAKE_OC_INSTALL_UNSAFE_NOOP",
     "FAKE_OC_INSPECT_JSON",
@@ -414,6 +415,8 @@ fn stage_in(root: tempfile::TempDir) -> World {
 ///   and `--dangerously-force-unsafe-install` when `FAKE_OC_INSTALL_UNSAFE=1`;
 ///   `FAKE_OC_INSTALL_UNSAFE_NOOP=1` marks that option as a deprecated no-op.
 /// - `plugins enable --help` advertises consent when `FAKE_OC_ENABLE_ACCEPT=1`.
+/// - `FAKE_OC_CONSENT_PREAUTHORIZED=1` lets either command proceed without a
+///   new grant, modeling capabilities already authorized by the operator.
 /// - `plugins inspect --help` lists `--json` unless `FAKE_OC_INSPECT_JSON=0`
 ///   and `--runtime` when `FAKE_OC_INSPECT_RUNTIME=1`.
 ///
@@ -494,7 +497,7 @@ case "$action" in
     accepted=0
     for option in "$@"; do [ "$option" = "--accept-capabilities" ] && accepted=1; done
     if [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "1" ]; then
-      if [ "$accepted" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
+      if [ "$accepted" != 1 ] && [ "${FAKE_OC_CONSENT_PREAUTHORIZED:-0}" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
     elif [ "$accepted" = 1 ]; then
       echo "unknown option --accept-capabilities" >&2; exit 2
     fi
@@ -524,7 +527,7 @@ case "$action" in
     accepted=0
     for option in "$@"; do [ "$option" = "--accept-capabilities" ] && accepted=1; done
     if [ "${FAKE_OC_ENABLE_ACCEPT:-0}" = "1" ]; then
-      if [ "$accepted" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
+      if [ "$accepted" != 1 ] && [ "${FAKE_OC_CONSENT_PREAUTHORIZED:-0}" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
     elif [ "$accepted" = 1 ]; then
       echo "unknown option --accept-capabilities" >&2; exit 2
     fi
@@ -2441,6 +2444,7 @@ fn authorized_unsafe_supported_includes_flag_once() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )
@@ -2481,6 +2485,7 @@ fn authorized_unsafe_unsupported_blocks() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )
@@ -2513,6 +2518,7 @@ fn authorized_unsafe_deprecated_noop_blocks() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )
@@ -3174,6 +3180,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )
@@ -3413,6 +3420,250 @@ fn enable_accepts_capabilities_per_subcommand_help() {
         );
         assert!(!activation.contains("--dangerously-force-unsafe-install"));
         assert!(world.registry_marker_exists());
+    }
+}
+
+#[test]
+fn withheld_capabilities_are_omitted_from_dry_run() {
+    let guard = OpenClawEnvGuard::acquire();
+    for (install_support, enable_support) in [
+        ("1", "1"),
+        ("1", "0"),
+        ("0", "1"),
+        ("0", "0"),
+        ("near_match", "near_match"),
+    ] {
+        let world = stage();
+        world.apply_env(&guard, None);
+        guard.set("FAKE_OC_INSTALL_ACCEPT", install_support);
+        guard.set("FAKE_OC_ENABLE_ACCEPT", enable_support);
+        guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+        let outcome = world
+            .manager()
+            .enable_with_options(
+                COMPONENT,
+                Some(FRAMEWORK),
+                true,
+                EnableOptions {
+                    no_accept_capabilities: true,
+                    ..EnableOptions::default()
+                },
+            )
+            .expect("withholding does not block a read-only preview");
+        let EnableOutcome::Planned { plan, .. } = outcome else {
+            panic!("expected preview")
+        };
+        assert!(
+            !plan
+                .register_command
+                .unwrap()
+                .contains("--accept-capabilities")
+        );
+        let activation = plan.actions.last().expect("activation preview");
+        assert!(activation.contains("plugins enable tokenless"));
+        assert!(!activation.contains("--accept-capabilities"));
+        assert!(
+            argv_lines(&world.argv_log())
+                .iter()
+                .all(|line| line == "--version" || line.ends_with("--help"))
+        );
+        assert!(!world.has_claim());
+        assert!(!world.registry_marker_exists());
+    }
+}
+
+#[test]
+fn withheld_consent_failures_keep_receipts_for_cleanup() {
+    let guard = OpenClawEnvGuard::acquire();
+    for (install_support, failed_verb) in [("1", "plugins install"), ("0", "plugins enable")] {
+        let world = stage();
+        world.apply_env(&guard, None);
+        guard.set("FAKE_OC_INSTALL_ACCEPT", install_support);
+        guard.set("FAKE_OC_ENABLE_ACCEPT", "1");
+        guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+        let manager = world.manager();
+        let err = manager
+            .enable_with_options(
+                COMPONENT,
+                Some(FRAMEWORK),
+                false,
+                EnableOptions {
+                    no_accept_capabilities: true,
+                    ..EnableOptions::default()
+                },
+            )
+            .expect_err("the fake host requires a new consent grant");
+        let reason = err.to_string();
+        assert!(reason.contains(failed_verb), "{reason}");
+        assert!(reason.contains("requires capability consent"), "{reason}");
+        assert!(
+            reason.contains("withheld by --no-accept-capabilities"),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("--allow-unsafe-plugin-install"),
+            "{reason}"
+        );
+        let lines = argv_lines(&world.argv_log());
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("--accept-capabilities")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with(failed_verb) && !line.ends_with("--help"))
+                .count(),
+            1,
+            "no automatic retry: {lines:?}"
+        );
+        assert!(
+            inspect_argv(&lines).is_none(),
+            "no verification after refusal"
+        );
+        assert_eq!(world.registry_marker_exists(), install_support == "0");
+        assert_eq!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, FRAMEWORK)
+                .unwrap()
+                .status,
+            ClaimStatus::CleanupFailed
+        );
+        assert!(
+            manager
+                .disable(COMPONENT, Some(FRAMEWORK), false)
+                .expect("cleanup")
+                .claim_removed
+        );
+        assert!(!world.registry_marker_exists());
+        assert!(!world.has_claim());
+    }
+}
+
+#[test]
+fn withheld_capabilities_leave_existing_authorization_and_unsafe_choice_to_host() {
+    let guard = OpenClawEnvGuard::acquire();
+    for unsafe_authorized in [false, true] {
+        let world = stage();
+        world.apply_env(&guard, None);
+        guard.set("FAKE_OC_INSTALL_ACCEPT", "1");
+        guard.set("FAKE_OC_ENABLE_ACCEPT", "1");
+        guard.set("FAKE_OC_CONSENT_PREAUTHORIZED", "1");
+        guard.set("FAKE_OC_INSTALL_UNSAFE", "1");
+        guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+        let manager = world.manager();
+        manager
+            .enable_with_options(
+                COMPONENT,
+                Some(FRAMEWORK),
+                false,
+                EnableOptions {
+                    no_accept_capabilities: true,
+                    allow_unsafe_plugin_install: unsafe_authorized,
+                    ..EnableOptions::default()
+                },
+            )
+            .expect("the host accepts previously authorized capabilities");
+        let lines = argv_lines(&world.argv_log());
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("--accept-capabilities")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            install_argv(&lines)
+                .unwrap()
+                .contains("--dangerously-force-unsafe-install"),
+            unsafe_authorized
+        );
+        assert!(lines.iter().any(|line| line == "plugins enable tokenless"));
+        assert!(world.registry_marker_exists());
+        assert_eq!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, FRAMEWORK)
+                .unwrap()
+                .status,
+            ClaimStatus::Enabled
+        );
+    }
+}
+
+#[test]
+fn withheld_capabilities_do_not_change_legacy_hosts_or_relabel_other_failures() {
+    let guard = OpenClawEnvGuard::acquire();
+    for failure in [None, Some("install")] {
+        let world = stage();
+        world.apply_env(&guard, failure);
+        guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+        let outcome = world.manager().enable_with_options(
+            COMPONENT,
+            Some(FRAMEWORK),
+            false,
+            EnableOptions {
+                no_accept_capabilities: true,
+                ..EnableOptions::default()
+            },
+        );
+        if failure.is_some() {
+            let reason = outcome.expect_err("unrelated install failure").to_string();
+            assert!(reason.contains("boom-install"), "{reason}");
+            assert!(!reason.contains("capability consent"), "{reason}");
+        } else {
+            outcome.expect("legacy host remains usable");
+            assert!(world.registry_marker_exists());
+        }
+        assert!(
+            argv_lines(&world.argv_log())
+                .iter()
+                .all(|line| !line.contains("--accept-capabilities"))
+        );
+    }
+}
+
+#[test]
+fn consent_opt_out_is_rejected_for_non_plugin_adapters_before_probes() {
+    let guard = OpenClawEnvGuard::acquire();
+    for (framework, adapter_type) in [("openclaw", "skill_bundle"), ("hermes", "plugin")] {
+        for dry_run in [false, true] {
+            let world = stage();
+            write_openclaw_manifest(
+                &world.layout,
+                &format!(
+                    "[[adapters]]\nframework = \"{framework}\"\nadapter_type = \"{adapter_type}\"\n"
+                ),
+            );
+            world.apply_env(&guard, None);
+            guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+            let err = world
+                .manager()
+                .enable_with_options(
+                    COMPONENT,
+                    Some(framework),
+                    dry_run,
+                    EnableOptions {
+                        no_accept_capabilities: true,
+                        ..EnableOptions::default()
+                    },
+                )
+                .expect_err("explicit consent policy must not silently no-op");
+            assert!(
+                matches!(err, AdapterError::InvalidAdapterInput { .. }),
+                "{err}"
+            );
+            assert!(err.to_string().contains("--no-accept-capabilities"));
+            assert!(argv_lines(&world.argv_log()).is_empty());
+            assert!(
+                world
+                    .load_state()
+                    .find_adapter_claim(COMPONENT, framework)
+                    .is_none()
+            );
+        }
     }
 }
 
@@ -3914,6 +4165,7 @@ fn authorized_unsafe_dry_run_shows_flag_without_mutation() {
             true,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )
@@ -3956,6 +4208,7 @@ fn central_log_records_authorized_unsafe_install_argv() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )
@@ -3992,6 +4245,7 @@ dest = "{{datadir}}/adapters/{{component}}/hermes/"
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                no_accept_capabilities: false,
                 profiles: Vec::new(),
             },
         )

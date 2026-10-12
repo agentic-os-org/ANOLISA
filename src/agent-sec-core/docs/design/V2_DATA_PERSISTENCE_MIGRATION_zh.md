@@ -295,9 +295,14 @@ v1 用**两种不同机制**完成 1→3，v2 都保留：
 文件记录上次时间、`<db>.maintenance.lock` 做跨进程互斥，默认间隔一天。标记损坏、标记
 时间在未来、间隔非正数都有明确行为（分别是「视为不存在」「视为过期」「总是执行」）。
 
-**闸门只在维护回调返回成功时前进。** 但 writer 的 `run_maintenance` 有意吞掉裁剪错误，
-所以「裁剪失败」在闸门看来仍是成功，标记照常写入——这与 v1 相同（v1 的 prune 也是内部
-catch）。差别只在失败后是否 dispose 连接，见 §10.3。
+**闸门只在维护回调返回成功时前进。** 自 #6602 起，writer 的 `run_maintenance` 传播裁剪
+错误：裁剪失败的 pass 不写标记，下一次维护机会直接重试而不是等满一个窗口。gate 自身的
+失败同样以结构化结果透出（`MaintenanceOutcome`：`NotDue`/`Contended`/`Ran`/`Failed`，
+覆盖 lock 文件打开/加锁失败与 marker 写/改名失败），不再与「未到期」混淆；持有 `Contended`
+表示他进程持锁。checkpoint 保持 v1 的 best-effort 语义（`repository.rs` 默认实现吞错），
+不计入 `Failed`。与 v1 相同的差别只在失败后是否 dispose 连接，见 §10.3。长驻 daemon 的
+周期触发、admission 排序与 shutdown 生命周期契约见
+`DAEMON_JOB_CONTRACT_zh.md` §11.5。
 
 ## 6. 去重与抽象
 

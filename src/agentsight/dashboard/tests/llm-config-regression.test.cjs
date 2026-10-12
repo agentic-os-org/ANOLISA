@@ -12,6 +12,7 @@ async function configForm(config) {
   let stateIndex = 0;
   let effectIndex = 0;
   let submitted;
+  const formRef = { current: null };
   const exports = {};
   const t = (key) => key;
   runInNewContext(readFileSync(process.env.AGENTSIGHT_LLM_CONFIG_BUILD, 'utf8'), {
@@ -19,6 +20,8 @@ async function configForm(config) {
     setTimeout: () => 0,
     require(name) {
       if (name === 'react') return {
+        forwardRef: (render) => () => render({}, formRef),
+        useImperativeHandle: (ref, createHandle) => { ref.current = createHandle(); },
         useState(initial) {
           const index = stateIndex++;
           if (!(index in states)) states[index] = initial;
@@ -70,7 +73,8 @@ async function configForm(config) {
     async provider(value) { selects()[0].props.onChange({ target: { value } }); await flush(); },
     preset(value) { selects()[1].props.onChange({ target: { value } }); },
     async save() {
-      await nodes(render(), (node) => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+      render();
+      await formRef.current.save();
       return submitted;
     },
   };
