@@ -88,6 +88,7 @@ fn initialization_failure_retries_apply_update_and_delete_without_losing_target_
             last_confirmed: Some(Presence::Present),
         };
         let initial = ReconcileRecord {
+            status_version: 1,
             binding: BindingView {
                 spec: spec.clone(),
                 status: status.into(),
@@ -142,6 +143,7 @@ fn initialization_failure_retries_apply_update_and_delete_without_losing_target_
             Disposition::RetryAt { at: 100 }
         );
         let mut expected = initial;
+        expected.status_version += 2;
         expected.binding.status.error = Some(Failure::new(
             FailureKind::Retryable,
             "TEST_CREDENTIAL_UNAVAILABLE",
@@ -166,6 +168,7 @@ fn initialization_failure_retries_apply_update_and_delete_without_losing_target_
         );
         assert_eq!(opens.load(Ordering::SeqCst), 2);
         let expected = (status != BindingStatus::PendingDelete).then_some(ReconcileRecord {
+            status_version: 5,
             binding: {
                 let mut binding = BindingView {
                     spec: spec.clone(),

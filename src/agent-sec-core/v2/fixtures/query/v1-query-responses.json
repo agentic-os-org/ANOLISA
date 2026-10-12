@@ -1,0 +1,627 @@
+{
+  "events": [
+    {
+      "event_id": "code",
+      "event_type": "scan",
+      "category": "code_scan",
+      "result": "succeeded",
+      "timestamp": "2026-06-09T00:00:01+00:00",
+      "trace_id": "trace-1",
+      "pid": 123,
+      "uid": 0,
+      "session_id": "session-1",
+      "run_id": "run-1",
+      "call_id": null,
+      "tool_call_id": "tool-1",
+      "details": {
+        "request": {
+          "code": "echo hi"
+        },
+        "result": {
+          "verdict": "pass"
+        }
+      }
+    },
+    {
+      "event_id": "batch",
+      "event_type": "scan",
+      "category": "skill_ledger",
+      "result": "succeeded",
+      "timestamp": "2026-06-09T00:00:02+00:00",
+      "trace_id": "trace-1",
+      "pid": 123,
+      "uid": 0,
+      "session_id": "session-1",
+      "run_id": "run-1",
+      "call_id": null,
+      "tool_call_id": "tool-1",
+      "details": {
+        "request": {
+          "command": "scan",
+          "skill_dir": "/skills/batch"
+        },
+        "result": {
+          "command": "scan",
+          "results": [
+            {
+              "skill_name": "a"
+            },
+            {
+              "skill_name": "b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "event_id": "unassigned",
+      "event_type": "scan",
+      "category": "code_scan",
+      "result": "succeeded",
+      "timestamp": "2026-06-09T00:00:03+00:00",
+      "trace_id": "trace-1",
+      "pid": 123,
+      "uid": 0,
+      "session_id": null,
+      "run_id": null,
+      "call_id": null,
+      "tool_call_id": null,
+      "details": {}
+    }
+  ],
+  "observations": [
+    {
+      "hook": "before_agent_run",
+      "observedAt": "2026-06-09T00:00:00+00:00",
+      "metadata": {
+        "sessionId": "session-1",
+        "runId": "run-1"
+      },
+      "metrics": {
+        "user_input": "inspect coverage"
+      }
+    },
+    {
+      "hook": "before_tool_call",
+      "observedAt": "2026-06-09T00:00:01+00:00",
+      "metadata": {
+        "sessionId": "session-1",
+        "runId": "run-1",
+        "toolCallId": "tool-1"
+      },
+      "metrics": {
+        "parameters": {
+          "command": "echo hi"
+        }
+      }
+    },
+    {
+      "hook": "before_agent_run",
+      "observedAt": "2026-06-09T00:01:00+00:00",
+      "metadata": {
+        "sessionId": "session-2",
+        "runId": "run-2"
+      },
+      "metrics": {
+        "user_input": "second session"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "method": "obs.sessions.list",
+      "params": {},
+      "expected": {
+        "items": [
+          {
+            "session_id": "session-2",
+            "first_seen_epoch": 1780963260.0,
+            "last_seen_epoch": 1780963260.0,
+            "turn_count": 1,
+            "observability_event_count": 1,
+            "security_event_count": 0
+          },
+          {
+            "session_id": "session-1",
+            "first_seen_epoch": 1780963200.0,
+            "last_seen_epoch": 1780963201.0,
+            "turn_count": 1,
+            "observability_event_count": 2,
+            "security_event_count": 2
+          }
+        ],
+        "total": 2,
+        "limit": 100,
+        "offset": 0,
+        "next_offset": null
+      }
+    },
+    {
+      "method": "obs.sessions.list",
+      "params": {
+        "limit": 1
+      },
+      "expected": {
+        "items": [
+          {
+            "session_id": "session-2",
+            "first_seen_epoch": 1780963260.0,
+            "last_seen_epoch": 1780963260.0,
+            "turn_count": 1,
+            "observability_event_count": 1,
+            "security_event_count": 0
+          }
+        ],
+        "total": 2,
+        "limit": 1,
+        "offset": 0,
+        "next_offset": 1
+      }
+    },
+    {
+      "method": "obs.sessions.list",
+      "params": {
+        "offset": 99
+      },
+      "expected": {
+        "items": [],
+        "total": 2,
+        "limit": 100,
+        "offset": 99,
+        "next_offset": null
+      }
+    },
+    {
+      "method": "obs.runs.list",
+      "params": {
+        "session_id": "session-1"
+      },
+      "expected": {
+        "session_id": "session-1",
+        "items": [
+          {
+            "run_id": "run-1",
+            "started_at_epoch": 1780963200.0,
+            "ended_at_epoch": 1780963201.0,
+            "user_input_preview": "inspect coverage",
+            "observability_event_count": 2,
+            "security_event_count": 2
+          }
+        ],
+        "total": 1,
+        "limit": 100,
+        "offset": 0,
+        "next_offset": null
+      }
+    },
+    {
+      "method": "obs.runs.list",
+      "params": {
+        "session_id": "missing"
+      },
+      "expected": {
+        "session_id": "missing",
+        "items": [],
+        "total": 0,
+        "limit": 100,
+        "offset": 0,
+        "next_offset": null
+      }
+    },
+    {
+      "method": "obs.timeline.get",
+      "params": {
+        "session_id": "session-1",
+        "run_id": "run-1"
+      },
+      "expected": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "limit": 1000,
+        "offset": 0,
+        "items": [
+          {
+            "kind": "observability",
+            "id": 1,
+            "hook": "before_agent_run",
+            "timestamp": "2026-06-09T00:00:00Z",
+            "timestamp_epoch": 1780963200.0,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": null,
+            "metadata": {
+              "sessionId": "session-1",
+              "runId": "run-1"
+            },
+            "metrics": {
+              "user_input": "inspect coverage"
+            }
+          },
+          {
+            "kind": "observability",
+            "id": 2,
+            "hook": "before_tool_call",
+            "timestamp": "2026-06-09T00:00:01Z",
+            "timestamp_epoch": 1780963201.0,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "metadata": {
+              "sessionId": "session-1",
+              "runId": "run-1",
+              "toolCallId": "tool-1"
+            },
+            "metrics": {
+              "parameters": {
+                "command": "echo hi"
+              }
+            }
+          },
+          {
+            "kind": "security",
+            "observability_event_id": 2,
+            "observability": {
+              "id": 2,
+              "hook": "before_tool_call",
+              "timestamp": "2026-06-09T00:00:01Z",
+              "timestamp_epoch": 1780963201.0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "metadata": {
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "toolCallId": "tool-1"
+              },
+              "metrics": {
+                "parameters": {
+                  "command": "echo hi"
+                }
+              }
+            },
+            "hook": "before_tool_call",
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "timestamp": "2026-06-09T00:00:01+00:00",
+            "timestamp_epoch": 1780963201.0,
+            "event": {
+              "event_id": "code",
+              "event_type": "scan",
+              "category": "code_scan",
+              "result": "succeeded",
+              "timestamp": "2026-06-09T00:00:01+00:00",
+              "trace_id": "trace-1",
+              "pid": 123,
+              "uid": 0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "details": {
+                "request": {
+                  "code": "echo hi"
+                },
+                "result": {
+                  "verdict": "pass"
+                }
+              },
+              "verdict": "pass"
+            },
+            "match": {
+              "reason": "tool_call_id",
+              "rank": 0,
+              "time_delta_seconds": 0.0
+            }
+          },
+          {
+            "kind": "security",
+            "observability_event_id": 2,
+            "observability": {
+              "id": 2,
+              "hook": "before_tool_call",
+              "timestamp": "2026-06-09T00:00:01Z",
+              "timestamp_epoch": 1780963201.0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "metadata": {
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "toolCallId": "tool-1"
+              },
+              "metrics": {
+                "parameters": {
+                  "command": "echo hi"
+                }
+              }
+            },
+            "hook": "before_tool_call",
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "timestamp": "2026-06-09T00:00:02+00:00",
+            "timestamp_epoch": 1780963202.0,
+            "event": {
+              "event_id": "batch",
+              "event_type": "scan",
+              "category": "skill_ledger",
+              "result": "succeeded",
+              "timestamp": "2026-06-09T00:00:02+00:00",
+              "trace_id": "trace-1",
+              "pid": 123,
+              "uid": 0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "details": {
+                "request": {
+                  "command": "scan",
+                  "skill_dir": "/skills/batch"
+                },
+                "result": {
+                  "command": "scan",
+                  "results": [
+                    {
+                      "skill_name": "a"
+                    },
+                    {
+                      "skill_name": "b"
+                    }
+                  ]
+                }
+              },
+              "command": "scan"
+            },
+            "match": {
+              "reason": "tool_call_id",
+              "rank": 0,
+              "time_delta_seconds": 1.0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "obs.timeline.get",
+      "params": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "include_security": false
+      },
+      "expected": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "limit": 1000,
+        "offset": 0,
+        "items": [
+          {
+            "kind": "observability",
+            "id": 1,
+            "hook": "before_agent_run",
+            "timestamp": "2026-06-09T00:00:00Z",
+            "timestamp_epoch": 1780963200.0,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": null,
+            "metadata": {
+              "sessionId": "session-1",
+              "runId": "run-1"
+            },
+            "metrics": {
+              "user_input": "inspect coverage"
+            }
+          },
+          {
+            "kind": "observability",
+            "id": 2,
+            "hook": "before_tool_call",
+            "timestamp": "2026-06-09T00:00:01Z",
+            "timestamp_epoch": 1780963201.0,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "metadata": {
+              "sessionId": "session-1",
+              "runId": "run-1",
+              "toolCallId": "tool-1"
+            },
+            "metrics": {
+              "parameters": {
+                "command": "echo hi"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "obs.timeline.get",
+      "params": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "limit": 1,
+        "offset": 1
+      },
+      "expected": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "limit": 1,
+        "offset": 1,
+        "items": [
+          {
+            "kind": "observability",
+            "id": 2,
+            "hook": "before_tool_call",
+            "timestamp": "2026-06-09T00:00:01Z",
+            "timestamp_epoch": 1780963201.0,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "metadata": {
+              "sessionId": "session-1",
+              "runId": "run-1",
+              "toolCallId": "tool-1"
+            },
+            "metrics": {
+              "parameters": {
+                "command": "echo hi"
+              }
+            }
+          },
+          {
+            "kind": "security",
+            "observability_event_id": 2,
+            "observability": {
+              "id": 2,
+              "hook": "before_tool_call",
+              "timestamp": "2026-06-09T00:00:01Z",
+              "timestamp_epoch": 1780963201.0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "metadata": {
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "toolCallId": "tool-1"
+              },
+              "metrics": {
+                "parameters": {
+                  "command": "echo hi"
+                }
+              }
+            },
+            "hook": "before_tool_call",
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "timestamp": "2026-06-09T00:00:01+00:00",
+            "timestamp_epoch": 1780963201.0,
+            "event": {
+              "event_id": "code",
+              "event_type": "scan",
+              "category": "code_scan",
+              "result": "succeeded",
+              "timestamp": "2026-06-09T00:00:01+00:00",
+              "trace_id": "trace-1",
+              "pid": 123,
+              "uid": 0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "details": {
+                "request": {
+                  "code": "echo hi"
+                },
+                "result": {
+                  "verdict": "pass"
+                }
+              },
+              "verdict": "pass"
+            },
+            "match": {
+              "reason": "tool_call_id",
+              "rank": 0,
+              "time_delta_seconds": 0.0
+            }
+          },
+          {
+            "kind": "security",
+            "observability_event_id": 2,
+            "observability": {
+              "id": 2,
+              "hook": "before_tool_call",
+              "timestamp": "2026-06-09T00:00:01Z",
+              "timestamp_epoch": 1780963201.0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "metadata": {
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "toolCallId": "tool-1"
+              },
+              "metrics": {
+                "parameters": {
+                  "command": "echo hi"
+                }
+              }
+            },
+            "hook": "before_tool_call",
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": null,
+            "tool_call_id": "tool-1",
+            "timestamp": "2026-06-09T00:00:02+00:00",
+            "timestamp_epoch": 1780963202.0,
+            "event": {
+              "event_id": "batch",
+              "event_type": "scan",
+              "category": "skill_ledger",
+              "result": "succeeded",
+              "timestamp": "2026-06-09T00:00:02+00:00",
+              "trace_id": "trace-1",
+              "pid": 123,
+              "uid": 0,
+              "session_id": "session-1",
+              "run_id": "run-1",
+              "call_id": null,
+              "tool_call_id": "tool-1",
+              "details": {
+                "request": {
+                  "command": "scan",
+                  "skill_dir": "/skills/batch"
+                },
+                "result": {
+                  "command": "scan",
+                  "results": [
+                    {
+                      "skill_name": "a"
+                    },
+                    {
+                      "skill_name": "b"
+                    }
+                  ]
+                }
+              },
+              "command": "scan"
+            },
+            "match": {
+              "reason": "tool_call_id",
+              "rank": 0,
+              "time_delta_seconds": 1.0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "obs.timeline.get",
+      "params": {
+        "session_id": "missing",
+        "run_id": "missing"
+      },
+      "expected": {
+        "session_id": "missing",
+        "run_id": "missing",
+        "limit": 1000,
+        "offset": 0,
+        "items": []
+      }
+    }
+  ]
+}

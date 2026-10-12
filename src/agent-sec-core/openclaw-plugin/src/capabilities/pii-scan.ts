@@ -2,7 +2,6 @@ import type { SecurityCapability } from "../types.js";
 import {
   afterToolCallPiiScanText,
   inboundPiiScanText,
-  modelInputPiiScanText,
   valueToText,
 } from "../helpers/pii-text.js";
 import {
@@ -269,7 +268,7 @@ export const piiScan: SecurityCapability = {
     ): Promise<string | undefined> => {
       try {
         const text = modelInput
-          ? modelInputPiiScanText(event)
+          ? safeString(event?.prompt)
           : inboundPiiScanText(event);
         if (!text.trim()) {
           return undefined;

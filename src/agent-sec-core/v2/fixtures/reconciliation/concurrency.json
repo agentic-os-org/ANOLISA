@@ -37,10 +37,10 @@
     ],
     "admission": null,
     "intermediate": {
-      "$ref": "record.create.registered"
+      "$ref": "record.create.registered.status-2"
     },
     "expected": {
-      "$ref": "record.create.ready"
+      "$ref": "record.create.ready.status-3"
     },
     "trace": [
       "read",
@@ -121,7 +121,7 @@
       }
     },
     "intermediate": {
-      "$ref": "record.create.registered"
+      "$ref": "record.create.registered.status-2"
     },
     "expected": null,
     "trace": [

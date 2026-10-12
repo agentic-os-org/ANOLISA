@@ -2,6 +2,7 @@
 //!
 //! Linux: full eBPF observability (trace, discover, token, audit, etc.)
 //! macOS: trajectory collection (trace) + local viewer (serve)
+#[cfg(target_os = "linux")]
 use agentsight::token_breakdown::AnalyzeChatmlCommand;
 use structopt::StructOpt;
 
@@ -61,6 +62,7 @@ pub enum Command {
     #[cfg(target_os = "linux")]
     Summary(SummaryCommand),
     /// Analyze ChatML token consumption from a Chrome Trace file
+    #[cfg(target_os = "linux")]
     #[structopt(name = "analyze-chatml")]
     AnalyzeChatml(AnalyzeChatmlCommand),
     /// Start the API server
@@ -91,6 +93,7 @@ fn main() {
         Command::SkillMetrics(skill_metrics_cmd) => skill_metrics_cmd.execute(),
         #[cfg(target_os = "linux")]
         Command::Summary(summary_cmd) => summary_cmd.execute(),
+        #[cfg(target_os = "linux")]
         Command::AnalyzeChatml(analyze_chatml_cmd) => analyze_chatml_cmd.execute(),
         #[cfg(feature = "server")]
         Command::Serve(serve_cmd) => serve_cmd.execute(),
@@ -99,7 +102,7 @@ fn main() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

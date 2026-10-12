@@ -1,0 +1,38 @@
+name: CI / sec-core macOS
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/agent-sec-core/v2/**'
+      - '.github/workflows/sec-core-macos-check.yaml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'src/agent-sec-core/v2/**'
+      - '.github/workflows/sec-core-macos-check.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-sec-core-macos:
+    name: Check AgentSecCore V2 on macOS
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: src/agent-sec-core/v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/agent-sec-core/v2
+      - name: Compile the V2 workspace and all test targets
+        run: cargo check --locked --workspace --all-targets
+      - name: Test SkillSec ledger entry identity checks
+        run: cargo test --locked -p asc-capability-skill-sec --lib ledger::storage::tests
+      - name: Test SQLite policy path identity checks
+        run: cargo test --locked -p asc-policy-repository-sqlite --lib lease_verification_

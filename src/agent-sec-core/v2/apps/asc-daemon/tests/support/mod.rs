@@ -63,11 +63,9 @@ pub async fn run_frozen_pap_crud_scenario(path: &Path, fixture: &Value) {
         assert_eq!(response, expected, "unexpected response for {step_name}");
     }
 
-    let resource_ids = ["policy_id", "scope_id", "binding_id"]
-        .map(|name| variables.get(name).unwrap().as_str().unwrap());
+    let resource_ids =
+        ["policy_id", "scope_id"].map(|name| variables.get(name).unwrap().as_str().unwrap());
     assert_ne!(resource_ids[0], resource_ids[1]);
-    assert_ne!(resource_ids[0], resource_ids[2]);
-    assert_ne!(resource_ids[1], resource_ids[2]);
 }
 
 pub async fn request_json(path: &Path, request_value: &Value) -> Value {

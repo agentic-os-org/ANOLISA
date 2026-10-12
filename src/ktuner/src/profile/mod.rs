@@ -47,6 +47,10 @@ pub fn classify(info: &SystemInfo) -> WorkloadType {
         || info.has_process("mongod")
         || info.has_process("clickhouse");
     let has_cache = info.has_process("redis-server")
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // `valkey-server` binary with the same event-loop, memory-resident
+        // cache workload, so the cache class must count it too.
+        || info.has_process("valkey-server")
         || info.has_process("memcached")
         || info.has_process("etcd")
         // ZooKeeper and Consul are the same in-memory coordination-KV class
@@ -154,6 +158,12 @@ mod tests {
     fn test_classify_cache() {
         assert_eq!(
             classify(&make_info(vec!["redis-server"])),
+            WorkloadType::MemoryIntensive
+        );
+        // Valkey is the Linux Foundation's fork of Redis 7.2.4 - a drop-in
+        // valkey-server binary with the same event-loop cache workload.
+        assert_eq!(
+            classify(&make_info(vec!["valkey-server"])),
             WorkloadType::MemoryIntensive
         );
         assert_eq!(

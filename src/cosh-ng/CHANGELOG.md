@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-10-11
+
+### Added
+- Managed installations now show an available-update notice at a safe idle prompt with the matching update command; unmanaged binaries remain silent (#3465)
+- SLS telemetry now detects IMDSv2-only instances and uses their regional endpoint, while retaining compatibility with older metadata services (#3406)
+
+### Fixed
+- Fresh login sessions now fall back to the native shell only when the enhanced runtime fails before producing side effects, preventing lockout without creating duplicate login sessions (#3395)
+
 ## [0.26.0] — 2026-09-23
 
 ### Added

@@ -12,6 +12,11 @@ on:
     types: [opened, synchronize, reopened, edited]
     branches: [main, "feature/**", "release/**"]
 
+# Only superseded PR runs share a group; pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   pull-requests: read
@@ -23,12 +28,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          sparse-checkout: .github/commitlint.config.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install commitlint
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/commitlint" --no-audit --no-fund
+          @commitlint/cli@19.8.1 @commitlint/config-conventional@19.8.1
 
       - name: Lint commit messages
-        uses: wagoid/commitlint-github-action@v6
+        uses: actions/github-script@v7
+        env:
+          NODE_PATH: ${{ runner.temp }}/commitlint/node_modules
         with:
-          configFile: .github/commitlint.config.json
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const pr = context.payload.pull_request;
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              ...context.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            // The endpoint caps results at 250 commits. Never pass a partial list
+            // or a list fetched after the PR head changed.
+            if (commits.length !== pr.commits || commits.at(-1)?.sha !== pr.head.sha) {
+              core.setFailed('PR commit list is incomplete or changed. Re-run for the current head; ' +
+                'PRs exceeding the API limit of 250 commits must be split.');
+              return;
+            }
+            const cli = `${process.env.RUNNER_TEMP}/commitlint/node_modules/.bin/commitlint`;
+            for (const commit of commits) {
+              core.startGroup(`Lint ${commit.sha}`);
+              try {
+                const output = execFileSync(cli, ['--config', '.github/commitlint.config.json'], {
+                  input: commit.commit.message,
+                  encoding: 'utf8',
+                });
+                core.info(output);
+              } catch (error) {
+                core.error(error.stdout || error.message);
+                core.setFailed(`Invalid commit message: ${commit.sha}`);
+              } finally {
+                core.endGroup();
+              }
+            }
 
       - name: Explain how to fix commit messages
         if: failure()

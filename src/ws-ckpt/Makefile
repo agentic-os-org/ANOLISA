@@ -1,5 +1,7 @@
 # Makefile for ws-ckpt
 
+.DEFAULT_GOAL := build
+
 INSTALL_PROFILE ?= system
 DESTDIR ?=
 ifeq ($(INSTALL_PROFILE),user)
@@ -24,7 +26,13 @@ PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 CONFIG_DIR ?= $(SYSCONFDIR)/ws-ckpt
 
-.PHONY: build install uninstall clean test test-openclaw-scripts test-openclaw-compat test-openclaw-install test-openclaw-uninstall help
+.PHONY: build install uninstall clean test test-openclaw-scripts test-openclaw-compat test-openclaw-install test-openclaw-uninstall package-raw test-package-raw help
+
+package-raw:
+	packaging/raw/package.sh package
+
+test-package-raw:
+	python3 -m unittest discover -s tests -p test_raw_packaging.py -v
 
 build:
 	cd src && cargo build --release --workspace
@@ -174,7 +182,7 @@ test-openclaw-uninstall:
 	bash tests/openclaw-uninstall.sh
 
 help:
-	@echo "Targets: build install uninstall clean test test-openclaw-scripts"
+	@echo "Targets: build install uninstall clean test test-openclaw-scripts package-raw test-package-raw"
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE=user|system"
 	@echo "  DESTDIR= staging root for packages"

@@ -9,6 +9,40 @@
 
 ## [未发布]
 
+## [0.5.1] - 2026-10-10
+
+本次补丁版本集中整理 0.5.0 之后合入的文件系统边界修复和易用性改进。
+
+### 变更
+
+- 认证通知和实时来源解析已接通 Rust sec-core SkillSec daemon。配合兼容的 daemon，
+  启动及 Skill 修改可触发扫描和激活状态更新；通知仍为 best-effort，不承诺恰好一次投递
+  ([#3295](https://github.com/agentic-os-org/ANOLISA/pull/3295))。
+
+### 修复
+
+- 隐藏 Skill 会拒绝通过已打开句柄写入，也会拒绝嵌套文件创建、链接、元数据及 xattr
+  修改。快照中的符号链接目标和 xattr 按当前激活视图读取，修改来源元数据时不再跟随
+  符号链接
+  ([#5382](https://github.com/agentic-os-org/ANOLISA/pull/5382))。
+- Flat 和 Hermes 目录在移动、替换及 unlink 后保持 Skill 列表和 inode 身份一致。
+  保留路径、暂存目录和隐藏点目录不会出现在普通列表中，Hermes 顶层文件仍可读取。
+- watcher 保留与读取事件相邻的修改事件，并跟踪分类目录中的 manifest、目录移动和
+  删除。pending-install 检查和激活决策等待均有明确上限
+  ([#4530](https://github.com/agentic-os-org/ANOLISA/pull/4530))。
+- 挂载时保留已有 views 配置，包括无法解析的配置；生成 views 和管理状态时使用独立
+  暂存文件。视图和发现结果不再重复列出 Skill，分类及列表会报告跳过的 Skill、名称
+  冲突和加载错误
+  ([#6202](https://github.com/agentic-os-org/ANOLISA/pull/6202))。
+- 复用 managed mount 时拒绝更换来源，卸载失败时保留 backing root，并正确处理转义
+  路径和非 UTF-8 路径。使用前检查 control socket 父目录和激活日志路径；daemon
+  endpoint 暂时不可用时，reconcile 会重试。
+- Skill 解析正确处理 UTF-8 BOM、CRLF、围栏代码块、空 frontmatter、重复章节及参数名，
+  避免丢失内容。Skill 文件和分类元数据读取有大小上限，不配对的指令保留原文。
+- OS 命令适配只改写真正执行的命令，不再误改普通文本或 Python pip 模块调用，也可
+  处理 `timeout`、`nice` 和 run 标签后的命令。CLI 状态名称与文档一致，列表转义
+  控制字符，文件系统路径保留原始字节。
+
 ## [0.5.0] - 2026-09-20
 
 ### 新增

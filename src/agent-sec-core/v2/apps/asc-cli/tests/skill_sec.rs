@@ -10,7 +10,6 @@ use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_daemon_service::ShutdownToken;
 use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
 use asc_security_events::SecurityEvent;
 use serde_json::{Value, json};
 use std::fs;
@@ -84,10 +83,7 @@ async fn cli_runs_full_core_workflow_and_emits_safe_public_audit() {
     let events = Arc::new(Events::default());
     let finalizer = asc_action_runtime::testing::audit_finalizer(events.clone());
     let dispatcher = Arc::new(DaemonDispatcher::new(
-        PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        ),
+        PapService::new(Arc::new(ProcessLocalPapRepository::default())),
         Arc::new(RootManagedPrincipalPolicy::default()),
         asc_daemon::skill_application(
             finalizer,

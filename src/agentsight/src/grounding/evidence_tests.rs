@@ -1100,3 +1100,55 @@ fn unknown_ratio_only_covers_the_selected_round() {
         "an unknown call from an earlier round must not trigger abstention"
     );
 }
+
+#[test]
+fn derived_ratio_is_recognised_in_either_operand_order() {
+    // Error rate / share / per-token cost are quotients whose operands appear
+    // in the other order in the tool output; a single-direction `a / b` check
+    // reported the correct computation as invented.
+    let step = acting_agent(
+        1,
+        "",
+        vec![call("c1", "exec", serde_json::json!({"command": "wc -l"}))],
+        vec![ok_result("c1", "12000 total\n5000 errors")],
+    );
+    let doc = traj(vec![step, agent(2, "错误占比 0.4167。")]);
+
+    let index = build_index(&doc, 0..2);
+    let claim = index
+        .claims
+        .iter()
+        .find(|c| c.claim.text.contains("0.4167"))
+        .expect("the ratio claim is extracted");
+    assert_eq!(
+        claim.grounding,
+        Grounding::Derived,
+        "5000 / 12000 is an arithmetic consequence of two pooled values"
+    );
+}
+
+#[test]
+fn a_value_no_pair_derives_stays_unresolved() {
+    // The negative half of the ratio check: a figure that matches none of the
+    // sums, differences, products or quotients of the pooled pair is still
+    // reported instead of being waved through as a derivation.
+    let step = acting_agent(
+        1,
+        "",
+        vec![call("c1", "exec", serde_json::json!({"command": "wc -l"}))],
+        vec![ok_result("c1", "12000 total\n5000 errors")],
+    );
+    let doc = traj(vec![step, agent(2, "错误占比 0.7311。")]);
+
+    let index = build_index(&doc, 0..2);
+    let claim = index
+        .claims
+        .iter()
+        .find(|c| c.claim.text.contains("0.7311"))
+        .expect("the numeric claim is extracted");
+    assert_eq!(
+        claim.grounding,
+        Grounding::Unresolved,
+        "0.7311 derives from no pair of 12000 and 5000"
+    );
+}

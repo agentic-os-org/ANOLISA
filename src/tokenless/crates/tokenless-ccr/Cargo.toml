@@ -23,4 +23,5 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+libc.workspace = true
 tempfile.workspace = true

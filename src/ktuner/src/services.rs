@@ -10,6 +10,10 @@ const KNOWN_SERVICES: &[(&str, &str)] = &[
     ("mongod", "MongoDB"),
     ("clickhouse", "ClickHouse"),
     ("redis-server", "Redis"),
+    // Valkey is the Linux Foundation's fork of Redis 7.2.4; the daemon comm
+    // is `valkey-server`. Without this entry a Valkey host reported no
+    // cache service at all - the same hole the mariadbd entry closed.
+    ("valkey-server", "Valkey"),
     ("memcached", "Memcached"),
     ("elasticsearch", "Elasticsearch"),
     ("opensearch", "OpenSearch"),
@@ -121,9 +125,15 @@ mod tests {
 
     #[test]
     fn test_detect_services_keeps_real_services() {
-        let info = info_with(&["postgres", "mysqld", "redis-server", "nginx"]);
+        let info = info_with(&[
+            "postgres",
+            "mysqld",
+            "redis-server",
+            "valkey-server",
+            "nginx",
+        ]);
         let svcs = detect_services(&info);
-        for expected in ["PostgreSQL", "MySQL", "Redis", "Nginx"] {
+        for expected in ["PostgreSQL", "MySQL", "Redis", "Valkey", "Nginx"] {
             assert!(svcs.contains(&expected), "missing {expected}: {svcs:?}");
         }
     }

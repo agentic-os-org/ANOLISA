@@ -86,8 +86,8 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
     if event_name == "pull_request":
         base = sha(event["pull_request"]["base"]["sha"])
         head = sha(event["pull_request"]["head"]["sha"])
-        ancestor = sha(git("merge-base", base, head, repo=repo))
-        comparisons = [f"{base}...{head}", f"{ancestor}..{actual}"]
+        # Base-branch AW updates must not select an unrelated PR.
+        comparisons = [f"{base}...{head}"]
     elif event_name == "push":
         before, after = sha(event["before"]), sha(event["after"])
         if after != actual:
@@ -96,7 +96,13 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO) -> bool:
         if before == "0" * 40 or event.get("forced") is True:
             return True
         comparisons = [f"{before}..{after}"]
-    elif event_name in ("workflow_dispatch", "merge_group"):
+    elif event_name == "merge_group":
+        base = sha(event["merge_group"]["base_sha"])
+        head = sha(event["merge_group"]["head_sha"])
+        if head != actual:
+            raise ValueError("merge group head SHA does not match checkout")
+        comparisons = [f"{base}..{head}"]
+    elif event_name == "workflow_dispatch":
         return True
     else:
         raise ValueError(f"unsupported event: {event_name}")
@@ -134,6 +140,7 @@ def inventory(text: str) -> set[str]:
 def check_inventory() -> None:
     """Require runnable tests for configuration, contracts, execution and journals."""
     for package, target in (
+        ("aw-package", "installation"),
         ("aw-contracts", "canonical"),
         ("aw-contracts", "schemas"),
         ("aw-contracts", "contracts"),
@@ -147,6 +154,7 @@ def check_inventory() -> None:
         ("aw-host", "host"),
         ("aw-provider-sec-core", "provider"),
         ("aw-service", "service"),
+        ("aw-service", "qwenpaw"),
     ):
         command = ["cargo", "test", "--locked", "-p", package, "--test", target, "--", "--list"]
         tests = inventory(run(command, AW, capture=True))
@@ -159,6 +167,7 @@ def check_inventory() -> None:
 def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and Rust source sizes explicit."""
     allowed = {
+        "aw-package": {"serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror", "libc", "flate2", "tar", "tempfile", "aw-config", "aw-exec", "aw-service"},
         "aw-provider-sec-core": {"aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"},
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {"aw-contracts", "serde_json", "thiserror"},

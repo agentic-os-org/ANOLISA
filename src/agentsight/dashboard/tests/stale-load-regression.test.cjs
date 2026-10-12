@@ -338,3 +338,23 @@ test('atif-viewer: loading or importing a document drops the previous savings', 
   assert.ok(importReset > fetchSavings,
     'handleFileImport must clear savingsDetail for imported documents');
 });
+test('agent-sessions: a failed semantic search is not an empty result', () => {
+  const source = readSource('src/pages/AgentSessionsPage.tsx');
+  // The search catch used to clear the matches and nothing else, so the table
+  // fell through to "no matching sessions" for a backend that never answered.
+  assert.match(
+    source,
+    /\.catch\(\(\) => \{\s*if \(cancelled\) return;[\s\S]{0,400}setSemanticError\(true\);/,
+    'AgentSessionsPage: the search failure must be recorded',
+  );
+  assert.match(
+    source,
+    /const \[semanticError, setSemanticError\] = useState\(false\);/,
+    'AgentSessionsPage: the failure needs a state of its own',
+  );
+  assert.match(
+    source,
+    /: semanticError && search\s*\?\s*t\('as\.semanticSearchFailed'\)/,
+    'AgentSessionsPage: the empty state must report the failure before claiming no matches',
+  );
+});

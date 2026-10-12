@@ -396,6 +396,31 @@ fn enable_dry_run_json_marks_preview_not_executed() {
 }
 
 #[test]
+fn inapplicable_consent_opt_out_is_forwarded_without_mutation_or_notices() {
+    for flags in [&["--json"][..], &["--json", "--dry-run"][..]] {
+        let fixture = NoticeFixture::new();
+        let output = fixture.run_adapter(
+            flags,
+            &["enable", COMPONENT, "cosh", "--no-accept-capabilities"],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(envelope["error"]["code"], "INVALID_ARGUMENT");
+        assert!(
+            envelope["error"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("--no-accept-capabilities")
+        );
+        assert!(
+            envelope["data"].is_null(),
+            "no notices for a rejected enable"
+        );
+        assert!(!fixture.extension_dir().exists(), "no extension delivery");
+    }
+}
+
+#[test]
 fn disable_human_shows_post_disable_notices() {
     let fixture = NoticeFixture::new();
     assert_success(&fixture.enable(&[]));

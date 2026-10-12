@@ -10,10 +10,8 @@ pub mod authoring;
 pub mod binding;
 pub mod error;
 pub mod identifiers;
-pub mod ir;
 pub mod policy;
-pub mod profile;
-pub mod resource;
+pub mod process_discovery;
 pub mod scope;
 pub mod target;
 

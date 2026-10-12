@@ -10,6 +10,7 @@ use crate::test_store::TestAdmission;
 
 fn initial() -> ReconcileRecord {
     ReconcileRecord {
+        status_version: 1,
         binding: BindingView {
             spec: serde_json::from_str(include_str!(
                 "../../asc-policy-types/tests/fixtures/prepared-binding.json"
@@ -49,16 +50,16 @@ fn claimed() -> (TestRepository, ReconcileRecord, PreparedAttempt) {
     let record = initial();
     let repository = TestRepository::with_binding_states(vec![record.clone()]).unwrap();
     let record = repository
-        .claim(&ExpectedBinding::from_binding(&record.binding), 0, policy())
+        .claim(&ExpectedBinding::from_snapshot(&record), 0, policy())
         .unwrap()
         .unwrap();
     let saved = saved(&record);
     assert!(
         repository
             .register(
-                &ExpectedBinding::from_binding(&record.binding),
+                &ExpectedBinding::from_snapshot(&record),
                 Some(&saved),
-                std::slice::from_ref(&saved.prepared.target)
+                std::slice::from_ref(&saved.prepared.target),
             )
             .unwrap()
     );
@@ -67,7 +68,7 @@ fn claimed() -> (TestRepository, ReconcileRecord, PreparedAttempt) {
 
 fn outcome(record: &ReconcileRecord, observations: Vec<Observation>) -> AttemptOutcome {
     AttemptOutcome {
-        expected: ExpectedBinding::from_binding(&record.binding),
+        expected: ExpectedBinding::from_snapshot(record),
         observations,
         next_status: BindingStatus::Ready,
         next_attempt_at: None,
@@ -128,6 +129,7 @@ fn bounded_cas_contention_is_distinct_from_storage_failure_and_preserves_state()
                     &result.expected,
                     Some(&saved),
                     std::slice::from_ref(&saved.prepared.target),
+                    &mut None,
                 )
             } else {
                 state.finish(&result, &mut completion)
@@ -141,6 +143,7 @@ fn bounded_cas_contention_is_distinct_from_storage_failure_and_preserves_state()
         assert!(completion.is_none());
         let mut expected = before.unwrap();
         if !registration {
+            expected.status_version += 1;
             expected.binding.status.phase = BindingStatus::Ready;
             expected.deployments[0].presence = Presence::Present;
             expected.deployments[0].last_confirmed = Some(Presence::Present);
@@ -181,7 +184,7 @@ fn registration_failure_does_not_partially_save_prepared_or_targets() {
     let record = initial();
     let repository = TestRepository::with_binding_states(vec![record.clone()]).unwrap();
     let record = repository
-        .claim(&ExpectedBinding::from_binding(&record.binding), 0, policy())
+        .claim(&ExpectedBinding::from_snapshot(&record), 0, policy())
         .unwrap()
         .unwrap();
     let saved = saved(&record);
@@ -190,7 +193,7 @@ fn registration_failure_does_not_partially_save_prepared_or_targets() {
     let before = repository.read(&record.binding.spec.binding_id).unwrap();
     assert_eq!(
         repository.register(
-            &ExpectedBinding::from_binding(&record.binding),
+            &ExpectedBinding::from_snapshot(&record),
             Some(&saved),
             &[saved.prepared.target.clone(), foreign]
         ),
@@ -218,14 +221,17 @@ fn no_confirmation_cannot_complete_ready_or_deleted() {
     deletion.status = BindingStatus::PendingDelete.into();
     assert!(
         repository
-            .compare_exchange_reconcile_intent(
-                &ExpectedBinding::from_binding(&record.binding),
-                &deletion
-            )
+            .compare_exchange_reconcile_intent(&ExpectedBinding::from_snapshot(&record), &deletion)
             .unwrap()
     );
     let deleting = repository
-        .claim(&ExpectedBinding::from_binding(&deletion), 0, policy())
+        .claim(
+            &ExpectedBinding::from_snapshot(
+                &repository.read(&deletion.spec.binding_id).unwrap().unwrap(),
+            ),
+            0,
+            policy(),
+        )
         .unwrap()
         .unwrap();
     let mut result = outcome(&deleting, vec![]);
@@ -244,7 +250,7 @@ fn due_time_and_attempts_are_caller_owned_while_claim_clears_error() {
     record.binding.status.error = Some(Failure::new(FailureKind::Retryable, "RETRY"));
     let repository = TestRepository::with_binding_states(vec![record.clone()]).unwrap();
     repository.schedule.lock().unwrap().next_attempt_at = Some(100);
-    let expected = ExpectedBinding::from_binding(&record.binding);
+    let expected = ExpectedBinding::from_snapshot(&record);
     let other_policy = RetryPolicy {
         max_attempts: 10,
         base_delay_ms: 200,
@@ -286,9 +292,9 @@ fn repeated_admitted_intent_preserves_budget_and_new_revision_keeps_targets() {
     next.status = BindingStatus::PendingApply.into();
     next.spec.binding_revision = next.spec.binding_revision.checked_next().unwrap();
     // Existing PAP repository writes and worker transactions share one store.
-    next.spec.scope.revision = next.spec.scope.revision.checked_next().unwrap();
+    next.spec.scope.process.start_time += 1;
     repository
-        .update_binding(Some(&ready.binding), &next)
+        .update_binding(Some(&(&ready).into()), &next)
         .unwrap();
     let pending = repository.read(id).unwrap().unwrap();
     assert_eq!(pending.deployments, ready.deployments);
@@ -296,7 +302,7 @@ fn repeated_admitted_intent_preserves_budget_and_new_revision_keeps_targets() {
     assert_eq!(repository.get_binding(id).unwrap(), next);
     assert!(
         repository
-            .compare_exchange_reconcile_intent(&ExpectedBinding::from_binding(&next), &next)
+            .compare_exchange_reconcile_intent(&ExpectedBinding::from_snapshot(&pending), &next)
             .unwrap()
     );
     assert_eq!(repository.read(id).unwrap(), Some(pending));
@@ -314,7 +320,7 @@ fn retry_noop_does_not_reset_attempts_and_bad_cas_does_not_mutate() {
         .read(&record.binding.spec.binding_id)
         .unwrap()
         .unwrap();
-    let expected = ExpectedBinding::from_binding(&pending.binding);
+    let expected = ExpectedBinding::from_snapshot(&pending);
     assert!(
         repository
             .compare_exchange_reconcile_intent(&expected, &pending.binding)
@@ -394,11 +400,16 @@ impl TestRepository {
         let Some(record) = self.read(&expected.id)? else {
             return Ok(None);
         };
-        if !expected.matches(&record.binding) {
+        if !expected.matches(&record) {
             return Ok(None);
         }
-        self.state
-            .claim(&record, now, policy, &mut self.schedule.lock().unwrap())
+        self.state.claim(
+            &record,
+            now,
+            policy,
+            &mut self.schedule.lock().unwrap(),
+            &mut None,
+        )
     }
     fn register(
         &self,
@@ -406,7 +417,7 @@ impl TestRepository {
         prepared: Option<&PreparedAttempt>,
         targets: &[TargetRef],
     ) -> Result<bool, StoreError> {
-        self.state.register(expected, prepared, targets)
+        self.state.register(expected, prepared, targets, &mut None)
     }
     fn finish(&self, outcome: &AttemptOutcome) -> Result<bool, StoreError> {
         self.state
@@ -415,7 +426,7 @@ impl TestRepository {
 }
 
 #[test]
-fn deployment_only_registration_preserves_concurrent_status_error_without_conflict() {
+fn deployment_registration_rejects_a_changed_status_version() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ConcurrentWrite {
@@ -440,18 +451,23 @@ fn deployment_only_registration_preserves_concurrent_status_error_without_confli
                     FailureKind::Retryable,
                     "CONCURRENT_DIAGNOSTIC",
                 ));
-                assert_eq!(
+                assert!(matches!(
                     self.inner.compare_exchange_binding_state(
                         expected,
                         &BindingStateWrite::new(concurrent)
                     )?,
-                    WriteResult::Applied
-                );
+                    WriteResult::Applied(_)
+                ));
             }
             self.inner.compare_exchange_binding_state(expected, write)
         }
     }
     let (repo, record, saved) = claimed();
+    let original_deployments = repo
+        .read(&record.binding.spec.binding_id)
+        .unwrap()
+        .unwrap()
+        .deployments;
     let wrapped = Arc::new(ConcurrentWrite {
         inner: repo.inner.clone(),
         calls: AtomicUsize::new(0),
@@ -460,11 +476,12 @@ fn deployment_only_registration_preserves_concurrent_status_error_without_confli
         repository: wrapped.clone(),
     };
     assert!(
-        state
+        !state
             .register(
-                &ExpectedBinding::from_binding(&record.binding),
+                &ExpectedBinding::from_snapshot(&record),
                 Some(&saved),
-                std::slice::from_ref(&saved.prepared.target)
+                std::slice::from_ref(&saved.prepared.target),
+                &mut None,
             )
             .unwrap()
     );
@@ -479,7 +496,7 @@ fn deployment_only_registration_preserves_concurrent_status_error_without_confli
             "CONCURRENT_DIAGNOSTIC"
         ))
     );
-    assert_eq!(current.deployments[0].target, saved.prepared.target);
-    assert_eq!(current.deployments[0].presence, Presence::Unknown);
+    assert_eq!(current.deployments, original_deployments);
+    assert_eq!(current.status_version, record.status_version + 1);
     assert_eq!(wrapped.calls.load(Ordering::SeqCst), 1);
 }

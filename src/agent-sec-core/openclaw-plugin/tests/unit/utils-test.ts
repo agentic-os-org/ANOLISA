@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 import {
   buildTraceContext,
   callAgentSecCli,
+  truncateApprovalText,
   type TraceContext,
   _resetCliMock,
   _setCliMock,
@@ -49,6 +50,41 @@ describe("utils", () => {
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  for (const length of [0, 255, 256]) {
+    it(`leaves approval text of length ${length} unchanged`, () => {
+      const text = "a".repeat(length);
+      assert.equal(truncateApprovalText(text), text);
+    });
+  }
+
+  it("includes the ellipsis in the 256-unit approval text budget", () => {
+    assert.equal(truncateApprovalText("a".repeat(257)), "a".repeat(255) + "…");
+  });
+
+  for (const maxLength of [48, 64, 241]) {
+    it(`supports the internal ${maxLength}-unit approval text budget`, () => {
+      assert.equal(
+        truncateApprovalText("a".repeat(maxLength + 1), maxLength),
+        "a".repeat(maxLength - 1) + "…",
+      );
+    });
+  }
+
+  it("does not split an emoji at the approval text boundary", () => {
+    assert.equal(
+      truncateApprovalText("a".repeat(254) + "😀z"),
+      "a".repeat(254) + "…",
+    );
+    assert.equal(
+      truncateApprovalText("a".repeat(253) + "😀zz"),
+      "a".repeat(253) + "😀…",
+    );
+  });
+
+  it("counts CJK approval text using the same UTF-16 budget", () => {
+    assert.equal(truncateApprovalText("险".repeat(257)), "险".repeat(255) + "…");
   });
 
   it("buildTraceContext accepts snake_case and camelCase with snake_case precedence", () => {

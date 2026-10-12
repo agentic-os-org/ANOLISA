@@ -12,15 +12,27 @@ import type { SelectiveClawConfig } from "./types.js";
 import type { SummarizeFn } from "./summarize.js";
 import { runMigrations } from "./db/migration.js";
 import { MessageStore } from "./store/message-store.js";
+import type { MessageRecord } from "./store/message-store.js";
 import { Assembler } from "./assembler.js";
 import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
 
-type ReconcileMessage = { role: string; content: string };
+type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
+
+function toolIdentity(message: AgentMessage): string | null {
+  if (!["tool", "toolResult", "tool_result"].includes(message.role)) return null;
+  // Compare stable tool semantics; replay timestamps do not identify a result.
+  return JSON.stringify([
+    message.toolCallId ?? null,
+    message.toolUseId ?? null,
+    message.toolName ?? null,
+    message.isError ?? null,
+  ]);
+}
 
 function messagesMatch(left: ReconcileMessage, right: ReconcileMessage): boolean {
-  return left.role === right.role && left.content === right.content;
+  return left.role === right.role && left.content === right.content && left.toolIdentity === right.toolIdentity;
 }
 
 function suffixOverlap(stored: ReconcileMessage[], incoming: ReconcileMessage[]): number {
@@ -140,6 +152,7 @@ export class SelectiveContextEngine implements ContextEngine {
       role,
       content,
       tokenCount: estimateTokens(content),
+      rawMessage: JSON.stringify(message),
     });
 
     return { ingested: true };
@@ -167,10 +180,7 @@ export class SelectiveContextEngine implements ContextEngine {
       if (stored.length === 0) {
         return { messages: [], estimatedTokens: 0 };
       }
-      messages = stored.map((m) => ({
-        role: m.role as string,
-        content: m.content,
-      }));
+      messages = stored.map((message) => this.restoreMessage(message));
     }
 
     const tokenBudget =
@@ -221,10 +231,7 @@ export class SelectiveContextEngine implements ContextEngine {
     const stored = this.store.getMessages(params.sessionId);
     if (stored.length === 0) return;
 
-    const messages: AgentMessage[] = stored.map((m) => ({
-      role: m.role as string,
-      content: m.content,
-    }));
+    const messages = stored.map((message) => this.restoreMessage(message));
     const turns = this.deriveTurns(messages);
     this.cacheTurnMessages(params.sessionId, turns);
 
@@ -250,9 +257,10 @@ export class SelectiveContextEngine implements ContextEngine {
     found: number;
     turns: Array<{ turnSeq: number; messages: Array<{ role: string; content: string }> }>;
   } {
+    const requestedTurns = [...new Set(turnSeqs)];
     const cache = this.turnMessagesCache.get(sessionId);
     const turnMap = new Map<number, Array<{ role: string; content: string }>>();
-    for (const seq of turnSeqs) {
+    for (const seq of requestedTurns) {
       const messages = cache?.get(seq);
       if (messages) {
         turnMap.set(seq, messages.map((message) => ({
@@ -262,7 +270,7 @@ export class SelectiveContextEngine implements ContextEngine {
       }
     }
 
-    const missingTurns = turnSeqs.filter((seq) => !turnMap.has(seq));
+    const missingTurns = requestedTurns.filter((seq) => !turnMap.has(seq));
     const storeMessages = this.store.getMessagesByTurnSeqs(sessionId, missingTurns);
     for (const m of storeMessages) {
       const arr = turnMap.get(m.turnSeq) ?? [];
@@ -270,7 +278,7 @@ export class SelectiveContextEngine implements ContextEngine {
       turnMap.set(m.turnSeq, arr);
     }
 
-    const result = turnSeqs
+    const result = requestedTurns
       .filter((ts) => turnMap.has(ts))
       .map((ts) => ({ turnSeq: ts, messages: turnMap.get(ts)! }));
 
@@ -278,10 +286,15 @@ export class SelectiveContextEngine implements ContextEngine {
   }
 
   private reconcileMessages(sessionId: string, messages: AgentMessage[]): void {
-    const stored = this.store.getMessages(sessionId);
+    const stored = this.store.getMessages(sessionId).map((message) => ({
+      role: message.role,
+      content: message.content,
+      toolIdentity: toolIdentity(this.restoreMessage(message)),
+    }));
     const incoming = messages.map((message) => ({
       role: this.normalizeRole(message.role),
       content: this.extractContent(message),
+      toolIdentity: toolIdentity(message),
     }));
 
     let matchLen = 0;
@@ -322,6 +335,7 @@ export class SelectiveContextEngine implements ContextEngine {
         role,
         content,
         tokenCount: estimateTokens(content),
+        rawMessage: JSON.stringify(msg),
       });
       seq++;
     }
@@ -430,6 +444,20 @@ export class SelectiveContextEngine implements ContextEngine {
     }
     this.turnSummaryCache.set(sessionId, map);
     return map;
+  }
+
+  private restoreMessage(message: MessageRecord): AgentMessage {
+    if (message.rawMessage) {
+      try {
+        const raw = JSON.parse(message.rawMessage);
+        if (raw && typeof raw === "object" && !Array.isArray(raw) && typeof raw.role === "string") {
+          return raw as AgentMessage;
+        }
+      } catch {
+        // Older archives may contain incomplete raw payloads.
+      }
+    }
+    return { role: message.role, content: message.content };
   }
 
   private extractContent(message: AgentMessage): string {

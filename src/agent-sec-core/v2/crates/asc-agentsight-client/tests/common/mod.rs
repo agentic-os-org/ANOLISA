@@ -22,7 +22,7 @@ pub fn plan(revision: u32) -> TargetBindingPlan {
     .unwrap();
     value["source"]["bindingRevision"] = json!(revision);
     TargetBindingPlan {
-        format: "agentsight.actplane.binding.v1".into(),
+        format: "agentsight.actplane.binding.v2".into(),
         content: serde_json::to_vec(&value).unwrap(),
     }
 }
@@ -131,6 +131,9 @@ impl Default for Identity {
 }
 
 impl ProcessIdentityResolver for Identity {
+    fn pid_namespace(&self, _pid: i32) -> Result<String, ProcessIdentityError> {
+        Ok("pid:[42]".into())
+    }
     fn process_start_time(&self, pid: i32) -> Result<u64, ProcessIdentityError> {
         assert_eq!(pid, 4242);
         let mut state = self.0.lock().unwrap();

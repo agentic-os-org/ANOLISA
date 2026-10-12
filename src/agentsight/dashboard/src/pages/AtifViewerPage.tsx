@@ -861,6 +861,9 @@ export const AtifViewerPage: React.FC = () => {
         }
         setDoc(parsed as AtifDocument);
         setNodePath([]);
+        const nextParams = new URLSearchParams(searchParamsRef.current);
+        nextParams.delete('node');
+        setSearchParams(nextParams, { replace: true });
         // Imported documents have no fetched savings; never show the
         // previously viewed session's numbers.
         setSavingsDetail(null);
@@ -883,7 +886,7 @@ export const AtifViewerPage: React.FC = () => {
     };
     reader.readAsText(file);
     e.target.value = '';
-  }, [t]);
+  }, [setSearchParams, t]);
 
   // JSON download
   const handleDownload = useCallback(() => {

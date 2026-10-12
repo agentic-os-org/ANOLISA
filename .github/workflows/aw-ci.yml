@@ -2,8 +2,14 @@ name: CI / AW
 
 on:
   push:
-    branches: ['**']
+    branches: [main, 'release/**']
+    paths:
+      - 'src/aw/**'
+      - '.github/workflows/aw-ci.yml'
   pull_request:
+    paths:
+      - 'src/aw/**'
+      - '.github/workflows/aw-ci.yml'
   merge_group:
   workflow_dispatch:
 
@@ -20,15 +26,12 @@ env:
   RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
 
 jobs:
-  scope:
-    name: AW / scope
+  required:
+    name: AW / required
     runs-on: >-
       ${{ github.repository == 'agentic-os-org/ANOLISA' &&
       'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
-    timeout-minutes: 10
-    outputs:
-      selected: ${{ steps.scope.outputs.selected }}
-      candidate_sha: ${{ steps.scope.outputs.candidate_sha }}
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,57 +46,36 @@ jobs:
         id: scope
         run: python3 src/aw/scripts/check.py scope
 
-  checks:
-    name: AW / contracts
-    needs: scope
-    if: needs.scope.outputs.selected == 'true'
-    runs-on: >-
-      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
-      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
-    timeout-minutes: 25
-    outputs:
-      tested_sha: ${{ steps.checks.outputs.tested_sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
+      - name: Restore the full working tree for Cargo package discovery
+        if: steps.scope.outputs.selected == 'true'
+        run: git sparse-checkout disable
       - uses: actions/setup-python@v5
+        if: steps.scope.outputs.selected == 'true'
         with:
           python-version: '3.12.3'
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.selected == 'true'
         with:
           node-version: '24.15.0'
       - name: Prepare the pinned Rust toolchain
+        if: steps.scope.outputs.selected == 'true'
         working-directory: src/aw
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.selected == 'true'
         with:
           workspaces: src/aw
       - name: Run AW checks
+        if: steps.scope.outputs.selected == 'true'
         id: checks
         run: python3 src/aw/scripts/check.py
 
-  required:
-    name: AW / required
-    needs: [scope, checks]
-    if: always()
-    runs-on: >-
-      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
-      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          sparse-checkout: /src/aw/scripts/check.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
       - name: Require the expected result
+        if: always()
         env:
-          SCOPE_RESULT: ${{ needs.scope.result }}
-          CHECKS_RESULT: ${{ needs.checks.result }}
-          SELECTED: ${{ needs.scope.outputs.selected }}
-          CANDIDATE_SHA: ${{ needs.scope.outputs.candidate_sha }}
-          TESTED_SHA: ${{ needs.checks.outputs.tested_sha }}
+          SCOPE_RESULT: ${{ steps.scope.outcome }}
+          CHECKS_RESULT: ${{ steps.checks.outcome }}
+          SELECTED: ${{ steps.scope.outputs.selected }}
+          CANDIDATE_SHA: ${{ steps.scope.outputs.candidate_sha }}
+          TESTED_SHA: ${{ steps.checks.outputs.tested_sha }}
         run: python3 src/aw/scripts/check.py required

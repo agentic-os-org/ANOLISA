@@ -214,10 +214,29 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
-For OpenClaw plugins, executing `adapter enable` accepts the plugin's declared
-capabilities. ANOLISA adds `--accept-capabilities` only when the installer's
-help advertises it, including in the dry-run plan. Capability consent does
-not authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
+For OpenClaw plugins, `adapter enable` accepts the plugin's declared capabilities
+by default. ANOLISA adds `--accept-capabilities` to installation and activation
+only when the corresponding command's help advertises it. To withhold these
+automatic grants, use:
+
+```bash
+anolisa adapter enable tokenless openclaw --no-accept-capabilities
+anolisa --dry-run adapter enable tokenless openclaw --no-accept-capabilities
+```
+
+The dry-run plan shows both commands without the consent flag. This option is
+only valid for an OpenClaw plugin adapter; other frameworks and skill-only
+adapters reject it. It does not revoke capabilities already authorized in
+OpenClaw, and hosts without the consent flag continue to apply their own policy.
+Environment settings such as `ANOLISA_ACCEPT_CAPABILITIES` or
+`AGENT_MEMORY_ACCEPT_CAPABILITIES` do not configure `adapter enable`; use the
+CLI option for this entry point.
+
+If OpenClaw requires a new grant, its refusal remains an execution failure
+(`EXECUTION_FAILED`, exit code 1) and the adapter receipt is kept for cleanup
+with `anolisa adapter disable tokenless openclaw`. Review the reported
+capabilities before authorizing them separately. Capability consent does not
+authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
 separately from a plugin-safety rejection.
 
 For OpenCode, manage an installed Tokenless plugin with:

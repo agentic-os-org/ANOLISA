@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.0.0
+
+**V2 Security Operations**
+
+- Added native V2 PII scanning with V1-compatible CLI and Hook contracts. (#3286)
+- Added V2 prompt scanning through the daemon and CLI, including loopback-only model classification. (#3384)
+- Added local-model LLM mode for V2 code scanning. (#6596)
+- Restored owner-scoped V2 security-event queries and the `events` CLI command. (#6745)
+- Added V2 observability recording through the CLI and daemon. (#3397)
+- Added V2 observability queries, reports, reviews, and owner-scoped correlation through the daemon. (#6826)
+- Reported the V2 prompt-scan L2 default and unsupported model overrides through `agent-sec-cli capabilities`. (#6595)
+- Corrected PII card and email detection boundaries to reduce false warnings and preserve sentence punctuation. (#6597)
+- Added CI/CD and cloud token-prefix detection to V2 PII scans. (#6219)
+- Added compound credential field-name detection to V2 PII scans. (#6234)
+
+**Skill Ledger Runtime**
+
+- Migrated Skill Ledger scanning, signing, activation, and recovery to the V2 daemon. (#3295)
+- Migrated Agent hooks to V2 daemon-owned Skill Ledger trust and command handling. (#3505)
+- Cleaned failed Skill Ledger export artifacts so callers can retry the same output directory. (#4004)
+- Retained all Skill Ledger rollback backups for later recovery and inspection. (#3989)
+- Reclaimed stale private-key temporary files after interrupted Skill Ledger initialization or rotation. (#4430)
+- Reported signed-but-unscanned directories as Skill Ledger warnings. (#4447)
+- Detected credential material outside hidden directories in Skill Ledger scans. (#6201)
+- Reported FIFOs, sockets, and device nodes in Skill Ledger scans. (#6211)
+- Rejected oversized Skill Ledger worker frames before spawning a worker. (#5671)
+
+**V2 Policy & Daemon Runtime**
+
+- Added persisted V2 policy assignments and AgentSight reconciliation. (#6931)
+- Started the V2 daemon automatically after installation. (#6846)
+- Ran V2 security-event retention while the daemon is active, including startup catch-up and failure retries. (#6679)
+- Preserved daemon cancellation behavior during V2 worker shutdown. (#3470)
+
+**Build & Packaging**
+
+- Added reproducible offline V2 RPM builds and installed-artifact validation. (#3257)
+- Changed the raw package to install V2 CLI and daemon binaries with the system service. (#6551)
+
+**Agent Hook Integrations**
+
+- Updated OpenClaw plugin deployment and runtime compatibility for OpenClaw 2.0. (#3408)
+- Moved OpenClaw PII scanning to the supported model-entry gate while retaining legacy-host compatibility. (#3503)
+- Moved OpenClaw prompt scanning to the supported model-entry gate. (#6571)
+- Kept Codex PII and Code Scanner Hooks fail-open for non-object input payloads. (#6341)
+- Kept the Codex PII Hook fail-open for non-object scan results. (#6654)
+- Aligned V2 Code Scanner contracts across CLI, daemon, and installed RPM behavior. (#6822)
+- Restricted PII scanning to the current model prompt. (#6970)
+- Bounded approval descriptions before they reach the security decision flow. (#6972)
+- Preserved native device identity checks for V2 storage and export operations. (#6955)
+
 ## 0.13.2
 
 **Build & Packaging**

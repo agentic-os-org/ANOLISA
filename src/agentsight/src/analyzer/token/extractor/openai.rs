@@ -118,6 +118,29 @@ pub fn extract_response_content(
                         }
                     }
                 }
+
+                // SysOM's Copilot streams spell the same tool calls
+                // `message.tool_use` — an array of {index, id, type,
+                // function: {name, arguments}} — instead of `tool_calls`.
+                // Without this arm a SysOM tool call counted zero tool
+                // tokens in the manual counters and the drain estimate;
+                // the calls arrive whole on cumulative snapshots, whose
+                // repetition the merge layer already handles like the
+                // snapshot's text.
+                if let Some(calls) = msg.get("tool_use").and_then(|t| t.as_array()) {
+                    for tool_call in calls {
+                        if let Some(func) = tool_call.get("function") {
+                            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let arguments =
+                                func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                            let tool_content = format!("{name}: {arguments}");
+                            if !tool_content.is_empty() {
+                                tool_calls.push(tool_content);
+                                has_data = true;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -335,30 +358,208 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
+    // A snapshot's tool calls are whole and repeat with every snapshot chunk,
+    // so the last one's calls are kept aside and used only when no delta
+    // fragment carried any — the same delta-wins rule the closing Responses
+    // events follow.
+    let mut snapshot_tool_calls: Vec<String> = Vec::new();
     for chunk in chunks {
         if saw_text_delta && repeats_full_text(chunk) {
             continue;
         }
+        // A choice carrying `message` instead of `delta` speaks in cumulative
+        // snapshots: each frame repeats the answer so far rather than an
+        // increment (SysOM's Copilot stream sends nothing else, and an
+        // OpenAI-compatible gateway's final frame is a whole `message`).
+        // Appending such a frame once per captured chunk counted the answer
+        // N times; accumulate it the way the SSE merger does — replace when
+        // the snapshot extends what we have.
+        let snapshot = carries_message_snapshot(chunk);
         if let Some((chunk_content, chunk_reasoning, chunk_tool_calls)) =
             extract_response_content(Some(chunk))
         {
             if !chunk_content.is_empty() {
-                content.push_str(&chunk_content);
+                if snapshot {
+                    accumulate_text(&mut content, &chunk_content);
+                } else {
+                    content.push_str(&chunk_content);
+                }
             }
             if let Some(reasoning_chunk) = chunk_reasoning {
                 if !reasoning_chunk.is_empty() {
-                    reasoning.push_str(&reasoning_chunk);
+                    if snapshot {
+                        accumulate_text(&mut reasoning, &reasoning_chunk);
+                    } else {
+                        reasoning.push_str(&reasoning_chunk);
+                    }
                 }
             }
-            for tool_call in chunk_tool_calls {
-                if !tool_call.is_empty() {
-                    tool_calls.push(tool_call);
+            if snapshot {
+                snapshot_tool_calls = chunk_tool_calls;
+            } else {
+                for tool_call in chunk_tool_calls {
+                    if !tool_call.is_empty() {
+                        tool_calls.push(tool_call);
+                    }
                 }
             }
         }
     }
+    if tool_calls.is_empty() {
+        tool_calls = snapshot_tool_calls;
+    }
 
     (content, reasoning, tool_calls)
+}
+
+/// A choice that carries `message` instead of `delta` speaks in cumulative
+/// snapshots: each frame repeats the answer so far rather than an increment.
+fn carries_message_snapshot(chunk: &Value) -> bool {
+    chunk
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| choice.get("message").is_some() && choice.get("delta").is_none())
+        })
+}
+
+/// Accumulate cumulative-or-incremental text into `buf`, mirroring the SSE
+/// merger's helper: a frame that repeats the whole text so far replaces the
+/// buffer; a frame that carries only an increment appends.
+fn accumulate_text(buf: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if next.starts_with(buf.as_str()) {
+        *buf = next.to_string();
+    } else {
+        buf.push_str(next);
+    }
+}
+
+/// Reconstruct complete tool calls before discarding their protocol identity.
+pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
+    use crate::analyzer::message::ResponsesToolCalls;
+    use std::collections::BTreeMap;
+
+    // Maps bound the number of calls, without allocating slots up to a wire
+    // index. Choice identity matters too: each choice starts its indices at 0.
+    let mut chat: BTreeMap<(u64, u64), (String, String)> = BTreeMap::new();
+    let mut current: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut responses = ResponsesToolCalls::default();
+    let mut compatible: Vec<String> = Vec::new();
+    for chunk in chunks {
+        responses.observe(chunk);
+        if let Some(choices) = chunk.get("choices").and_then(Value::as_array) {
+            for (choice_pos, choice) in choices.iter().enumerate() {
+                if choice.get("index").is_some_and(|v| v.as_u64().is_none()) {
+                    continue;
+                }
+                let choice_index = choice
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(choice_pos as u64);
+                let snapshot = choice.get("message");
+                let message = snapshot.or_else(|| choice.get("delta"));
+                let Some(message) = message else {
+                    continue;
+                };
+                // SysOM uses tool_use for the same Chat call shape.
+                let calls = ["tool_calls", "tool_use"]
+                    .into_iter()
+                    .filter_map(|field| message.get(field).and_then(Value::as_array))
+                    .flatten();
+                for (call_pos, call) in calls.enumerate() {
+                    if call.get("index").is_some_and(|v| v.as_u64().is_none()) {
+                        continue;
+                    }
+                    let Some(function) = call.get("function") else {
+                        continue;
+                    };
+                    let index = call
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_else(|| {
+                            if snapshot.is_some() {
+                                call_pos as u64
+                            } else if function
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty())
+                            {
+                                // Unindexed compatible streams retain the sequential
+                                // fallback: a name starts a call, continuations use it.
+                                chat.keys()
+                                    .filter(|(choice, _)| *choice == choice_index)
+                                    .map(|(_, index)| *index)
+                                    .max()
+                                    .map_or(0, |index| index.saturating_add(1))
+                            } else {
+                                current.get(&choice_index).copied().unwrap_or(0)
+                            }
+                        });
+                    let key = (choice_index, index);
+                    if !chat.contains_key(&key) && chat.len() >= 256 {
+                        continue;
+                    }
+                    current.insert(choice_index, index);
+                    let (name, arguments) = chat.entry(key).or_default();
+                    if snapshot.is_some() {
+                        // A message carries the whole call, not another delta.
+                        *name = function
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        *arguments = function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                    } else {
+                        if let Some(fragment) = function.get("name").and_then(Value::as_str) {
+                            name.push_str(fragment);
+                        }
+                        if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
+                            arguments.push_str(fragment);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if chunk
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.starts_with("response."))
+        {
+            continue;
+        }
+        // Retain the legacy fragment contract for other compatible providers;
+        // Responses and Chat calls never pass through this unnamed stream.
+        if let Some((_, _, fragments)) = extract_response_content(Some(chunk)) {
+            for fragment in fragments {
+                let starts_call = matches!(fragment.split_once(": "), Some((name, _)) if !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.'));
+                if starts_call || compatible.is_empty() {
+                    compatible.push(fragment);
+                } else if let Some(last) = compatible.last_mut() {
+                    last.push_str(fragment.strip_prefix(": ").unwrap_or(&fragment));
+                }
+            }
+        }
+    }
+    chat.into_values()
+        .filter(|(name, arguments)| !name.is_empty() || !arguments.is_empty())
+        .map(|(name, arguments)| format!("{name}: {arguments}"))
+        .chain(
+            responses
+                .into_calls()
+                .map(|(_, name, arguments)| format!("{name}: {arguments}")),
+        )
+        .chain(compatible)
+        .collect()
 }
 
 /// Extract role and content from OpenAI message JSON
@@ -405,6 +606,70 @@ fn extract_content(content: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_tools_replace_cumulative_chat_snapshots() {
+        let chunks = [
+            serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"x\":"}}]}}]}),
+            serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"x\":1}"}}]}}]}),
+        ];
+        assert_eq!(merge_response_tool_calls(&chunks), ["lookup: {\"x\":1}"]);
+        assert_eq!(
+            merge_response_tool_calls(&[
+                serde_json::json!({"choices":[{"message":{"tool_calls":[{"function":{}}]}}]})
+            ]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn manual_tools_ignore_invalid_identities_and_keep_sparse_calls() {
+        let chunks = [
+            serde_json::json!({"choices":[{"index":-1,"delta":{"tool_calls":[{"function":{"name":"invalid"}}]}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":-1,"function":{"name":"invalid"}},{"index":0}]}}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":u64::MAX,"function":{"name":"lookup","arguments":"{}"}}]}},{"index":1,"delta":{"content":"hello"}}]}),
+        ];
+        assert_eq!(merge_response_tool_calls(&chunks), ["lookup: {}"]);
+        let mut chunks = Vec::new();
+        for index in 0..257 {
+            chunks.push(serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":index,"function":{"name":"lookup","arguments":"a"}}]}}]}));
+        }
+        chunks.push(serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"b"}}]}}]}));
+        let calls = merge_response_tool_calls(&chunks);
+        assert_eq!(calls.len(), 256);
+        assert_eq!(calls[0], "lookup: ab");
+        assert!(calls[1..].iter().all(|call| call == "lookup: a"));
+    }
+
+    #[test]
+    fn manual_tools_keep_unindexed_sequential_continuations() {
+        let chunks = [
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"orphan"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"first","arguments":"a"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"b"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"second","arguments":"c"}}]}}]}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            [": orphan", "first: ab", "second: c"]
+        );
+    }
+
+    #[test]
+    fn manual_tools_keep_compatible_provider_fragments() {
+        let chunks = [
+            serde_json::json!({"content":[{"type":"tool_use","name":"lookup","input":{}}]}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"1}"}}),
+            serde_json::json!({"content":[{"type":"tool_use","name":"other","input":{"y":2}}]}),
+            serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}),
+        ];
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            ["lookup: {}{\"x\":1}", "other: {\"y\":2}"]
+        );
+        assert_eq!(merge_response_tool_calls(&chunks[1..3]), ["{\"x\":1}"]);
+    }
 
     #[test]
     fn test_extract_openai_request() {
@@ -624,6 +889,68 @@ mod tests {
             serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
         ];
         assert_eq!(merge_response_output_text(&empty_delta).0, "hello there");
+    }
+
+    /// A `choices[].message` snapshot repeats the answer so far (SysOM's
+    /// Copilot stream sends nothing else), so the fold must count the answer
+    /// once, not once per captured chunk.
+    #[test]
+    fn test_merge_response_output_text_counts_message_snapshots_once() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"message":{"content":"Hello"}}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Hello there"}}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Hello there!"},"finish_reason":"stop"}]}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(content, "Hello there!");
+        assert!(reasoning.is_empty());
+        assert!(tool_calls.is_empty());
+    }
+
+    /// An OpenAI-compatible gateway's final frame can be a whole `message`
+    /// after a run of deltas; the snapshot completes the text instead of
+    /// appending to it.
+    #[test]
+    fn test_merge_response_output_text_snapshot_completes_delta_text() {
+        let chunks = vec![
+            serde_json::json!({"choices":[{"delta":{"content":"Do"},"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}),
+        ];
+        let (content, _, _) = merge_response_output_text(&chunks);
+        assert_eq!(content, "Done");
+    }
+
+    /// A snapshot's tool calls are whole and repeat with every chunk; the
+    /// last snapshot's calls must be counted once, not once per chunk.
+    #[test]
+    fn test_merge_response_output_text_snapshot_tool_calls_do_not_repeat() {
+        let second = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"index":0,"id":"c1","function":{
+                            "name":"get_weather",
+                            "arguments": serde_json::json!({"city":"Beijing"}).to_string()}}
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let chunks = vec![
+            serde_json::json!({"choices":[{"message":{"content":"","tool_calls":[
+                {"index":0,"id":"c1","function":{"name":"get_weather","arguments":"{}"}}]}}]}),
+            second,
+        ];
+        let (content, _, tool_calls) = merge_response_output_text(&chunks);
+        assert!(content.is_empty());
+        assert_eq!(
+            tool_calls,
+            vec![format!(
+                "get_weather: {}",
+                serde_json::json!({"city":"Beijing"})
+            )]
+        );
     }
 
     /// Reasoning and tool fragments pass through the same merge unchanged.
@@ -890,6 +1217,62 @@ mod tests {
             tool_calls.is_empty(),
             "tool_call without function should be skipped"
         );
+    }
+
+    /// SysOM's Copilot streams spell the assistant's tool calls
+    /// `choices[].message.tool_use` — an array of
+    /// `{index, id, type, function: {name, arguments}}` — instead of the
+    /// OpenAI `tool_calls`. The extractor read only the OpenAI spelling, so
+    /// a SysOM tool call counted zero tool tokens in the manual counters and
+    /// the drain estimate.
+    #[test]
+    fn sysom_tool_use_snapshots_yield_tool_calls() {
+        let response = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"file_path\":\"/tmp/a.md\"}"}
+                    }]
+                }
+            }]
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("a SysOM tool call must count");
+        assert_eq!(
+            tool_calls,
+            vec!["read_file: {\"file_path\":\"/tmp/a.md\"}".to_string()]
+        );
+    }
+
+    /// A SysOM snapshot can carry text and tool calls together: both feed the
+    /// counters (the text as content, the call as its `name: arguments`
+    /// string), exactly like an OpenAI message carrying both.
+    #[test]
+    fn sysom_tool_use_alongside_content_is_extracted() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Reading the file first.",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"file_path\":\"/tmp/a.md\"}"}
+                    }]
+                }
+            }]
+        });
+        let (content, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("text and calls must both count");
+        assert_eq!(content, "Reading the file first.");
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].starts_with("read_file: "));
     }
 
     /// Anthropic streams deliver the answer as `content_block_delta` events and

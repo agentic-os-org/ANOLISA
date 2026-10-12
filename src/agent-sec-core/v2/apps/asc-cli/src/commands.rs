@@ -3,6 +3,8 @@
 mod binding;
 mod capabilities;
 mod common;
+mod events;
+mod events_summary;
 mod observability;
 mod policy;
 mod scan_code;
@@ -16,6 +18,7 @@ use clap::Subcommand;
 
 use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
+pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -33,7 +36,7 @@ pub(crate) enum Command {
     /// Manage authored Policy templates.
     #[command(subcommand)]
     Policy(PolicyCommand),
-    /// Manage PID or cgroup Scope selectors.
+    /// Manage Scope process selectors and Policy assignments.
     #[command(subcommand)]
     Scope(ScopeCommand),
     /// Manage Binding desired state; acceptance does not imply enforcement.
@@ -45,6 +48,8 @@ pub(crate) enum Command {
     ScanPii(ScanPiiCommand),
     /// Scan a prompt for injection or jailbreak attempts.
     ScanPrompt(ScanPromptCommand),
+    /// List the caller's own security events from the daemon.
+    Events(EventsCommand),
     /// Manage Skill scanning, signatures, history and activation.
     #[command(subcommand)]
     SkillLedger(skill_ledger::SkillLedgerCommand),
@@ -53,6 +58,17 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    pub(crate) fn run_observability_query(
+        &self,
+        socket: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Option<std::io::Result<u8>> {
+        match self {
+            Self::Observability(command) => command.run_query(socket, timeout),
+            _ => None,
+        }
+    }
+
     pub(crate) fn request(&self) -> Result<DaemonRequest, InputError> {
         match self {
             Self::Observability(command) => command.request(),
@@ -61,11 +77,23 @@ impl Command {
             Self::Binding(command) => command.request(),
             Self::ScanCode(command) => command.request(),
             Self::ScanPii(command) => command.request(),
+            // Events resolves its own request pagination (large --limit
+            // values are satisfied through bounded page requests), so the
+            // single-request path refuses it.
+            Self::Events(_) => Err(InputError::EventsBatch),
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
             Self::Capabilities(_) => Err(InputError::LocalCommand),
             Self::SkillLedger(command) => command.request(),
+        }
+    }
+
+    /// Returns the events command when this invocation queries events.
+    pub(crate) const fn events(&self) -> Option<&EventsCommand> {
+        match self {
+            Self::Events(command) => Some(command),
+            _ => None,
         }
     }
 
@@ -86,6 +114,13 @@ impl Command {
             // so only the scan-prompt command has one.
             _ => Err(InputError::LocalCommand),
         }
+    }
+
+    pub(crate) const fn is_observability_schema(&self) -> bool {
+        matches!(
+            self,
+            Self::Observability(observability::ObservabilityCommand::Schema)
+        )
     }
 
     pub(crate) const fn is_observability_record(&self) -> bool {

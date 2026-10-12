@@ -126,6 +126,7 @@ impl OscParser {
             shell_prompt_cwd: crate::input::ShellPromptCwd::default(),
             shell_path_command_names: crate::input::ShellPathCommandNames::default(),
             pty_input_barrier_pushed: false,
+            prompt_input_barrier_pushed: false,
             visible_tail: VisibleTailTracker::default(),
             alt_screen: AltScreenTracker::default(),
         })

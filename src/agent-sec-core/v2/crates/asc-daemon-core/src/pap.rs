@@ -1,11 +1,11 @@
 use asc_foundation_types::{ResourceId, Revision};
 pub use asc_pap::EnqueueError;
-use asc_pap::{Page, PapError, PapRepository, PapService, PolicyCompiler};
+use asc_pap::{Page, PapError, PapRepository, PapService};
 use asc_policy_types::authoring::PolicyTemplate;
 use asc_policy_types::binding::BindingView;
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::policy::PreparedPolicy;
-use asc_policy_types::scope::{PreparedScope, ScopeSelector};
+use asc_policy_types::scope::{PolicyReference, PreparedScope, ScopeDeletion, ScopeSelector};
 
 use crate::{Principal, PrincipalRole};
 
@@ -36,18 +36,12 @@ pub enum NotFoundResource {
     /// A Scope identity requested for update does not exist.
     #[error("scope was not found")]
     Scope,
-    /// An exact Scope revision requested for read or delete does not exist.
-    #[error("scope revision was not found")]
-    ScopeRevision,
     /// A Binding identity does not exist.
     #[error("binding was not found")]
     Binding,
     /// A Binding's referenced Policy revision does not exist.
     #[error("referenced policy revision was not found")]
     ReferencedPolicyRevision,
-    /// A Binding's referenced Scope revision does not exist.
-    #[error("referenced scope revision was not found")]
-    ReferencedScopeRevision,
 }
 
 /// Stable PAP application failures safe for a daemon adapter to project.
@@ -108,9 +102,11 @@ fn project_pap_error(
         PapError::InvalidPolicy(error) => {
             project_validation_error(&error, &["template"], "invalid policy")
         }
-        PapError::InvalidScope(error) => {
-            project_validation_error(&error, &["selector", "pid", "cgroupId"], "invalid scope")
-        }
+        PapError::InvalidScope(error) => project_validation_error(
+            &error,
+            &["selector", "pid", "cgroupId", "policyTemplates"],
+            "invalid scope",
+        ),
         PapError::InvalidPagination => PolicyAdministrationError::InvalidArgument(
             PolicyInputError::new("invalid pagination: limit must be between 1 and 1000"),
         ),
@@ -122,9 +118,6 @@ fn project_pap_error(
         ),
         PapError::ReferencedPolicyRevisionNotFound => {
             PolicyAdministrationError::NotFound(NotFoundResource::ReferencedPolicyRevision)
-        }
-        PapError::ReferencedScopeRevisionNotFound => {
-            PolicyAdministrationError::NotFound(NotFoundResource::ReferencedScopeRevision)
         }
         PapError::RevisionExhausted => PolicyAdministrationError::ResourceExhausted,
         PapError::Unavailable => PolicyAdministrationError::Unavailable,
@@ -237,28 +230,17 @@ pub trait PolicyAdministration: Send + Sync {
         revision: Revision,
     ) -> Result<PreparedPolicy, PolicyAdministrationError>;
 
-    /// Creates one Scope with a server-generated identity.
-    ///
+    /// Creates an assignment with exact policy references.
     /// # Errors
-    /// Returns authorization, validation, conflict, capacity, or internal failures.
-    fn create_scope(
+    /// Returns validation, admission, authorization or reference errors.
+    fn create_scope_assignment(
         &self,
         principal: &Principal,
         selector: &ScopeSelector,
+        policies: &[PolicyReference],
     ) -> Result<PreparedScope, PolicyAdministrationError>;
 
-    /// Updates one existing Scope identity.
-    ///
-    /// # Errors
-    /// Returns authorization, validation, conflict, not-found, capacity, or internal failures.
-    fn update_scope(
-        &self,
-        principal: &Principal,
-        scope_id: &ResourceId,
-        selector: &ScopeSelector,
-    ) -> Result<PreparedScope, PolicyAdministrationError>;
-
-    /// Reads one exact current Scope revision.
+    /// Reads an immutable assignment and its lifecycle status.
     ///
     /// # Errors
     /// Returns authorization, not-found, or internal failures.
@@ -266,7 +248,6 @@ pub trait PolicyAdministration: Send + Sync {
         &self,
         principal: &Principal,
         id: &ResourceId,
-        revision: Revision,
     ) -> Result<PreparedScope, PolicyAdministrationError>;
 
     /// Lists current Scopes.
@@ -280,43 +261,15 @@ pub trait PolicyAdministration: Send + Sync {
         offset: u32,
     ) -> Result<ResourcePage<PreparedScope>, PolicyAdministrationError>;
 
-    /// Deletes one exact current Scope revision.
+    /// Requests discovery termination and cleanup of owned Bindings.
     ///
     /// # Errors
     /// Returns authorization, conflict, not-found, or internal failures.
-    fn delete_scope_revision(
+    fn delete_scope(
         &self,
         principal: &Principal,
         id: &ResourceId,
-        revision: Revision,
-    ) -> Result<PreparedScope, PolicyAdministrationError>;
-
-    /// Creates one Binding Apply intent with a server-generated identity.
-    ///
-    /// # Errors
-    /// Returns authorization, validation, conflict, not-found, capacity, or internal failures.
-    fn create_binding(
-        &self,
-        principal: &Principal,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PolicyAdministrationError>;
-
-    /// Updates one existing Binding and requests Apply.
-    ///
-    /// # Errors
-    /// Returns authorization, validation, conflict, not-found, capacity, or internal failures.
-    fn update_binding(
-        &self,
-        principal: &Principal,
-        binding_id: &ResourceId,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PolicyAdministrationError>;
+    ) -> Result<ScopeDeletion, PolicyAdministrationError>;
 
     /// Reads one current Binding spec and lifecycle status.
     ///
@@ -339,21 +292,19 @@ pub trait PolicyAdministration: Send + Sync {
         offset: u32,
     ) -> Result<ResourcePage<BindingView>, PolicyAdministrationError>;
 
-    /// Accepts one Binding Delete intent without discarding its current spec.
-    ///
+    /// Explicitly retries failed work owned by a Scope.
     /// # Errors
-    /// Returns authorization, conflict, not-found, capacity, or internal failures.
-    fn delete_binding(
+    /// Returns authorization, not-found, admission, or internal failures.
+    fn retry_scope(
         &self,
         principal: &Principal,
         id: &ResourceId,
-    ) -> Result<BindingView, PolicyAdministrationError>;
+    ) -> Result<PreparedScope, PolicyAdministrationError>;
 }
 
-impl<R, C> PolicyAdministration for PapService<R, C>
+impl<R> PolicyAdministration for PapService<R>
 where
     R: PapRepository,
-    C: PolicyCompiler,
 {
     fn create_policy(
         &self,
@@ -412,35 +363,25 @@ where
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::PolicyRevision)))
     }
 
-    fn create_scope(
+    fn create_scope_assignment(
         &self,
         principal: &Principal,
         selector: &ScopeSelector,
+        policies: &[PolicyReference],
     ) -> Result<PreparedScope, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        PapService::create_scope(self, selector).map_err(|error| project_pap_error(error, None))
-    }
-
-    fn update_scope(
-        &self,
-        principal: &Principal,
-        scope_id: &ResourceId,
-        selector: &ScopeSelector,
-    ) -> Result<PreparedScope, PolicyAdministrationError> {
-        require_policy_administrator(principal)?;
-        PapService::update_scope(self, scope_id, selector)
-            .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))
+        PapService::create_scope_assignment(self, selector, policies)
+            .map_err(|error| project_pap_error(error, None))
     }
 
     fn get_scope(
         &self,
         principal: &Principal,
         id: &ResourceId,
-        revision: Revision,
     ) -> Result<PreparedScope, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        PapService::get_scope(self, id, revision)
-            .map_err(|error| project_pap_error(error, Some(NotFoundResource::ScopeRevision)))
+        PapService::get_scope(self, id)
+            .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))
     }
 
     fn list_scopes(
@@ -455,49 +396,14 @@ where
             .map_err(|error| project_pap_error(error, None))
     }
 
-    fn delete_scope_revision(
+    fn delete_scope(
         &self,
         principal: &Principal,
         id: &ResourceId,
-        revision: Revision,
-    ) -> Result<PreparedScope, PolicyAdministrationError> {
+    ) -> Result<ScopeDeletion, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        PapService::delete_scope_revision(self, id, revision)
-            .map_err(|error| project_pap_error(error, Some(NotFoundResource::ScopeRevision)))
-    }
-
-    fn create_binding(
-        &self,
-        principal: &Principal,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PolicyAdministrationError> {
-        require_policy_administrator(principal)?;
-        PapService::create_binding(self, policy_id, policy_revision, scope_id, scope_revision)
-            .map_err(|error| project_pap_error(error, None))
-    }
-
-    fn update_binding(
-        &self,
-        principal: &Principal,
-        binding_id: &ResourceId,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PolicyAdministrationError> {
-        require_policy_administrator(principal)?;
-        PapService::update_binding(
-            self,
-            binding_id,
-            policy_id,
-            policy_revision,
-            scope_id,
-            scope_revision,
-        )
-        .map_err(|error| project_pap_error(error, Some(NotFoundResource::Binding)))
+        PapService::delete_scope(self, id)
+            .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))
     }
 
     fn get_binding(
@@ -522,14 +428,14 @@ where
             .map_err(|error| project_pap_error(error, None))
     }
 
-    fn delete_binding(
+    fn retry_scope(
         &self,
         principal: &Principal,
         id: &ResourceId,
-    ) -> Result<BindingView, PolicyAdministrationError> {
+    ) -> Result<PreparedScope, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        PapService::delete_binding(self, id)
-            .map_err(|error| project_pap_error(error, Some(NotFoundResource::Binding)))
+        PapService::retry_scope(self, id)
+            .map_err(|error| project_pap_error(error, Some(NotFoundResource::Scope)))
     }
 }
 
@@ -585,8 +491,8 @@ mod tests {
             PolicyAdministrationError::NotFound(NotFoundResource::Policy)
         );
         assert_eq!(
-            project_pap_error(PapError::ReferencedScopeRevisionNotFound, None),
-            PolicyAdministrationError::NotFound(NotFoundResource::ReferencedScopeRevision)
+            project_pap_error(PapError::ReferencedPolicyRevisionNotFound, None),
+            PolicyAdministrationError::NotFound(NotFoundResource::ReferencedPolicyRevision)
         );
         for path in ["pid", "cgroupId"] {
             assert_eq!(
@@ -602,7 +508,7 @@ mod tests {
         assert_eq!(
             project_pap_error(
                 PapError::InvalidPolicy(ValidationError::new(
-                    "canonicalPolicy.policyId",
+                    "internal.validation",
                     "compiler output exposed an internal mismatch"
                 )),
                 None
