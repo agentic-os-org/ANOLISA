@@ -882,6 +882,63 @@ test('causal attribution: a run superseded by a round switch must discard its re
 const sameDeps = (a, b) =>
   a.length === b.length && a.every((dep, i) => Object.is(dep, b[i]));
 
+for (const [initialCount, refreshedCount, direction, expectedPage] of [
+  [75, 20, '‹', 1],
+  [150, 35, '‹', 2],
+  [20, 20, '‹', 1],
+  [20, 20, '«', 1],
+]) {
+  test(`agent sessions: ${direction} navigates from the displayed page after ${initialCount} to ${refreshedCount} rows`, async () => {
+    const driver = createHooksDriver();
+    const { calls, stubs } = deferredFetchStubs(['fetchSessions', 'fetchTrajectories']);
+    const t = (key, args) => args ? `${key}:${JSON.stringify(args)}` : key;
+    const page = loadPageModule('src/pages/AgentSessionsPage.tsx', {
+      'react-router-dom': { useNavigate: () => () => {} },
+      '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': stubs,
+      '../utils/semanticSearchFilter': loadPageModule('src/utils/semanticSearchFilter.ts', {}),
+      '../utils/sessionModel': loadPageModule('src/utils/sessionModel.ts', {}),
+      '../components/CopyButton': componentStub('CopyButton'),
+    }, driver).AgentSessionsPage;
+    const render = () => driver.render(page).element;
+    const button = (label) => {
+      const node = findElement(render(), (item) => item.type === 'button'
+        && elementText(item).join('') === label);
+      assert.ok(node, `visible ${label} button`);
+      return node;
+    };
+    const summary = () => {
+      const node = findElement(render(), (item) => item.type === 'span'
+        && elementText(item).join('').startsWith('as.paginationSummary:'));
+      return JSON.parse(elementText(node).join('').slice('as.paginationSummary:'.length));
+    };
+    const refresh = async (count) => {
+      const node = findElement(render(), (item) => item.type === 'button'
+        && ['common.loading', 'common.refresh'].includes(elementText(item).join('')));
+      const loading = node.props.onClick();
+      calls.fetchSessions.at(-1).resolve(Array.from({ length: count }, (_, i) => ({
+        session_id: `fixture-${i}`, agent_name: 'fixture', model: 'fixture-model',
+        conversation_count: 1, total_input_tokens: 2, total_output_tokens: 3,
+        last_seen_ns: (Date.now() - i) * 1_000_000,
+      })));
+      calls.fetchTrajectories.at(-1).resolve([]);
+      await loading;
+    };
+
+    await refresh(initialCount);
+    button('»').props.onClick();
+    assert.equal(summary().cur, Math.ceil(initialCount / 15));
+    await refresh(refreshedCount);
+    assert.equal(summary().cur, Math.ceil(refreshedCount / 15));
+    assert.equal(button(direction).props.disabled, false);
+    button(direction).props.onClick();
+    assert.equal(summary().cur, expectedPage);
+    const firstRow = findElement(render(), (item) => item.type === 'tr'
+      && typeof item.props?.onClick === 'function');
+    assert.equal(firstRow.props.key, `fixture-${(expectedPage - 1) * 15}`);
+  });
+}
+
 test('agent sessions: an unchanged 10 s poll must not re-issue the semantic search', async () => {
   const { calls, stubs } = deferredFetchStubs([
     'fetchSessions',

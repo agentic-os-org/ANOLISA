@@ -479,7 +479,7 @@ export const AgentSessionsPage: React.FC = () => {
             </button>
             <button
               disabled={safePage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              onClick={() => setPage((p) => Math.max(1, Math.min(p, totalPages) - 1))}
               className="px-2.5 py-1 rounded border border-gray-300 disabled:opacity-40 hover:bg-gray-100"
             >
               ‹
