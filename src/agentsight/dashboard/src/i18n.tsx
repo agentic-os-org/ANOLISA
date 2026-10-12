@@ -707,6 +707,8 @@ const enUSMessages = {
   'opt.session.action.start': 'Start analysis',
   'opt.session.loadingHistory': 'Loading historical analysis results...',
   'opt.session.noAnalysisYet': 'This session has not been analyzed yet.',
+  'opt.session.resultsUnavailable':
+    'The stored analysis results could not be read, so no dimension was started automatically. Use "Start analysis" to run them.',
   'opt.session.startHint': 'Click "Start analysis" to run accuracy / performance / cost analysis in parallel.',
   'opt.llm.notConfiguredHint': 'LLM is not configured — summary / performance strategies / cost waste / accuracy analysis all require LLM calls.',
   'opt.llm.goToSettings': 'Go to settings',
@@ -1799,6 +1801,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'opt.session.action.start': '开始分析',
     'opt.session.loadingHistory': '加载历史分析结果...',
     'opt.session.noAnalysisYet': '该会话尚未进行优化分析',
+    'opt.session.resultsUnavailable':
+      '读取历史分析结果失败，因此没有自动开始任何维度分析；可点击「开始分析」手动运行。',
     'opt.session.startHint': '点击「开始分析」并行运行准确性 / 性能 / 成本三维度剖析',
     'opt.llm.notConfiguredHint': 'LLM 尚未配置 —— 摘要 / 性能策略 / 成本浪费 / 准确性维度需要调用 LLM。',
     'opt.llm.goToSettings': '前往设置',

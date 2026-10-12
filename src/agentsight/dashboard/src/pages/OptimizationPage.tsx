@@ -903,6 +903,11 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const [loadingResults, setLoadingResults] = useState(true);
   const [llmNotConfigured, setLlmNotConfigured] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  // A history read that failed is not "this session was never analyzed": both
+  // leave every dimension idle, and the auto-run below reads idle as a first
+  // visit and starts six LLM calls. Keep the two apart so a 5xx cannot spend
+  // the budget by itself.
+  const [resultsUnavailable, setResultsUnavailable] = useState(false);
   // Dimension requests run for tens of seconds (some are LLM calls). The route
   // param can change while they are in flight, and the page keeps the same
   // component instance, so a result must only be applied when it belongs to
@@ -921,6 +926,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
     setProgress(IDLE_PROGRESS);
     setAnalyzeError(null);
     setLlmNotConfigured(false);
+    setResultsUnavailable(false);
     (async () => {
       try {
         const data = await fetchOptimizeResults(sessionId);
@@ -944,7 +950,11 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           accuracy: data.accuracy ? 'done' : 'idle',
         });
       } catch {
-        // 无历史结果时保持 idle，不阻塞页面
+        // A failed read is not a session without stored results: the page
+        // cannot tell them apart from the progress map alone, and the auto-run
+        // below starts every dimension as soon as they all read idle. Record
+        // the failure instead of leaving the page looking like a first visit.
+        if (!cancelled) setResultsUnavailable(true);
       } finally {
         if (!cancelled) setLoadingResults(false);
       }
@@ -1086,9 +1096,11 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
 
   // 历史结果加载后自动补齐缺失维度：全空 = 首次进入，自动全量分析；
   // 部分缺失（如 cost 已落库但 cost-waste 从未跑成）只补跑缺的维度，
-  // 避免这些维度停在「尚未分析」死等手动重跑
+  // 避免这些维度停在「尚未分析」死等手动重跑。
+  // 读取失败时维度同样全空，但那不是「首次进入」：此时不能自作主张花掉
+  // 六次 LLM 调用，交给用户手动决定（页面另有提示）。
   useEffect(() => {
-    if (loadingResults) return;
+    if (loadingResults || resultsUnavailable) return;
     const idle = ALL_DIMS.filter((k) => progress[k] === 'idle');
     if (idle.length === 0) return;
     if (idle.length === ALL_DIMS.length) {
@@ -1096,7 +1108,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
     } else {
       runDimensions(idle);
     }
-  }, [loadingResults, progress, runAnalysis, runDimensions]);
+  }, [loadingResults, resultsUnavailable, progress, runAnalysis, runDimensions]);
 
   const running = Object.values(progress).some((s) => s === 'loading');
   const hasAnyResult = Object.values(progress).some((s) => s === 'done');
@@ -1172,6 +1184,13 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       {analyzeError && !llmNotConfigured && (
         <div className="mt-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm break-all">
           {analyzeError}
+        </div>
+      )}
+
+      {/* ── 历史结果读取失败 ── */}
+      {resultsUnavailable && (
+        <div className="mt-4 bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
+          {t('opt.session.resultsUnavailable')}
         </div>
       )}
 
