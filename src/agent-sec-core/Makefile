@@ -8,6 +8,41 @@ python-code-pretty: ## Format Python code using black and isort
 	@uv run --project agent-sec-cli isort --settings-path ../.. --profile black --line-length 80 --skip-glob "*/backend-skill/templates/*" .
 	@uv run --project agent-sec-cli black --force-exclude "backend-skill/templates/" .
 
+# On main the hook layer ships only with V2 and V1 is a frozen oracle, so V1
+# test targets exclude every test that loads hook sources; the V2 CI job runs
+# them through test-hooks instead. See AGENTS.md "Hook layer is V2-only".
+HOOK_SOURCE_DIRS := cosh-extension openclaw-plugin hermes-plugin codex-plugin qoder-plugin qwen-code-extension
+HOOK_UNIT_TESTS := \
+	tests/unit-test/codex_hooks \
+	tests/unit-test/cosh_hooks \
+	tests/unit-test/hermes-plugin \
+	tests/unit-test/qoder_hooks \
+	tests/unit-test/qwen-code-extension \
+	tests/unit-test/code_scanner/test_hook_adapter.py \
+	tests/unit-test/test_cosh_skill_ledger_hook.py \
+	tests/unit-test/test_skillsec_hook_initialization.py
+HOOK_E2E_TESTS := tests/e2e/codex-hooks tests/e2e/cosh-hooks tests/e2e/qoder-hooks tests/e2e/qwen-code-extension
+HOOK_PYTHON_PATHS := $(HOOK_SOURCE_DIRS) $(HOOK_UNIT_TESTS) $(HOOK_E2E_TESTS)
+# V1-vs-hook parity cases (node-id prefixes); hooks may now diverge from V1.
+V1_HOOK_PARITY_TESTS := \
+	tests/unit-test/capabilities/test_view.py::test_cli_strict_enabled_matches_python_hook_helpers \
+	tests/unit-test/capabilities/test_view.py::test_observability_timeout_matches_python_hook_runtime \
+	tests/unit-test/capabilities/test_view.py::test_observability_timeout_matches_hermes_runtime \
+	tests/unit-test/capabilities/test_view.py::test_qwen_pii_legacy_enabled_fallback_matches_hook_runtime \
+	tests/e2e/skill-ledger/e2e_test.py::test_skill_ledger_e2e_case[G12_ \
+	tests/e2e/skill-ledger/e2e_test.py::test_skill_ledger_e2e_case[G13_
+V1_HOOK_TEST_EXCLUDES := $(addprefix --ignore=,$(HOOK_UNIT_TESTS) $(HOOK_E2E_TESTS)) \
+	$(foreach t,$(V1_HOOK_PARITY_TESTS),'--deselect=$(t)')
+
+.PHONY: python-format-check-hooks
+python-format-check-hooks: ## Check hook-layer Python formatting (same rules as python-code-pretty)
+	@uv run --project agent-sec-cli isort --check-only --settings-path ../.. --profile black --line-length 80 --skip-glob "*/backend-skill/templates/*" $(HOOK_PYTHON_PATHS)
+	@uv run --project agent-sec-cli black --check --force-exclude "backend-skill/templates/" $(HOOK_PYTHON_PATHS)
+
+.PHONY: python-lint-hooks-report
+python-lint-hooks-report: ## Write ruff findings for hook-layer Python to ruff_report.txt
+	@uv run --project agent-sec-cli ruff check --config agent-sec-cli/pyproject.toml --output-format=concise $(HOOK_PYTHON_PATHS) > ruff_report.txt || true
+
 .PHONY: python-lint
 python-lint: ## Run ruff lint check on all Python code (no fix)
 	@echo "🔍 Running ruff lint check..."
@@ -79,12 +114,18 @@ rust-lint-v2: ## Run cargo clippy (V2 workspace)
 test-python: ## Run Python unit and integration tests
 	@echo "🧪 Running Python tests..."
 	cd agent-sec-cli && uv sync
-	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ --ignore=tests/v2 -v
+	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ --ignore=tests/v2 $(V1_HOOK_TEST_EXCLUDES) -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
 	uv run --project agent-sec-cli pytest tests/e2e/daemon -v
 	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner -v
 	@echo "🧪 Running skill-ledger e2e tests..."
-	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
+	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py $(V1_HOOK_TEST_EXCLUDES)
+
+.PHONY: test-hooks
+test-hooks: ## Run hook-layer unit tests (V2-only on main; see AGENTS.md)
+	@echo "🧪 Running hook-layer unit tests..."
+	cd agent-sec-cli && uv sync
+	uv run --project agent-sec-cli pytest $(HOOK_UNIT_TESTS) -v
 
 .PHONY: test-prompt-scanner-e2e
 test-prompt-scanner-e2e: ## Run prompt-scanner e2e tests (L2 cases self-skip unless a model is served)
@@ -105,6 +146,7 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
+		$(V1_HOOK_TEST_EXCLUDES) \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# linux-sandbox e2e skipped: requires privileged container
@@ -161,6 +203,7 @@ test-e2e-source-build: ## Run E2E tests against source-build-installed agent-sec
 	$(VENV_PYTHON) -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
+		$(V1_HOOK_TEST_EXCLUDES) \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# linux-sandbox e2e skipped: requires privileged container
@@ -174,6 +217,7 @@ test-python-coverage: ## Run Python tests with coverage report
 		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/skill-signing \
 		--ignore=tests/v2 \
+		$(V1_HOOK_TEST_EXCLUDES) \
 		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
 
 .PHONY: test-rust
@@ -223,7 +267,7 @@ test-openclaw-plugin-coverage: ## Run openclaw-plugin tests with coverage report
 	cd openclaw-plugin && npm run test:coverage && npm run smoke
 
 .PHONY: test
-test: test-python test-rust test-openclaw-plugin ## Run all tests
+test: test-python test-hooks test-rust test-openclaw-plugin ## Run all tests
 
 # =============================================================================
 # BUILD

@@ -263,7 +263,15 @@ include = [
 > Lint 检查仅在 PR 触发时对增量代码检查，不检查历史代码。违规信息显示在 PR 的 Job Summary 区域。
 > 增量覆盖率门禁仅在 PR 触发，要求本次 PR 新增/修改的代码行中被测试覆盖的比例 ≥ 80%。
 
-### 12. Capability View Maintenance
+### 12. Hook layer is V2-only
+
+On `main`, the shipped hook layer targets agent-sec-core V2. The V1 Python implementation remains a migration oracle, not a hook compatibility target. Therefore changes under `cosh-extension/`, `openclaw-plugin/`, `hermes-plugin/`, `codex-plugin/`, `qoder-plugin/`, and `qwen-code-extension/` must trigger V2 CI only.
+
+The V1 pytest targets intentionally exclude hook unit/e2e directories and the remaining mixed parity cases that load hook source files. Do not add hook tests back to a V1 test target: add Python hook unit tests to the `test-hooks` Make target and the `Test agent-sec-core V2` CI job instead. OpenClaw plugin tests and their TypeScript incremental coverage gate also belong to that V2 job. V2 RPM acceptance owns installed hook e2e coverage.
+
+When a shared test mixes a V1 oracle with hook behavior, split the hook contract into the V2-owned hook suite. Do not preserve V1 compatibility merely to keep a mixed test passing.
+
+### 13. Capability View Maintenance
 
 `agent-sec-cli capabilities` is the canonical read-only environment-variable view of agent-sec plugin hook capabilities. Treat it as part of the hook environment contract, but do not treat it as proof of the target Agent's live runtime state.
 
@@ -286,7 +294,7 @@ Important scope boundary: `agent-sec-cli capabilities` reads only the current CL
 
 Qwen Code PII currently has a specific compatibility fallback: `PII_CHECKER_HOOK_ENABLED` takes precedence, and legacy `PII_CHECKER_ENABLED` is consulted only when the new variable is absent. Do not generalize that fallback to other Agents unless their hook runtime implements it too.
 
-### 13. Rust Migration Architecture
+### 14. Rust Migration Architecture
 
 `docs/design/AGENT_SEC_RUST_MIGRATION_zh.md` is the repository source of truth
 for the V2 product architecture, process topology, crate boundaries, migration

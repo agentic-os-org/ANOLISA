@@ -266,6 +266,12 @@ jobs:
               src/agent-sec-core/v2/*|src/agent-sec-core/packaging/raw/*|src/agent-sec-core/tests/v2/*|src/agent-sec-core/tests/packaging/*)
                 AGENT_SEC_V2=true
                 ;;
+              src/agent-sec-core/cosh-extension/*|src/agent-sec-core/openclaw-plugin/*|src/agent-sec-core/hermes-plugin/*|src/agent-sec-core/codex-plugin/*|src/agent-sec-core/qoder-plugin/*|src/agent-sec-core/qwen-code-extension/*)
+                AGENT_SEC_V2=true
+                ;;
+              src/agent-sec-core/tests/unit-test/codex_hooks/*|src/agent-sec-core/tests/unit-test/cosh_hooks/*|src/agent-sec-core/tests/unit-test/hermes-plugin/*|src/agent-sec-core/tests/unit-test/qoder_hooks/*|src/agent-sec-core/tests/unit-test/qwen-code-extension/*|src/agent-sec-core/tests/unit-test/code_scanner/test_hook_adapter.py|src/agent-sec-core/tests/unit-test/test_cosh_skill_ledger_hook.py|src/agent-sec-core/tests/unit-test/test_skillsec_hook_initialization.py|src/agent-sec-core/tests/e2e/codex-hooks/*|src/agent-sec-core/tests/e2e/cosh-hooks/*|src/agent-sec-core/tests/e2e/qoder-hooks/*|src/agent-sec-core/tests/e2e/qwen-code-extension/*)
+                AGENT_SEC_V2=true
+                ;;
               src/agent-sec-core/agent-sec-cli/*|src/agent-sec-core/tests/unit-test/*|src/agent-sec-core/tests/integration-test/*)
                 AGENT_SEC_V1=true
                 ;;
@@ -592,44 +598,6 @@ jobs:
           emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
           emit_rust_cov_row rust-coverage.xml linux-sandbox
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.23.2'
-
-      - name: Run openclaw-plugin tests with coverage
-        run: |
-          cd src/agent-sec-core
-          cd openclaw-plugin && npm install
-          cd ..
-          make test-openclaw-plugin-coverage
-
-      - name: Generate openclaw-plugin coverage summary
-        if: always()
-        shell: bash
-        run: |
-          COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
-          if [ -f "$COV_FILE" ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
-            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
-            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
-            {
-              echo "### 🧪 agent-sec-core/openclaw-plugin (TypeScript) Test Coverage"
-              echo ""
-              echo "| Metric | Coverage | Detail |"
-              echo "|--------|----------|--------|"
-              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
-              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       - name: Incremental coverage gate (PR only)
         if: github.event_name == 'pull_request'
         shell: bash
@@ -687,18 +655,6 @@ jobs:
             DIFF_COV_SUMMARY="${DIFF_COV_SUMMARY}| Rust | ${RUST_PCT}% | ${RUST_DETAIL} | ${THRESHOLD}% |\n"
           fi
 
-          # --- TypeScript ---
-          TS_COV="openclaw-plugin/coverage/cobertura-coverage.xml"
-          if [ -f "$TS_COV" ]; then
-            echo "--- TypeScript incremental coverage ---"
-            TS_OUTPUT=$(diff-cover "$TS_COV" --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
-            echo "$TS_OUTPUT"
-            TS_STATS=$(extract_diff_cov_stats "$TS_OUTPUT")
-            TS_PCT=$(echo "$TS_STATS" | cut -d'|' -f1)
-            TS_DETAIL=$(echo "$TS_STATS" | cut -d'|' -f2)
-            DIFF_COV_SUMMARY="${DIFF_COV_SUMMARY}| TypeScript | ${TS_PCT}% | ${TS_DETAIL} | ${THRESHOLD}% |\n"
-          fi
-
           # --- Summary ---
           {
             echo "### 🚦 Incremental Coverage Gate (new/changed code)"
@@ -727,6 +683,8 @@ jobs:
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -741,11 +699,45 @@ jobs:
         with:
           python-version: '3.11.6'
 
-      - name: Check V2 Python test formatting
+      - name: Install diff-cover
+        run: uv tool install --force diff-cover
+
+      - name: Check V2 and hook Python formatting
         run: |
           cd src/agent-sec-core
           uv run --project agent-sec-cli isort --check-only --profile black --line-length 80 v2 tests/v2
           uv run --project agent-sec-cli black --check --force-exclude "backend-skill/templates/" v2 tests/v2
+          make python-format-check-hooks
+
+      - name: Hook lint check (incremental)
+        if: github.event_name == 'pull_request'
+        run: |
+          cd src/agent-sec-core
+          make python-lint-hooks-report
+          sed -i 's|^\([^: ]*\.py\)|src/agent-sec-core/\1|' ruff_report.txt
+          cd "$GITHUB_WORKSPACE"
+          LINT_OUTPUT=$(diff-quality --violations=flake8 --fail-under=100 src/agent-sec-core/ruff_report.txt 2>&1) || true
+          rm -f src/agent-sec-core/ruff_report.txt
+          echo "$LINT_OUTPUT"
+          if echo "$LINT_OUTPUT" | grep -q "Failure"; then
+            {
+              echo "### ⚠️ agent-sec-core Hook Lint Warnings (incremental)"
+              echo ""
+              echo '以下为 PR 变更行中的 ruff lint 违规（不卡点，仅提示）：'
+              echo ""
+              echo '```'
+              echo "$LINT_OUTPUT"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Hook lint violations found in changed lines. See step summary for details."
+          else
+            echo "### ✅ agent-sec-core Hook Lint Check Passed" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run hook unit tests
+        run: |
+          cd src/agent-sec-core
+          make test-hooks
 
       - name: Check V2 Rust formatting and lints
         run: |
@@ -759,6 +751,66 @@ jobs:
           make test-rust-v2
           cd v2
           cargo doc --workspace --no-deps --locked
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - name: Run openclaw-plugin tests with coverage
+        run: |
+          cd src/agent-sec-core/openclaw-plugin
+          npm install
+          cd ..
+          make test-openclaw-plugin-coverage
+
+      - name: Generate openclaw-plugin coverage summary
+        if: always()
+        shell: bash
+        run: |
+          COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
+          if [ -f "$COV_FILE" ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core/openclaw-plugin (TypeScript) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: TypeScript incremental coverage gate (PR only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          cd src/agent-sec-core
+          COMPARE_BRANCH="origin/${{ github.base_ref }}"
+          THRESHOLD=80
+          TS_COV="openclaw-plugin/coverage/cobertura-coverage.xml"
+          TS_OUTPUT=$(diff-cover "$TS_COV" --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+          echo "$TS_OUTPUT"
+          {
+            echo "### 🚦 TypeScript Incremental Coverage Gate"
+            echo ""
+            echo '```'
+            echo "$TS_OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${GATE_FAILED:-false}" = true ]; then
+            echo "::error::TypeScript incremental coverage gate failed: new code coverage < ${THRESHOLD}%"
+            exit 1
+          fi
 
   # =========================================================================
   # Step 5: Test agentsight (Linux only)

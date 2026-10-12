@@ -20,6 +20,12 @@ on:
       - '!src/agent-sec-core/packaging/raw/**'
       - '!src/agent-sec-core/tests/v2/**'
       - '!src/agent-sec-core/tests/packaging/**'
+      - '!src/agent-sec-core/cosh-extension/**'
+      - '!src/agent-sec-core/openclaw-plugin/**'
+      - '!src/agent-sec-core/hermes-plugin/**'
+      - '!src/agent-sec-core/codex-plugin/**'
+      - '!src/agent-sec-core/qoder-plugin/**'
+      - '!src/agent-sec-core/qwen-code-extension/**'
   workflow_dispatch:       # 手动触发不受 paths 限制
 
 # Only superseded PR runs share a group; pushes and manual runs stay independent.
