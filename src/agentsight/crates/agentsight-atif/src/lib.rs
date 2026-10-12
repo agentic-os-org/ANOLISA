@@ -407,13 +407,12 @@ fn default_schema_version() -> String {
 }
 
 impl AtifTrajectory {
-    /// Serialize to a JSON Value with `None` fields stripped out.
+    /// Serialize with absent optional fields omitted and JSON payloads preserved.
     ///
     /// # Errors
     /// Returns a `serde_json` error if serialization fails.
     pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
-        let v = serde_json::to_value(self)?;
-        Ok(strip_nulls(v))
+        serde_json::to_value(self)
     }
 
     /// Validate step_id sequence (1-based, contiguous).
@@ -432,24 +431,6 @@ impl AtifTrajectory {
             }
         }
         Ok(())
-    }
-}
-
-/// Recursively strip null values from a JSON object.
-fn strip_nulls(v: serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::Object(map) => {
-            let filtered: serde_json::Map<String, serde_json::Value> = map
-                .into_iter()
-                .filter(|(_, val)| !val.is_null())
-                .map(|(k, val)| (k, strip_nulls(val)))
-                .collect();
-            serde_json::Value::Object(filtered)
-        }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(strip_nulls).collect())
-        }
-        other => other,
     }
 }
 
@@ -595,10 +576,14 @@ mod tests {
     }
 
     #[test]
-    fn strip_nulls_removes_nested_nulls() {
-        let v = serde_json::json!({"a": null, "b": {"c": null, "d": 1}, "e": [null, 2]});
-        let stripped = strip_nulls(v);
-        assert_eq!(stripped, serde_json::json!({"b": {"d": 1}, "e": [null, 2]}));
+    fn json_value_omits_unset_metadata_and_roundtrips() {
+        let value = minimal_trajectory().to_json_value().unwrap();
+        assert!(value.get("trajectory_id").is_none());
+        assert!(value["agent"].get("tool_definitions").is_none());
+        assert!(value["steps"][0].get("reasoning_content").is_none());
+        let parsed = validate_trajectory_str(&value.to_string()).unwrap();
+        assert_eq!(parsed.steps[0].message, "hello");
+        assert_eq!(parsed.session_id.as_deref(), Some("s-1"));
     }
 
     // ─── Derived step categories ─────────────────────────────────────────
