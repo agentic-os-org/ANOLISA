@@ -786,6 +786,33 @@ test('legacy bindings report their enforcing mode from the DSL', () => {
   assert.equal(legacyBindingMode('block open file "x" if AGENT'), 'enforce');
 });
 
+test('a legacy binding mode follows the rule verb, not two literal rule shapes', () => {
+  // The inode guard writes `block unlink file`, ActPlane hands over `block
+  // exec` and `kill exec`, and the inode fixtures use `notify open file`. Only
+  // `block connect endpoint` / `block open file` / `notify connect endpoint`
+  // were recognised, so every other blocking rule was reported as observing —
+  // the enforcement badge and the audit overview both claimed a binding that
+  // blocks was not enforcing anything.
+  assert.equal(
+    legacyBindingMode('rule protected:\nblock unlink file "/tmp/x" if AGENT\nbecause "keep fixture"'),
+    'enforce',
+  );
+  assert.equal(legacyBindingMode('rule r:\n  block exec "git" if AGENT\n  because "x"'), 'enforce');
+  assert.equal(legacyBindingMode('rule r:\n  kill exec "rm" if AGENT\n  because "x"'), 'enforce');
+  assert.equal(
+    legacyBindingMode('rule r:\n  notify open file "/tmp/never-matches" if AGENT\n  because "unrelated"'),
+    'audit',
+  );
+  // The reason prose must not decide the mode: a `notify` rule whose reason
+  // mentions blocking still audits.
+  assert.equal(
+    legacyBindingMode('rule r:\n  notify connect endpoint "*" if AGENT\n  because "block the exfiltration"'),
+    'audit',
+  );
+  // A DSL that carries no rule at all still observes.
+  assert.equal(legacyBindingMode('source AGENT = exec "**"'), 'observe');
+});
+
 test('both protection views resolve a binding mode through the shared helper', () => {
   // The audit view read `policy_mode` directly, so a binding persisted by an
   // older enforcer — where the field is absent and only the DSL carries the

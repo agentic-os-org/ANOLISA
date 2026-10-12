@@ -10,16 +10,17 @@ export interface BindingModeSource {
  * Mode of a binding stored before `policy_mode` existed.
  *
  * Enforcers predating that field persisted only the policy DSL, which is then
- * the evidence for what the binding does: `block …` rules enforce, `notify …`
- * rules audit, anything else only observes.
+ * the evidence for what the binding does: a `block`/`kill` clause enforces, a
+ * `notify` clause audits, anything else only observes. Every clause opens with
+ * its verb (see the ActPlane grammar), so the verb decides the mode — which
+ * operation the clause guards (`connect endpoint`, `open file`, `unlink file`,
+ * `exec`) is not part of the question, and matching only a couple of literal
+ * rule shapes reported a binding that blocks `unlink file` or `exec` as
+ * observing.
  */
 export function legacyBindingMode(policyDsl: string): EnforcementPolicyMode {
-  if (/\bblock connect endpoint\b/.test(policyDsl) || /\bblock open file\b/.test(policyDsl)) {
-    return 'enforce';
-  }
-  if (/\bnotify connect endpoint\b/.test(policyDsl)) {
-    return 'audit';
-  }
+  if (/^\s*(block|kill)\s+\S+/m.test(policyDsl)) return 'enforce';
+  if (/^\s*notify\s+\S+/m.test(policyDsl)) return 'audit';
   return 'observe';
 }
 
