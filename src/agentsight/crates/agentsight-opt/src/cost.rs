@@ -514,7 +514,18 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                 let has_tool = !step.calls().is_empty();
                 let all_calls_errored = has_tool
                     && !step.results().is_empty()
-                    && step.results().iter().all(observation_result_is_error);
+                    && step.results().iter().all(observation_result_is_error)
+                    && step.calls().iter().enumerate().all(|(index, call)| {
+                        step.results().iter().any(|result| {
+                            result.source_call_id.as_deref().is_some_and(|id| {
+                                agentsight_atif::same_call_id(id, &call.tool_call_id)
+                            })
+                        }) || (step
+                            .results()
+                            .iter()
+                            .all(|result| result.source_call_id.is_none())
+                            && index < step.results().len())
+                    });
 
                 let turn_ts = step.end_ts().unwrap_or(origin);
                 b.finalize(
